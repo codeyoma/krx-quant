@@ -100,6 +100,8 @@ from krx_quant.swap import (
 )
 from krx_quant.trader import SYMBOL as TRADED_SYMBOL
 from krx_quant.trader.quotes import QuoteFeed
+from krx_quant.trader.store import DB_NAME as TRADER_DB
+from krx_quant.trader_watch import TraderWatch, keep_trader_watched
 from krx_quant.training_nights import TrainingNights
 
 log = logging.getLogger(__name__)
@@ -538,6 +540,11 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                     settings.state_dir,
                 )
                 background.append(asyncio.create_task(keep_disks(disks)))
+            # The trader going silent in the session (#542): its state's time in its store, read-only.
+            trader_watch = TraderWatch(
+                settings.state_dir / TRADER_DB, calendar.calendar, alerts, settings.state_dir
+            )
+            background.append(asyncio.create_task(keep_trader_watched(trader_watch, now)))
             if settings.restart_at is not None:
                 background.append(
                     asyncio.create_task(restart_each_day(settings.restart_at, calendar.calendar, now, stop))

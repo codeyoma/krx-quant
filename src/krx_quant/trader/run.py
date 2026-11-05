@@ -41,6 +41,12 @@ on KIS, the buys whose answer was lost looked up, what is outside the ledger pau
 sold past its time barrier or its take-profit placed again. A trader stopping waits for the order in
 flight (``mock.CLOSE_SECONDS``).
 
+The broker of either mode checks each buy last before it leaves for KIS (#543, ``kis_orders.BuyLimits``):
+within ``KRX_TRADER_CAPITAL`` with the buys that may still fill (the live one within the first period's
+cap while it holds, told at each judgment, ``LiveWatch``), of 005930 alone, priced near the latest
+quote of the stream, which reaches it before the books. A buy it withholds is a buy that could not be
+sent (``mock.py``'s failed order). Sells are never checked.
+
 In mock mode the trader also records its mock account's fill notices (#484, ``fill_notices.py``:
 with ``KRX_TRADER_KIS_HTS_ID``, on each trading day from 08:20 to 15:40, in
 ``state/fill_notices.sqlite3``), beside the loops and never in their set: its failures stop neither
@@ -81,7 +87,7 @@ from krx_quant.config import Settings
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kis_orders import LIVE as LIVE_SERVERS
 from krx_quant.kis_orders import MOCK as MOCK_SERVERS
-from krx_quant.kis_orders import Broker, Servers, trader_broker, trader_live_broker
+from krx_quant.kis_orders import Broker, BuyLimits, Servers, trader_broker, trader_live_broker
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 from krx_quant.notify import Alerts
 from krx_quant.predictions import DB_NAME as ENGINE_DB
@@ -102,7 +108,7 @@ from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import CONTROL_SECONDS
 from krx_quant.trader.mock import Timing
 from krx_quant.trader.paper import Rules
-from krx_quant.trader.quotes import follow_quotes
+from krx_quant.trader.quotes import BestQuote, follow_quotes
 from krx_quant.trader.selection import NO_COST_MAP, pick
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore
@@ -170,11 +176,15 @@ async def run_trader(
     async with kis.rest_session() as orders:
         # Made before anything is kept: a mock or live trader that cannot order does not start (#405,
         # #408). The live broker is made whether or not the live mode orders yet: its key is checked.
+        # Each checks a buy last against the trader's limits (#543): the capital, its one symbol; the
+        # live one on the first period's cap until the ramp says it is lifted (``LiveWatch.judge``).
         broker: Broker | None = None
+        limits = BuyLimits(trader.capital, frozenset({SYMBOL}))
         if trader.mode == MOCK:
-            broker = trader_broker(orders, settings, clock, servers=servers)
+            broker = trader_broker(orders, settings, clock, servers=servers, limits=limits)
         elif trader.mode == LIVE:
-            broker = trader_live_broker(orders, settings, clock, servers=live_servers)
+            broker = trader_live_broker(orders, settings, clock, servers=live_servers, limits=limits)
+            broker.set_cap(min(live.RAMP_CAP, trader.capital))
         return await _run(
             settings,
             trader,
@@ -260,7 +270,7 @@ async def _run(
                     practice=trader.mock_practice and mode == MOCK,  # #427: the settings allow mock alone
                     engine=settings.state_dir / ENGINE_DB,  # where a policy's predictor is found gone (#469)
                 )
-                watch = LiveWatch(trader.mode, mode, book, sessions, alerts.notice)
+                watch = LiveWatch(trader.mode, mode, book, sessions, alerts.notice, broker=broker)
                 watch.judge(started, ready, start=True)
                 # The mock account's fill notices recorded (#484): beside the loops, never in their set,
                 # and never read by a book. Its own task catches what it raises: it stops neither the
@@ -287,6 +297,7 @@ async def _run(
                         book,
                         session,
                         watch,
+                        broker=broker,
                         stop=stop,
                         clock=clock,
                         sleep=sleep,
@@ -309,9 +320,9 @@ async def _run(
 class LiveWatch:
     """The live mode's answer (#408, ``live.readiness``), judged at the start and at each pick for
     the trader ``configured`` (``KRX_TRADER_MODE``) running its desk in ``running``: kept in the
-    champion's state, the first period stepped in live mode (``Desk.ramp``), what is missing told at
-    the start and once a day while the live mode waits, and ``switch`` set when the answer is not the
-    one the trader started with."""
+    champion's state, the first period stepped in live mode (``Desk.ramp``) and its cap told to the
+    live ``broker``'s last check (#543), what is missing told at the start and once a day while the live
+    mode waits, and ``switch`` set when the answer is not the one the trader started with."""
 
     def __init__(
         self,
@@ -320,10 +331,13 @@ class LiveWatch:
         desk: Desk,
         sessions: Callable[[date], Session | None],
         notify: Callable[[str], None],
+        *,
+        broker: Broker | None = None,
     ) -> None:
         self.configured = configured
         self.running = running
         self._desk = desk
+        self._broker = broker
         self._sessions = sessions
         self._notify = notify
         self.switch = asyncio.Event()
@@ -339,6 +353,8 @@ class LiveWatch:
     def judge(self, at: datetime, ready: live.Readiness | None = None, *, start: bool = False) -> None:
         ready = ready or live.readiness(self._desk.store.db, self._sessions, kst_day(at))
         ramp = self._desk.ramp(at) if self.running == LIVE else None
+        if ramp is not None and self._broker is not None:
+            self._broker.set_cap(ramp.cap)  # #543: the broker's last check holds the cap the book sizes on
         self._desk.set_live(live.live_state(ready, self.configured, self.running == LIVE, ramp), at)
         if self.configured != LIVE:
             return
@@ -388,6 +404,7 @@ async def _trade(
     session: aiohttp.ClientSession,
     watch: LiveWatch,
     *,
+    broker: Broker | None,
     stop: asyncio.Event,
     clock: Clock,
     sleep: Callable[[float], Awaitable[None]],
@@ -395,8 +412,14 @@ async def _trade(
 ) -> bool:
     """The loops until ``stop`` is set (False), or until the live mode's answer changed and nothing of
     the champion's book is open (True). The trader ``started`` then: the engine's start is waited for
-    until ``ENGINE_START_GRACE`` after it (#508)."""
+    until ``ENGINE_START_GRACE`` after it (#508). Each quote goes to ``broker`` before the books: a buy's
+    price is checked against the latest (#543)."""
     reader = EngineReader(settings.state_dir / ENGINE_DB, SYMBOL)
+
+    def on_quote(quote: BestQuote) -> None:
+        if broker is not None:
+            broker.quoted(SYMBOL, quote.bid, quote.ask, quote.received_at)
+        book.on_quote(quote)
 
     def starting() -> bool:
         """Whether the engine may still be starting with the trader (#508)."""
@@ -497,9 +520,7 @@ async def _trade(
 
     tasks = [
         asyncio.create_task(picking()),
-        asyncio.create_task(
-            follow_quotes(session, trader.quotes_url, SYMBOL, book.on_quote, starting=starting)
-        ),
+        asyncio.create_task(follow_quotes(session, trader.quotes_url, SYMBOL, on_quote, starting=starting)),
         asyncio.create_task(predictions()),
         asyncio.create_task(ticks()),
         asyncio.create_task(controls()),

@@ -618,7 +618,7 @@ async def test_a_kind_awaiting_a_probe_is_listed_but_not_run(
     assert not job.due(night)
 
 
-async def test_the_kind_runs_now_that_the_dividend_probe_s_result_is_in(tmp_path: Path) -> None:
+async def test_the_kind_runs_now_that_the_dividends_were_measured(tmp_path: Path) -> None:
     """#310: ``probe-dividends-310`` (2026-10-21) found KIS's adjusted prices take no cash dividend
     out and its 락 구분 marking the ex-dividend days, so the kind runs with the spec's fallback (the
     answer as it is, the window marked ``ex_dividend``). Its baselines predict at 08:50; its
