@@ -1,6 +1,7 @@
 """Pre-validation's inputs for the tests (#511): ten recorded trading days of swings, the Monday
 morning after them, a stand-in algorithm with fixed forecasts and one against the swings, the
-settings, and the report read back. Every value is made up.
+settings, the report read back, and a report that refused an algorithm (#544). Every value is made
+up.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from krx_quant.config import Settings
 from krx_quant.engine import Event
 from krx_quant.features import FeatureVector
 from krx_quant.feeds import KST
+from krx_quant.prevalidation import judging, report_path
+from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm, stand_in_card, stand_in_meanings
 from tests.replay_doubles import record
 from tests.replay_events import at, book, trade
@@ -92,3 +95,25 @@ def settings(tmp_path: Path, days: Sequence[date] = DAYS) -> Settings:
 def report(s: Settings, name: str) -> dict[str, Any]:
     data: dict[str, Any] = json.loads((s.state_dir / "prevalidations" / f"{name}.json").read_text())
     return data
+
+
+def refuse(
+    state_dir: Path, algorithm: Any, target_version: int = TARGET_VERSION, code: str | None = None
+) -> None:
+    """A report that refused ``algorithm`` on ten days, as a pre-validation leaves it: of the code,
+    target and inputs it has now (``prevalidation.judging``), or of ``code``, as before a change."""
+    path = report_path(state_dir, algorithm.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    judged = {**judging(algorithm, target_version), **({} if code is None else {"code": code})}
+    report = {
+        "algorithm": algorithm.name,
+        **judged,
+        "prevalidated_at": datetime.combine(DAYS[-1], time(23, 10), KST).isoformat(),
+        "passed": False,
+        "days": [d.isoformat() for d in DAYS],
+        "checks": [
+            {"check": "days", "passed": True, "detail": "10 recorded days"},
+            {"check": "stats", "passed": False, "detail": "weakest lift -0.0100"},
+        ],
+    }
+    path.write_text(json.dumps(report))

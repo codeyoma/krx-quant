@@ -7,18 +7,25 @@ quiet in continuous trading, per the Market Calendar, for longer than its thresh
 Closed gaps are written to the ``gaps`` layer; gaps still open at shutdown are
 written with no end. Each key also counts today's frames that came short of fields and were
 kept raw only (#381).
+
+The ``gaps`` layer is read back here too (``read_gaps``), for ``krx-quant probe-gaps`` (#344) and
+the trader's replay (``trader/replay.py``), which so imports no probe (#552).
 """
 
 from __future__ import annotations
 
 import enum
 import logging
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from collections import Counter
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass, field
 from datetime import date, datetime
+from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 
+from krx_quant.archive import partition_batches
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar, Phase
 from krx_quant.recorder import ParquetRecorder
@@ -241,3 +248,64 @@ class FeedHealth:
         }
         log.info("gap %s %s %s – %s (%s)", key[0], key[1], row["start"], row["end"], gap.reason)
         self._recorder.record("gaps", kst_day(gap.start), key[0], key[1], row, GAP_SCHEMA)
+
+
+@dataclass(frozen=True)
+class Gap:
+    """One row of the ``gaps`` layer."""
+
+    feed: str
+    key: str
+    start: datetime
+    end: datetime | None  # None: still open when the collector stopped
+    reason: str
+
+
+@dataclass
+class Unread:
+    """Files unlike the schema the collector writes them in: without a column it names, or with
+    one of another type. Counted, never guessed at."""
+
+    files: Counter[str] = field(default_factory=Counter)  # "<layer> <feed> <column> <what>" -> files
+
+    def lines(self) -> list[str]:
+        return [f"{what}: 파일 {n}개" for what, n in sorted(self.files.items())]
+
+
+def read_batches(
+    partition: Path, columns: Sequence[str], unread: Unread, optional: Sequence[str] = ()
+) -> Iterator[Any]:
+    """A partition's rows, a batch at a time, each row once (``archive.partition_batches``), with
+    ``columns`` and those of ``optional`` the file has. A file without one of ``columns`` is not
+    read; it and one without an ``optional`` column are counted in ``unread``."""
+    label = f"{partition.parent.parent.parent.name} {partition.parent.name.removeprefix('feed=')}"
+
+    def present(_: Path, schema: pa.Schema) -> list[str] | None:
+        names = schema.names
+        absent = [c for c in columns if c not in names]
+        for column in absent:
+            unread.files[f"{label} {column} 없음(읽지 않음)"] += 1
+        for column in (c for c in optional if c not in names):
+            unread.files[f"{label} {column} 없음(그 열 없이 읽음)"] += 1
+        if absent:
+            return None
+        return [*columns, *(c for c in optional if c in names)]
+
+    for _, batch in partition_batches(partition, present):
+        yield batch
+
+
+def read_gaps(data_dir: Path, day: date, unread: Unread) -> list[Gap]:
+    """The gaps that started on ``day`` (the ``gaps`` partition's date is the start's)."""
+    root = data_dir / "gaps" / f"date={day.isoformat()}"
+    names = GAP_SCHEMA.names
+    out = []
+    for partition in sorted(root.glob("feed=*/symbol=*")):
+        for batch in read_batches(partition, names, unread):
+            rows = batch.to_pydict()
+            for feed, key, start, end, reason in zip(*(rows[c] for c in names), strict=True):
+                if start is None:
+                    unread.files[f"gaps {feed} start 빈 값(그 행을 읽지 않음)"] += 1
+                    continue
+                out.append(Gap(str(feed), str(key), start, end, str(reason)))
+    return out

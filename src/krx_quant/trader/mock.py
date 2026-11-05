@@ -1027,7 +1027,7 @@ class MockTrader(PaperTrader):
                 poll=self._timing.poll,
                 on_accepted=accepted,
             )
-        except BrokerError as e:  # no token: nothing was sent
+        except BrokerError as e:  # no token, or the broker's last check withheld it (#543): nothing sent
             self.store.close_unfilled_buy(unfilled, UNSENT)
             self._buy_failed(waiting, "buy", ERROR, str(e))
             return
