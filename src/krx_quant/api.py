@@ -38,14 +38,21 @@ Endpoints (all under ``/v1``):
   kept any (today's always), else the day made again from its backfilled bars, else from its
   recording, and where each day's came from. The days made again are kept, the least recently
   asked let go first (``SMT_CACHED_DAYS``), and made one question at a time, off the event loop;
-- ``GET /algorithms``: each registered algorithm's card, features, current model (with what
-  it trained on) and status (probation, active, bench, retired, clone) with its history, the
-  meaning of each feature and model parameter, its report of the latest night's training,
-  and, on probation or the bench, where it stands toward its next review (#165); and the
-  baselines' and the consensus' cards;
+- ``GET /algorithms``: every registered algorithm (#561), run or not: its card, features, current
+  model (with what it trained on) and status (probation, active, bench, retired, clone) with its
+  history, the meaning of each feature and model parameter, its report of the latest night's
+  training, on probation or the bench where it stands toward its next review (#165), its state
+  (its status, or waiting, refused, held, awaiting) and pre-validation (a waiting one's place in the
+  night's order, a refused one's report); each kind's algorithms by state; and the baselines' and
+  the consensus' cards;
 - ``GET /algorithms/{name}``: one of them, with the models installed on the server for it;
 - ``GET /leaderboard?symbol=&period=&special=``: algorithms ranked by the lower bound of
   their weakest lift over the baselines, with their stats;
+- ``GET /leaderboard/days?kind=&limit=N``: each predictor of a kind on each of its latest N days
+  reviewed (default 20, at most 60; #561, ``algorithm_days.py``): its hit rate, coverage, precision
+  by class, lift over the kind's climate baseline, log loss and status that day, an active
+  algorithm's decay mark, and the direction's consensus beside its members; each day computed once
+  and kept;
 - ``GET /algorithms/{name}/stats?symbol=&period=&special=``: one algorithm's stats, by
   symbol, 30-minute slot and model version, with its calibration curve;
 - ``GET /cost-map?symbol=&period=&special=``: each symbol's round-trip costs, and each kind
@@ -117,7 +124,7 @@ import contextlib
 import json
 import re
 from collections import OrderedDict, defaultdict
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import partial
@@ -128,6 +135,18 @@ from typing import Any, Literal
 from aiohttp import web
 
 from krx_quant import loki
+from krx_quant.algorithm_days import LIMIT as DAYS_LIMIT
+from krx_quant.algorithm_days import MAX_LIMIT as MAX_DAYS_LIMIT
+from krx_quant.algorithm_days import (
+    Kept,
+    climate_of,
+    close_of,
+    day_json,
+    decay_json,
+    make_days,
+    members_json,
+    status_at,
+)
 from krx_quant.algorithms import Algorithm, KindAlgorithm
 from krx_quant.backfill import MINUTE_BARS_TR, read_bars, stock_bars_path, stored_bars
 from krx_quant.base_rates import read_base_rates
@@ -155,7 +174,7 @@ from krx_quant.kind_stats import leaderboard as kind_leaderboard
 from krx_quant.kind_stats import split as kind_split
 from krx_quant.kinds import DIRECTION, DIRECTION_KIND, KindScored
 from krx_quant.kinds import Kind as PredictionKind
-from krx_quant.lifecycle import Stage
+from krx_quant.lifecycle import RECENT_DAYS, Stage, Status
 from krx_quant.macro import latest_macro, macro_json, reading_before
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
@@ -163,6 +182,7 @@ from krx_quant.names import logo_url
 from krx_quant.net_assets import read_net_assets
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import Excluded, SimulationRecord, iso
+from krx_quant.prevalidation import REGISTERED_BEFORE, Refusal
 from krx_quant.pricing import flat_ticks, tick_size
 from krx_quant.reference import BAR, Bar
 from krx_quant.skill import Skill, calls_by_day, day_kappa, skill
@@ -290,6 +310,8 @@ class MadeAgain:
 
 
 SMT_KEY = web.AppKey("smt_made_again", MadeAgain)
+# Each kind's reviewed days, computed once and kept (#561, ``algorithm_days.Kept``).
+DAYS_KEY = web.AppKey("days_kept", Kept)
 
 
 def create_app(
@@ -327,6 +349,7 @@ def create_app(
     app[FLOW_CACHE_KEY] = {}
     app[KRX_DAYS_KEY] = None if data_dir is None else StoredDays(data_dir)
     app[SMT_KEY] = MadeAgain(SMT_CACHED_DAYS)
+    app[DAYS_KEY] = Kept()
     app[NAMES_KEY] = {} if names is None else names
     stream = EventStream(engine, live_status, stream_poll_seconds)
     app[STREAM_KEY] = stream
@@ -362,6 +385,7 @@ def create_app(
     app.router.add_get("/v1/algorithms", _algorithms)
     app.router.add_get("/v1/algorithms/{name}", _algorithm)
     app.router.add_get("/v1/leaderboard", _leaderboard)
+    app.router.add_get("/v1/leaderboard/days", _leaderboard_days)
     app.router.add_get("/v1/algorithms/{name}/stats", _algorithm_stats)
     app.router.add_get("/v1/cost-map", _cost_map)
     app.router.add_get("/v1/consensus", _consensus)
@@ -822,14 +846,14 @@ async def _algorithms(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     stages = await engine.stages()
     simulations = engine.store.simulations()
-    running: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
-        *engine.algorithms,
-        *engine.kind_algorithms,
-        *engine.daily_algorithms,
-    ]
+    standings = await _standings(engine)
     return _json(
         {
-            "algorithms": [_algorithm_json(engine, a, stages, simulations) for a in running],
+            "algorithms": [
+                _algorithm_json(engine, a, stages, simulations, standings[a.name])
+                for a in _registered(engine)
+            ],
+            "kinds": _kinds_json(engine, standings),
             "baselines": [{"name": b.name, "card": b.card.as_dict()} for b in engine.baselines],
             "consensus": [
                 {"name": name, "card": card.as_dict()}
@@ -842,12 +866,7 @@ async def _algorithms(request: web.Request) -> web.Response:
 async def _algorithm(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     name = request.match_info["name"]
-    running: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
-        *engine.algorithms,
-        *engine.kind_algorithms,
-        *engine.daily_algorithms,
-    ]
-    algorithm = next((a for a in running if a.name == name), None)
+    algorithm = next((a for a in _registered(engine) if a.name == name), None)
     if algorithm is None:
         raise _error(web.HTTPNotFound, f"unknown algorithm {name!r}")
     shelf = request.app[SHELF_KEY]
@@ -858,7 +877,122 @@ async def _algorithm(request: web.Request) -> web.Response:
     ]
     stages = await engine.stages()
     simulations = engine.store.simulations()
-    return _json({**_algorithm_json(engine, algorithm, stages, simulations), "model_history": history})
+    standing = (await _standings(engine))[name]
+    return _json(
+        {**_algorithm_json(engine, algorithm, stages, simulations, standing), "model_history": history}
+    )
+
+
+def _registered(engine: PredictionEngine) -> list[Algorithm | KindAlgorithm | DailyAlgorithm]:
+    """Every registered algorithm (#561), run or not: the direction's, the other kinds', the daily
+    kinds', each in registration order."""
+    return [*engine.registered, *engine.kind_registered, *engine.daily_registered]
+
+
+# The states of an algorithm the engine predicts with (#561): its lifecycle status, retired aside.
+PREDICTING = (Status.ACTIVE.value, Status.PROBATION.value, Status.BENCH.value, Status.CLONE.value)
+
+
+@dataclass(frozen=True)
+class _Standing:
+    """Where a registered algorithm stands (#561): its ``state``, its lifecycle status while the
+    engine runs it (retired included), else why not: ``waiting`` for its pre-validation, ``refused``
+    by it (``prevalidation.left_out``'s rule: the code, target and inputs it has now), ``held`` (it
+    passed, its daily kind's review days are not fixed yet, #310) or ``awaiting`` (its daily kind
+    awaits a probe's result, #310); the refusal; and a waiting one's place in the night's order."""
+
+    state: str
+    refusal: Refusal | None = None
+    queue: int | None = None
+
+
+async def _standings(engine: PredictionEngine) -> dict[str, _Standing]:
+    """Each registered algorithm's ``_Standing``. The reports are read and the code digested in a
+    worker thread (``prevalidation.refusals``, ``admits``)."""
+    # The scheduler's order of the pre-validations (#204); its module imports this one's.
+    from krx_quant.scheduled.prevalidations import prevalidation_order
+
+    refused, waiting, held = await asyncio.to_thread(
+        lambda: (engine.refused(), engine.waiting(), engine.held())
+    )
+    statuses = engine.store.statuses()
+    runs: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
+        *engine.algorithms,
+        *engine.kind_algorithms,
+        *engine.daily_algorithms,
+    ]
+    running = {a.name for a in runs}
+    bar_close = [a.name for a in engine.registered] + [a.name for a in engine.kind_registered]
+    queue = [name for name in prevalidation_order(bar_close) if name in waiting]
+    out: dict[str, _Standing] = {}
+    for a in _registered(engine):
+        name, standing = a.name, statuses.get(a.name)
+        if name in running:  # every one run has a status: it starts on probation (``_admit``)
+            out[name] = _Standing(Status.PROBATION.value if standing is None else standing.status.value)
+        elif name in refused:
+            out[name] = _Standing("refused", refused[name])
+        elif name in held:
+            out[name] = _Standing("held")
+        elif name in waiting:
+            out[name] = _Standing("waiting", queue=queue.index(name) + 1 if name in queue else None)
+        else:
+            out[name] = _Standing("awaiting")
+    return out
+
+
+def _kinds_json(engine: PredictionEngine, standings: Mapping[str, _Standing]) -> list[dict[str, Any]]:
+    """Each kind the engine predicts (the direction first, then the others', then the daily ones'),
+    the target version its algorithms run on, the algorithms predicting it and each state's (#561)."""
+    registered = _registered(engine)
+    out = []
+    for kind in (DIRECTION_KIND, *engine.kinds, *engine.daily_kinds):
+        of_kind = [a.name for a in registered if str(getattr(a, "kind", DIRECTION)) == kind.name]
+        states: dict[str, list[str]] = {}
+        for name in of_kind:
+            states.setdefault(standings[name].state, []).append(name)
+        out.append(
+            {
+                "kind": kind.name,
+                "target_version": engine.target_version if kind is DIRECTION_KIND else kind.answer_version,
+                "predicting": [name for name in of_kind if standings[name].state in PREDICTING],
+                "states": states,
+            }
+        )
+    return out
+
+
+def _prevalidation_json(name: str, standing: _Standing) -> dict[str, Any]:
+    """An algorithm's pre-validation (#561): exempt (registered before it, #24), a waiting one's
+    place in the night's order, a refused one's report: when, the code, target and inputs it judged,
+    the checks it failed."""
+    refusal = standing.refusal
+    judged: dict[str, Any] = {}
+    if refusal is not None:
+        with contextlib.suppress(ValueError):
+            judged = json.loads(refusal.judged)
+    return {
+        "exempt": name in REGISTERED_BEFORE,
+        "queue": standing.queue,
+        "refused": None
+        if refusal is None
+        else {
+            "at": _report_time(judged.get("prevalidated_at")),
+            "code": judged.get("code"),
+            "target_version": judged.get("target_version"),
+            "inputs": judged.get("inputs") or {},
+            "checks": list(refusal.checks),
+            "why": refusal.why,
+        },
+    }
+
+
+def _report_time(raw: Any) -> str | None:
+    """A report's time in KST; None for one that cannot be read, or without its offset."""
+    try:
+        at = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return None if at.tzinfo is None else iso(at)
 
 
 def _algorithm_json(
@@ -866,6 +1000,7 @@ def _algorithm_json(
     a: Algorithm | KindAlgorithm | DailyAlgorithm,
     stages: Mapping[str, Stage],
     simulations: Mapping[str, SimulationRecord],
+    standing: _Standing,
 ) -> dict[str, Any]:
     model = engine.models[a.name]
     # Every parameter it may hold, then those of its model's that are known by name only (Shannon's
@@ -889,6 +1024,8 @@ def _algorithm_json(
         "validation": _validation_json(engine, a.name),
         "stage": _stage_json(stages.get(a.name)),
         "simulation": _simulation_json(simulations.get(a.name)),
+        "state": standing.state,  # #561
+        "prevalidation": _prevalidation_json(a.name, standing),
     }
 
 
@@ -1196,11 +1333,113 @@ async def _leaderboard(request: web.Request) -> web.Response:
     return _json(_echo_basis(request, body))
 
 
+async def _leaderboard_days(request: web.Request) -> web.Response:
+    """``/v1/leaderboard/days?kind=&limit=N`` (#561, ``algorithm_days.py``): each predictor of a kind
+    on each of its latest ``limit`` days reviewed (default 20, at most 60), oldest first; an active
+    algorithm's decay mark; the direction's consensus beside its members. A day is computed once and
+    kept (``Kept``), its rows read off the event loop; a request computes the days it lacks only."""
+    engine = request.app[ENGINE_KEY]
+    kind = _kind_query(request, engine) or DIRECTION_KIND
+    limit = _limit_query(request, DAYS_LIMIT, MAX_DAYS_LIMIT)
+    daily = engine.daily_kind_named(kind.name)
+    baselines: Collection[str]
+    rules, min_sample, recent = engine.review_rules, engine.min_sample, RECENT_DAYS
+    if kind is DIRECTION_KIND:
+        baselines, consensus = engine.baseline_names, list(NAMES)
+        target = engine.target_version if engine.target_version >= 2 else None  # as the leaderboard (#170)
+        read: Callable[[Sequence[date]], list[dict[str, Any]]] = partial(
+            engine.store.reviewed, include_special=False
+        )
+    else:
+        baselines, consensus, target = kind.baseline_names(), [], kind.answer_version
+        read = partial(engine.store.kind_reviewed, kind.name, kind.answer_version, include_special=False)
+    if daily is not None:  # its own rules (#264)
+        rules, min_sample, recent = daily.review_rules, daily.min_sample, daily.recent_days
+    # The days reviewed, latest first: a daily kind's those with an answer, as its reviews count.
+    today = kst_day(engine.clock.now())
+    wanted = max(limit, recent)
+    if daily is not None:
+        listed = engine.store.kind_answered_days(kind.name, kind.answer_version, today, wanted)
+    elif kind is DIRECTION_KIND:
+        listed = engine.store.prediction_days(today, wanted + 1)
+    else:
+        listed = engine.store.kind_prediction_days(kind.name, today, wanted + 1)
+    next_day = engine.next_review_day()
+    days = [d for d in listed if next_day is None or d < next_day][:wanted]
+    store = engine.store
+    mark = (
+        store.simulation_mark(),
+        store.refill_mark() if daily is None else store.refill_mark(kind.name, kind.answer_version),
+    )
+    kept = request.app[DAYS_KEY]
+    async with kept.lock:
+        found = {d: made for d in days if (made := kept.get(kind.name, d, mark)) is not None}
+        missing = [d for d in days if d not in found]
+        if missing:
+            simulated = engine.simulated(kind)
+            for made in await asyncio.to_thread(
+                make_days, missing, read, kind, baselines, target, consensus, simulated
+            ):
+                kept.put(kind.name, made, mark)
+                found[made.day] = made
+    latest = [found[d] for d in days]
+    shown = latest[:limit][::-1]  # oldest first
+    statuses = store.statuses()
+    registered = [a.name for a in _registered(engine) if str(getattr(a, "kind", DIRECTION)) == kind.name]
+    seen = {name for made in latest for name in made.tallies}
+    algorithms = [*registered, *sorted(seen - set(registered) - set(baselines) - set(consensus))]
+    closes = [(made.day, close_of(engine.calendar, made.day)) for made in latest]
+    on_day: dict[str, dict[date, str | None]] = {}
+    for name in algorithms:
+        history = store.status_history(name)
+        on_day[name] = {d: status_at(history, close) for d, close in closes}
+    climate = climate_of(kind, baselines)
+
+    def series(name: str) -> dict[str, Any]:
+        standing = statuses.get(name)
+        decay = None
+        if standing is not None and standing.status is Status.ACTIVE:
+            decay = decay_json(
+                name, standing.since, latest, on_day[name], baselines, rules, min_sample, recent
+            )
+        rows = [day_json(made, name, kind, climate, on_day.get(name, {}).get(made.day)) for made in shown]
+        return {
+            "algorithm": name,
+            "status": None if standing is None or name not in on_day else standing.status.value,
+            "decay": decay,
+            "days": [r for r in rows if r is not None],
+        }
+
+    members = [
+        beside
+        for made in shown
+        if (
+            beside := members_json(
+                made, [name for name in algorithms if on_day[name].get(made.day) == Status.ACTIVE.value]
+            )
+        )
+        is not None
+    ]
+    return _json(
+        {
+            "kind": kind.name,
+            "days": [made.day.isoformat() for made in shown],
+            "climate": climate,
+            "min_sample": min_sample,
+            "algorithms": [series(name) for name in algorithms],
+            "baselines": [series(name) for name in sorted(baselines)],
+            "consensus": [series(name) for name in consensus],
+            "members": members if kind is DIRECTION_KIND else [],
+        }
+    )
+
+
 async def _algorithm_stats(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     name = request.match_info["name"]
+    # Every registered algorithm (#561), run or not: one never run has empty statistics.
     known = (
-        {a.name for a in engine.algorithms} | engine.baseline_names | set(NAMES) | engine.store.algorithms()
+        {a.name for a in engine.registered} | engine.baseline_names | set(NAMES) | engine.store.algorithms()
     )
     if name not in known and (kind := _kind_of(engine, name)) is not None:
         return await _kind_algorithm_stats(request, name, kind)  # of its kind (#179)

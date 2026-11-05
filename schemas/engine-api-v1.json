@@ -645,7 +645,7 @@
       "type": "object",
       "required": [
         "name", "kind", "card", "features", "feature_meanings", "training_days", "model", "param_meanings",
-        "status", "validation", "stage", "simulation"
+        "status", "validation", "stage", "simulation", "state", "prevalidation"
       ],
       "properties": {
         "name": {"type": "string"},
@@ -692,8 +692,46 @@
         "status": {"$ref": "#/$defs/standing"},
         "validation": {"$ref": "#/$defs/night_validation"},
         "stage": {"$ref": "#/$defs/stage"},
-        "simulation": {"$ref": "#/$defs/simulation"}
+        "simulation": {"$ref": "#/$defs/simulation"},
+        "state": {"$ref": "#/$defs/algorithm_state"},
+        "prevalidation": {
+          "description": "Its pre-validation (#561, #24): exempt (registered before it), a waiting one's place in the night's order, a refused one's report.",
+          "type": "object",
+          "required": ["exempt", "queue", "refused"],
+          "additionalProperties": false,
+          "properties": {
+            "exempt": {"type": "boolean", "description": "registered before pre-validation: it runs without a report"},
+            "queue": {
+              "description": "Waiting, a bar-close algorithm's place among the waiting in the night's pre-validation order (1: next); null otherwise, and for a daily kind's (each runs the first night it waits).",
+              "type": ["integer", "null"],
+              "minimum": 1
+            },
+            "refused": {
+              "description": "Refused, its latest report: of the code, target and inputs it has now. null otherwise.",
+              "oneOf": [
+                {"type": "null"},
+                {
+                  "type": "object",
+                  "required": ["at", "code", "target_version", "inputs", "checks", "why"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}], "description": "when it ran; null if its report does not say"},
+                    "code": {"type": ["string", "null"], "description": "the digest of the code it judged"},
+                    "target_version": {"type": ["integer", "null"], "description": "the target (a kind's answer version) it judged; null for a kind not registered"},
+                    "inputs": {"type": "object", "additionalProperties": {"type": "integer"}, "description": "the versions of its inputs not 1 (a daily kind's, #297)"},
+                    "checks": {"type": "array", "items": {"type": "string"}, "description": "the checks it failed, in the report's order"},
+                    "why": {"type": "string", "description": "each failed check with its detail"}
+                  }
+                }
+              ]
+            }
+          }
+        }
       }
+    },
+    "algorithm_state": {
+      "description": "Where an algorithm stands (#561): its lifecycle status while the engine runs it (retired included); else waiting (for its pre-validation), refused (by it, for the code, target and inputs it has now), held (it passed, its daily kind's review days are not fixed yet, #310) or awaiting (its daily kind awaits a probe's result, #310).",
+      "enum": ["probation", "active", "bench", "retired", "clone", "waiting", "refused", "held", "awaiting"]
     },
     "model_training": {
       "description": "What the model was trained on, as values (#165): trained's text. null for the defaults and for a model saved before #165.",
@@ -910,10 +948,34 @@
     "algorithms": {
       "description": "GET /v1/algorithms",
       "type": "object",
-      "required": ["algorithms", "baselines", "consensus"],
+      "required": ["algorithms", "kinds", "baselines", "consensus"],
       "additionalProperties": false,
       "properties": {
-        "algorithms": {"type": "array", "items": {"$ref": "#/$defs/algorithm"}},
+        "algorithms": {
+          "description": "Every registered algorithm, run or not (#561), in registration order: the direction's, the other kinds', the daily kinds'.",
+          "type": "array",
+          "items": {"$ref": "#/$defs/algorithm"}
+        },
+        "kinds": {
+          "description": "Each kind the engine predicts (#561), the direction first: the target its algorithms run on, those predicting it, and each state's.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "target_version", "predicting", "states"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+              "target_version": {"type": "integer", "minimum": 1, "description": "the direction's target version (KRX_TARGET_VERSION), a kind's answer version"},
+              "predicting": {"type": "array", "items": {"type": "string"}, "description": "its algorithms the engine predicts with: active, on probation, on the bench, clones"},
+              "states": {
+                "description": "Its algorithms by state, each in registration order; a state without one is left out.",
+                "type": "object",
+                "propertyNames": {"$ref": "#/$defs/algorithm_state"},
+                "additionalProperties": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+              }
+            }
+          }
+        },
         "baselines": {
           "description": "The baselines' cards: three, four with the touch target (KRX_TARGET_VERSION=3, the default; #169: baseline-climate).",
           "type": "array",
@@ -1145,6 +1207,141 @@
         "baselines": {"type": "array", "items": {"$ref": "#/$defs/baseline_entry"}}
       },
       "unevaluatedProperties": false
+    },
+    "leaderboard_days": {
+      "description": "GET /v1/leaderboard/days (#561): each predictor of a kind on each of its latest days reviewed, oldest first.",
+      "type": "object",
+      "required": ["kind", "days", "climate", "min_sample", "algorithms", "baselines", "consensus", "members"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "days": {"type": "array", "items": {"$ref": "#/$defs/day"}, "description": "the days, oldest first: reviewed ones with predictions (a daily kind's with an answer)"},
+        "climate": {"type": ["string", "null"], "description": "the kind's climate baseline, what each day's lift is over; null without one"},
+        "min_sample": {"type": "integer", "minimum": 1, "description": "the scored predictions, and pairs with each baseline, a decay mark needs"},
+        "algorithms": {"type": "array", "items": {"$ref": "#/$defs/day_series"}},
+        "baselines": {"type": "array", "items": {"$ref": "#/$defs/day_series"}},
+        "consensus": {"type": "array", "items": {"$ref": "#/$defs/day_series"}, "description": "the direction's two; none for another kind"},
+        "members": {
+          "description": "The direction's final consensus beside its members each day (the algorithms active at its close); none for another kind.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["day", "consensus", "members", "n", "accuracy", "vs", "best", "lift"],
+            "additionalProperties": false,
+            "properties": {
+              "day": {"$ref": "#/$defs/day"},
+              "consensus": {"const": "consensus-final"},
+              "members": {"type": "array", "items": {"type": "string"}},
+              "n": {"type": "integer", "minimum": 1},
+              "accuracy": {"type": "number", "minimum": 0, "maximum": 1},
+              "vs": {
+                "description": "Each member it shares a bar close with: on those, its hit rate (accuracy), the consensus' and the gain (lift).",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "required": ["n", "accuracy", "consensus", "lift"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "n": {"type": "integer", "minimum": 1},
+                    "accuracy": {"type": "number", "minimum": 0, "maximum": 1},
+                    "consensus": {"type": "number", "minimum": 0, "maximum": 1},
+                    "lift": {"type": "number", "minimum": -1, "maximum": 1}
+                  }
+                }
+              },
+              "best": {"type": ["string", "null"], "description": "the member the consensus gained least over (the weakest lift); null without one"},
+              "lift": {"type": ["number", "null"], "minimum": -1, "maximum": 1}
+            }
+          }
+        }
+      }
+    },
+    "day_series": {
+      "description": "One predictor's days (#561): those with a scored prediction.",
+      "type": "object",
+      "required": ["algorithm", "status", "decay", "days"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {"type": "string"},
+        "status": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/lifecycle_status"}], "description": "its status now; null for a baseline, the consensus and one never run"},
+        "decay": {
+          "description": "Active: its weakest lift over the baselines on its days active among the latest 20 (a daily kind's recent days), flagged at 0 or below with enough to judge. null in any other status.",
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["days", "rule_days", "weakest", "enough", "flagged"],
+              "additionalProperties": false,
+              "properties": {
+                "days": {"type": "integer", "minimum": 0, "description": "its days active counted"},
+                "rule_days": {"type": "integer", "minimum": 1, "description": "the days active from which the bench check judges them alone (#545)"},
+                "weakest": {
+                  "oneOf": [
+                    {"type": "null"},
+                    {
+                      "type": "object",
+                      "required": ["baseline", "n", "value"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "baseline": {"type": "string"},
+                        "n": {"type": "integer", "minimum": 1},
+                        "value": {"type": "number", "minimum": -1, "maximum": 1}
+                      }
+                    }
+                  ]
+                },
+                "enough": {"type": "boolean"},
+                "flagged": {"type": "boolean"}
+              }
+            }
+          ]
+        },
+        "days": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["day", "status", "simulated", "n", "accuracy", "coverage", "precision", "lift", "log_loss"],
+            "additionalProperties": false,
+            "properties": {
+              "day": {"$ref": "#/$defs/day"},
+              "status": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/lifecycle_status"}], "description": "its status at the day's close; probation on a simulated day"},
+              "simulated": {"type": "boolean", "description": "the day's values are its probation's simulation's (#298)"},
+              "n": {"type": "integer", "minimum": 1},
+              "accuracy": {"type": "number", "minimum": 0, "maximum": 1},
+              "coverage": {"type": "number", "minimum": 0, "maximum": 1},
+              "precision": {
+                "description": "Each of the kind's classes: its calls and the share that happened (null without one).",
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "required": ["n", "value"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "n": {"type": "integer", "minimum": 0},
+                    "value": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+                  }
+                }
+              },
+              "lift": {
+                "description": "Over the climate baseline on the bar closes both predicted; null without one.",
+                "oneOf": [
+                  {"type": "null"},
+                  {
+                    "type": "object",
+                    "required": ["n", "value"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "n": {"type": "integer", "minimum": 1},
+                      "value": {"type": "number", "minimum": -1, "maximum": 1}
+                    }
+                  }
+                ]
+              },
+              "log_loss": {"type": "number", "minimum": 0}
+            }
+          }
+        }
+      }
     },
     "algorithm_stats": {
       "description": "GET /v1/algorithms/{name}/stats: of the predictor's kind (#179), the direction's or another's (kind_algorithm_stats).",
