@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-from krx_quant.algorithms import Model, save_model
+from krx_quant.algorithms import ALGORITHMS, Model, save_model
 from krx_quant.api import create_app
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
@@ -26,9 +26,19 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.object_store import LocalObjectStore, ObjectStore
 from krx_quant.predictions import PredictionStore
-from krx_quant.swap import morning_swap, night_status, night_to_train, publish_live, reload_models
+from krx_quant.prevalidation import admits, refusals
+from krx_quant.swap import (
+    morning_swap,
+    night_status,
+    night_to_train,
+    not_run,
+    publish_live,
+    reload_models,
+    swap_notice,
+)
 from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import check
+from tests.prevalidation_doubles import refuse
 from tests.replay_events import api, get_json
 
 NIGHT = date(2026, 10, 12)  # a Monday's night
@@ -41,7 +51,12 @@ def at(day: date, hhmm: str) -> datetime:
 
 
 def night_list(
-    store_root: Path, *, finalized: datetime, promoted: dict[str, Model], day: date = NIGHT
+    store_root: Path,
+    *,
+    finalized: datetime,
+    promoted: dict[str, Model],
+    day: date = NIGHT,
+    refused: dict[str, str] | None = None,
 ) -> None:
     for name, model in promoted.items():
         path = store_root / "models" / name / f"{model.version}.json"
@@ -53,6 +68,7 @@ def night_list(
         "finalized_at": finalized.isoformat(),
         "promoted": {name: m.version for name, m in promoted.items()},
         "reports": reports,
+        **({} if refused is None else {"refused": refused}),  # left out of the night (#544)
     }
     path = store_root / "promotions" / f"{day}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,6 +200,44 @@ async def test_a_night_that_promoted_nothing_is_taken_all_the_same(
     assert applied.as_dict()["applied"] is True
     status = night_status(store, Shelf(tmp_path / "state"), MORNING)
     assert status is not None and status.as_dict()["reason"] == "applied"
+
+
+async def test_the_swap_s_line_leaves_out_the_models_of_algorithms_their_pre_validation_refused(
+    store: ObjectStore, tmp_path: Path
+) -> None:
+    # #544: kalman's pre-validation refused the code it has after the night trained it (the
+    # scheduled pre-validation runs after the night), and the engine's gate does not run it.
+    state = tmp_path / "state"
+    kalman = next(a for a in ALGORITHMS if a.name == "kalman")
+    refuse(state, kalman, target_version=1)
+    calendar = MarketCalendar({NIGHT: True, MORNING: True})
+    engine = PredictionEngine(
+        PredictionStore(tmp_path / "engine.db"),
+        calendar,
+        ("005930",),
+        0.00015,
+        FakeClock(at(MORNING, "07:00")),
+        admits=admits(state),
+        refused=refusals(state),
+    )
+    trained = Model("kalman-20261012-def456", {}, "2026-09-14..2026-10-07")
+    promoted = {"newton": TRAINED, "kalman": trained}
+    # poisson was refused before the night: not trained (``Night.refused``).
+    night_list(tmp_path / "store", finalized=at(NIGHT, "21:40"), promoted=promoted, refused={"poisson": "x"})
+
+    status = await morning(store, tmp_path, engine)
+
+    refused = not_run(engine, tmp_path / "state")
+    assert refused == {"kalman"}, "the others have no report, or run without one"
+    assert swap_notice(status, refused) == f"모델 교체 ({NIGHT} 밤 학습): newton → {TRAINED.version}"
+    assert "kalman" in (swap_notice(status) or ""), "told without the refusal"
+    assert engine.models["kalman"] == trained, "installed all the same: the list is applied whole"
+    alone = replace(status, night=replace(status.night, promoted={"kalman": trained.version}))
+    assert swap_notice(alone, refused) is None, "nothing the engine runs changed"
+    async with api(engine) as client:
+        training = (await get_json(client, "/v1/status"))["training"]
+    assert "refused" not in training, "the API does not carry the list's refused (#544)"
+    check("training", training)
 
 
 def test_a_model_installed_before_the_history_is_one_rollback_away(tmp_path: Path) -> None:
