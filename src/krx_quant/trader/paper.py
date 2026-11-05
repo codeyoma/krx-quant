@@ -144,7 +144,8 @@ cumulative P&L the limits count with, since #533, the mock practice's and the ac
 the limits' use, the pause, and since #475 the risk rules' state, ``risk_state``)
 into its store as it changes, at most every
 ``SNAPSHOT_SECONDS`` while only the open position's bid moves and at least every ``HEARTBEAT``,
-with the day's ledger (``days``) on a trading day: ``GET /v1/trader``, ``/v1/trader/days``.
+with the day's ledger (``days``) on a trading day: ``GET /v1/trader``, ``/v1/trader/days``. The
+snapshot also carries the process's resident memory for the engine's heartbeat (#547).
 """
 
 from __future__ import annotations
@@ -157,6 +158,7 @@ from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.footprint import resident_mb
 from krx_quant.kinds import most_likely
 from krx_quant.market_calendar import Session
 from krx_quant.pricing import SELL_TAX, tick_size
@@ -190,7 +192,7 @@ from krx_quant.trader.limits import (
 )
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Pick, Selection
-from krx_quant.trader.store import WAITED, Entry, Exit, OpenTrade, Stall, TraderStore
+from krx_quant.trader.store import RESIDENT, WAITED, Entry, Exit, OpenTrade, Stall, TraderStore
 
 if TYPE_CHECKING:
     from krx_quant.trader.settings import TraderSettings
@@ -993,13 +995,14 @@ class PaperTrader:
     def write(self, now: datetime, force: bool = True) -> None:
         """The state (``state``) and the day's ledger into the store: at once if something changed
         or ``force``; if only the open position's P&L moved, at most every ``SNAPSHOT_SECONDS``;
-        else every ``HEARTBEAT``."""
+        else every ``HEARTBEAT``. The snapshot also carries the process's resident memory then
+        (#547, ``store.RESIDENT``), which is not the state: its moves alone write nothing."""
         body = self.state(now)
         if self._written is not None and not (force or self._dirty):
             at, written = self._written
             if now - at < (SNAPSHOT_SECONDS if body != written else HEARTBEAT):
                 return
-        self.store.put_snapshot(now, body)
+        self.store.put_snapshot(now, {**body, RESIDENT: resident_mb()})
         guard = self.guard
         if self._sessions(guard.day) is not None:  # a trading day's ledger
             self.store.put_day(self.mode, guard.day, guard.ledger(), now)

@@ -373,6 +373,34 @@ async def test_the_engine_sends_a_heartbeat_to_loki_only(
     assert "heartbeat" not in caplog.text, "stdout does not have it"
 
 
+async def test_the_heartbeat_ends_with_its_fields_and_goes_without_them_when_they_fail(
+    fake: FakeLoki, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The engine's memory (#547, ``tests/test_heartbeat.py``) ends the line; a reading that fails
+    is said once, and the heartbeat goes on, the log-absence alert's line."""
+    handler, _ = loki.start(fake.values(), (), loki.ENGINE, "", formatter(), every=0.05)
+    assert handler is not None
+    reads = 0
+
+    async def fields() -> str:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise OSError("cannot read")
+        return "memory available 812 MB"
+
+    beating = asyncio.create_task(loki.keep_heartbeat(0.01, fields=fields))
+    try:
+        await until(lambda: sum("heartbeat: sent" in line for _, line in fake.lines()) >= 3)
+    finally:
+        beating.cancel()
+    first, second, third = [line for _, line in fake.lines() if "heartbeat: sent" in line][:3]
+    assert re.search(r"buffered \d+; memory available 812 MB$", first)
+    assert re.search(r"buffered \d+$", second) and re.search(r"buffered \d+$", third)
+    said = [r for r in caplog.records if "could not read its fields" in r.getMessage()]
+    assert len(said) == 1 and said[0].levelname == "ERROR"
+
+
 # A command, from its start to its end
 
 

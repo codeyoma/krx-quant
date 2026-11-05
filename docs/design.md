@@ -73,7 +73,7 @@
 | `loop_watch.py` | 봉 마감의 이벤트 루프 감시(#538): heartbeat가 차례를 받지 못한 가장 긴 시간과 그동안 돈 봉 마감의 단계. 1초를 넘으면 엔진이 WARNING 한 줄을 남긴다(5장 "시간 예산"의 "이벤트 루프(#538)") |
 | `smt.py` | SMT 다이버전스(#520, 5장 "SMT 다이버전스"): 구간 극값 SMT 판정(`Detector`), 엔진의 장중 기록, 지난날 다시 계산(`reconstruct`: 녹화는 시장 보기로 재생, 아니면 채운 1분봉)과 `smt` 명령의 출력 |
 | `trader/` | 자동 매매(#393, 14장)의 trader 프로세스(`krx-quant trade`, compose 서비스 `trader`): 비용 지도로 칸 고르기·순위·Kelly f*(`selection.py`, #395. #471부터 진단으로만), 정책 버전과 챔피언(`policy.py`, #399), 밤 정책 맞추기(`refit.py`, `krx-quant refit-policy`, #399), 녹화한 날을 paper의 체결 규칙 그대로 다시 돌리는 재생(`replay.py`, #470: 맞추기가 쓴다), 검토 주기마다 고정하는 mock 연습 칸(`practice.py`, #474: 밤 작업 `trader-report`가 고른다), 밤 리포트(`report.py`, `krx-quant trader-report`와 `refit-policy --report`, #402), 챔피언과 도전 정책의 장부(`desk.py`, #400), 도전 정책 판정·승격과 실전 관문(`promotion.py`, #400), 칸의 예측과 특수 상황 창 읽기(`cells.py`, 엔진 DB를 읽기만), 수집기가 내보내는 최우선 호가 스트림과 trader의 받기(`quotes.py`), 삼중 장벽 모의 매매 규칙과 비용(`paper.py`), 손실 한도와 정지·재개·다시 켜기(`limits.py`, #396), trader 저장소(`store.py`, `state/trader.sqlite3`), 그 저장소의 시각 문자열(KST의 ISO 8601)과 읽기 전용 열기(`db.py`, #509: 엔진 API의 읽기와 mock 대조가 같이 쓴다), 차트에 표시할 매수·매도 읽기(`marks.py`, #398), trader 설정(`settings.py`), 프로세스(`run.py`), KIS 모의 주문 장부(`mock.py`, #405: 챔피언의 주문을 `kis_orders.Broker`로 KIS 모의투자 서버에 낸다), mock 날의 장부와 KIS 체결 조회 대조(`mock_check.py`, `krx-quant check-mock-trades`, #405), mock 시작의 계좌와 장부 견주기(`reconcile.py`, #406), live 모드의 실전 관문·실행 점검·첫 단계 상한(`live.py`, #408), KIS 장부와 그림자의 체결 차이(`gap.py`, #405). 주문 코드(TR ID, 주문 경로)는 없다: `kis_orders.py`를 부른다 |
-| `training.py`, `nightly.py`, `sample_store.py`, `model_shelf.py`, `swap.py`, `footprint.py`, `training_nights.py` | 학습 샘플, 밤 학습, 날마다의 표본 저장소(#370), 서버의 모델 이력, 08:00 교체와 모델 감시, 밤 학습 단계별 시간과 최대 메모리(#355)와 사전 검증·수습 시뮬레이션이 재생한 날마다의 메모리(#383), 밤 학습의 결과와 적용되지 않은 밤(#355) |
+| `training.py`, `nightly.py`, `sample_store.py`, `model_shelf.py`, `swap.py`, `footprint.py`, `training_nights.py` | 학습 샘플, 밤 학습, 날마다의 표본 저장소(#370), 서버의 모델 이력, 08:00 교체와 모델 감시, 밤 학습 단계별 시간과 최대 메모리(#355)와 사전 검증·수습 시뮬레이션이 재생한 날마다의 메모리(#383), heartbeat가 읽는 서버와 프로세스의 메모리(#547), 밤 학습의 결과와 적용되지 않은 밤(#355) |
 | ~~`cost_guard.py`~~ | **삭제됨** (2026-11-06, #572): 월 AWS 비용 감시(Cost Guard: 50%·80% 알림, 상한에서 Spot 학습 끄기, #23). 2026-10-14부터 꺼져 있었다(9장). 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
 | `disk_watch.py` | 디스크 감시: 데이터·상태 폴더가 있는 디스크의 여유가 기준(`KRX_DISK_MIN_FREE_PERCENT`)보다 작아지면 한 번 알리고, 돌아오면 `[복구]`(#379) |
 | `trader_watch.py` | trader 침묵 감시(#542, 14장 "trader 침묵"): 엔진이 trader 저장소의 상태 시각을 5초마다 읽기만 해, 장중에 60초(열린 포지션이 있으면 20초) 넘게 새 상태가 없으면 한 번 알리고, 다시 60초 쓰면 `[복구]`. trader는 이것을 읽지 않는다 |
@@ -81,6 +81,7 @@
 | `doctor.py`, `snapshot.py` | 서버 요약(#322): 읽기 전용 `krx-quant doctor`(엔진의 커밋과 시작 시각, KIS 연결과 피드·키별 마지막 수신, 오늘의 PINGPONG, 최근 WARNING·ERROR 로그, 예약 작업, 디스크와 메모리, 밤 학습(#355), 로그 폴더(#356)를 시세 값 없이 가려서)와, `needs-server-snapshot` 라벨이 붙은 이슈에 그 요약을 댓글로 남기고 라벨을 떼는 수집기의 확인(3분마다, 이슈마다·시간마다 한도)([operations.md](operations.md#서버-상태-보기-322)) |
 | `process_log.py` | 프로세스의 로그 줄(#356, #358): 프로세스마다 시작 줄과 종료 코드가 든 끝 줄, 엔진이 띄운 밤 학습·예약 작업을 돌리고 그 출력 전체를 읽어 Loki로(`KRX_LOG_BY_PARENT=1`, `process="training"`·`"job"`), 종료 코드와 마지막 단계는 `Ran`으로 |
 | `loki.py` | 로그 줄을 Grafana Cloud Loki로(#358): 프로세스마다 스레드 하나가 가려서 묶어 보내고, 실패하면 물러났다 다시 보내고, 버퍼가 넘치면 버리고 센다. 레이블은 `service`, `process`, `level`뿐. 엔진이 띄운 학습·작업의 줄은 엔진이 그 출력을 읽는 자리에서 보낸다. 엔진의 1분 heartbeat, `doctor` 8절과 `/v1/status`의 `loki`([operations.md](operations.md#grafana-cloud-loki로-보내는-로그-358)) |
+| `heartbeat.py` | 엔진 heartbeat의 메모리(#547): 서버의 `MemAvailable`과 스왑 사용량, 엔진·trader·지금 도는 밤 학습과 예약 작업 각각의 RSS를 1분마다 heartbeat 줄 끝에 싣는다. trader는 다른 컨테이너라 trader가 상태(`snapshot`)에 적은 제 값을 읽는다([operations.md](operations.md#grafana-cloud-loki로-보내는-로그-358)) |
 | `macro.py`, `regime.py` | 매크로 지표 수집(07:30), 일일 국면 |
 | `econ_calendar.py` | 경제 캘린더 수집(15분마다, TradingView), `/v1/calendar`의 답 (#150) |
 | `flow.py` | `/v1/symbols/{symbol}/flow`의 답(#306): 녹화한 프로그램매매, 회원사, 외국인·기관 추정 가집계를 그날 1분마다(앞 값을 끌어오지 않는다), 추정 구간, 상위 5개 창구, 지금까지의 합과 전 거래일 같은 시각의 합, 확정 일별 수급 |
@@ -1252,7 +1253,7 @@ SMT(ICT의 Smart Money Technique)는 함께 움직이는 두 종목 중 한쪽�
 | 사용자 KIS 수수료율 | P1 설정 |
 | ~~미국 서머타임이 아닌 기간에는 주간거래가 10:00 KST부터라 개장 첫 1시간이 빔~~ | 처리함 (2026-10-12 확인, #75): 선행 묶음의 값이 없으면 움직임 0으로 보고 예측 폭을 넓힌다(Granger, #15). [engine-api.md](engine-api.md#granger) |
 | ~~신규 AWS 계정의 GPU Spot 한도~~ | 필요 없어짐 (2026-11-06, #572): Spot 학습을 지웠다(8장) |
-| Lightsail 버스트 CPU로 실시간 예측 부하를 감당할 수 있는지 | 서버 개통 뒤 장중에 잰다. 방법: [operations.md](operations.md#cpu-여유-재기) |
+| Lightsail 버스트 CPU로 실시간 예측 부하를 감당할 수 있는지 | 서버 개통 뒤 장중에 잰다. 방법: [operations.md](operations.md#cpu-여유-재기). 버스트 여유는 쟀다(2026-11-05, #547): 10-21부터 11-05까지 거래일 장중(09:00–15:30)의 가장 낮은 값은 99.7%였고, 밤 재생 뒤에도 73.7% 아래로 내려간 적이 없다. 서버 watchdog이 10분마다 읽어 50% 아래면 알린다([operations.md](operations.md#cpu-버스트-여유-547)) |
 | CME Non-Display 라이선스 해당 여부 | 유료 데이터 검토 시 |
 | 2027-03 NXT 데이터 유료화가 개인 API 이용에 미치는 영향 | 2027 초 |
 | REST 대체 조회(#28): 달러선물 시세의 시장 코드 `CF`, 옵션 가격 필드(`futs_prpr`), 프로그램매매 추이의 행 순서·금액 단위·장 전 응답, 주간거래 시간 밖의 미국 시세 | 장중 `check-fallbacks` ([operations.md](operations.md) 2.3), [kis-feeds.md](kis-feeds.md#rest-대체-조회) |

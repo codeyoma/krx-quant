@@ -464,7 +464,7 @@ Lightsail은 버스트형 CPU다. 기준선보다 많이 쓰면 쌓아 둔 버�
    ```bash
    docker stats --no-stream
    ```
-3. **버스트 용량.** Lightsail 콘솔 → 인스턴스 → 지표에서 CPU 사용률과 남은 버스트 용량(Remaining CPU burst capacity, 분과 %)을 본다.
+3. **버스트 용량.** Lightsail 콘솔 → 인스턴스 → 지표에서 CPU 사용률과 남은 버스트 용량(Remaining CPU burst capacity, 분과 %)을 본다. 서버 watchdog이 10분마다 읽어 그 실행의 요약 화면에 남기고, 50% 아래로 떨어지면 알린다(#547, 6장 "CPU 버스트 여유 (#547)").
 4. **판단.** 다음 중 하나라도 해당하면 CPU 기준선이 높은 요금제($44: 기준선 30%, $84: vCPU 4개 40%)나 비버스트형 EC2로 옮긴다([design.md](design.md) 9장). $24(4GB)는 $12와 CPU가 같아서(vCPU 2개, 기준선 20%) CPU 문제에는 소용없다. 메모리가 모자랄 때(`docker stats`의 메모리가 한도에 닿을 때)만 $24로 올린다.
    - `usage`가 0.5를 넘는다(잠정 기준: 예산의 절반이면 장중 부하가 몰릴 때 건너뜀이 생길 수 있다).
    - 버스트 용량이 장중 내내 줄기만 해서 바닥에 닿는다.
@@ -2654,6 +2654,7 @@ docker compose logs --tail 200 engine
 | 로그의 `no macro regime for <날짜>` | `docker compose logs engine \| grep macro`, `/v1/macro` | 그날 개장 전에 정한 매크로 국면이 없다(07:30 수집이 꺼졌거나 모든 출처가 실패했거나, 수집기가 개장 뒤에 시작했다). Markov가 그날 기본 전이행렬로 돈다. `runs`에 `no_regime`으로 남는다. 할 일은 없고, 매일 나오면 07:30 수집을 확인한다. |
 | 디스크가 찬다, `[장애] 서버 디스크의 여유가 <N> GB(<M>%)로 기준 20%보다 작습니다(데이터 폴더 /data). …` (#379) | `docker system df`, `df -h`, `du -sh data/*/ state/*/`, 06:00 업데이트 알림의 끝 줄(`디스크 여유 … · Docker 이미지 …, 빌드 캐시 …`), `krx-quant doctor` 6절 | 1. Docker부터 본다. 06:00 업데이트가 정리한다(4장, #568): 쓰는 이미지와 `krx-quant:latest`, `krx-quant:previous`만 남기고, 하루 쓰지 않은 빌드 캐시를 지우고, 3 GB를 넘으면 빌드 캐시를 모두 지운다. 되돌린 날은 정리하지 않아서 그날 만든 것이 다음 성공까지 남는다. 사용자가 docker 명령을 칠 일은 없다. 알림의 끝 줄(정리 전과 뒤)과 `Docker 정리 실패` 줄을 Loki에서 읽고(4장의 쿼리), 정리가 실패하거나 빌드 캐시가 줄지 않으면 #568처럼 이슈로 고친다. Docker의 이미지 크기는 빌드 캐시를 다시 센 것일 수 있어서, 비운 양은 디스크 여유로 본다.<br>2. 로컬 데이터는 자동으로 지우지 않는다. 지우기 전에 `docker compose run --rm engine archive --recheck`를 실행하고, `0 failed`로 끝나는지(종료 코드 0) 확인한다. `.uploaded.json`이 있다는 것만으로는 지금 파일이 S3에 있다고 볼 수 없다. 파티션을 합친 뒤 업로드가 실패하면 그 전 파일의 기록이 남아 있기 때문이다. 확인한 뒤에는 오래된 날짜 폴더를 `raw`, `events`, `gaps`에서 지워도 된다. `bars`는 지우지 않는다(백필이 다시 받는다). `state/training-cache/`는 밤 학습이 끝날 때 그 밤에 쓰지 않은 오래된 날짜를 지운다. 남은 것도 지워도 된다(밤 학습이 S3에서 다시 받는다).<br>3. 여유가 기준보다 2%p 넘게 생기면 `[복구] 서버 디스크의 여유가 <N> GB(<M>%)로 돌아왔습니다(…)`가 온다. 알림은 한 번만 온다(재시작해도 `state/disk_alert.json`으로 다시 보내지 않는다). |
 | 서버가 멈췄다: `[Grafana] krx-quant 엔진 로그가 10분 넘게 없습니다…`가 오고 Tailscale로 닿지 않는다. 또는 `[watchdog] krx-quant …` 텔레그램이나 라벨 `server-watchdog`인 이슈 (#385) | 맥에서 `aws lightsail get-instance-state --instance-name krx-quant --region ap-southeast-2`와 `get-instance-metric-data`의 `StatusCheckFailed_Instance`·`StatusCheckFailed_System`([agents/server-snapshot.md](agents/server-snapshot.md)의 "If nothing comes"), 그 이슈 | 인스턴스 상태 검사만 실패하면 OS가 멈춘 것이다. 커널이 스스로 재부팅하지 못한 멈춤은 watchdog이 15분 실패 뒤 재부팅하고 이슈에 남긴다(아래 "서버가 멈추면 (#385)"). 기다리지 않으려면 맥에서 `aws lightsail reboot-instance --instance-name krx-quant --region ap-southeast-2`(그 뒤 1시간은 watchdog이 재부팅하지 않는다). 다시 뜨면 서버에서 `sudo journalctl -b -1 -k -n 200`으로 멈추기 전 부팅의 커널 로그를 본다. 시스템 상태 검사도 실패하면 AWS 쪽 문제다: 기다리거나 Lightsail 콘솔에서 멈춘 뒤 다시 시작한다. |
+| `[watchdog] krx-quant CPU 버스트 여유가 <N>%로 50% 아래입니다. …` 텔레그램이나 라벨 `server-burst`인 이슈 (#547) | 그 이슈와 server-watchdog 실행의 요약 화면, Loki에서 그때의 엔진 heartbeat(`rss`에 돌던 밤 학습·예약 작업의 이름이 있다), 맥에서 `aws lightsail get-instance-metric-data`의 `BurstCapacityPercentage`(아래 "CPU 버스트 여유 (#547)") | 0%가 되면 CPU가 기준선(20%)으로 묶인다. 그때 돌던 무거운 작업이 장 전까지 끝나지 않을 것 같으면 그 작업을 미루거나 줄이는 PR을 낸다. 같은 일이 되풀이되면 2.3의 "CPU 여유 재기" 4번대로 요금제를 바꾼다. 60% 이상으로 돌아오면 watchdog이 이슈를 닫는다 |
 | 서버를 잃었다 | Lightsail 콘솔의 스냅샷 | 1. 옛 인스턴스가 아직 있으면 먼저 멈추거나 지운다. 같은 Tailscale 신원으로 두 대가 동시에 뜨지 않게 하려는 것이다.<br>2. 마지막 자동 스냅샷으로 새 인스턴스를 만든다. 디스크에 Tailscale 신원, `.env`, 데이터가 그대로 있어서 부팅하면 `krx-quant`로 다시 붙고 엔진도 스스로 뜬다. Tailscale admin의 기기는 지우지 않는다. 지우면 접속할 길이 없어진다.<br>3. 새 인스턴스의 Lightsail 방화벽은 41641/udp만 열어 둔다(2.2의 10단계 명령).<br>4. `docker compose run --rm engine archive --recheck`로 S3와 맞춘다.<br>마지막 스냅샷 뒤에 녹화하고 아직 올리지 못한 데이터는 잃는다.<br>스냅샷을 쓸 수 없으면 S3의 서버 상태 백업으로 새로 만든다(아래 "서버 상태 백업과 복원 (#576)"의 "서버를 새로 만들 때"). |
 
 > **바뀜** (2026-10-12, #73): 위 표의 CPU 예산 행은 "텔레그램 알림은 없다"였다 → 하루 한 번 알린다. 이유: 운영자가 예산 문제를 로그로만 알 수 있었다(#71).
@@ -2712,6 +2713,7 @@ docker compose logs --tail 200 engine
 - 두 상태 검사의 지난 40분, 1분 단위(`get-instance-metric-data`, period 60, 최솟값과 최댓값). 1분의 점은 그 1분이 끝나고 40–85초 뒤에 생긴다(2026-10-28 실측). 그래서 가장 새 점은 보통 1.5–2.5분 전의 것이다. 5분 단위(period 300)는 묻는 시작 시각부터 5분씩 세고 아직 덜 찬 마지막 구간도 돌려줘서 쓰지 않는다.
 - 인스턴스의 작업(`get-operations-for-resource`) 중 재부팅(`RebootInstance`)과 시작(`StartInstance`). 누가 했든 센다. 실패한 작업과 커널이 스스로 한 재부팅은 세지 않는다(후자는 작업으로 남지 않는다).
 - 이 workflow가 연 `server-watchdog` 이슈와 그 댓글(이 workflow가 쓴 것만).
+- CPU 버스트 여유(`BurstCapacityPercentage`)의 지난 40분과 `server-burst` 이슈(#547). 아래 판단은 이것을 읽지 않는다(아래 "CPU 버스트 여유 (#547)").
 
 판단(위에서부터):
 1. 인스턴스가 `running`이 아니면 손대지 않는다.
@@ -2745,6 +2747,32 @@ docker compose logs --tail 200 engine
 실행이 실패할 때: AWS나 GitHub를 읽지 못하면 아무것도 하지 않고 실행이 실패로 끝난다(예: 키가 지워졌거나 틀려 `configure-aws-credentials` 단계가 `The security token included in the request is invalid`로 실패한다. 정책에 없는 일은 `AccessDeniedException`이다). GitHub가 실패한 예약 실행을 메일로 알린다. 로그의 계정 번호는 가려진다(`mask-aws-account-id`). 재부팅이 실패하면 알리지 않고 실패로 끝나며, 다음 실행이 다시 판단한다. 이슈나 텔레그램이 실패하면 재부팅은 된 채 실행이 실패로 끝난다. 다음 실행은 1시간을 기다리므로 다시 재부팅하지 않는다. 공개 저장소에 60일 동안 활동이 없으면 GitHub가 예약 workflow를 끈다. 끄인 것은 Actions 화면과 `gh workflow list --all`에 보인다.
 
 06:00 배포와 07:20 재시작은 Docker만 다시 띄우고 OS는 그대로라 상태 검사는 통과한다. 커널이 스스로 재부팅하면 몇 분 안에 검사가 통과로 돌아와 watchdog은 할 일이 없다. 비용은 없다(7장).
+
+### CPU 버스트 여유 (#547)
+
+Lightsail $12 요금제는 버스트형 CPU다(vCPU 2개, 기준선 20%, 2.3의 "CPU 여유 재기"). 기준선보다 많이 쓰면 버스트 여유(burst capacity)를 쓰고, 0%가 되면 CPU가 기준선으로 묶인다. 2026-11-04와 11-05의 호가 끊김은 1.8–3.3시간짜리 밤 재생 뒤에 와서, 그 재생이 여유를 다 썼는지 알아야 했다(#547).
+
+**잰 것** (2026-11-05, 맥에서 `aws lightsail get-instance-metric-data`로 읽기만 했다. 2026-10-20 23:20부터 11-05 23:25 KST까지 5분마다의 점 4,605개):
+- 가장 낮았던 값은 73.7%(10-23)다. 날마다의 가장 낮은 값은 73.7–94.7%였고, 날마다 100%로 다시 찼다.
+- 밤 재생은 vCPU 하나를 쓴다(CPU 약 50%). 그동안 한 시간에 약 5.7%p 줄어 78–90%까지 내려갔다. 쉬면(CPU 약 1%) 한 시간에 약 3.6%p 차서 04:00–08:00에 100%가 됐다.
+- 거래일 장중(09:00–15:30)의 가장 낮은 값은 99.7%(10-23)였다. 11-04와 11-05 장중에는 내내 100%였다. 그날들의 호가 끊김은 버스트 여유가 바닥나서 난 것이 아니다.
+- 두 비율을 CPU 100%로 늘이면 vCPU 둘을 다 쓸 때 한 시간에 약 15%p 준다(잰 값이 아니라 계산이다).
+- 100%는 `BurstCapacityTime` 17,280초다. 점은 5분마다 :00, :05, …에 하나씩이고(period 60으로 읽는다. period 300은 묻는 시작 시각부터 센다), 가장 새 점은 1.5분쯤 전의 것이다.
+
+**남는 곳.** 서버 watchdog(위 "서버가 멈추면 (#385)")이 10분마다 지난 40분의 `BurstCapacityPercentage`를 읽어, 그 실행의 요약 화면(Actions → server-watchdog)과 로그에 가장 새 값과 지난 40분의 가장 낮은 값을 남긴다: `- BurstCapacityPercentage: 88.2% · 가장 새 점 11-05 23:25 · 지난 40분의 가장 낮은 점 86.0%`. 실행 기록은 90일 남는다(`gh run list --workflow server-watchdog --repo codeyoma/krx-quant`, `gh run view <id> --log`). 지표 자체는 Lightsail이 2주쯤 남긴다. 맥에서 `aws lightsail get-instance-metric-data --instance-name krx-quant --region ap-southeast-2 --metric-name BurstCapacityPercentage --period 60 --start-time <UTC> --end-time <UTC> --unit Percent --statistics Minimum`으로 읽는다(점 1,440개 한도라 period 60이면 한 번에 24시간까지).
+- Loki에 두지 않은 까닭: watchdog에는 Loki 쓰기 토큰이 없고, 엔진(서버의 IAM 사용자)에는 Lightsail을 읽을 권한이 없다. 어느 쪽이든 사용자가 비밀값이나 IAM 정책을 더해야 해서, 이미 이 지표를 읽을 수 있는 watchdog에 두었다. 그때의 메모리와 돌던 프로세스는 엔진 heartbeat(6장 "Grafana Cloud Loki로 보내는 로그 (#358)")에 있다.
+
+**알리는 때.**
+- 가장 새 점이 50% 아래면 라벨 `server-burst`인 이슈를 열고(라벨이 없으면 만든다) 텔레그램 한 줄을 보낸다. 이슈가 열려 있는 동안은 다시 알리지 않는다. 제목은 `서버 watchdog: krx-quant CPU 버스트 여유가 50% 아래다 (47.5%, <날짜 시각> KST)` 꼴이고, 본문에 판단, 값, 기준, 할 일, 실행 링크가 있다(숨은 표시 `<!-- krx-quant-watchdog: burst-low -->`).
+- 60% 이상이 되면 그 이슈에 댓글(`burst-back`)을 달고 닫으며 텔레그램 한 줄을 보낸다.
+- 가장 새 점이 15분보다 오래되거나 없으면 아무것도 하지 않는다. 사람이 이슈를 먼저 닫으면, 여전히 50% 아래일 때 다음 실행이 새 이슈를 연다.
+- 이슈를 열거나 닫지 못하면(GitHub 실패) 텔레그램도 보내지 않고 실행이 실패로 끝난다. 열린 이슈가 다음 실행을 조용하게 하므로, 이슈 없이 보내면 같은 알림이 10분마다 온다. 다음 실행이 둘 다 다시 한다.
+- 텔레그램(`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`가 둘 다 있을 때):
+  - `[watchdog] krx-quant CPU 버스트 여유가 47.5%로 50% 아래입니다. 바닥나면 CPU가 기준선(20%)으로 느려집니다. <이슈 주소>`
+  - `[watchdog] krx-quant CPU 버스트 여유가 60.2%로 돌아왔습니다. <이슈 주소>`
+- 기준의 근거: 50%는 위 2주 동안 한 번도 닿지 않았다(가장 낮은 값 73.7%). 50%에서는 vCPU 둘을 다 써도 기준선으로 묶이기까지 약 3시간, 하나면 약 9시간이 남는다. 닫는 60%는 50% 언저리에서 이슈가 열렸다 닫혔다 하지 않게 10%p 위로 뒀다(쉬면 약 3시간에 오른다).
+- 재부팅 판단(위)은 이 값을 읽지 않는다. watchdog은 재부팅 판단과 그 일(재부팅, 이슈, 텔레그램)을 마친 뒤에 이 값과 `server-burst` 이슈를 읽는다. 그 읽기가 실패하거나 시간 제한(명령마다 120초)에 걸려도 재부팅을 막거나 늦추지 않고, 실행이 실패로 끝난다(GitHub가 실패한 예약 실행을 메일로 알린다). 요약 화면에는 판단 아래에 이 값의 줄이 붙는다.
+- 권한: watchdog 정책(`deploy/watchdog-policy.json`)의 `lightsail:GetInstanceMetricData`가 이 지표도 읽는다. 사용자가 더 할 일은 없다.
 
 ### 서버 상태 백업과 복원 (#576)
 
@@ -2952,8 +2980,31 @@ rm -rf ~/krx-quant/state/logs
 - **사용자가 받아들인 빈틈 둘**(2026-10-23, #360). 이 줄들은 Loki에 끝내 가지 못하고 stdout에만 있다. `docker compose logs`로 볼 수 있지만, 다음 06:00 배포가 컨테이너를 새로 만들면 없어진다(`docker compose run --rm`으로 돌린 명령은 끝나면 컨테이너와 함께 없어진다).
   1. 바로 죽은 프로세스의 마지막 줄: 커널의 메모리 부족 처리(SIGKILL)처럼 엔진이나 명령이 바로 죽으면 버퍼에 있던 마지막 몇 초(최대 3초와 보내던 묶음)의 줄. 엔진이 죽으면 그때 엔진이 읽던 학습·작업의 줄도 그렇다. 밤 학습만 죽으면 그 출력은 엔진이 받아 넘긴 것이라 Loki에 있다.
   2. Loki에 닿지 않는 동안 버퍼 상한을 넘어 버린 줄, 그리고 끝날 때 5초 안에 못 보낸 줄. `doctor` 8절의 버린 줄과 stdout의 경고가 그 수를 말한다.
-- heartbeat: 엔진은 이벤트 루프에서 1분마다 `heartbeat: sent N, dropped M, buffered K` 한 줄을 Loki에만 보낸다(stdout에는 쓰지 않는다). 엔진은 밤에 몇 분씩 아무 줄도 쓰지 않을 수 있어서, 로그 끊김 알림(아래 1번 규칙)이 이 줄로 엔진이 살아 있는지 본다. 루프가 멈추면 이 줄도 멈춘다.
-- 양: 보내는 줄은 stdout의 줄과 엔진이 띄운 프로세스의 출력이고, heartbeat는 하루 1,440줄이다. #359의 로그 파일은 하루 수십 MB 안쪽이었으니(전체 상한 500 MB/14일) 무료 한도(월 50 GB)보다 훨씬 적다.
+- heartbeat: 엔진은 이벤트 루프에서 1분마다 한 줄을 Loki에만 보낸다(stdout에는 쓰지 않는다). 엔진은 밤에 몇 분씩 아무 줄도 쓰지 않을 수 있어서, 로그 끊김 알림(아래 1번 규칙)이 이 줄로 엔진이 살아 있는지 본다. 루프가 멈추면 이 줄도 멈춘다. 줄에는 Loki로 보낸 줄 수와, 서버와 프로세스마다의 메모리가 있다(#547):
+
+  ```
+  heartbeat: sent N, dropped M, buffered K; memory available 812 MB, swap used 0 MB; rss engine 431 MB, trader 182 MB, training 640 MB, job prevalidate-cox 300 MB
+  ```
+
+  > **바뀜** (2026-11-05, #556): `heartbeat: sent N, dropped M, buffered K`뿐이었다 → 뒤에 메모리가 붙는다. 이유: Loki에 메모리 시계열이 없어 2 GB 서버의 여유를 장중 스냅샷(632–1,028 MB 여유)과 학습 최고치로만 짐작했다(#547). 줄을 더하지 않고 있던 줄에 붙였다.
+
+  - `available`: 서버의 `MemAvailable`(`/proc/meminfo`. 컨테이너도 서버의 값을 읽는다). 스왑하지 않고 내줄 수 있는 메모리다. `swap used`: 서버의 `SwapTotal` − `SwapFree`.
+  - `rss`: 프로세스마다의 상주 메모리(`VmRSS`). `engine`은 엔진 자신이다. `trader`는 trader가 상태(`state/trader.sqlite3`의 `snapshot`)에 적은 제 값이다. trader는 다른 컨테이너라 엔진이 그 프로세스를 볼 수 없어서, trader가 상태를 쓸 때마다(5초마다는) 함께 적는다. 그 뒤로 엔진이 띄워 지금 도는 프로세스가 시작한 순서로 온다: `training`(밤 학습), `job <이름>`(예약 작업). 도는 것이 없으면 `engine`과 `trader`뿐이다.
+  - 값은 MB 정수다. `?`는 읽지 못한 값이다: trader가 돌지 않음(상태가 15초보다 묵음)이나 그 저장소를 10초 안에 읽지 못함, `/proc`가 없음(맥), 그 사이 끝난 프로세스.
+  - 질의(LogQL, 커넥터나 `scripts/loki-query.sh`, [agents/server-logs.md](agents/server-logs.md)). `?`인 값은 앞의 `|~` 거름에서 빠진다. 거르지 않으면 `unwrap`이 그 줄에서 오류를 낸다.
+
+    ```
+    {service="krx-quant", process="engine"} |= "heartbeat: "
+    min_over_time({service="krx-quant", process="engine"} |= "heartbeat: " |~ `available \d+ MB` | regexp `available (?P<mb>\d+) MB` | unwrap mb [10m])
+    max_over_time({service="krx-quant", process="engine"} |= "heartbeat: " |~ `swap used \d+ MB` | regexp `swap used (?P<mb>\d+) MB` | unwrap mb [10m])
+    max_over_time({service="krx-quant", process="engine"} |= "heartbeat: " |~ `rss engine \d+ MB` | regexp `rss engine (?P<mb>\d+) MB` | unwrap mb [10m])
+    max_over_time({service="krx-quant", process="engine"} |= "heartbeat: " |~ `, trader \d+ MB` | regexp `, trader (?P<mb>\d+) MB` | unwrap mb [10m])
+    max_over_time({service="krx-quant", process="engine"} |= "heartbeat: " |~ `, training \d+ MB` | regexp `, training (?P<mb>\d+) MB` | unwrap mb [10m])
+    max by (job) (max_over_time({service="krx-quant", process="engine"} |= "heartbeat: " |~ `, job \S+ \d+ MB` | regexp `, job (?P<job>\S+) (?P<mb>\d+) MB` | unwrap mb [10m]))
+    ```
+
+    차례로 줄 그대로, 10분마다 가장 적었던 `available`, 스왑, 엔진, trader, 밤 학습의 가장 컸던 RSS, 예약 작업마다의 가장 컸던 RSS다. 한 줄에 작업이 둘이면 마지막 질의는 앞의 것만 잡는다. 작업 이름이 `trader`나 `training`으로 끝나거나 시작해도 앞의 `, `가 있어 trader나 밤 학습으로 읽히지 않는다.
+- 양: 보내는 줄은 stdout의 줄과 엔진이 띄운 프로세스의 출력이고, heartbeat는 하루 1,440줄이다. 2026-11-05 23:24까지 하루 동안 모든 프로세스가 약 2,350줄을 보냈고 그중 1,440줄이 heartbeat였다. 그래서 trader의 메모리는 trader의 줄을 따로 더하지 않고(하루 1,440줄, 약 60% 더) 엔진의 heartbeat에 실었다(#547). 메모리를 붙여 heartbeat 한 줄은 100–150바이트 길어진다(하루 약 0.2 MB). #359의 로그 파일은 하루 수십 MB 안쪽이었으니(전체 상한 500 MB/14일) 무료 한도(월 50 GB)보다 훨씬 적다.
 
 **상태.** `krx-quant doctor` 8절(위 "서버 상태 보기 (#322)")과 `/v1/status`의 `loki`([engine-api.md](engine-api.md#get-v1status)): 켜짐·꺼짐(과 이유), 보낸 줄, 버린 줄, 버퍼의 줄, 마지막 성공, 마지막 오류의 종류.
 
@@ -3089,7 +3140,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `trader_live_kis_token.json` | trader의 실전 키의 접근 토큰 캐시(권한 600, #408). 모의 키의 것(`trader_kis_token.json`)과 따로다. live 모드의 trader(`kis_orders.trader_live_broker`)가 실전 계좌에 처음 무언가를 물을 때 생긴다(관문 전의 live는 KIS를 부르지 않아 생기지 않는다) |
 | `market_calendar.json` | KIS 휴장일 조회 캐시 |
 | `engine.sqlite3`, `-wal`, `-shm` | 예측, 채점, 상태, 합의 가중치, 다른 종류의 예측과 정답(`kind_predictions`, `kind_answers`, #179), 특수 상황 구간(`special_windows`, `special_days`, #236), 수습 시뮬레이션의 재생과 예측(`simulation_runs`, `simulations`, `sim_predictions`, `sim_kind_predictions`, #298. 실시간 예측과 따로 둔다). 테이블은 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다. 스키마 버전은 `PRAGMA user_version`이다(#179, #236, #298의 새 표는 올리지 않았다) |
-| `trader.sqlite3`, `-wal`, `-shm` | 자동 매매 trader의 저장소(#394, #408의 `gate_checks`, `order_checks`, `ramp`도 여기): 시작마다(`runs`), 비용 지도로 칸을 고른 기록(`selections`, #395), 읽은 칸의 예측과 한 일(`decisions`), 매매(`trades`), 주문(`orders`), 체결(`fills`), 정책 버전(`policies`, #399)과 챔피언의 바뀜(`champions`), 정책마다 돈 거래일(`policy_days`, #400: 도전 정책의 승격과 실전 관문이 읽는 모의 기록), 정지·재개·다시 켜기 요청(`controls`, #396), 닿은 손실 한도(`halts`), mock 모드의 실패한 KIS 주문(`failures`, #405)과 하나도 체결되지 않은 매수(`unfilled_buys`, #405. #406부터 보내는 매수와 응답이 사라진 매수도), mock 시작마다의 계좌 맞추기(`reconciles`, #406: 장부 밖의 보유와 KIS 주문번호가 있다), 지금 상태(`snapshot`), 날마다의 장부(`days`, #533부터 한도가 세지 않는 mock 연습 손익의 열 `practice`, `practice_trades`, `practice_cumulative`도). 매매 기록의 행에 모드(`paper`, `mock`), mock 주문에 KIS의 주문번호(`orders.broker_id`, `broker_branch`, #405), 결정과 매매에 정책 버전(챔피언과 도전 정책의 장부가 갈린다, #400). trader가 쓰고, 정책 표는 밤 정책 맞추기(예약 작업 `refit-policy-399`)가 쓴다. 엔진 API는 읽고 정지 요청만 쓰며, `krx-quant trade resume|rearm`이 재개와 다시 켜기를 쓴다([design.md](design.md#14-자동-매매-393) 14장) |
+| `trader.sqlite3`, `-wal`, `-shm` | 자동 매매 trader의 저장소(#394, #408의 `gate_checks`, `order_checks`, `ramp`도 여기): 시작마다(`runs`), 비용 지도로 칸을 고른 기록(`selections`, #395), 읽은 칸의 예측과 한 일(`decisions`), 매매(`trades`), 주문(`orders`), 체결(`fills`), 정책 버전(`policies`, #399)과 챔피언의 바뀜(`champions`), 정책마다 돈 거래일(`policy_days`, #400: 도전 정책의 승격과 실전 관문이 읽는 모의 기록), 정지·재개·다시 켜기 요청(`controls`, #396), 닿은 손실 한도(`halts`), mock 모드의 실패한 KIS 주문(`failures`, #405)과 하나도 체결되지 않은 매수(`unfilled_buys`, #405. #406부터 보내는 매수와 응답이 사라진 매수도), mock 시작마다의 계좌 맞추기(`reconciles`, #406: 장부 밖의 보유와 KIS 주문번호가 있다), 지금 상태(`snapshot`. #547부터 trader 프로세스의 상주 메모리 `rss_mb`도 실어 엔진 heartbeat가 읽는다), 날마다의 장부(`days`, #533부터 한도가 세지 않는 mock 연습 손익의 열 `practice`, `practice_trades`, `practice_cumulative`도). 매매 기록의 행에 모드(`paper`, `mock`), mock 주문에 KIS의 주문번호(`orders.broker_id`, `broker_branch`, #405), 결정과 매매에 정책 버전(챔피언과 도전 정책의 장부가 갈린다, #400). trader가 쓰고, 정책 표는 밤 정책 맞추기(예약 작업 `refit-policy-399`)가 쓴다. 엔진 API는 읽고 정지 요청만 쓰며, `krx-quant trade resume|rearm`이 재개와 다시 켜기를 쓴다([design.md](design.md#14-자동-매매-393) 14장) |
 
 > **바뀜** (2026-10-30, #414): `trader.sqlite3`는 trader만 썼다 → 정책 표(`policies`, `champions`)는 밤 정책 맞추기가 엔진 컨테이너에서 쓴다. 이유: 정책 버전은 spec #393대로 trader의 저장소에 두고, 밤 학습 뒤 예약 작업은 수집기의 컨테이너에서 돈다(#399).
 
