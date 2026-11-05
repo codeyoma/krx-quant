@@ -10,7 +10,7 @@ from krx_quant.baselines import Forecast
 from krx_quant.config import Settings
 from krx_quant.consensus import FINAL
 from krx_quant.feeds import KST
-from krx_quant.loop_watch import LOOP_HELD, held_detail
+from krx_quant.loop_watch import LOOP_HELD, Collected, held_detail
 from krx_quant.predictions import DB_NAME, NewKindPrediction, NewPrediction, PredictionStore
 from krx_quant.scheduled import BAR_CLOSE_TIMES, FAILED, INTERRUPTED, OK, Facts, JobRecord, Night
 from krx_quant.trader.store import DB_NAME as TRADER_DB_NAME
@@ -79,17 +79,20 @@ def bar_close(store: PredictionStore, at: datetime, ito: float, last: float) -> 
 
 def test_the_report_compares_the_day_s_bar_closes_with_the_days_before(tmp_path: Path) -> None:
     """Input: two bar closes on a day before, ito 0.5 s and 0.7 s after the baselines, one of them
-    timed out; two on the day, ito 0.01 s and 0.02 s after them, one holding the loop 1.4 s; a quote
-    stall of 6.0 s on each day. Output: each day's bar closes, first record, final consensus and
-    stalls; each algorithm's seconds after the first record, the day's against the days before; the
-    day's bar close that held the loop and its largest step. Exit 0."""
+    timed out; two on the day, ito 0.01 s and 0.02 s after them, both holding the loop (1.1 s, and
+    1.4 s with a garbage collection of 0.62 s in it, #621); a quote stall of 6.0 s on each day.
+    Output: each day's bar closes, first record, final consensus and stalls; each algorithm's seconds
+    after the first record, the day's against the days before; the day's bar closes that held the
+    loop, how many a garbage collection ran in, and their largest step. Exit 0."""
     store = PredictionStore(tmp_path / DB_NAME)
     bar_close(store, close(BEFORE, 0), ito=0.5, last=0.9)
     bar_close(store, close(BEFORE, 1), ito=0.7, last=1.1)
     stored(store, "ulam", close(BEFORE, 1), 10.2, status="timed_out")
     bar_close(store, close(DAY, 0), ito=0.01, last=0.3)
     bar_close(store, close(DAY, 1), ito=0.02, last=0.4)
-    store.add_run(LOOP_HELD, close(DAY, 1), None, held_detail(1.4, [("records", 1.1), ("other", 0.3)]))
+    store.add_run(LOOP_HELD, close(DAY, 0), None, held_detail(1.1, [("records", 0.9), ("other", 0.2)]))
+    held = [("records", 1.1), ("other", 0.3)]
+    store.add_run(LOOP_HELD, close(DAY, 1), None, held_detail(1.4, held, Collected(0.62, 2)))
     store.close()
     trader = TraderStore(tmp_path / TRADER_DB_NAME)
     for day in (BEFORE, DAY):
@@ -110,8 +113,8 @@ def test_the_report_compares_the_day_s_bar_closes_with_the_days_before(tmp_path:
     assert "- ulam: 없음 · 10.000/10.000/10.000초 · 시간 초과·오류 0/1" in lines
     assert "- mandelbrot: 0.100/0.100/0.100초 · 0.100/0.100/0.100초 · 시간 초과·오류 0/0" in lines
     assert not any(line.startswith(("- baseline-climate", f"- {FINAL}")) for line in lines)
-    assert lines[-2].endswith("`loop_held`): 루프 막힘 1번(가장 긴 1.40초)")
-    assert lines[-1] == "가장 큰 단계: records 1번"
+    assert lines[-2].endswith("`loop_held`): 루프 막힘 2번(가장 긴 1.40초, GC가 겹친 것 1번)")
+    assert lines[-1] == "가장 큰 단계: records 2번"
 
 
 def test_an_open_stall_is_told_apart_with_its_time_up_to_now(tmp_path: Path) -> None:

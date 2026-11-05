@@ -75,7 +75,10 @@ is kept in ``special_windows`` (#236), its later versions over it (a VI's releas
 
 Live, each bar close watches the event loop it runs on (``watch_loop``, #538, ``loop_watch.py``):
 that loop also reads KIS and streams the best quotes to the trader. A bar close that keeps it over
-a second without a turn logs one WARNING with how long and which of its steps ran then.
+a second without a turn logs one WARNING with how long, which of its steps ran then and how much
+garbage collection (#621). Live, each bar close also ends with a garbage collection that freezes
+what is alive, so that Python's full collections no longer walk the session's quote logs
+(``garbage``, ``garbage.py``); the engine lets the frozen go once it is idle.
 
 The prediction window is continuous trading, from the first bar close after the open
 until the last bar close whose target (t + 4 minutes) is still in continuous trading:
@@ -198,6 +201,7 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST, LEVELS
+from krx_quant.garbage import IDLE, Garbage
 from krx_quant.kind_registry import DAILY_KINDS, KINDS
 from krx_quant.kind_stats import kind_scoring
 from krx_quant.kinds import (
@@ -335,6 +339,7 @@ RECORDS = "records"
 SMT_STEP = "SMT"
 KIND_BASELINES = "the kinds' baselines"
 CONSENSUS = "consensus"
+GARBAGE = "garbage collection"  # the live engine's after each bar close (#621, ``garbage.py``)
 # Days with predictions a review reads back over: the longest rule counts 60 on the bench,
 # and a status can be older than that.
 _REVIEW_DAYS = MAX_REVIEW_DAY  # prediction days a review reads back
@@ -484,6 +489,7 @@ class PredictionEngine:
         daily_features: DailyFeatures | None = None,
         daily_feature_names: Collection[str] = (),
         watch_loop: bool = False,
+        garbage: Garbage | None = None,
     ) -> None:
         self.store = store
         self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
@@ -563,6 +569,8 @@ class PredictionEngine:
         # The bar close's event loop, watched live (#538): the one going on, if any.
         self._watch_loop = watch_loop
         self._watch: LoopWatch | None = None
+        # The live engine's garbage collection after each bar close (#621); without: Python's own.
+        self.garbage = garbage
         # The kinds' answers made at the last scoring, by (kind, symbol, bar close): the kinds'
         # baselines read the window just over from them (#538).
         self._answered: dict[tuple[str, str, datetime], Answer] = {}
@@ -1042,8 +1050,15 @@ class PredictionEngine:
                     await self._review(due)
                 if self._daily is not None and due == self._daily.next_due():
                     await self._daily.run(due)
+                if predicted and self.garbage is not None:
+                    with self._step(GARBAGE):
+                        self.garbage.settle()
             finally:
                 self._tell_held(due, predicted)
+        if self.garbage is not None:  # out of the session, the frozen let go (#621)
+            ahead = self.next_due()
+            if ahead is None or ahead - self.clock.now() > IDLE:
+                self.garbage.release()
 
     def _step(self, name: str) -> contextlib.AbstractContextManager[None]:
         """Time a synchronous step of the bar close on the event loop, when it is watched (#538)."""

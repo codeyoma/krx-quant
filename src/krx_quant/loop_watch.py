@@ -15,14 +15,24 @@ WARNING with them (``held``) and keeps them in the store's ``runs`` as ``LOOP_HE
 #589), which the night's report of the bar closes' times reads (``bar_close_times.py``): the server
 cannot read Loki. The live engine watches its bar closes (``watch_loop``); replays and
 pre-validations do not.
+
+The garbage collector's passes are told too (#621): a pass holds the GIL, whichever thread starts
+it, so the loop waits for it. The watch times each pass while it runs (``gc.callbacks``), and the
+WARNING says how much of the stretch the passes took and the oldest generation among them, or that
+none ran. A pass is not a step: one inside a step counts in that step's seconds too, one between
+steps in ``other``. Before the engine froze what it keeps after each bar close (``garbage.py``), a
+pass of the oldest generation over the session's quote logs held the loop up to 0.66 s on GitHub's
+runners.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import gc
 import json
 from collections.abc import Iterator
+from typing import Any, NamedTuple
 
 # A bar close that keeps the loop this long without a turn is told (#538): the trader's quotes stall
 # at 5 s, and on a quiet server a bar close's steps take milliseconds each.
@@ -35,9 +45,27 @@ LOOP_HELD = "loop_held"
 _SHOWN = 0.01  # a step's seconds in the stretch, below which the WARNING leaves it out
 
 
+class Collected(NamedTuple):
+    """The garbage collector's passes in a stretch: their seconds there, and the oldest generation
+    among them (2 walks every object the process keeps)."""
+
+    seconds: float
+    generation: int
+
+
+class Held(NamedTuple):
+    """A stretch over ``LIMIT_SECONDS``: its seconds, the steps in it (``LoopWatch.held``), and the
+    garbage collection in it, None if none ran (#621)."""
+
+    seconds: float
+    parts: list[tuple[str, float]]
+    collected: Collected | None
+
+
 class LoopWatch:
-    """One bar close's longest stretch without a turn of the event loop, and the steps in it.
-    Made in the running loop, where it starts its heartbeat; ``stop`` ends it."""
+    """One bar close's longest stretch without a turn of the event loop, and the steps and the
+    garbage collector's passes in it. Made in the running loop, where it starts its heartbeat;
+    ``stop`` ends it."""
 
     def __init__(self) -> None:
         loop = asyncio.get_running_loop()
@@ -45,7 +73,18 @@ class LoopWatch:
         self._last = self._time()  # the heartbeat's last turn; the bar close's start at first
         self._longest = (self._last, self._last)
         self._steps: list[tuple[str, float, float]] = []
+        self._passes: list[tuple[int, float, float]] = []  # generation, start, end (#621)
+        self._passing = self._last
+        gc.callbacks.append(self._collecting)
         self._beat = loop.create_task(self._beating())
+
+    def _collecting(self, phase: str, info: dict[str, Any]) -> None:
+        """A garbage collection's start or stop, on whichever thread runs it (it holds the GIL)."""
+        now = self._time()
+        if phase == "start":
+            self._passing = now
+        else:
+            self._passes.append((info["generation"], self._passing, now))
 
     async def _beating(self) -> None:
         while True:
@@ -68,14 +107,17 @@ class LoopWatch:
             self._steps.append((name, start, self._time()))
 
     def stop(self) -> None:
-        """End the heartbeat; the stretch since its last turn counts too."""
+        """End the heartbeat and the timing of the garbage collector's passes; the stretch since
+        the heartbeat's last turn counts too."""
         self._beat.cancel()
+        with contextlib.suppress(ValueError):
+            gc.callbacks.remove(self._collecting)
         self._turn(self._time())
 
-    def held(self) -> tuple[float, list[tuple[str, float]]] | None:
-        """The longest stretch without a turn of the loop, in seconds, and the steps that ran in it
-        with their seconds there, the longest first, then ``other`` (each from 0.01 s); None when it
-        is within ``LIMIT_SECONDS``."""
+    def held(self) -> Held | None:
+        """The longest stretch without a turn of the loop, in seconds; the steps that ran in it with
+        their seconds there, the longest first, then ``other`` (each from 0.01 s); and the garbage
+        collection in it. None when it is within ``LIMIT_SECONDS``."""
         start, end = self._longest
         if end - start <= LIMIT_SECONDS:
             return None
@@ -86,15 +128,38 @@ class LoopWatch:
                 spent[name] = spent.get(name, 0.0) + overlap
         rest = end - start - sum(spent.values())
         parts = [*sorted(spent.items(), key=lambda p: -p[1]), (OTHER, rest)]
-        return end - start, [(name, s) for name, s in parts if s >= _SHOWN]
+        passes = [
+            (generation, min(ended, end) - max(began, start))
+            for generation, began, ended in self._passes
+            if min(ended, end) > max(began, start)
+        ]
+        collected = Collected(sum(s for _, s in passes), max(g for g, _ in passes)) if passes else None
+        return Held(end - start, [(name, s) for name, s in parts if s >= _SHOWN], collected)
 
 
-def held_text(what: str, seconds: float, parts: list[tuple[str, float]]) -> str:
-    """The WARNING's text: ``<what> held the event loop <s>s (over <limit>s): <step> <s>s, …``."""
+def held_text(
+    what: str, seconds: float, parts: list[tuple[str, float]], collected: Collected | None = None
+) -> str:
+    """The WARNING's text: ``<what> held the event loop <s>s (over <limit>s): <step> <s>s, …;
+    garbage collection <s>s (generation <g>)``, or ``…; no garbage collection`` (#621)."""
     named = ", ".join(f"{name} {s:.2f}s" for name, s in parts)
-    return f"{what} held the event loop {seconds:.2f}s (over {LIMIT_SECONDS:g}s): {named}"
+    gc_text = (
+        "no garbage collection"
+        if collected is None
+        else f"garbage collection {collected.seconds:.2f}s (generation {collected.generation})"
+    )
+    return f"{what} held the event loop {seconds:.2f}s (over {LIMIT_SECONDS:g}s): {named}; {gc_text}"
 
 
-def held_detail(seconds: float, parts: list[tuple[str, float]]) -> str:
-    """The ``LOOP_HELD`` run's detail: JSON of the stretch's seconds and its parts' (#589)."""
-    return json.dumps({"seconds": round(seconds, 2), "parts": {name: round(s, 2) for name, s in parts}})
+def held_detail(seconds: float, parts: list[tuple[str, float]], collected: Collected | None = None) -> str:
+    """The ``LOOP_HELD`` run's detail: JSON of the stretch's seconds and its parts' (#589), and its
+    garbage collection's seconds and oldest generation, null if none ran (``gc``, #621)."""
+    return json.dumps(
+        {
+            "seconds": round(seconds, 2),
+            "parts": {name: round(s, 2) for name, s in parts},
+            "gc": None
+            if collected is None
+            else {"seconds": round(collected.seconds, 2), "generation": collected.generation},
+        }
+    )

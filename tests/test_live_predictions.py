@@ -7,6 +7,7 @@ Engine API the collector serves.
 from __future__ import annotations
 
 import asyncio
+import gc
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,9 +22,13 @@ from tests.collector_doubles import settings_for
 from tests.kis_frames import book_frame
 from tests.replay_events import LIVE_PREDICTORS, at
 from tests.server_doubles import free_port, poll
+from tests.waiting import until
 
 
 async def test_the_collector_predicts_from_live_events_and_serves_them(kis: FakeKis, tmp_path: Path) -> None:
+    """Input: a book frame at 09:30:10, then the clock past the 09:30 bar close. Output: every live
+    predictor's prediction served, the status and the symbol; the bar close ends with what is alive
+    frozen, and the collector lets it go when it stops (#621, ``garbage.py``)."""
     port = free_port()
     settings = replace(settings_for(kis, tmp_path), api_port=port)
     clock = FakeClock(at("09:30:10"))
@@ -45,10 +50,12 @@ async def test_the_collector_predicts_from_live_events_and_serves_them(kis: Fake
         )
         status = await poll(f"{base}/status", lambda b: True)
         symbols = await poll(f"{base}/symbols", lambda b: True)
+        await until(lambda: gc.get_freeze_count() > 0)  # after the bar close's last record
     finally:
         stop.set()
         await asyncio.wait_for(task, 5)
 
+    assert gc.get_freeze_count() == 0, "let go when the collector stopped"
     assert latest["bar_close"] == "2026-10-12T09:31:00+09:00"
     assert {p["algorithm"] for p in latest["predictions"]} == LIVE_PREDICTORS
     assert {p["displayed_at"] for p in latest["predictions"]} == {"2026-10-12T09:31:00.200000+09:00"}

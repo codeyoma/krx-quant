@@ -16,7 +16,8 @@ What it reads:
   when it was given up: its seconds count, and its bar closes timed out or failed are counted apart.
 - The engine's ``loop_held`` runs (``loop_watch.LOOP_HELD``): each bar close that held the event
   loop over a second, the WARNING's ``held the event loop`` line. The engine keeps them from #589
-  on; for the days before, Loki has the lines.
+  on; for the days before, Loki has the lines. From #621 each says how much garbage collection ran
+  in it, and the report counts those it did.
 - The trader's stalls (``stalls``, #407): each time its quotes stopped for more than 5 s, from the
   last quote before it to the first after. One not ended yet (the quotes did not come back, or the
   trader stopped and has not started since) is told apart, with its time up to now.
@@ -70,16 +71,23 @@ class Spread:
 
 @dataclass(frozen=True)
 class Held:
-    """A bar close that held the event loop over a second (a ``loop_held`` run): how long, and the
-    seconds of each step in that stretch."""
+    """A bar close that held the event loop over a second (a ``loop_held`` run): how long, the
+    seconds of each step in that stretch, and of the garbage collection in it (#621; None if none
+    ran, or a run kept before #621)."""
 
     seconds: float
     parts: dict[str, float]
+    collected: float | None = None
 
     @classmethod
     def of(cls, detail: str) -> Held:
         found = json.loads(detail)
-        return cls(float(found["seconds"]), {str(k): float(v) for k, v in found["parts"].items()})
+        collected = found.get("gc")
+        return cls(
+            float(found["seconds"]),
+            {str(k): float(v) for k, v in found["parts"].items()},
+            None if collected is None else float(collected["seconds"]),
+        )
 
 
 @dataclass
@@ -196,7 +204,8 @@ def _held_text(day: Day) -> str:
     if not day.held:
         return "루프 막힘 0번"
     longest = max(h.seconds for h in day.held)
-    return f"루프 막힘 {len(day.held)}번(가장 긴 {longest:.2f}초)"
+    collected = sum(1 for h in day.held if h.collected is not None)
+    return f"루프 막힘 {len(day.held)}번(가장 긴 {longest:.2f}초, GC가 겹친 것 {collected}번)"
 
 
 def _stalls_text(day: Day) -> str:

@@ -1778,18 +1778,31 @@ mock으로 시작한 날부터 비용 지도에서 시장가 왕복으로 통과
 - 엔진은 봉 마감마다 루프의 heartbeat가 50 ms마다 차례를 받는지 본다(`loop_watch.py`, 장중 엔진만). 차례 없이 1초(`loop_watch.LIMIT_SECONDS`) 넘게 간 봉 마감은 WARNING 한 줄을 남긴다(텔레그램은 보내지 않는다):
 
   ```
-  bar close 2026-11-06 10:15 held the event loop 5.21s (over 1s): records 3.10s, the kinds' baselines 1.60s, other 0.51s
+  bar close 2026-11-06 10:15 held the event loop 5.21s (over 1s): records 3.10s, the kinds' baselines 1.60s, other 0.51s; garbage collection 0.62s (generation 2)
   ```
+
+  > **바뀜** (2026-11-06, #PRNUM): 줄이 단계들(`…, other 0.51s`)로 끝났다 → 그 뒤에 `; garbage collection N s (generation G)`나 `; no garbage collection`이 붙는다. 이유: 루프를 쥔 것이 GC였는지 서버에서도 알려고(#621).
 
   - `held the event loop N s`: 그 봉 마감에서 루프가 차례 없이 간 가장 긴 시간(50 ms 안쪽으로 잰다). 봉 마감이 아니라 채점·검토만 한 차례면 `run …`이다.
   - 그 뒤는 그동안 루프에서 돈 봉 마감의 단계와 그 안에서 쓴 초다(긴 것부터, 0.01초 넘는 것만): `scoring`(도달 정답과 채점 저장), `the kinds' answers`(다른 종류의 창 복사와 정답 저장. 정답 계산은 작업 스레드라 들지 않는다), `the inputs`(입장 확인, 스냅숏, 피처, 방향의 기준 예측), `records`(예측 저장과 스트림에 알리기. 기준 예측과 알고리즘마다), `SMT`, `the kinds' baselines`, `consensus`(빠른·최종 합의와 신호). `other`는 그 시간에서 단계들을 뺀 나머지다: 루프의 다른 일(엔진 API 요청, KIS 프레임 처리, 다른 작업), 또는 단계 밖의 봉 마감 일.
+  - `; garbage collection N s (generation G)`: 그 시간 안에 돈 파이썬 GC의 초와 그중 가장 오래된 세대(`2`는 프로세스가 가진 객체를 모두 훑는 전체 수집)다. GC는 어느 스레드가 시작하든 GIL을 쥐어 루프가 기다린다. 단계가 아니라서 단계 안에서 돌면 그 단계의 초에도, 단계 밖이면 `other`에도 든다. 돌지 않았으면 `; no garbage collection`이다(#621). 엔진은 봉 마감마다 GC를 짧게 돌리므로(아래 "봉 마감 뒤의 GC") 세대 2가 0.1초를 넘으면 그 정책이 들지 않은 것이다.
   - 같은 분에 trader의 `quotes stalled`가 있는지 맞춰 본다. 단계가 `records`나 `consensus`이고 알고리즘들이 도는 동안이면 저장소 호출이 GIL을 기다린 것이다(수집기는 GIL을 0.5 ms마다 넘긴다, `collector.GIL_SWITCH_SECONDS`). `other`가 크면 그 시각의 엔진 API 요청(화면)이나 다른 작업을 본다.
 - Loki: `{service="krx-quant", process="engine"} |= "held the event loop"`. 하루 수: `sum(count_over_time({service="krx-quant", process="engine"} |= "held the event loop" [1d]))`. 끊김과 함께 보려면 `{service="krx-quant"} |~ "held the event loop|quotes stalled"`.
 - 할 일: 하루 몇 번이고 1–2초면 없다. 5초 가까운 줄이 잦으면 가장 큰 단계를 이슈로 남긴다(무엇을 루프 밖으로 옮기거나 가볍게 할지). 알림 기준(trader의 5초)은 바꾸지 않는다(#538).
+- **봉 마감 뒤의 GC (#621).** 장중 엔진은 예측한 봉 마감마다 끝에(단계 `garbage collection`) 얼리지 않은 객체만 GC로 한 번 훑고 살아 있는 객체를 모두 얼린다(`gc.collect()` 뒤 `gc.freeze()`, `garbage.py`). 언 객체는 어떤 GC도 다시 훑지 않는다. 장중에 엔진이 가진 것은 대부분 호가 기록(Market View의 호가 갱신, 다른 종류의 한 시간 호가)인데, 파이썬은 named tuple을 GC 대상에서 빼지 않아서 가장 오래된 세대의 GC가 그것을 모두 훑으며 루프를 0.4–0.66초 쥐었다(GitHub 러너의 재생, 아침마다 12번). 이제 한 번에 몇 ms다. 잰 값과 고른 까닭은 [design.md](design.md) 5장 "시간 예산"의 "GC(#621)"에 있다.
+  - 언 객체도 가리키는 것이 없어지면 바로 풀린다(호가 기록이 잊은 호가). 얼었을 때 살아 있다가 나중에 버려진 참조 순환만 남는데, 엔진은 다음 일이 10분(`garbage.IDLE`) 넘게 남았을 때(그날 마지막 정답 뒤) 한 번, 그리고 수집기가 멈출 때 모두 녹이고 전체를 한 번 훑는다. 그때 INFO 한 줄을 남긴다:
+
+    ```
+    garbage collection: let go of 1273649 frozen objects; a full pass freed 412 in 0.71s
+    ```
+
+  - `let go of N`은 녹인 객체 수, `freed M`은 그 전체 GC가 찾은 버려진 객체 수(얼어서 남았던 순환이 대부분이다), 끝은 걸린 초(그동안 루프가 멈춘다. 장이 끝난 뒤라 trader에는 상관없다).
+  - Loki: `{service="krx-quant", process="engine"} |= "garbage collection: let go of"`. 엔진의 RSS는 1분마다의 heartbeat(`rss engine`)에 있다.
+  - 할 일: `freed`가 수십만을 넘거나, 장중에 엔진의 RSS가 호가 기록만큼(재생에서 09:00–10:31에 약 500 MB) 넘게 계속 늘면 언 채 남는 순환이 많은 것이다. 이슈로 남긴다(그 순환을 만드는 곳을 찾거나 얼리는 정책을 되돌린다).
 - BLAS·OpenMP 스레드를 하나로 둔 배포(#589, 위 2장의 Docker 이미지) 뒤 첫 거래일 밤에 예약 작업 `bar-close-times-589`가 `krx-quant bar-close-times --tonight`을 돌려 #589에 남긴다(아래 "예약 작업 (#215)"의 표. 그날 예측이 없으면 다음 거래일 밤에 다시 돈다). 그날을 앞 거래일 5일과 견준다:
   - 날마다 봉 마감에서 첫 저장(기준 예측: 채점과 입력), 최종 합의, 마지막 저장(봉 마감 전체)까지의 초, trader의 호가 끊김 수(끝난 끊김은 마지막 호가에서 다음 호가까지의 가장 긴 초, 아직 끝나지 않은 끊김은 따로 지금까지의 초). 엔진 DB의 예측이 저장된 시각(`displayed_at`)으로 잰다. 장중 엔진은 저장할 때의 시계를 적는다.
   - 알고리즘마다 첫 저장 뒤 그 예측이 저장되기까지의 초(작업 스레드와 GIL을 기다린 시간과 계산)와 시간 초과·오류가 난 봉 마감 수. ito가 앞 날들보다 짧아야 한다.
-  - 그날 이벤트 루프를 1초 넘게 쥔 봉 마감과 그 가장 큰 단계. 엔진은 #589부터 위 WARNING을 쓸 때 저장소의 `runs`에도 `loop_held`로 남긴다(서버는 Loki를 읽지 못한다, [engine-api.md](engine-api.md)의 `runs`). 앞 날들의 수는 Loki에 있다(위 질의).
+  - 그날 이벤트 루프를 1초 넘게 쥔 봉 마감, 그중 GC가 겹친 수(#621)와 그 가장 큰 단계. 엔진은 #589부터 위 WARNING을 쓸 때 저장소의 `runs`에도 `loop_held`로 남긴다(서버는 Loki를 읽지 못한다, [engine-api.md](engine-api.md)의 `runs`). 앞 날들의 수는 Loki에 있다(위 질의).
   - 넘친 알고리즘은 WARNING으로도 남는다: `<이름> took over 10.0s at <봉 마감>; skipped`(알고리즘 하나의 한도), `<이름> skipped at <봉 마감> for the CPU budget (expected …s; budget 30.0s per bar close)`. 질의: `{service="krx-quant", process="engine"} |~ "took over|for the CPU budget"`.
   - 알고리즘마다 봉 마감 한 번에 걸린 시간의 지수 평균은 `/v1/status`의 `cpu.algorithms`다([engine-api.md](engine-api.md)). 엔진 API에 닿는 사용자가 화면이나 `curl -s http://krx-quant:8080/v1/status | jq .cpu`로 본다. 잰 값으로는 ito가 봉 마감마다 수 ms다. 0.1초를 넘는 일이 잦으면 고정이 들었는지 본다(컨테이너 안 `printenv OPENBLAS_NUM_THREADS`가 `1`인지 본다).
 
@@ -2627,7 +2640,7 @@ docker compose start engine
   - 이 변경을 처음 받는 06:00 배포는 이전 스크립트로 돌아 CI를 보지 않는다(돌던 `auto-update.sh`는 그대로 읽힌다). 그다음 실행부터 본다. 서버에서 손으로 할 일은 없다.
 
   > **바뀜** (2026-11-05, #550): main의 최신 커밋을 CI 결과를 보지 않고 배포했다 → 그 커밋에서 `ci` workflow가 통과했을 때만 배포하고, 기다리거나 실패했거나 GitHub를 읽지 못하면 돌던 버전을 그대로 둔다. main CI가 실패하면 텔레그램으로 커밋마다 한 번 알린다. 이유: main에는 branch protection이 없어서 여러 세션이 머지한 PR이 함께 시험되지 않은 채 쌓일 수 있고, 2026-11-05 #539의 머지 커밋(3f9611e)에서 main CI가 실패했다(#540). 이를 막는 장치가 없었다(#541).
-- **CI는 봉 마감을 느리게 한 커밋도 막는다(#600).** `ci`의 `bar-close` job이 바쁜 아침 하나를 진짜 엔진으로 재생한다(`tests/test_bar_close_loop.py`, 재생은 `tests/bar_close_bench.py`). #538의 재현을 넓힌 것이다: 세 종목에 종목마다 초당 호가 40번·체결 20번, 09:00–10:31, 방향 알고리즘 열셋과 다른 종류의 알고리즘 다섯이 모두 만든 날 하루에 맞춘 모델로, 모든 종류와 지평(장벽의 60분까지, 09:00부터의 한 시간이 그 창을 채운다). 조건은 서버와 같게 둔다: CPU 둘(`taskset`), 메모리 2 GB(`systemd-run`의 cgroup, 넘으면 죽는다), 이미지의 BLAS·OpenMP 스레드(`Dockerfile`의 `ENV`에서 읽는다. 테스트의 `tests/__init__.py`가 아니다), 곁에 CPU를 쉬지 않고 쓰는 프로세스 하나(서버의 다른 일), 수집기의 GIL 넘김 0.5 ms, 작업 스레드 6개, 장중 엔진의 루프 감시. 10:00–10:31의 봉 마감 32개에서 잰 것을 기준(`tests/bar_close_reference.json`, GitHub 러너에서 main을 잰 값의 중앙값)과 견준다.
+- **CI는 봉 마감을 느리게 한 커밋도 막는다(#600).** `ci`의 `bar-close` job이 바쁜 아침 하나를 진짜 엔진으로 재생한다(`tests/test_bar_close_loop.py`, 재생은 `tests/bar_close_bench.py`). #538의 재현을 넓힌 것이다: 세 종목에 종목마다 초당 호가 40번·체결 20번, 09:00–10:31, 방향 알고리즘 열셋과 다른 종류의 알고리즘 다섯이 모두 만든 날 하루에 맞춘 모델로, 모든 종류와 지평(장벽의 60분까지, 09:00부터의 한 시간이 그 창을 채운다). 조건은 서버와 같게 둔다: CPU 둘(`taskset`), 메모리 2 GB(`systemd-run`의 cgroup, 넘으면 죽는다), 이미지의 BLAS·OpenMP 스레드(`Dockerfile`의 `ENV`에서 읽는다. 테스트의 `tests/__init__.py`가 아니다), 곁에 CPU를 쉬지 않고 쓰는 프로세스 하나(서버의 다른 일), 수집기의 GIL 넘김 0.5 ms, 작업 스레드 6개, 장중 엔진의 루프 감시와 봉 마감 뒤의 GC(#621). 10:00–10:31의 봉 마감 32개에서 잰 것을 기준(`tests/bar_close_reference.json`, GitHub 러너에서 main을 잰 값의 중앙값)과 견준다.
 
   | 잰 것(봉 마감 32개) | 한도 |
   |---|---|
@@ -2639,6 +2652,8 @@ docker compose start engine
 
   - 하나라도 넘으면 아침을 한 번 더 재고, 또 넘을 때만 실패한다. 실패한 커밋은 PR에서 머지할 수 없고(`test` 검사가 기다린다), main에 들어가도 위처럼 배포되지 않는다.
   - p95는 기준과 견주지 않는다. 가장 오래된 세대의 GC 한 번이 루프를 0.5–0.7초 쥐는데(재생의 RSS 650 MB 남짓), 아침 하나에 몇 번 오는 그것이 봉 마감 32개 중 어디에 떨어지는지가 p95를 0.04초에서 0.52초까지 움직였다.
+
+    > **바뀜** (2026-11-06, #PRNUM): 엔진이 봉 마감마다 GC를 짧게 돌리고 얼려서(위 3장 "봉 마감 뒤의 GC (#621)") 재생에 그런 GC가 없다. 아침 6개의 p95가 0.040–0.049초였다. p95를 기준과 견주지 않고 1초와 견주는 규칙은 그대로 둔다. 이유: 디스크를 기다린 저장(0.35–0.57초, design.md 5장 "GC(#621)")도 같은 식으로 p95를 움직인다.
   - 걸리는 시간: shard들과 함께 도는 따로의 러너에서 3–7분(모델 맞추기 30–50초, 아침 하나 2.5–5분. 러너의 CPU에 따라. main 56번에서 테스트가 172–372초). 한 번 더 재면 7–13분. 그래서 CI 전체 시간은 대개 그대로다(shard가 6–8분).
   - 잰 값과 한도를 정한 근거는 [design.md](design.md) 5장 "시간 예산"의 "이벤트 루프(#538)"에 있다. 일부러 봉 마감을 무겁게 하는 PR(알고리즘 추가 등)은 기준을 새로 잰 값으로 바꾼다(docs/agents/pr-checklist.md "Checks").
 - 평일 07:50–20:10에는 손으로 실행해도 거부한다.
