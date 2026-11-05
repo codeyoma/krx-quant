@@ -24,7 +24,9 @@ leave out (a VI, a special situation) are left out.
   opened at t less the horizon), the random one the classes of the day's windows over by t (their
   bar close plus the horizon at or before t): never a class of a window still open at t. A day's
   whole class shares would leak the answers into the baseline. Live, both also count the bar closes
-  no sample has (a VI); here they do not.
+  no sample has (a VI); here they do not. The touch target's baselines only: with
+  ``KRX_TARGET_VERSION=1`` a direction candidate's score is unknown (``TOUCH_ONLY``), as the
+  four-minute move's persistence reads mid-points the samples do not keep.
 - A kind's candidate (#179: the range, the barrier and its horizon ladder) is scored on its kind's
   answers (``TrainingDay.of_kind``: its answer version, its horizon of 4, 15, 30 or 60 minutes), its
   barriers' width the one fixed at the bar close, as the engine fixes it; a window with no class
@@ -131,6 +133,8 @@ SHORTEST = timedelta(minutes=1)  # less budget than this left: the rest are not 
 POLL_SECONDS = 1.0  # how often a candidate's process is looked at
 # A queue made more days than this before is not gone by: its seats were set on other nights.
 QUEUE_KEPT_DAYS = 4
+# Why a direction candidate is not scored on the four-minute move (``KRX_TARGET_VERSION=1``).
+TOUCH_ONLY = "the touch target only: KRX_TARGET_VERSION 1's persistence needs mid-points the samples lack"
 
 
 @dataclass(frozen=True)
@@ -270,7 +274,8 @@ def _called(f: Forecast) -> Direction:
 @dataclass(frozen=True)
 class Screened:
     """A candidate's folds (``screen``): the days predicted, its calls scored, its errors, and its
-    lift by trading day over each of its kind's baselines (None: fewer than two days paired)."""
+    lift by trading day over each of its kind's baselines (None: fewer than two days paired); or why
+    it was not scored at all (``unscored``, ``TOUCH_ONLY``)."""
 
     algorithm: str
     kind: str
@@ -278,6 +283,7 @@ class Screened:
     calls: int
     errors: int
     lifts: Mapping[str, Lift | None]
+    unscored: str | None = None
 
     @property
     def weakest(self) -> tuple[str, float] | None:
@@ -299,6 +305,8 @@ class Screened:
         """Why the score is unknown; None when it is known."""
         if self.score is not None:
             return None
+        if self.unscored is not None:
+            return self.unscored
         if self.calls == 0:
             return "no call scored"
         missing = sorted(b for b, lift in self.lifts.items() if lift is None or lift.value is None)
@@ -314,6 +322,7 @@ class Screened:
             "lifts": {b: None if lift is None else _lift_json(lift) for b, lift in self.lifts.items()},
             "score": self.score,
             "weakest": None if self.weakest is None else self.weakest[0],
+            "unscored": self.unscored,
         }
 
     @classmethod
@@ -329,6 +338,7 @@ class Screened:
             int(data["calls"]),
             int(data["errors"]),
             lifts,
+            None if data.get("unscored") is None else str(data["unscored"]),
         )
 
 
@@ -379,6 +389,10 @@ def screen(
     predicted = _predicted(settings, available, days)
     if not predicted:
         raise FileNotFoundError(f"no recorded day of {', '.join(settings.symbols)} in {settings.data_dir}")
+    if kind is None and settings.target_version < 2:
+        # The four-minute move's persistence (``baselines.Persistence``) reads the mid-points four
+        # minutes apart, which the samples do not keep: given none, it would be always flat again.
+        return Screened(name, DIRECTION, tuple(predicted), 0, 0, {}, TOUCH_ONLY)
     calendar = calendar_store(settings).calendar
     night = night_reads(algorithms, kind_algorithms, kinds)
     trainer = _WalkForward(settings, candidate, available, calendar, Leaders.of(settings), kind, night=night)
