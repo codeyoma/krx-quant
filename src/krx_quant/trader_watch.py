@@ -13,8 +13,10 @@ than ``SILENT_SECONDS``, or ``HOLDING_SECONDS`` while it shows an open position,
 Out of the session (a holiday, before the open, after the close, the 06:00 deploy) it raises none. A
 store without a state (a server with no trader) has nothing to watch.
 
-The alert clears once the trader has written again for ``RECOVER_SECONDS``, each state read at most
-``store.ALIVE_SECONDS`` old (``alive``'s rule), in the session or out of it. A trader that writes
+The alert clears once the trader has written again for ``RECOVER_SECONDS``, in the session or out of
+it, read in an unbroken run: each state read at most ``store.ALIVE_SECONDS`` old (``alive``'s rule),
+each read within ``ALIVE_SECONDS`` of the one before, and none in between that found no state or
+could not read the store (``missed``): the run starts over at any of them. A trader that writes
 once and dies again (Docker starting one that crashes again and again, waiting twice as long each
 time) stays alerted, rather than told down and back at each start. The silence alerted is kept in
 the state folder (``STATE_FILE``) by its last state's time: a restart of the collector while it
@@ -100,13 +102,17 @@ class TraderWatch:
         self._alerts = alerts
         self._state_dir = state_dir
         self._silent_since = alerted(state_dir)  # the last state before the silence alerted
-        self._back: datetime | None = None  # the first fresh state read since, while it stays fresh
+        # The run of fresh states read since (``_recovering``): its first state's time, and when the
+        # last of it was read.
+        self._back: datetime | None = None
+        self._seen: datetime | None = None
         if self._silent_since is not None:  # alerted before a restart: its end is still told
             alerts.mark(KEY)
 
     def check(self, now: datetime, beat: Beat | None) -> None:
         """Judge the trader's last state ``beat`` (None: no state) at ``now``."""
         if beat is None:
+            self.missed()
             return
         if self._silent_since is not None:
             self._recovering(now, beat, self._silent_since)
@@ -127,16 +133,25 @@ class TraderWatch:
             " 않습니다. 서버에서 `docker compose ps trader`와 `docker compose logs --tail 50 trader`를 봅니다"
             '(docs/operations.md 3장 "trader 침묵 (#542)").',
         )
-        self._silent_since, self._back = beat.at, None
+        self._silent_since = beat.at
+        self.missed()
         self._save()
 
+    def missed(self) -> None:
+        """A check that read no state (none there, or a store that could not be read): a recovery
+        under way starts over."""
+        self._back = self._seen = None
+
     def _recovering(self, now: datetime, beat: Beat, since: datetime) -> None:
-        """While a silence is alerted: told over once the trader has written for ``RECOVER_SECONDS``,
-        each state read fresh."""
+        """While a silence is alerted: told over once the trader has written for ``RECOVER_SECONDS``
+        in an unbroken run of fresh states, each read within ``ALIVE_SECONDS`` of the one before."""
         if beat.at <= since or (now - beat.at).total_seconds() > ALIVE_SECONDS:
-            self._back = None  # silent still, or again
+            self.missed()  # silent still, or again
             return
-        back = self._back = self._back or beat.at
+        if self._back is None or self._seen is None or (now - self._seen).total_seconds() > ALIVE_SECONDS:
+            self._back = beat.at  # a run begins: the first, or after a gap in the reads
+        self._seen = now
+        back = self._back
         if (beat.at - back).total_seconds() < RECOVER_SECONDS:
             return
         self._alerts.resolve(
@@ -144,7 +159,8 @@ class TraderWatch:
             f"{_who(beat)}: trader가 다시 상태를 씁니다({_when(back, now)}부터,"
             f" 멈춘 동안 {_span((back - since).total_seconds())}).",
         )
-        self._silent_since = self._back = None
+        self._silent_since = None
+        self.missed()
         self._save()
 
     def _save(self) -> None:
@@ -166,19 +182,22 @@ async def keep_trader_watched(
 ) -> None:
     """Check the trader's state now and every ``every`` seconds until cancelled, its store read in
     a worker thread. The time is taken before the read: a read that waits makes the state look
-    newer, never older. A failure is logged once until a check goes through again."""
+    newer, never older. A failure is logged once until a check goes through again, and starts a
+    recovery under way over (``TraderWatch.missed``)."""
     failing = False
     while True:
         at = now()
         try:
             watch.check(at, await asyncio.to_thread(last_beat, watch.path))
         except (sqlite3.Error, ValueError) as e:
+            watch.missed()
             if not failing:
                 log.warning(
                     "could not read the trader's state in %s (%s): read again every %gs", watch.path, e, every
                 )
             failing = True
         except Exception:
+            watch.missed()
             if not failing:
                 log.exception("could not check the trader's state")
             failing = True

@@ -64,6 +64,13 @@ def watching(tmp_path: Path, alerts: Alerts) -> TraderWatch:
     return TraderWatch(tmp_path / DB_NAME, CALENDAR, alerts, tmp_path)
 
 
+def keep_writing(watch: TraderWatch, since: datetime, seconds: int) -> None:
+    """The trader writing every 5 s from ``since`` for ``seconds``, each state read a second after."""
+    for second in range(0, seconds + 1, 5):
+        written = since + timedelta(seconds=second)
+        watch.check(written + timedelta(seconds=1), Beat(written, "mock", False, None))
+
+
 def test_a_trader_silent_in_the_session_is_told_once_past_a_minute(tmp_path: Path) -> None:
     alerts = Sent()
     watch = watching(tmp_path, alerts)
@@ -194,14 +201,52 @@ def test_a_trader_that_writes_once_and_dies_again_stays_told_once(tmp_path: Path
     assert len(alerts.sent) == 1, alerts.sent
 
 
+def test_reads_that_found_no_state_start_a_recovery_over(tmp_path: Path) -> None:
+    """A fresh state, about 55 s of reads that found none or could not read the store, then a fresh
+    state again: not a minute of writes in a row, whatever the trader did meanwhile."""
+    alerts = Sent()
+    watch = watching(tmp_path, alerts)
+    watch.check(at("10:01:10"), beat("10:00:05"))
+    back = at("10:02:00")
+
+    watch.check(back + timedelta(seconds=1), Beat(back, "mock", False, None))
+    for second in range(5, 60, 5):
+        if second % 10:
+            watch.check(back + timedelta(seconds=second), None)  # the store gone, or no state in it
+        else:
+            watch.missed()  # the store not readable (``keep_trader_watched``'s failures)
+    watch.check(back + timedelta(seconds=61), Beat(back + timedelta(seconds=60), "mock", False, None))
+    assert len(alerts.sent) == 1, "no [복구] from two fresh states with no reads between them"
+
+    keep_writing(watch, back + timedelta(seconds=60), 60)
+    assert alerts.sent[1:] == [
+        "[복구] 자동 매매(mock): trader가 다시 상태를 씁니다(10:03:00부터, 멈춘 동안 2분 55초)."
+    ]
+
+
+def test_reads_too_far_apart_are_no_run_of_writes(tmp_path: Path) -> None:
+    """Two fresh states read 60 s apart, nothing read between (the collector's loop held): the
+    trader may have stopped between them."""
+    alerts = Sent()
+    watch = watching(tmp_path, alerts)
+    watch.check(at("10:01:10"), beat("10:00:05"))
+    back = at("10:02:00")
+
+    watch.check(back + timedelta(seconds=1), Beat(back, "mock", False, None))
+    watch.check(back + timedelta(seconds=61), Beat(back + timedelta(seconds=60), "mock", False, None))
+    assert len(alerts.sent) == 1
+
+    keep_writing(watch, back + timedelta(seconds=65), 60)
+    assert alerts.sent[1].startswith("[복구] 자동 매매(mock): trader가 다시 상태를 씁니다(10:03:00부터,")
+
+
 def test_the_trader_back_is_told_out_of_the_session_too(tmp_path: Path) -> None:
     alerts = Sent()
     watch = watching(tmp_path, alerts)
     watch.check(at("15:10:00"), beat("15:00:00", trade=8))
 
     morning = at("06:01:03", date(2026, 11, 6))  # the 06:00 deploy starts it again
-    watch.check(morning + timedelta(seconds=2), Beat(morning, "mock", False, None))
-    watch.check(morning + timedelta(seconds=63), Beat(morning + timedelta(seconds=61), "mock", False, None))
+    keep_writing(watch, morning, 60)
 
     assert alerts.sent[1] == (
         "[복구] 자동 매매(mock): trader가 다시 상태를 씁니다(06:01:03부터, 멈춘 동안 15시간 1분)."
@@ -222,8 +267,7 @@ def test_a_restart_of_the_collector_does_not_tell_the_same_silence_again_and_tel
     assert again.sent == []
 
     back = at("10:40:00")
-    watch.check(back + timedelta(seconds=1), Beat(back, "mock", False, None))
-    watch.check(back + timedelta(seconds=61), Beat(back + timedelta(seconds=60), "mock", False, None))
+    keep_writing(watch, back, 60)
     assert again.sent == [
         "[복구] 자동 매매(mock): trader가 다시 상태를 씁니다(10:40:00부터, 멈춘 동안 39분 55초)."
     ]
@@ -295,11 +339,16 @@ async def test_a_store_that_cannot_be_read_is_logged_once_and_read_again(
     path.write_text("not a database")
     alerts = Sent()
     reads: list[datetime] = []
+    misses = [0]
 
     class Counted(TraderWatch):
         def check(self, now: datetime, last: Beat | None) -> None:
             reads.append(now)
             super().check(now, last)
+
+        def missed(self) -> None:
+            misses[0] += 1
+            super().missed()
 
     turns = [0]  # the watch asks the time once a turn, before it reads
 
@@ -313,6 +362,7 @@ async def test_a_store_that_cannot_be_read_is_logged_once_and_read_again(
     try:
         await until(lambda: turns[0] >= 4)  # three reads failed, at least
         assert reads == []
+        assert misses[0] >= 3, "each failed read starts a recovery under way over"
         path.unlink()
         store = TraderStore(path)
         store.put_snapshot(at("09:59:59"), {"mode": "paper", "position": None})
