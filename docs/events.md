@@ -29,6 +29,7 @@
   - `data.parquet`의 Parquet 메타데이터(`krx_quant.parts`)에 합친 part 파일 이름이 남는다. 그래서 합친 뒤 지우지 못한 part 파일이 있어도 두 번 합치지 않는다. 그 뒤에 생긴 part 파일은 다음 업로드 때 합친다.
   - 파티션의 `.uploaded.json`에 올린 파일의 크기, 수정 시각, SHA-256을 남긴다. 바뀌지 않은 파일은 다시 올리지 않는다.
   - 10분 넘게 남아 있는 `.tmp` 파일(쓰다가 죽은 흔적)은 이때 지운다.
+  - 30일 넘게 지난 날의 `raw` 파티션은 서버에서 지운다(#607, [operations.md](operations.md#서버의-raw-30일-607)). S3 사본을 받아 SHA-256이 로컬 파일과 같은 것을 확인한 파티션만이다. 폴더에는 표시 `.pruned.json`(S3 키, SHA-256, 크기)이 남는다. 그런 파티션을 `archive.partition_batches`로 읽으면 `archive.RawMissing`으로 실패한다. raw를 읽는 명령은 `raw_days.RawDays`로 S3에서 임시 폴더에 받아 읽는다. `events`, `gaps`, `bars`는 지우지 않는다.
   - 수집기 옆에서 녹화를 읽는 `krx-quant probe-night`, `probe-gaps`, `doctor`는 같은 읽기 하나(`archive.partition_batches`)로 읽는다. 읽는 사이 업로드가 합쳐 지운 part 파일과, 쓰이는 중에 읽힌 파일은 건너뛰고 나머지 파일의 행을 센다. 그래서 업로드와 겹친 읽기는 그 파일들의 행을 세지 않을 수 있다(#501). **삭제됨** (2026-11-06, #567): 이 읽기를 쓰던 `probe-expected-open`, `probe-member-frames`(`expected_open_probe.py`, `member_frames_probe.py`). 이유: 결론이 났다(#314, #381. 사용자 결정 2026-11-05, #563). 대신: git 이력.
   - 밤의 야간선물은 저녁 날짜의 21:00 업로드에 그때까지의 행이 들어가고, 나머지(21:00–23:59)와 다음 날짜의 새벽(00:00–06:00)은 다음 날의 장 마감 15분 뒤와 21:00 업로드에 들어간다. 업로드는 휴장일에도 21:00에 돈다.
 - 디렉터리는 Hive 파티션 형식이라 `pyarrow.dataset`이나 DuckDB로 바로 읽을 수 있다.

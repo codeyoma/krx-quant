@@ -75,7 +75,9 @@ positional arguments:
     backfill            fill missing one-minute bars for the past year and
                         exit (stop the collector first)
     archive             merge recorded part files and upload every day to
-                        KRX_OBJECT_STORE (safe to rerun)
+                        KRX_OBJECT_STORE, then delete here the raw days past
+                        30 days whose copies there read back the same (#607);
+                        safe to rerun
     recording-quality   report a trading day's recording quality (#570):
                         disconnects in the session by feed, the recorded one-
                         minute bars against KIS's, frames short of fields or

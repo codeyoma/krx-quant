@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from krx_quant import cli
-from krx_quant.archive import archive
+from krx_quant.archive import PRUNED, archive
 from krx_quant.config import Settings
 from krx_quant.features import Leaders
 from krx_quant.feeds import KRX_TRADE, NIGHT_FUTURES, TRADE
@@ -195,6 +195,20 @@ def test_it_tells_the_late_parts_the_samples_read_from_the_rest(server: Server) 
     assert f"    {partition(LATEST, EVERY_TRADE)} · part 1개" in late
     assert "표본이 읽지 않는 파티션 1개 (층, 피드별):" in late
     assert f"    events {NIGHT_FUTURES.tr_id} · 파티션 1개 · part 1개" in late
+
+
+def test_a_raw_partition_pruned_on_the_server_is_no_late_part(server: Server) -> None:
+    """#607: the probe only lists part files, which a raw partition the archive pruned never has: its
+    folder holds the mark alone, and is neither late nor unreadable."""
+    pruned = server.data / "raw" / f"date={LATEST.isoformat()}" / f"feed={EVERY_TRADE}" / "symbol=005930"
+    pruned.mkdir(parents=True)
+    (pruned / PRUNED).write_text("{}")
+
+    report, code = probe_sample_keys(server.settings(), kst(LATEST, "22:31"))
+
+    late = section(report, 3, LATEST)
+    assert code == 0
+    assert "part가 남은 파티션 2개" in late and "읽지 못한" not in late
 
 
 def test_the_next_run_names_what_changed_in_a_key_since_the_last(server: Server) -> None:

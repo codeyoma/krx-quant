@@ -3,13 +3,14 @@ read from files the collector's own writers made, without printing a market valu
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from krx_quant.archive import RAW_KEEP_DAYS, RawMissing, archive
 from krx_quant.backfill import BAR_SCHEMA, stock_bars_path
 from krx_quant.cli import main
 from krx_quant.collector import silence
@@ -18,6 +19,8 @@ from krx_quant.feeds.base import KST
 from krx_quant.gaps_probe import report
 from krx_quant.health import GAP_SCHEMA, FeedHealth
 from krx_quant.market_calendar import MarketCalendar
+from krx_quant.object_store import LocalObjectStore
+from krx_quant.raw_days import RawDays
 from krx_quant.recorder import ParquetRecorder
 from tests.kis_frames import TRADE_COLUMNS, book_frame, trade_frame
 
@@ -300,6 +303,24 @@ def test_a_file_unlike_the_schema_is_counted_not_read(recorded: Path) -> None:
     assert "  gaps H0UNCNT0 reason 없음(읽지 않음): 파일 1개" in output
     assert "  raw H0UNASP0 received_at 타입 string(읽지 않음): 파일 1개" in output
     assert "결측 구간 17개" in output, "the rows of the files read"
+
+
+async def test_a_day_pruned_on_the_server_is_still_listed_and_read_back_from_the_store(
+    recorded: Path, tmp_path: Path
+) -> None:
+    """#607: the archive deleted every recorded day's raw on the server a month on; the probe still
+    lists them (their folders stay) and reads their frames back from the store."""
+    store = LocalObjectStore(tmp_path / "store")
+    await archive(recorded, store)  # merged, as the server's are by then
+    before = report(recorded, CALENDAR, STOCKS, ETFS, NIGHT)
+    pruned = await archive(recorded, store, today=DAY + timedelta(days=RAW_KEEP_DAYS + 10))
+    assert pruned.pruned
+
+    with pytest.raises(RawMissing):
+        report(recorded, CALENDAR, STOCKS, ETFS, NIGHT)
+    with RawDays(recorded, store) as raw:
+        assert report(recorded, CALENDAR, STOCKS, ETFS, NIGHT, raw) == before
+        assert raw.restored
 
 
 def test_without_a_recording_the_probe_says_so(tmp_path: Path) -> None:
