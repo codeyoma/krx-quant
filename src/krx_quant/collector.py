@@ -85,6 +85,8 @@ from krx_quant.revisions import RevisionGate
 from krx_quant.scheduled import keep_jobs
 from krx_quant.signals import Signals
 from krx_quant.snapshot import keep_snapshots
+from krx_quant.state_backup import keep_backed_up
+from krx_quant.state_lock import in_use
 from krx_quant.stream import LiveStatus
 from krx_quant.supply import toss_client_maker
 from krx_quant.swap import NightTraining, TrainingWatch, keep_models, keep_training, show_night
@@ -278,7 +280,9 @@ async def run_collector(
     switch = sys.getswitchinterval()
     sys.setswitchinterval(GIL_SWITCH_SECONDS)
     try:
-        await _collect(settings, stop=stop, clock=clock)
+        # Before any database is opened: a restore of the state backup (#576) is not run under it.
+        async with in_use(settings.state_dir, "the collector"):
+            await _collect(settings, stop=stop, clock=clock)
     finally:
         sys.setswitchinterval(switch)
 
@@ -466,6 +470,14 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                     asyncio.create_task(_keep_archived(settings, recorder, calendar.calendar, alerts, now))
                 )
             object_store = open_store(settings)
+            if object_store is not None:  # the server's state off the host each night at 05:35 (#576)
+                background.append(
+                    asyncio.create_task(
+                        keep_backed_up(
+                            settings.state_dir, object_store, alerts, session_clock, commit=settings.commit
+                        )
+                    )
+                )
             shelf = Shelf(settings.state_dir)
             training = NightTraining()  # the scheduled jobs wait for the night's training (#215)
             # The nights' outcomes, kept in the state folder across restarts (#355).

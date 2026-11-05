@@ -46,9 +46,10 @@ run wrote.
 The package (#500): ``core`` holds what a job is, the facts its condition asks (``Facts``, read by
 ``read_facts``), the state file and the scheduler. The jobs are in a module by family: ``probes``
 (what an outside source's data means), ``research`` (reviews and experiments), ``trader`` (the auto
-trader's) and ``prevalidations`` (the pre-validations and simulated probations, built from the
-registries). ``JOBS``, here, gathers them in the order they run. A new job goes in its family's
-module and on its line in ``JOBS`` (``tests/test_scheduled_layout.py`` pins the order); a condition
+trader's), ``upkeep`` (the server's: the state backup's restore drill, #576) and ``prevalidations``
+(the pre-validations and simulated probations, built from the registries). ``JOBS``, here, gathers
+them in the order they run. A new job goes in its family's module and on its line in ``JOBS``
+(``tests/test_scheduled_layout.py`` pins the order); a condition
 that needs more of what the engine knows adds it to ``Facts`` and ``read_facts``, in ``core``. The
 names other modules import from ``krx_quant.scheduled`` are exported here (``__all__``).
 """
@@ -138,6 +139,7 @@ from krx_quant.scheduled.research import (
     SMT_HOLDOUT,
 )
 from krx_quant.scheduled.trader import LIVE_PROBE, TRADER_REPORT, trader_report_calls
+from krx_quant.scheduled.upkeep import RESTORE_DRILL
 from krx_quant.swap import NightTraining
 
 # Every name other modules import from ``krx_quant.scheduled`` (mypy's strict mode reads only
@@ -163,6 +165,7 @@ __all__ = [
     "PREVALIDATION_ISSUE",
     "RECORDING_QUALITY",
     "REFUSED",
+    "RESTORE_DRILL",
     "RUNNING",
     "SAMPLE_PROFILE",
     "SESSION_UNTIL",
@@ -261,6 +264,7 @@ JOBS: tuple[Job, ...] = (
     ERROR_HOLDOUT,
     CLIMATE_GATE,
     NIGHTLY_HIT_RATES,
+    RESTORE_DRILL,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},
