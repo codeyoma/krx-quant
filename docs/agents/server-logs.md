@@ -132,6 +132,12 @@ scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "scheduled job
 scripts/loki-query.sh '{service="krx-quant", process="command"} |= "command=doctor "' --since 7d --forward
 ```
 
+**The 06:00 deploy and its Docker cleanup** (#568): the deploy script runs on the host and its journal does not reach Loki; its Telegram notice does, as the lines of the `notify` command. The disk line is `디스크 여유 <before> → <after> / <size> · Docker 이미지 <before> → <after>, 빌드 캐시 <before> → <after> · Docker <version> <storage driver>`, followed on a day the whole build cache went by `빌드 캐시가 하루 정리 뒤에도 3GB를 넘어(…) 모두 지웠습니다. …`, and on a day a cleanup step failed by `Docker 정리 실패: <what>(<Docker's last error line>). …`. Docker's image size counts the build cache's layers too (Docker before 29.6 with the containerd image store), so read freed space from the disk line's free space. What to expect is in operations.md, section 4.
+
+```bash
+scripts/loki-query.sh '{service="krx-quant", process="command"} |= "command=notify " |~ "디스크 여유|빌드 캐시|Docker 정리"' --since 7d --forward
+```
+
 **Is the server sending?**
 
 - The heartbeats: `{service="krx-quant", process="engine"} |= "heartbeat: "` (one a minute while the engine runs).
