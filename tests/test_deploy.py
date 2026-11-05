@@ -126,11 +126,21 @@ def test_deploy_scripts_parse(script: Path) -> None:
 FAKE_DOCKER = """#!/usr/bin/env bash
 # Stands in for docker: logs each call; the engine answers unless the checkout's
 # BROKEN file exists (a commit that does not start), a prune and `system df` fail while
-# DOCKER_FAILS does, and a notice while NOTIFY_FAILS does. An engine runs (`compose ps`) unless
-# NO_ENGINE exists. `images` lists the checkout's IMAGES, a tag a line. `system df` says the
-# build cache is the checkout's CACHE (2.5GB without one): a prune with `until` leaves it, as
-# Docker leaves the cache it made before it last started (#568); one without a filter empties it.
+# DOCKER_FAILS does, and a notice while NOTIFY_FAILS does. The run that waits for the engine is
+# killed, as a reboot would, while INTERRUPT does. `images` lists the checkout's IMAGES, a tag a
+# line. `system df` says the build cache is the checkout's CACHE (2.5GB without one): a prune with
+# `until` leaves it, as Docker leaves the cache it made before it last started (#568); one without
+# a filter empties it.
+#
+# Images are commits: a build makes krx-quant:latest of KRX_COMMIT, `compose up` runs the engine
+# on krx-quant:latest, the engine's image ID is sha256:<its commit>, and `tag` copies a commit to
+# a tag, in $DOCKER_LOG.state. An engine runs (`compose ps`) unless NO_ENGINE exists.
 echo "$*" >>"$DOCKER_LOG"
+state="$DOCKER_LOG.state"
+mkdir -p "$state"
+commit_of() {
+  if [[ "$1" == sha256:* ]]; then echo "${1#sha256:}"; else cat "$state/${1//\\//_}" 2>/dev/null; fi
+}
 if [[ ( "$2" == prune || "$*" == "system df"* ) && -f DOCKER_FAILS ]]; then
   echo "Error response from daemon: a prune operation is already running" >&2
   exit 1
@@ -146,12 +156,6 @@ fi
 if [[ "$*" == "builder prune -af" ]]; then
   echo 0B >CACHE
 fi
-if [[ "$*" == "compose ps -q engine" && ! -f NO_ENGINE ]]; then
-  echo 5f2c0ffee
-fi
-if [[ "$*" == "inspect --format {{.Image}} 5f2c0ffee" ]]; then
-  echo sha256:4b1d
-fi
 if [[ "$*" == "images --format {{.Repository}}:{{.Tag}}" && -f IMAGES ]]; then
   cat IMAGES
 fi
@@ -161,8 +165,31 @@ fi
 # The commit a compose build is given (KRX_COMMIT), one per build.
 if [[ "$*" == "compose up -d --build" ]]; then
   echo "${KRX_COMMIT:-}" >>"$DOCKER_LOG.commits"
+  echo "${KRX_COMMIT:-}" >"$state/krx-quant:latest"
+fi
+if [[ "$*" == "compose up -d" || "$*" == "compose up -d --build" ]]; then
+  cp "$state/krx-quant:latest" "$state/running"
+fi
+if [[ "$*" == "compose ps -q engine" && -s "$state/running" && ! -f NO_ENGINE ]]; then
+  echo 5f2c0ffee
+fi
+if [[ "$*" == "inspect --format {{.Image}} 5f2c0ffee" ]]; then
+  echo "sha256:$(cat "$state/running")"
+fi
+if [[ "$1 $2" == "image inspect" ]]; then
+  made=$(commit_of "${@: -1}")
+  [[ -n "$made" ]] || exit 1
+  printf 'PATH=/usr/local/bin\\nKRX_COMMIT=%s\\n' "$made"
+fi
+if [[ "$1" == tag ]]; then
+  made=$(commit_of "$2")
+  [[ -n "$made" ]] || exit 1
+  echo "$made" >"$state/${3//\\//_}"
 fi
 if [[ "$*" == *"exec -T engine"* ]]; then
+  if [[ -f INTERRUPT ]]; then
+    kill -KILL "$PPID"
+  fi
   [[ ! -f BROKEN ]]
 fi
 """
@@ -297,6 +324,10 @@ def server(tmp_path: Path, github: FakeActions) -> Path:
     (bin_dir / "docker").chmod(0o755)
     (bin_dir / "sudo").write_text(FAKE_SUDO)
     (bin_dir / "sudo").chmod(0o755)
+    images = tmp_path / "docker.log.state"  # the fake docker's images: the first commit runs
+    images.mkdir()
+    for name in ("krx-quant:latest", "running"):
+        (images / name).write_text(git(checkout, "rev-parse", "HEAD") + "\n")
     (tmp_path / "github-api").write_text(github.api)
     return checkout
 
@@ -416,16 +447,28 @@ def test_each_build_is_given_the_commit_it_runs(server: Path) -> None:
     assert not any(c.startswith("tag ") for c in docker_calls(server)), "no image to keep"
 
 
+def running(server: Path) -> str:
+    """The commit of the image the fake docker's engine runs."""
+    return (server.parent / "docker.log.state" / "running").read_text().strip()
+
+
 def test_an_update_tags_the_image_the_engine_runs_previous_before_it_builds(server: Path) -> None:
-    """#568: the image a rollback starts again; the cleanup keeps it."""
+    """#568: the image a rollback starts again, once it is seen to be built from the deployed
+    commit; the cleanup keeps it."""
+    before = git(server, "rev-parse", "HEAD")
     push(server, "Granger learns")
 
     assert update(server).returncode == 0
 
     calls = docker_calls(server)
-    running = calls.index("inspect --format {{.Image}} 5f2c0ffee")
-    tagged = calls.index("tag sha256:4b1d krx-quant:previous")
-    assert calls.index("compose ps -q engine") < running < tagged < calls.index("compose up -d --build")
+    image = calls.index("inspect --format {{.Image}} 5f2c0ffee")
+    checked = calls.index(
+        f"image inspect --format {{{{range .Config.Env}}}}{{{{println .}}}}{{{{end}}}} sha256:{before}"
+    )
+    tagged = calls.index(f"tag sha256:{before} krx-quant:previous")
+    assert (
+        calls.index("compose ps -q engine") < image < checked < tagged < calls.index("compose up -d --build")
+    )
 
 
 def test_a_main_that_does_not_start_goes_back_to_the_image_the_engine_ran_without_a_build(
@@ -440,10 +483,61 @@ def test_a_main_that_does_not_start_goes_back_to_the_image_the_engine_ran_withou
     assert result.returncode != 0
     assert git(server, "rev-parse", "HEAD") == before
     assert built_commits(server) == [bad], "only the bad main was built"
+    assert running(server) == before
     calls = docker_calls(server)
     back = calls.index("tag krx-quant:previous krx-quant:latest")
     assert calls.index("compose up -d --build") < back < calls.index("compose up -d")
     assert any("자동 업데이트 실패" in c and f"{before[:7]}로 되돌렸습니다" in c for c in calls)
+
+
+def test_a_run_cut_short_after_the_new_engine_started_still_goes_back_to_the_checked_image(
+    server: Path,
+) -> None:
+    """#568 review: a reboot after the new engine started and before it was checked leaves that
+    image running. The run that does the update again must not tag it krx-quant:previous: when
+    the new main does not start, it goes back to the image the deployed commit was checked on."""
+    good = push(server, "Granger learns")
+    assert update(server).returncode == 0
+    assert running(server) == good
+    bad = push(server, "a bug", broken=True)
+    (server / "INTERRUPT").write_text("x")
+
+    cut = update(server)
+
+    assert cut.returncode == -9, "killed while it waited for the new engine"
+    assert deployed(server) == good and running(server) == bad, "the unchecked image runs"
+    (server / "INTERRUPT").unlink()
+    (server.parent / "docker.log").unlink()
+
+    result = update(server)
+
+    assert result.returncode != 0
+    assert "the running image is not built from" in result.stdout
+    calls = docker_calls(server)
+    assert not any(c.endswith(" krx-quant:previous") and c.startswith("tag ") for c in calls), calls
+    assert calls.index("compose up -d --build") < calls.index("tag krx-quant:previous krx-quant:latest")
+    assert running(server) == good, "back on the image the deployed commit was checked on"
+    assert git(server, "rev-parse", "HEAD") == good
+    assert (server / ".auto-update-failed").read_text().strip() == bad
+    assert any(f"{good[:7]}로 되돌렸습니다" in c for c in calls)
+
+
+def test_a_previous_image_of_another_commit_is_not_gone_back_to(server: Path) -> None:
+    """#568 review: a krx-quant:previous not built from the deployed commit (the run that tagged
+    the checked image was cut short before it) is not trusted: the rollback builds that commit."""
+    good = push(server, "Granger learns")
+    assert update(server).returncode == 0
+    images = server.parent / "docker.log.state"
+    (images / "running").write_text("1" * 40 + "\n")  # started, never checked
+    (images / "krx-quant:previous").write_text("0" * 40 + "\n")
+    bad = push(server, "a bug", broken=True)
+
+    result = update(server)
+
+    assert result.returncode != 0
+    assert built_commits(server)[-2:] == [bad, good], "the bad main, then the deployed commit built"
+    assert running(server) == good
+    assert "tag krx-quant:previous krx-quant:latest" not in docker_calls(server)
 
 
 def test_an_update_keeps_the_used_latest_and_previous_images_and_a_day_of_build_cache(

@@ -15,11 +15,11 @@
 #    it failed, or if GitHub cannot be read, the engine keeps running what it ran and the
 #    journal names the commit and why. A commit whose ci failed is told on Telegram once
 #    (.auto-update-ci-failed); a GitHub that cannot be read, on every run it is so.
-# 4. It tags the image the engine runs krx-quant:previous (#568), fast-forwards, rebuilds and
-#    restarts the engine.
+# 4. It tags the image the engine runs krx-quant:previous when it is built from the deployed
+#    commit (#568), fast-forwards, rebuilds and restarts the engine.
 # 5. It waits for the Engine API to answer (3 minutes). If it does not, it goes back to the
-#    commit before on krx-quant:previous (a build of it when no engine ran to tag), and
-#    remembers the commit that failed.
+#    commit before on krx-quant:previous when that image was built from it (a build of the
+#    commit otherwise), and remembers the commit that failed.
 # 6. It cleans Docker up (#379, #568): every image but the ones containers use,
 #    krx-quant:latest and krx-quant:previous; the build cache no build used for a day; and all
 #    of the build cache when more than 3 GB is left after that. It reports to Telegram
@@ -134,10 +134,19 @@ running_image() {
   fi
 }
 
-# Back to the commit before, which the checkout is on again: the image the engine ran before the
-# update, kept as krx-quant:previous, or a build of that commit when none was kept.
+# The commit an image was built from (its KRX_COMMIT); nothing when it cannot be read.
+image_commit() {
+  docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$1" 2>/dev/null |
+    sed -n 's/^KRX_COMMIT=//p' || true
+}
+
+# Back to the commit before, which the checkout is on again: krx-quant:previous when it was built
+# from that commit, or a build of it. A tag that names another commit is not trusted: an update
+# cut short (a reboot) after it started the new engine leaves that unchecked image running, and
+# the next run must not go back to it (#568).
 go_back() {
-  if [[ -n "$previous_image" ]] && docker tag krx-quant:previous krx-quant:latest; then
+  if [[ "$(image_commit krx-quant:previous)" == "$deployed" ]] &&
+    docker tag krx-quant:previous krx-quant:latest; then
     docker compose up -d && healthy
   else
     restart
@@ -285,12 +294,18 @@ pending)
 esac
 
 changes=$(git log -n 10 --format='- %s' "$deployed..$target")
-# The image the engine runs now, for a rollback (#568). The cleanup keeps it until the next
-# update tags the one it replaces.
+# The image the engine runs now, for a rollback (#568), when it is the one the engine was checked
+# to start from: built from the deployed commit. After a run cut short past the new engine's
+# start, the engine runs that unchecked image instead; krx-quant:previous then stays on the
+# checked one the cut-short run tagged. The cleanup keeps the tag's image until the next update
+# moves it.
 previous_image=$(running_image)
-if [[ -n "$previous_image" ]] && ! docker tag "$previous_image" krx-quant:previous; then
-  echo "auto-update: could not tag the running image krx-quant:previous; a rollback builds" >&2
+if [[ -n "$previous_image" && "$(image_commit "$previous_image")" != "$deployed" ]]; then
+  echo "auto-update: the running image is not built from ${deployed:0:7}; krx-quant:previous stays"
   previous_image=""
+fi
+if [[ -n "$previous_image" ]] && ! docker tag "$previous_image" krx-quant:previous; then
+  echo "auto-update: could not tag the running image krx-quant:previous" >&2
 fi
 git merge -q --ff-only "$target"
 
