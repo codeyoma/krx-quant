@@ -1,8 +1,10 @@
 """The fill notice recorder (#484, #403): in mock mode the trader subscribes to the real-time fill
 notice of its own mock account (``kis_orders.FILL_NOTICE``) with its own key (``KRX_TRADER_KIS_*``)
 and HTS ID (``KRX_TRADER_KIS_HTS_ID``), and keeps every record as it came in
-``state/fill_notices.sqlite3`` (``FillNoticeStore``), for the night job ``fill-notice-layout-403`` to
-measure the mock server's 23 columns against the day's orders (``notice_layout.py``). The order
+``state/fill_notices.sqlite3`` (``FillNoticeStore``), for ``krx-quant fill-notice-layout`` to measure
+the mock server's 23 columns against the day's orders (``notice_layout.py``; the night job
+``fill-notice-layout-403`` ran it until it had joined every kind of order, 2026-11-04, and left
+``JOBS``, #580). The order
 probe measured every step on the mock server but this one (#403, 2026-10-30): its records had 23
 fields where KIS's example lists 26 (``kis_orders.FILL_NOTICE_COLUMNS``), and the probe does not run
 while the trader orders on the same mock account (#405). The trader's own orders are measured
@@ -40,7 +42,7 @@ frame. The columns are not named here: a record is kept as it came, not read as
 (``MOCK_FILL_NOTICE_COLUMNS``, #403). A frame whose fields do not divide by its count, or that is
 not decrypted (no key and IV, or they do not open it), or not of the frame's form, is kept apart
 (``odd_frames``: why, its length, and its fields when decrypted). Each connection is kept (when it
-was asked for, subscribed, last heard from and ended, and why it ended), so that the night job
+was asked for, subscribed, last heard from and ended, and why it ended), so that the measure
 counts the time within the window that none was subscribed. Not kept: the approval key, the key and
 IV, the subscription's answer.
 
@@ -52,7 +54,7 @@ recorder's start and each new day.
 
 The file holds the account, the HTS ID, order numbers and prices: it stays on the server, mode 600
 with its WAL files, apart from the trader's ledger. Nothing of it goes to the Engine API, the logs,
-an issue or Telegram: the night job prints shapes, counts and dates alone.
+an issue or Telegram: the measure prints shapes, counts and dates alone.
 """
 
 from __future__ import annotations
@@ -283,7 +285,7 @@ def _private(path: Path) -> None:
 
 class FillNoticeStore:
     """``state/fill_notices.sqlite3``, written by the recorder alone (its writer task, one call at a
-    time, in worker threads), read by the night job (``read_recorded``)."""
+    time, in worker threads), read by the measure (``read_recorded``)."""
 
     def __init__(self, path: Path, limits: Limits, today: date) -> None:
         self.path = path
@@ -408,7 +410,7 @@ def _day(at: datetime) -> str:
     return at.astimezone(KST).date().isoformat()
 
 
-# What the night job reads (read-only).
+# What the measure reads (read-only).
 
 
 @dataclass(frozen=True)
@@ -528,24 +530,6 @@ def read_recorded(state_dir: Path) -> Recorded | None:
 
 def _when(text: str | None) -> datetime | None:
     return datetime.fromisoformat(text) if text else None
-
-
-def notice_days(state_dir: Path) -> tuple[date, ...]:
-    """The days the recorder kept a frame of (a record or an odd frame), oldest first: the night
-    job's condition (``scheduled.Facts.fill_notice_days``). () without the file or when it cannot be
-    read (a WARNING says why)."""
-    path = state_dir / DB_NAME
-    if not path.exists():
-        return ()
-    try:
-        with _reading(path) as db:
-            rows = db.execute(
-                "SELECT day FROM records UNION SELECT day FROM odd_frames ORDER BY day"
-            ).fetchall()
-    except sqlite3.Error as e:
-        log.warning("cannot read the recorded fill notices' days (%s)", e)
-        return ()
-    return tuple(date.fromisoformat(r[0]) for r in rows)
 
 
 # The recorder.
