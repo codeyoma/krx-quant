@@ -62,7 +62,7 @@ and each skipped so, its position sold by its own barriers, and no other cell (a
 neither) takes its place. Each pick keeps every cell of the policy and why it does not trade
 (``Selection.cells``).
 
-> **바뀜** (2026-11-06, #PRNUM): a cell whose predictor left the active status (a bench, #545) traded on
+> **바뀜** (2026-11-06, #611): a cell whose predictor left the active status (a bench, #545) traded on
 > until the review, its predictor still predicting → it buys nothing from the next pick to the review.
 > 이유: the frozen policy's cells are its predictors' names, and only an active algorithm's evidence
 > still holds (the user's choice of 2026-11-06, the recommendation and a second opinion alike).
