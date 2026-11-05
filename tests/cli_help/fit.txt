@@ -1,0 +1,8 @@
+usage: krx-quant fit [-h] [--days DAYS] algorithm
+
+positional arguments:
+  algorithm    e.g. newton
+
+options:
+  -h, --help   show this help message and exit
+  --days DAYS  trading days to train on (default: the algorithm's own)

@@ -7,8 +7,9 @@ compares three lists, both ways:
 - the settings `src/krx_quant/config.py` and `src/krx_quant/trader/settings.py` read (each string
   argument of a call there that looks like an environment variable) with `.env.example` (its
   `NAME=` and `# NAME=` lines) and with the tables of docs/operations.md "설정 값 전체";
-- the commands `src/krx_quant/cli.py` adds to the `krx-quant` parser with README.md's command table
-  ("명령": the first word of each backticked name in a row's first column);
+- the commands the modules of `src/krx_quant/cli/` add to the `krx-quant` parser (each family's
+  `add`, #578) with README.md's command table ("명령": the first word of each backticked name in a
+  row's first column);
 - `scheduled.JOBS` with docs/operations.md's job table ("예약 작업 (#215)": the first backticked
   name in a row's first column, where `<이름>` stands for any name, as for the pre-validation jobs
   built from the algorithm registries).
@@ -49,7 +50,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SELF = "scripts/check_docs_drift.py"
 
 SETTINGS_CODE = ("src/krx_quant/config.py", "src/krx_quant/trader/settings.py")
-CLI = "src/krx_quant/cli.py"
+CLI = "src/krx_quant/cli"  # the package: a module by family (#578)
 ENV_EXAMPLE = ".env.example"
 OPERATIONS = "docs/operations.md"
 README = "README.md"
@@ -92,6 +93,8 @@ ANY_NAME = "[a-z0-9][a-z0-9-]*"
 # A file a row names as reading a variable: `compose.yaml`, `deploy/setup-server.sh`.
 PATH = re.compile(r"[\w.-]+(?:/[\w.-]+)*\.\w+")
 
+# Where a command is found: a module's call that adds it (``commands``).
+FOUND_AS = 'sub.add_parser on ArgumentParser(prog="krx-quant").add_subparsers(), or on add(sub) in a family'
 GONE_HINT = "remove it, or leave a 삭제됨 or 바뀜 note in its section that names it"
 QUOTED_ROW = (
     "a table row right after a quote is read as the quote's text: leave a blank line and repeat the"
@@ -299,9 +302,28 @@ def settings_read(source: str) -> dict[str, int]:
 
 
 def commands(source: str) -> dict[str, int]:
-    """The commands ``source`` adds to ``ArgumentParser(prog="krx-quant")``'s subparsers, each at its
-    line. A command's own subparsers' are not commands."""
+    """The commands ``source`` adds to ``krx-quant``'s subparsers, each at its line: to the subparsers
+    of ``ArgumentParser(prog="krx-quant")``, or, in a family's module, to the first parameter of its
+    module-level ``add`` (``cli/__init__.py``, #578). A command's own subparsers' are not commands."""
     tree = ast.parse(source)
+    found = _added(tree, _subparsers(tree))
+    for family in tree.body:
+        if isinstance(family, ast.FunctionDef) and family.name == "add" and family.args.args:
+            found.update(_added(family, {family.args.args[0].arg}))
+    return found
+
+
+def cli_commands(root: Path) -> dict[str, tuple[str, int]]:
+    """The commands the CLI's modules under ``root`` add, each with its module's path and line."""
+    found: dict[str, tuple[str, int]] = {}
+    for path in sorted((root / CLI).glob("*.py")):
+        for name, line in commands(path.read_text(encoding="utf-8")).items():
+            found.setdefault(name, (path.relative_to(root).as_posix(), line))
+    return found
+
+
+def _subparsers(tree: ast.Module) -> set[str]:
+    """The names ``tree`` binds to the subparsers of ``ArgumentParser(prog="krx-quant")``."""
     assigned = [
         (node.targets[0].id, node.value)
         for node in ast.walk(tree)
@@ -311,7 +333,7 @@ def commands(source: str) -> dict[str, int]:
         and isinstance(node.value, ast.Call)
     ]
     parsers = {name for name, call in assigned if _is_krx_quant_parser(call)}
-    subparsers = {
+    return {
         name
         for name, call in assigned
         if isinstance(call.func, ast.Attribute)
@@ -319,6 +341,11 @@ def commands(source: str) -> dict[str, int]:
         and isinstance(call.func.value, ast.Name)
         and call.func.value.id in parsers
     }
+
+
+def _added(tree: ast.AST, subparsers: set[str]) -> dict[str, int]:
+    """The commands added under ``tree`` by ``<name>.add_parser("<command>", …)``, ``<name>`` one of
+    ``subparsers``, each at its line."""
     found: dict[str, int] = {}
     for node in ast.walk(tree):
         if (
@@ -474,9 +501,9 @@ def _variables(row: Row) -> list[str]:
 
 
 def _commands(root: Path) -> list[Problem]:
-    code = commands(_read(root, CLI))
+    code = cli_commands(root)
     if not code:
-        return [Problem(CLI, 0, 'no commands found (sub.add_parser on ArgumentParser(prog="krx-quant"))')]
+        return [Problem(CLI, 0, f"no commands found ({FOUND_AS})")]
     body = section(_read(root, README), COMMANDS_SECTION)
     if body is None:
         return [_missing_section(README, COMMANDS_SECTION)]
@@ -490,8 +517,8 @@ def _commands(root: Path) -> list[Problem]:
     ]
     documented = {name for row, names in tabled if not row.is_note for name in names}
     found = [
-        Problem(CLI, line, f'command {name} is not in {README} "{COMMANDS_SECTION}"')
-        for name, line in code.items()
+        Problem(path, line, f'command {name} is not in {README} "{COMMANDS_SECTION}"')
+        for name, (path, line) in code.items()
         if name not in documented
     ]
     for row, names in tabled:

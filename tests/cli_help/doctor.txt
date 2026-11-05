@@ -1,0 +1,6 @@
+usage: krx-quant doctor [-h] [--api API]
+
+options:
+  -h, --help  show this help message and exit
+  --api API   the Engine API to ask, e.g. http://127.0.0.1:8080 (default: this
+              container's, then compose's engine service)

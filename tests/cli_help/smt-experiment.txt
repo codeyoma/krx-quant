@@ -1,0 +1,5 @@
+usage: krx-quant smt-experiment [-h] [--holdout]
+
+options:
+  -h, --help  show this help message and exit
+  --holdout   judge the pre-registered claims on the holdout window

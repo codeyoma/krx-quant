@@ -1,0 +1,6 @@
+usage: krx-quant probe-night [-h] [--day DAY]
+
+options:
+  -h, --help  show this help message and exit
+  --day DAY   the evening whose night to read, YYYY-MM-DD (default: the latest
+              one subscribed for)

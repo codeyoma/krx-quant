@@ -1,0 +1,6 @@
+usage: krx-quant neyman-variants [-h] [--backfill]
+
+options:
+  -h, --help  show this help message and exit
+  --backfill  judge the three comparisons as registered on the backfilled days
+              before the discovery's training instead, once (#532)

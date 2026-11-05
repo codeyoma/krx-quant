@@ -1,0 +1,6 @@
+usage: krx-quant nightly-hit-rates [-h] [--nights NIGHTS]
+
+options:
+  -h, --help       show this help message and exit
+  --nights NIGHTS  the latest N nights whose promotion lists carry the hit
+                   rates (default 10)

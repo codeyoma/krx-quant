@@ -55,6 +55,17 @@ def main(argv=None):
     controls = trade.add_subparsers()
     controls.add_parser("inner")
 """
+# A family's module (#578): its commands are those its ``add`` adds to the parameter.
+FAMILY = """\
+def add(sub):
+    sub.add_parser("archive", help="upload")
+    replay = sub.add_parser("replay", help="replay")
+    replay.add_subparsers().add_parser("inner")
+
+
+def other(sub):
+    sub.add_parser("not-a-command")
+"""
 ENV_EXAMPLE = """\
 # The alpha.
 KRX_ALPHA=
@@ -110,6 +121,7 @@ README = """\
 |---|---|---|
 | `collect` | 실시간 녹화 | 필요 |
 | `trade`, `trade resume` | 자동 매매 | 없어도 된다 |
+| `archive`, `replay <YYYY-MM-DD>` | 업로드, 재생 | 필요 |
 
 ## 문서
 """
@@ -122,7 +134,8 @@ def repo(tmp_path: Path, **texts: str) -> Path:
     files = {
         "config": ("src/krx_quant/config.py", CONFIG),
         "trader": ("src/krx_quant/trader/settings.py", TRADER),
-        "cli": ("src/krx_quant/cli.py", CLI),
+        "cli": ("src/krx_quant/cli/__init__.py", CLI),
+        "family": ("src/krx_quant/cli/data.py", FAMILY),
         "env": (".env.example", ENV_EXAMPLE),
         "operations": ("docs/operations.md", OPERATIONS),
         "readme": ("README.md", README),
@@ -294,7 +307,15 @@ def test_allowlisted_settings_pass_and_a_stale_allowlist_entry_fails(tmp_path: P
 def test_a_command_missing_from_the_readme_is_caught_and_subcommands_are_not_commands(tmp_path: Path) -> None:
     cli = CLI + '    sub.add_parser(\n        "probe-live-account",\n        help="read",\n    )\n'
     assert problems(repo(tmp_path, cli=cli)) == [
-        'src/krx_quant/cli.py:12: command probe-live-account is not in README.md "명령"',
+        'src/krx_quant/cli/__init__.py:12: command probe-live-account is not in README.md "명령"',
+    ]
+
+
+def test_a_family_s_command_missing_from_the_readme_is_caught_in_its_module(tmp_path: Path) -> None:
+    added = '    sub.add_parser("backfill", help="fill")\n'
+    family = FAMILY.replace("    replay = sub", added + "    replay = sub")
+    assert problems(repo(tmp_path, family=family)) == [
+        'src/krx_quant/cli/data.py:3: command backfill is not in README.md "명령"',
     ]
 
 
@@ -302,7 +323,7 @@ def test_a_readme_command_the_cli_lacks_passes_only_with_a_note(tmp_path: Path) 
     row = "| `logs-bundle [--days N | --since 때]` | 로그 꾸러미 | 없어도 된다 |\n"
     readme = README.replace("\n## 문서", row + "\n## 문서")
     assert problems(repo(tmp_path, readme=readme)) == [
-        "README.md:9: command logs-bundle is in the table, but src/krx_quant/cli.py has no such command:"
+        "README.md:10: command logs-bundle is in the table, but src/krx_quant/cli has no such command:"
         " remove it, or leave a 삭제됨 or 바뀜 note in its section that names it",
     ]
     note = "\n> **삭제됨** (2026-10-23, #360): `logs-bundle`. 이유: 시험.\n"
@@ -353,8 +374,9 @@ def test_a_missing_section_or_table_fails_the_check(tmp_path: Path) -> None:
         'README.md: section "명령" has no table whose first column is "명령"',
     ]
     cli = CLI.replace('prog="krx-quant"', 'prog="other"')
-    assert problems(repo(tmp_path, cli=cli)) == [
-        'src/krx_quant/cli.py: no commands found (sub.add_parser on ArgumentParser(prog="krx-quant"))',
+    family = FAMILY.replace("def add(sub)", "def added(sub)")
+    assert problems(repo(tmp_path, cli=cli, family=family)) == [
+        f"src/krx_quant/cli: no commands found ({check.FOUND_AS})",
     ]
 
 

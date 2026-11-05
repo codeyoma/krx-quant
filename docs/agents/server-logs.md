@@ -110,6 +110,21 @@ scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "heartbeat: "'
 
 **The CPU burst capacity** (#547) is not in Loki. The server watchdog reads Lightsail's `BurstCapacityPercentage` every 10 minutes and writes it on its run's summary and log: `gh run list --workflow server-watchdog --repo codeyoma/krx-quant --limit 6`, then `gh run view <id> --repo codeyoma/krx-quant --log | grep BurstCapacityPercentage`. Below 50% it opens an issue labelled `server-burst` and tells Telegram; it closes it at 60%. Lightsail keeps the series about two weeks: on the user's Mac, `aws lightsail get-instance-metric-data --instance-name krx-quant --region ap-southeast-2 --metric-name BurstCapacityPercentage --period 60 --start-time <UTC> --end-time <UTC> --unit Percent --statistics Minimum` (24 hours at most a call), read-only. operations.md "CPU 버스트 여유 (#547)" has what it measured and why those marks.
 
+**Engine API requests by route** (#588): the API logs no line a request. One INFO line at each 00:00 KST and one when the API stops (07:20 restart, 06:00 deploy) counts the requests since the line before, by route pattern: `Engine API requests from <since> to <until>: <N> in all; GET /v1/status 41230 (200 41229, 503 1) p95 3ms; …; GET /v1/stream 4 (101 4), WebSocket p95 7201s max 25200s, 1 open; unmatched 3 (404 3) p95 1ms; not called: GET /v1/algorithms/{name}, …`. Statuses, the p95 milliseconds to the answer, the stream's connections by their seconds; never an address, query or path value (operations.md "엔진 API 요청 수 (#588)" says what each part is).
+
+```bash
+scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "Engine API requests from "' --since 14d --forward --limit 100
+```
+
+- Whether one route was called at all: `|= "; GET /v1/algorithms/{name} "` on the same selector (a route in the `not called:` list is followed by a comma, not a space). No line means no one called it.
+- Its requests over 14 days (connector, `queryType: "instant"`):
+
+  ```
+  sum(sum_over_time({service="krx-quant", process="engine"} |= "Engine API requests from "
+    |= "; GET /v1/algorithms/{name} " | regexp `; GET /v1/algorithms/\{name\} (?P<n>\d+) `
+    | unwrap n | __error__="" [14d]))
+  ```
+
 **ERRORs in the last 24 hours:**
 
 ```bash

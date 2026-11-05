@@ -712,7 +712,7 @@ def test_the_command_reports_a_registry_that_fails_the_registration_check_as_an_
     async def refused(*args: Any, **kwargs: Any) -> None:
         raise RegistrationError("twin: the same features as contrarian")
 
-    monkeypatch.setattr("krx_quant.cli.prevalidate", refused)
+    monkeypatch.setattr("krx_quant.prevalidation.prevalidate", refused)  # imported as the command runs
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
 
     assert main(["prevalidate", "twin"]) == 1

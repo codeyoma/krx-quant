@@ -288,6 +288,6 @@ def test_the_command_exits_1_only_when_nothing_answered(
         assert now.tzinfo is not None
         return next(answers)
 
-    monkeypatch.setattr(cli, "probe_nav", stand_in)
+    monkeypatch.setattr(nav_probe, "probe_nav", stand_in)  # the command imports it as it runs (#578)
     assert cli.main(["probe-nav"]) == 0
     assert cli.main(["probe-nav"]) == 1

@@ -1,0 +1,8 @@
+usage: krx-quant error-breakdown [-h] [--days DAYS] [--algorithm ALGORITHM]
+
+options:
+  -h, --help            show this help message and exit
+  --days DAYS           the latest N days with predictions (default 20, the
+                        leaderboard's 20d)
+  --algorithm ALGORITHM
+                        the algorithm (default turing)

@@ -1,0 +1,7 @@
+usage: krx-quant fake-kis [-h] [--port PORT] [--host HOST] [--trades]
+
+options:
+  -h, --help   show this help message and exit
+  --port PORT
+  --host HOST  address to listen on (0.0.0.0 inside Docker)
+  --trades     push a synthetic trade per stock every second

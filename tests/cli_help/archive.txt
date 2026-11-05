@@ -1,0 +1,5 @@
+usage: krx-quant archive [-h] [--recheck]
+
+options:
+  -h, --help  show this help message and exit
+  --recheck   compare every file with the store and upload what it lacks
