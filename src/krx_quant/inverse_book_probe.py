@@ -24,11 +24,14 @@ For a trading day it prints:
    silence, and how much of the session, and how many bar closes, had no record within the last 5
    seconds (``FRESH_SECONDS``: the replay leaves such quotes out);
 6. the gaps the collector recorded for it;
-7. the recording's burden: the bytes on disk, and the day's frames handled again as the collector
-   handles them (parsed, recorded raw with its buffer of ``KRX_FLUSH_ROWS`` rows or
-   ``KRX_FLUSH_SECONDS``), then also turned into best-quote events, on this server's CPU: the CPU
-   seconds, their share of one core, and the most the buffers held, against #606's bounds
-   (``RSS_BOUND_MB``, ``CPU_BOUND``).
+7. the recording's burden: the bytes on disk, and the day's frames handled again on this server:
+   read only (the control), as the collector handles them (parsed, recorded raw with its buffer of
+   ``KRX_FLUSH_ROWS`` rows or ``KRX_FLUSH_SECONDS``), then also turned into best-quote events. For
+   each recording pass: the CPU seconds and their share of one core, and its resident memory's
+   growth from just before it, reading included (an upper bound on what recording adds), and less
+   the read-only pass's (a rough estimate), against #606's bounds (``RSS_BOUND_MB``, ``CPU_BOUND``):
+   within only under the upper bound, and an RSS that cannot be read is said to be unmeasured, never
+   within (``verdict``).
 
 It prints counts, rates, seconds, ticks, field names and codes: no price, quantity or other market
 value, so its output can go on the public issue. It reads files only, beside the running collector,
@@ -59,7 +62,7 @@ from krx_quant.config import Settings
 from krx_quant.feeds import KRX_BOOK, RAW_SCHEMA
 from krx_quant.feeds.base import EVENT_TIME, KST, RECEIVED_AT, kst
 from krx_quant.feeds.stock import KRX_BOOK_OLD_WIDTH
-from krx_quant.footprint import Meter
+from krx_quant.footprint import PEAK_STEP, Meter, give_back
 from krx_quant.health import Unread, read_gaps
 from krx_quant.market_calendar import MarketCalendar, Phase, Session, calendar_store
 from krx_quant.products import INVERSE_PRODUCTS
@@ -343,6 +346,10 @@ def _mb(value: float | None) -> str:
     return "모름" if value is None else f"{value:.0f} MB"
 
 
+def _mb1(value: float | None) -> str:
+    return "모름" if value is None else f"{value:.1f} MB"
+
+
 _PHASES = {
     Phase.PRE_OPEN: "장 전",
     Phase.OPENING_AUCTION: "시가 단일가",
@@ -560,17 +567,49 @@ _EVENT_SCHEMA = pa.schema(
 )
 
 
+@dataclass(frozen=True)
+class Pass:
+    """One pass over the day's frames (``measure_burden``)."""
+
+    cpu: float = 0.0  # seconds handling the frames; reading them is left out
+    buffer_mb: float = 0.0  # the most the recorder's buffers held, as Python objects
+    # Resident memory's growth over the pass, from just before it (its peak less that); None where
+    # it cannot be read (no ``/proc``: not Linux).
+    rss_mb: float | None = None
+
+
 @dataclass
 class Burden:
-    """The day's frames handled again as the collector handles them."""
+    """The day's frames handled again as the collector handles them, and read only."""
 
     frames: int = 0
     events: int = 0
-    raw_cpu: float = 0.0  # seconds: parse and record raw
-    all_cpu: float = 0.0  # seconds: that, then the events too
-    raw_buffer_mb: float = 0.0  # the most the raw buffer held
-    all_buffer_mb: float = 0.0  # the most both buffers held
-    arrow_mb: float = 0.0  # Arrow's peak while writing
+    read: Pass = field(default_factory=Pass)  # read only: the control the others are measured against
+    raw: Pass = field(default_factory=Pass)  # parse and record raw, as the collector does now
+    all: Pass = field(default_factory=Pass)  # that, then a best-quote event per record too
+
+    def without_reading_mb(self, mode: Pass) -> float | None:
+        """``mode``'s growth less the read-only pass's (the probe's own reading): an estimate of what
+        recording adds, rougher than either figure (the allocators' reuse makes it vary from run to
+        run by several MB); None if either was not read."""
+        if mode.rss_mb is None or self.read.rss_mb is None:
+            return None
+        return max(0.0, mode.rss_mb - self.read.rss_mb)
+
+
+def verdict(share: float, upper_mb: float | None, own_mb: float | None) -> str:
+    """#606's bounds on a recording mode, given its CPU ``share`` of a core and its pass's resident
+    growth: ``upper_mb``, reading included, bounds what recording adds from above; ``own_mb`` is
+    that less the read-only pass's. Within only when the CPU is within and so is the upper bound;
+    over when the CPU is over or even ``own_mb`` is; otherwise the RSS is not judged. An RSS not
+    read is said to be unmeasured, never passed."""
+    if share > CPU_BOUND or (own_mb is not None and own_mb > RSS_BOUND_MB):
+        return "기준 넘음"
+    if upper_mb is None:
+        return "RSS는 재지 못함(CPU는 기준 안)"
+    if upper_mb > RSS_BOUND_MB:
+        return "RSS는 판정 못함(읽기를 포함한 상한이 기준을 넘고, 읽기를 빼면 기준 안. CPU는 기준 안)"
+    return "기준 안"
 
 
 def _event(record: Sequence[str], at: datetime) -> dict[str, Any]:
@@ -617,59 +656,142 @@ class _Buffers:
         self.held = {}
 
 
-def measure_burden(data_dir: Path, day: date, flush_rows: int, flush_seconds: float) -> Burden:
-    """Handle the day's book frames again, twice, timing only the handling: as the collector does
-    now (parse, record raw), then also as a best-quote event per record. The recorder writes a
-    buffer once it holds ``flush_rows`` rows, and the buffers ``flush_seconds`` after their last
-    write, by the times received (the collector looks each second, ``ParquetRecorder.flush_due``)."""
-    burden = Burden()
-    for with_events in (False, True):
-        with tempfile.TemporaryDirectory(prefix="probe-inverse-book-") as out:
-            recorder = ParquetRecorder(Path(out), flush_rows, flush_seconds)
-            buffers = _Buffers(flush_rows)
-            cpu, written = 0.0, None
-            for partition in _partitions(data_dir, day):
-                for _, batch in partition_batches(partition, RAW_SCHEMA.names):
-                    rows = batch.to_pydict()
-                    started = clock.process_time()
-                    for at, text in zip(rows["received_at"], rows["message"], strict=True):
-                        if written is None:
-                            written = at
-                        elif (at - written).total_seconds() >= flush_seconds:
-                            recorder.flush()
-                            buffers.write()
-                            written = at
-                        try:
-                            message = kis.parse_message(text)
-                        except kis.KisError:
-                            continue
-                        if not isinstance(message, kis.RealtimeFrame):
-                            continue
-                        raw_row = {"received_at": at, "message": text}
-                        buffers.add("raw", raw_row)
-                        recorder.record("raw", day, message.tr_id, message.symbol, raw_row, RAW_SCHEMA)
-                        if not with_events:
-                            burden.frames += 1
-                            continue
-                        fields = message.payload.split("^")
-                        width, rest = divmod(len(fields), message.count)
-                        if rest or width not in LAYOUTS or message.encrypted:
-                            continue
-                        for i in range(message.count):
-                            row = _event(fields[i * width : (i + 1) * width], at)
-                            buffers.add("events", row)
-                            recorder.record("events", day, message.tr_id, row["symbol"], row, _EVENT_SCHEMA)
-                            burden.events += 1
-                    cpu += clock.process_time() - started
-            started = clock.process_time()
-            recorder.close()
-            cpu += clock.process_time() - started
-        if with_events:
-            burden.all_cpu, burden.all_buffer_mb = cpu, buffers.peak / 2**20
-        else:
-            burden.raw_cpu, burden.raw_buffer_mb = cpu, buffers.peak / 2**20
-    burden.arrow_mb = pa.default_memory_pool().max_memory() / 2**20
-    return burden
+class _Resident:
+    """A pass's resident memory: read just before it, then after each batch and each write, with
+    the kernel's high-water mark since the start where it can be reset (``footprint.Meter``)."""
+
+    def __init__(self, meter: Meter) -> None:
+        self._meter = meter
+        give_back()  # what the pass before freed goes back to the system first
+        meter.reset()
+        self._start = meter.rss_mb()
+        self._peak = self._start
+
+    def sample(self) -> None:
+        now = self._meter.rss_mb()
+        if now is not None and (self._peak is None or now > self._peak):
+            self._peak = now
+
+    def growth(self) -> float | None:
+        self.sample()
+        peak = self._peak
+        if self._meter.peak_since == PEAK_STEP:
+            mark = self._meter.peak_mb()
+            peak = mark if peak is None or (mark is not None and mark > peak) else peak
+        return None if self._start is None or peak is None else max(0.0, peak - self._start)
+
+
+# The rows read at a time in the burden's passes: few, so that what reading holds stays small beside
+# what recording does (the read-only pass measures it, and it is taken off).
+BURDEN_BATCH_ROWS = 2_000
+
+
+def _warm_up(flush_rows: int, flush_seconds: float, day: date) -> None:
+    """Write a row of each layer once, so that what Arrow and Parquet set up on a first write (the
+    collector did it long ago) is not counted as the first pass's growth."""
+    at = datetime.now(UTC)
+    record = ["0"] * len(KRX_BOOK.columns)
+    with tempfile.TemporaryDirectory(prefix="probe-inverse-book-") as out:
+        recorder = ParquetRecorder(Path(out), flush_rows, flush_seconds)
+        recorder.record("raw", day, KRX_BOOK.tr_id, ETF, {"received_at": at, "message": ""}, RAW_SCHEMA)
+        recorder.record("events", day, KRX_BOOK.tr_id, ETF, _event(record, at), _EVENT_SCHEMA)
+        recorder.close()
+
+
+# How many times each pass runs: resident memory's growth over one varies from run to run by more
+# than the bound's tenth (the allocators reuse what earlier passes freed: on made-up days of 300,000
+# frames the raw pass grew 15 MB on one run and 35 MB on another), so each figure is the median of
+# this many, the passes taken in turn.
+REPEATS = 3
+
+_MODES = ("read", "raw", "all")
+
+
+def measure_burden(
+    data_dir: Path, day: date, flush_rows: int, flush_seconds: float, meter: Meter | None = None
+) -> Burden:
+    """Handle the day's book frames again, timing only the handling: read only once to warm up
+    (unreported: the first read sets up what the later ones reuse, and grew 45–55 MB more than they
+    in a measure on made-up days), then ``REPEATS`` times in turn: read only (the control), as the
+    collector does now (parse, record raw), and also as a best-quote event per record. Each pass's
+    resident memory grows from just before it (``_Resident``); each figure is its mode's median. The
+    recorder writes a buffer once it holds ``flush_rows`` rows, and the buffers ``flush_seconds``
+    after their last write, by the times received (the collector looks each second,
+    ``ParquetRecorder.flush_due``)."""
+    meter = meter or Meter()
+    _warm_up(flush_rows, flush_seconds, day)
+    _run_pass(data_dir, day, "read", flush_rows, flush_seconds, meter)
+    runs: dict[str, list[Pass]] = {mode: [] for mode in _MODES}
+    counts: dict[str, tuple[int, int]] = {}
+    for _ in range(REPEATS):
+        for mode in _MODES:
+            done, frames, events = _run_pass(data_dir, day, mode, flush_rows, flush_seconds, meter)
+            runs[mode].append(done)
+            counts[mode] = frames, events
+    medians = {mode: _median(passes) for mode, passes in runs.items()}
+    return Burden(counts["raw"][0], counts["all"][1], medians["read"], medians["raw"], medians["all"])
+
+
+def _median(passes: Sequence[Pass]) -> Pass:
+    grown = [p.rss_mb for p in passes]
+    return Pass(
+        statistics.median(p.cpu for p in passes),
+        statistics.median(p.buffer_mb for p in passes),
+        None if any(g is None for g in grown) else statistics.median(g for g in grown if g is not None),
+    )
+
+
+def _run_pass(
+    data_dir: Path, day: date, mode: str, flush_rows: int, flush_seconds: float, meter: Meter
+) -> tuple[Pass, int, int]:
+    """One pass of ``mode`` (``read``, ``raw`` or ``all``), and the frames and events it recorded."""
+    frames = events = 0
+    with tempfile.TemporaryDirectory(prefix="probe-inverse-book-") as out:
+        resident = _Resident(meter)
+        recorder = ParquetRecorder(Path(out), flush_rows, flush_seconds)
+        buffers = _Buffers(flush_rows)
+        cpu, written = 0.0, None
+        for partition in _partitions(data_dir, day):
+            for _, batch in partition_batches(partition, RAW_SCHEMA.names, BURDEN_BATCH_ROWS):
+                rows = batch.to_pydict()
+                started = clock.process_time()
+                for at, text in zip(rows["received_at"], rows["message"], strict=True):
+                    if mode == "read":
+                        continue
+                    if written is None:
+                        written = at
+                    elif (at - written).total_seconds() >= flush_seconds:
+                        recorder.flush()
+                        buffers.write()
+                        resident.sample()
+                        written = at
+                    try:
+                        message = kis.parse_message(text)
+                    except kis.KisError:
+                        continue
+                    if not isinstance(message, kis.RealtimeFrame):
+                        continue
+                    raw_row = {"received_at": at, "message": text}
+                    buffers.add("raw", raw_row)
+                    recorder.record("raw", day, message.tr_id, message.symbol, raw_row, RAW_SCHEMA)
+                    frames += 1
+                    if mode == "raw":
+                        continue
+                    fields = message.payload.split("^")
+                    width, rest = divmod(len(fields), message.count)
+                    if rest or width not in LAYOUTS or message.encrypted:
+                        continue
+                    for i in range(message.count):
+                        row = _event(fields[i * width : (i + 1) * width], at)
+                        buffers.add("events", row)
+                        recorder.record("events", day, message.tr_id, row["symbol"], row, _EVENT_SCHEMA)
+                        events += 1
+                cpu += clock.process_time() - started
+                resident.sample()
+        started = clock.process_time()
+        recorder.close()
+        cpu += clock.process_time() - started
+        return Pass(cpu, buffers.peak / 2**20, resident.growth()), frames, events
 
 
 def burden_lines(data_dir: Path, day: date, book: Book, burden: Burden) -> list[str]:
@@ -684,33 +806,45 @@ def burden_lines(data_dir: Path, day: date, book: Book, burden: Burden) -> list[
         return lines
     span = (book.last - book.first).total_seconds() if book.first and book.last else 0.0
     busiest = max(book.minutes.values(), default=0)
-    per_record = burden.all_cpu / max(book.records, 1)
-    for name, cpu, buffer in (
-        ("지금처럼 raw만", burden.raw_cpu, burden.raw_buffer_mb),
-        (f"raw와 1호가 이벤트(레코드마다 1행, {burden.events}행)", burden.all_cpu, burden.all_buffer_mb),
+    per_record = burden.all.cpu / max(book.records, 1)
+    read = burden.read.rss_mb
+    lines.append(
+        "RSS 증가는 각 실행 직전(메모리를 돌려준 뒤)부터 가장 높은 때까지다. 같은 프레임을 읽기만 한 실행은 "
+        f"{_mb1(read)} 늘었다. 기록하는 실행의 증가는 읽기를 포함한 상한이고, 뺀 값은 거친 추정이다"
+    )
+    for name, mode in (
+        ("지금처럼 raw만", burden.raw),
+        (f"raw와 1호가 이벤트(레코드마다 1행, {burden.events}행)", burden.all),
     ):
-        share = cpu / span if span else 0.0
-        mark = "기준 안" if share <= CPU_BOUND and buffer <= RSS_BOUND_MB else "기준 넘음"
+        share = mode.cpu / span if span else 0.0
+        own = burden.without_reading_mb(mode)
+        rss = (
+            "모름(이 시스템에서 읽지 못함)"
+            if mode.rss_mb is None
+            else f"{mode.rss_mb:.1f} MB(읽기를 빼면 {_mb1(own)})"
+        )
         lines.append(
-            f"{name}: CPU {cpu:.2f}초(프레임당 {1e6 * cpu / burden.frames:.0f}µs) · "
-            f"받은 동안({_seconds(span)}) "
-            f"한 코어의 {100 * share:.2f}% · 버퍼가 가장 많이 든 때 {buffer:.1f} MB · {mark}"
+            f"{name}: CPU {mode.cpu:.2f}초(프레임당 {1e6 * mode.cpu / burden.frames:.0f}µs) · "
+            f"받은 동안({_seconds(span)}) 한 코어의 {100 * share:.2f}% · RSS 증가 {rss} · "
+            f"버퍼가 가장 많이 든 때 {mode.buffer_mb:.1f} MB(파이썬 객체) · "
+            f"{verdict(share, mode.rss_mb, own)}"
             f"(기준 CPU {100 * CPU_BOUND:g}%, RSS 증가 {RSS_BOUND_MB:g} MiB)"
         )
     lines.append(
-        f"레코드가 가장 많은 1분({busiest}개)의 CPU: 그 1분의 {100 * busiest * per_record / 60:.2f}% · "
-        f"Arrow가 쓰는 동안 가장 많이 잡은 메모리 {burden.arrow_mb:.1f} MB"
+        f"레코드가 가장 많은 1분({busiest}개)의 CPU: 그 1분의 {100 * busiest * per_record / 60:.2f}%"
     )
     return lines
 
 
-def report(settings: Settings, calendar: MarketCalendar, day: date) -> tuple[str, int]:
-    """``day``'s report and the exit code."""
-    started, meter = clock.monotonic(), Meter()
+def report(
+    settings: Settings, calendar: MarketCalendar, day: date, meter: Meter | None = None
+) -> tuple[str, int]:
+    """``day``'s report and the exit code; ``meter`` reads the burden's resident memory."""
+    started, run = clock.monotonic(), Meter()
     data_dir = settings.data_dir
     session = calendar.session(day)
     book = read_book(data_dir, day, session)
-    burden = measure_burden(data_dir, day, settings.flush_rows, settings.flush_seconds)
+    burden = measure_burden(data_dir, day, settings.flush_rows, settings.flush_seconds, meter)
     weekday = "월화수목금토일"[day.weekday()]
     sections = [
         ("1. 구독 응답(KIS, raw _system)", ack_lines(acknowledgements(data_dir, day))),
@@ -721,7 +855,7 @@ def report(settings: Settings, calendar: MarketCalendar, day: date) -> tuple[str
         ("6. 결측 구간(gaps)", gap_lines(data_dir, day)),
         ("7. 기록 부담", burden_lines(data_dir, day, book, burden)),
     ]
-    peak = meter.peak_mb()
+    peak = run.peak_mb()
     sections.append(
         (
             "8. 실행",

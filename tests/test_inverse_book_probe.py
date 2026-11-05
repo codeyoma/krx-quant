@@ -15,8 +15,18 @@ from krx_quant import cli
 from krx_quant.config import Settings
 from krx_quant.feeds import RAW_SCHEMA
 from krx_quant.feeds.base import KST
+from krx_quant.footprint import Meter
 from krx_quant.health import GAP_SCHEMA
-from krx_quant.inverse_book_probe import NO_FRAMES, probe_inverse_book, probed_day, report
+from krx_quant.inverse_book_probe import (
+    NO_FRAMES,
+    REPEATS,
+    RSS_BOUND_MB,
+    measure_burden,
+    probe_inverse_book,
+    probed_day,
+    report,
+    verdict,
+)
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night
@@ -54,6 +64,29 @@ def ack(tr_id: str, key: str, message: str, ok: bool = True) -> str:
     code = "OPSP0000" if ok else "OPSP0008"
     body = {"rt_cd": "0" if ok else "1", "msg_cd": code, "msg1": message}
     return json.dumps({"header": {"tr_id": tr_id, "tr_key": key, "encrypt": "N"}, "body": body})
+
+
+class Resident(Meter):
+    """Resident memory as a pass sees it (time is a system boundary, and so is ``/proc``): 100 MB just
+    before each pass, then 100 MB plus that pass's growth: none for the warm-up pass, then in turn
+    each of ``growth``'s rows (read only, raw, raw and events), one row a repeat. No high-water
+    mark. ``None``: a system where it cannot be read."""
+
+    def __init__(self, *growth: tuple[float, float, float]) -> None:
+        super().__init__(Path("/nonexistent"))
+        rows = growth * (REPEATS // len(growth)) if growth else ()
+        self._growth = [0.0, *(g for row in rows for g in row)] if growth else None
+        self._pass, self._first = -1, True
+
+    def reset(self) -> None:
+        self._pass += 1
+        self._first = True
+
+    def rss_mb(self) -> float | None:
+        if self._growth is None:
+            return None
+        before, self._first = self._first, False
+        return 100.0 if before else 100.0 + self._growth[self._pass]
 
 
 class Day:
@@ -113,7 +146,7 @@ def section(text: str, n: int) -> str:
 
 
 def test_the_report_counts_the_frames_fields_times_and_best_quotes(tmp_path: Path) -> None:
-    out, code = report(recorded(tmp_path).settings(), CALENDAR, DAY)
+    out, code = report(recorded(tmp_path).settings(), CALENDAR, DAY, Resident((1.5, 2.0, 4.5)))
 
     assert code == 0
     assert out.startswith("인버스 ETF 호가 확인 (#606): 0193L0 KRX 호가(H0STASP0), 2026-10-08(목)")
@@ -157,8 +190,12 @@ def test_the_report_counts_the_frames_fields_times_and_best_quotes(tmp_path: Pat
     )
 
     burden = section(out, 7)
-    assert "지금처럼 raw만: CPU" in burden and "기준 안" in burden
-    assert "raw와 1호가 이벤트(레코드마다 1행, 8행)" in burden, "the 63- and 59-field records"
+    assert "같은 프레임을 읽기만 한 실행은 1.5 MB 늘었다" in burden
+    assert "지금처럼 raw만: CPU" in burden and "RSS 증가 2.0 MB(읽기를 빼면 0.5 MB)" in burden
+    raw_line, events_line = (line for line in burden.splitlines() if "RSS 증가 " in line and "CPU " in line)
+    assert raw_line.endswith("기준 안(기준 CPU 5%, RSS 증가 32 MiB)")
+    assert "raw와 1호가 이벤트(레코드마다 1행, 8행)" in events_line, "the 63- and 59-field records"
+    assert "RSS 증가 4.5 MB(읽기를 빼면 3.0 MB)" in events_line and "기준 안" in events_line
     assert "8. 실행" in out
     for price in PRICES:
         assert price not in out
@@ -168,11 +205,41 @@ def test_a_day_without_a_frame_of_the_book_exits_3(tmp_path: Path) -> None:
     day = Day(tmp_path)
     day.raw("_system", ETF, at("06:00:01"), ack("H0STASP0", ETF, "SUBSCRIBE SUCCESS"))
 
-    out, code = report(day.settings(), CALENDAR, DAY)
+    out, code = report(day.settings(), CALENDAR, DAY, Resident())
 
     assert code == NO_FRAMES == 3
     assert "받은 프레임 없음" in section(out, 2)
     assert "H0STASP0 0193L0: SUBSCRIBE SUCCESS 1번" in section(out, 1)
+
+
+def test_a_recording_over_the_rss_bound_or_not_measured_is_never_within() -> None:
+    assert verdict(0.01, 31.0, 28.0) == "기준 안", "within under the upper bound, reading included"
+    assert verdict(0.01, 40.0, 33.0) == "기준 넘음", "over even without the reading"
+    assert verdict(0.01, 35.0, 30.0).startswith("RSS는 판정 못함"), "over with the reading, within without"
+    assert verdict(0.06, 1.0, 0.0) == "기준 넘음", "the CPU bound is 5% of a core"
+    assert verdict(0.01, None, None) == "RSS는 재지 못함(CPU는 기준 안)"
+    assert verdict(0.06, None, None) == "기준 넘음"
+
+
+def test_the_burden_counts_what_recording_adds_to_the_read_only_pass(tmp_path: Path) -> None:
+    settings = recorded(tmp_path).settings()
+
+    over = 2.0 + RSS_BOUND_MB + 1
+    # One raw pass of the three grew far more than the others: each figure is the median.
+    resident = Resident((2.0, 2.5, over), (2.0, 60.0, over), (2.0, 2.5, over))
+    burden = measure_burden(settings.data_dir, DAY, 3, 30.0, resident)
+
+    assert REPEATS == 3 and (burden.read.rss_mb, burden.raw.rss_mb, burden.all.rss_mb) == (2.0, 2.5, over)
+    assert burden.without_reading_mb(burden.raw) == 0.5
+    assert burden.without_reading_mb(burden.all) == RSS_BOUND_MB + 1, "over: 33 MB more than reading"
+    assert (burden.frames, burden.events) == (8, 8)
+    out, _ = report(settings, CALENDAR, DAY, Resident((2.0, 2.5, over)))
+    events_line = next(line for line in section(out, 7).splitlines() if "1호가 이벤트" in line)
+    assert "RSS 증가 35.0 MB(읽기를 빼면 33.0 MB)" in events_line and "기준 넘음" in events_line
+    unmeasured, _ = report(settings, CALENDAR, DAY, Resident())
+    assert "RSS 증가 모름(이 시스템에서 읽지 못함)" in section(unmeasured, 7)
+    assert "RSS는 재지 못함(CPU는 기준 안)" in section(unmeasured, 7)
+    assert "· 기준 안(" not in section(unmeasured, 7)
 
 
 def test_the_day_read_is_the_latest_whose_session_is_over() -> None:
