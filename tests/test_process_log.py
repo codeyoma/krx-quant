@@ -19,7 +19,7 @@ from pathlib import Path
 import aiohttp
 import pytest
 
-from krx_quant import loki
+from krx_quant import loki, process_log
 from krx_quant.clock import FakeClock
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub
@@ -95,6 +95,42 @@ async def test_a_child_stopped_at_its_time_limit_says_so(fake_loki: FakeLoki) ->
     assert "stopped at its time limit (0:00:01): exit -9 (SIGKILL) after" in lines[-1][1]
 
 
+async def test_a_running_child_is_named_for_the_heartbeat_until_it_ends(tmp_path: Path) -> None:
+    """#547: the engine's heartbeat says the memory of each process it started that runs, by name."""
+    go = tmp_path / "go"
+    script = f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.01)\n"
+    command = [sys.executable, "-c", script]
+    job = asyncio.create_task(run_logged(command, timedelta(seconds=20), child=Child.job("probe-x", NIGHT)))
+    training = asyncio.create_task(run_logged(command, timedelta(seconds=20), child=Child.training(NIGHT)))
+    bare = asyncio.create_task(run_logged(command, timedelta(seconds=20)))
+    try:
+        await until(lambda: len(process_log.running()) == 3)
+        assert sorted(process_log.running().values()) == [
+            "job probe-x",
+            os.path.basename(sys.executable),  # no child: the program's name
+            "training",
+        ]
+    finally:
+        go.write_text("")
+    ran = await asyncio.gather(job, training, bare)
+    assert [r.exit_code for r in ran] == [0, 0, 0]
+    assert process_log.running() == {}
+
+
+async def test_a_child_cut_short_with_the_engine_is_not_named_any_more(tmp_path: Path) -> None:
+    started = tmp_path / "started"
+    script = f"import pathlib, time\npathlib.Path({str(started)!r}).write_text('')\ntime.sleep(30)\n"
+    run = asyncio.create_task(
+        run_logged([sys.executable, "-c", script], timedelta(seconds=20), child=Child.training(NIGHT))
+    )
+    await until(lambda: started.exists())
+    assert list(process_log.running().values()) == ["training"]
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    assert process_log.running() == {}
+
+
 async def test_a_child_is_told_the_engine_sends_its_output() -> None:
     script = f"import os; print(os.environ.get({BY_PARENT!r}))"
     ran = await run_logged([sys.executable, "-c", script], timedelta(seconds=20))
@@ -156,6 +192,75 @@ async def test_the_training_s_steps_and_the_kill_that_ended_it_reach_loki(fake_l
         "started step turing",
     ]
     assert last[0] == "error" and "ended: exit -9 (SIGKILL) after" in last[1]
+
+
+# The real ``krx-quant train`` but for the training itself, which logs a warning of its own and
+# returns a night (#580). Telegram is set but unreachable, its tries cut short: the summary's notice
+# is dropped (``telegram send failed``, ERROR) right before the command's own report of the night.
+SUMMARY_CHILD = (
+    "import logging, sys\n"
+    "from datetime import date\n"
+    "from krx_quant import cli, nightly, notify\n"
+    "notify.RETRY_SECONDS, notify.RETRY_DELAYS = 0.2, (0.05,)\n"
+    "def train_night(*args, **kwargs):\n"
+    "    logging.getLogger('krx_quant.nightly').warning('a warning of the night')\n"
+    "    return nightly.Night(date(2026, 10, 22), '', {'newton': 'newton-1'}, [], {'cox-5d': 'stats'})\n"
+    "nightly.train_night = train_night\n"
+    "sys.exit(cli.main(sys.argv[1:]))\n"
+)
+
+
+@pytest.mark.timeout(60)  # the real command's imports (pyarrow, lightgbm) take a few seconds
+async def test_the_night_s_summary_lines_keep_their_own_level_whatever_the_line_before(
+    fake_loki: FakeLoki, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#580: the summary's lines were the training's "warnings" in Loki, taking the level of the
+    ``alert:`` line (WARNING) they came in, and the printed report the level of whatever line came
+    before it. A real warning stays one; the engine says the night in one line of its own."""
+    caplog.set_level(logging.INFO)  # the engine's own lines, as the engine logs them
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "store").mkdir()
+    for name, value in {
+        "KRX_OBJECT_STORE": str(tmp_path / "store"),
+        "KRX_STATE_DIR": str(tmp_path / "state"),
+        "TELEGRAM_BOT_TOKEN": "123:fake",
+        "TELEGRAM_CHAT_ID": "42",
+        "TELEGRAM_API_URL": "http://127.0.0.1:9",  # nothing listens there
+    }.items():
+        monkeypatch.setenv(name, value)
+    as_the_engine(fake_loki)
+    assert await _train(NIGHT, [sys.executable, "-c", SUMMARY_CHILD, "train"]) is None
+    await ended(fake_loki)
+    lines = of(fake_loki, "training", "night=2026-10-22")
+    texts = [text for _, text in lines]
+    refused = "사전 검증 거부로 학습하지 않음: cox-5d"
+
+    warned = [text for level, text in lines if level == "warning"]
+    assert warned[0].endswith(" WARNING krx_quant.nightly: a warning of the night")
+    assert all(" WARNING krx_quant.notify: telegram send retry in " in text for text in warned[1:])
+    alert = next(i for i, text in enumerate(texts) if " krx_quant.notify: alert: " in text)
+    assert lines[alert][0] == "info" and texts[alert].endswith(
+        " INFO krx_quant.notify: alert: 2026-10-22 밤 학습"
+    )
+    assert lines[alert + 1] == ("info", refused)
+    dropped = next(i for i, text in enumerate(texts) if "telegram send failed: " in text)
+    assert lines[dropped][0] == "error" and texts[dropped].endswith("dropped: [알림] 2026-10-22 밤 학습")
+    assert lines[dropped + 1] == ("error", refused), "the dropped notice's own lines, at its level"
+    report, end = lines[dropped + 2 : -1], lines[-1]
+    assert [level for level, _ in report] == ["info"] * 3, "after the ERROR, at their own level"
+    assert report[0][1].endswith(" INFO krx_quant.nightly: 2026-10-22 밤 학습")
+    assert [text for _, text in report[1:]] == [
+        refused,
+        "promoted: {'newton': 'newton-1'}; the server applies it at 08:00",
+    ]
+    assert end[0] == "info" and " train --day 2026-10-22 ended: exit 0 after " in end[1]
+
+    assert await asyncio.to_thread(loki.stop) == 0  # and the engine's own lines after it
+    engine = [line for labels, line in fake_loki.lines() if labels["process"] == "engine"]
+    [said] = [line for line in engine if "nightly training of" in line]
+    assert " INFO krx_quant.swap: nightly training of 2026-10-22 finished after " in said
+    assert said.endswith(f"({len(lines) - 2} lines of output)"), "all but its start and end lines"
+    assert not [line for line in engine if "밤 학습" in line], "not the training's lines again"
 
 
 TRACEBACK = (

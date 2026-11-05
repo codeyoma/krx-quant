@@ -189,7 +189,7 @@ def _overlap_lines(overlap: dict[str, Any], kind: DailyKind | None = None) -> st
 
 
 def _train(day: date | None) -> int:
-    from krx_quant.nightly import run_training
+    from krx_quant.nightly import log_summary, run_training
 
     try:
         settings = Settings.from_env(require_kis=False)
@@ -199,8 +199,7 @@ def _train(day: date | None) -> int:
     except (FileNotFoundError, ValueError) as e:
         print(e, file=sys.stderr)
         return 1
-    print(night.summary())
-    print(f"promoted: {night.promoted or 'nothing'}; the server applies it at 08:00")
+    log_summary(night)
     return 0
 
 

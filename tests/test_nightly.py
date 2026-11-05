@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import random
 import statistics
@@ -471,8 +472,13 @@ def test_a_refused_algorithm_is_neither_trained_nor_promoted_until_its_code_chan
 # (``pyproject.toml``) on a loaded CI runner (#327).
 @pytest.mark.timeout(120)
 def test_the_train_command_trains_every_registered_algorithm_from_the_store(
-    store_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    store_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("KRX_OBJECT_STORE", str(store_root))
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
@@ -516,8 +522,11 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
     barrier = read(store_root, f"reports/{NIGHT}/{BARRIER_CLIMATE}.json")
     assert (barrier["kind"], barrier["promoted"]) == ("barrier", True), "fitted on the bar rule's answers"
     assert {r["commit"] for r in promotions["reports"]} == {"0123abc"}, "the deploy's, as the engine's (#85)"
-    out = capsys.readouterr().out
-    assert f"{NIGHT} 밤 학습" in out
+    # The command's report of the night: one INFO record of its own (#580), not printed.
+    [report] = [r for r in caplog.records if r.getMessage().endswith("; the server applies it at 08:00")]
+    assert (report.name, report.levelno) == ("krx_quant.nightly", logging.INFO)
+    out = report.getMessage()
+    assert out.startswith(f"{NIGHT} 밤 학습")
     # Mandelbrot's report names the range and counts its answers by source: bars only here.
     mandelbrot = read(store_root, f"reports/{NIGHT}/{MANDELBROT}.json")
     assert mandelbrot["kind"] == "range" and mandelbrot["promoted"] is True

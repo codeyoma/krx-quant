@@ -6,6 +6,10 @@
 # 15 minutes; never twice within an hour, and after two reboots in three hours it gives up
 # (scripts/server_watchdog.py, docs/operations.md "서버가 멈추면 (#385)").
 #
+# Each run also reads the server's CPU burst capacity and writes it on the run's page; below 50% it
+# opens a server-burst issue and tells Telegram, and closes it at 60% (#547, docs/operations.md
+# "CPU 버스트 여유 (#547)"). The policy's GetInstanceMetricData already reads that metric.
+#
 # AWS access is the access key of the IAM user krx-quant-watchdog, in the repository secrets
 # AWS_WATCHDOG_ACCESS_KEY_ID and AWS_WATCHDOG_SECRET_ACCESS_KEY. Its one inline policy reads the
 # server's health and reboots that one instance (deploy/watchdog-policy.json).

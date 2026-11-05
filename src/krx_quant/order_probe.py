@@ -50,7 +50,7 @@ Prices are shown against the order's own price in ticks (``PRICES``), amounts by
 So no key, account, order number, branch, name, phone number or address is printed, and no market
 value: its output went on the public issue (the scheduled job ``probe-kis-orders-403``, which left
 ``JOBS`` in #484: its run of 2026-10-30 did every step but the fill notice, which the trader's
-recorder and the night job ``fill-notice-layout-403`` measure instead; it is run by hand now), masked
+recorder and the night job ``fill-notice-layout-403`` measured instead; it is run by hand now), masked
 again there (``redaction.py``, which also masks the trader's keys, account and HTS ID).
 
 Calls are paced (``Timing.pace``, one a second) but for the burst, and nothing is sent twice but a

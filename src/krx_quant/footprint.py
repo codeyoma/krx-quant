@@ -10,6 +10,11 @@ kernel that refuses), the peak is the process's since it started (``ru_maxrss``)
 ``peak_since`` says ``start`` instead of ``step``. Without either (Windows has no ``resource``
 module), the figures are None. Nothing here raises: a figure that cannot be read is None.
 
+``resident_mb`` and ``server_mb`` are the memory the engine's heartbeat says each minute (#547,
+``heartbeat.py``): a process's resident memory now (``VmRSS`` in ``/proc/<pid>/status``), and the
+server's available memory and swap in use (``/proc/meminfo``, which a container reads as the
+server's).
+
 ``give_back`` hands the memory a replayed day freed back to the system (#383). The allocators
 keep what is freed for later: glibc's ``malloc``, in an arena for each thread that allocated
 (the engine reads the stored predictions in worker threads, more of them each replayed day as
@@ -32,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 PROC = Path("/proc/self")
+PROCS = Path("/proc")  # every process's folder, and the server's ``meminfo``
 PEAK_STEP = "step"  # the peaks are the step's and its phases' own
 PEAK_START = "start"  # the peaks are the process's since it started
 _MB = 1024 * 1024
@@ -153,6 +159,26 @@ class DayUsage:
         return "; ".join(parts) + f"; peaks since {since}"
 
 
+def resident_mb(pid: int | None = None, proc: Path = PROCS) -> float | None:
+    """Process ``pid``'s resident memory now (``VmRSS``), this process's if None; None where it
+    cannot be read (macOS, a process that has ended)."""
+    return Meter(proc / ("self" if pid is None else str(pid))).rss_mb()
+
+
+def server_mb(proc: Path = PROCS) -> tuple[float | None, float | None]:
+    """The server's memory available (``MemAvailable``: what the kernel can hand out without
+    swapping) and its swap in use (``SwapTotal`` less ``SwapFree``), in MB; None where they cannot
+    be read."""
+    sizes = _kbs(proc / "meminfo")
+    available = sizes.get("MemAvailable")
+    total, free = sizes.get("SwapTotal"), sizes.get("SwapFree")
+    swap = None if total is None or free is None else max(total - free, 0)
+    return (
+        None if available is None else round(available / 1024, 1),
+        None if swap is None else round(swap / 1024, 1),
+    )
+
+
 def give_back() -> None:
     """Free what a replayed day left (its engine's reference cycles) and hand the memory freed
     back to the system: Arrow's pool's, then glibc's (``malloc_trim``; another C library has none,
@@ -195,13 +221,19 @@ def _higher(a: float | None, b: float | None) -> float | None:
 
 def _kb(path: Path, field: str) -> int | None:
     """A ``kB`` field of ``/proc/self/status``."""
+    return _kbs(path).get(field)
+
+
+def _kbs(path: Path) -> dict[str, int]:
+    """The ``kB`` fields of ``/proc/self/status`` or ``/proc/meminfo``; none if it cannot be read."""
     try:
         text = path.read_text()
     except OSError:
-        return None
+        return {}
+    found: dict[str, int] = {}
     for line in text.splitlines():
         name, _, rest = line.partition(":")
         parts = rest.split()
-        if name == field and len(parts) == 2 and parts[1] == "kB" and parts[0].isdigit():
-            return int(parts[0])
-    return None
+        if len(parts) == 2 and parts[1] == "kB" and parts[0].isdigit():
+            found.setdefault(name, int(parts[0]))
+    return found

@@ -12,10 +12,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import sqlite3
 import stat
 from collections.abc import AsyncIterator, Callable
-from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -46,7 +44,6 @@ from krx_quant.trader.fill_notices import (
     Frame,
     Limits,
     Pace,
-    notice_days,
     parse_frame,
     read_recorded,
     recording_window,
@@ -374,7 +371,6 @@ def test_rows_older_than_thirty_days_are_deleted(tmp_path: Path) -> None:
     left = [today - timedelta(days=KEEP_DAYS), today]
     assert [r.day for r in kept.records] == left and [o.day for o in kept.odd] == left
     assert [c.day for c in kept.connections] == left and [d.day for d in kept.drops] == left
-    assert notice_days(tmp_path) == tuple(left)
 
 
 def test_a_store_made_with_another_mode_is_made_600(tmp_path: Path) -> None:
@@ -395,7 +391,6 @@ async def test_without_an_hts_id_it_says_so_once_and_records_nothing(
 
     assert [m for m in caplog.messages if "KRX_TRADER_KIS_HTS_ID is not set" in m]
     assert fake.ws_connections == 0 and not (tmp_path / DB_NAME).exists()
-    assert notice_days(tmp_path) == ()
 
 
 async def test_a_store_that_cannot_be_opened_ends_the_recorder_alone(
@@ -433,13 +428,3 @@ async def test_outside_the_window_there_is_no_connection_until_it_opens(
             await subscribed(fake, 1)
         finally:
             await running.stop()
-
-
-def test_the_days_kept_are_read_without_writing(tmp_path: Path) -> None:
-    assert notice_days(tmp_path) == ()
-    store = FillNoticeStore(tmp_path / DB_NAME, Limits(), TEN.date())
-    store.apply([Frame(1, 1, TEN, TR_ID, 1, 3, records=(("a",),))])
-    store.close()
-    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
-        assert db.execute("SELECT count(*) FROM records").fetchone() == (1,)
-    assert notice_days(tmp_path) == (TEN.date(),)

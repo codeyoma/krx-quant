@@ -16,7 +16,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-from krx_quant import kis, loki
+from krx_quant import heartbeat, kis, loki
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, load_models
 from krx_quant.api import create_app
 from krx_quant.archive import NIGHTLY_ARCHIVE, archive
@@ -505,7 +505,8 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                     )
                 )
             if loki.active() is not None:  # the log-absence alert's line, from this loop (#358)
-                background.append(asyncio.create_task(loki.keep_heartbeat()))
+                memory = partial(heartbeat.readings, settings.state_dir, now)  # and the memory (#547)
+                background.append(asyncio.create_task(loki.keep_heartbeat(fields=memory)))
             if settings.disk_min_free_percent > 0:
                 disks = DiskWatch(
                     {"data": settings.data_dir, "state": settings.state_dir},
