@@ -77,9 +77,8 @@ from krx_quant.scheduled import FAILED, JOBS, NEYMAN_VARIANTS, Facts, JobRecord,
 from krx_quant.stats import Scored
 from tests.prevalidation_doubles import AFTER, DAYS
 from tests.replay_doubles import record
-from tests.replay_events import at
+from tests.replay_events import at, book, trade
 from tests.test_neyman import features, made_up, params
-from tests.test_turing_prior import mornings
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 NEYMAN = Neyman()
@@ -331,6 +330,24 @@ def test_a_variant_is_a_candidate_when_its_paired_lift_and_its_lower_bound_by_da
     assert verdict.pairs.value is not None and verdict.pairs.value > 0
     assert verdict.by_day is not None and verdict.by_day.low is not None and verdict.by_day.low < 0
     assert verdict.candidate is False
+
+
+def mornings(day: date, symbol: str, swings: bool) -> list[Event]:
+    """09:00–10:30 of ``symbol``: with ``swings``, its first half hour's mid swings six ticks up and
+    down every two minutes, at its centre at each bar close, so the four minutes from a bar close
+    reach both targets (k = 2 ticks): up. Otherwise, and from 09:30, it stands still: flat. A book
+    with the same sizes and a trade every ten seconds."""
+    events: list[Event] = []
+    start = when = at("09:00:00", day)
+    while when <= at("10:30:00", day):
+        swing = round(6 * math.sin(2 * math.pi * (when - start).total_seconds() / 120))
+        mid = 81_250 + 100 * (swing if swings and when < at("09:30:00", day) else 0)
+        events += [
+            book(when, mid - 50, mid + 50, symbol, bid_qty=100, ask_qty=100, deeper=(50, 50)),
+            trade(when + timedelta(seconds=1), mid + 50, 3, symbol=symbol),
+        ]
+        when += timedelta(seconds=10)
+    return events
 
 
 def short_morning(day: date, symbol: str) -> list[Event]:
