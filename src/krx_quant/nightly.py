@@ -501,8 +501,16 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
         left_out=refused_by(settings.state_dir, statuses, settings.target_version),
     )
     if not finished_before:
-        await send_notice(settings, night.summary())
+        # A report, no warning: its ``alert:`` line and the lines of its text go at INFO (#580).
+        await send_notice(settings, night.summary(), level=logging.INFO)
     return night
+
+
+def log_summary(night: Night) -> None:
+    """``krx-quant train``'s own report of the night: its summary and promotion list, as one INFO
+    record (#580). Printed, its lines had no level of their own: in Loki each took the line's before
+    it (``loki.level_of``), such as a dropped notice's ERROR."""
+    log.info("%s\npromoted: %s; the server applies it at 08:00", night.summary(), night.promoted or "nothing")
 
 
 class _Trainer:

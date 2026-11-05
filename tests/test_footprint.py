@@ -131,3 +131,19 @@ def test_giving_back_the_memory_freed_runs_wherever_the_engine_does() -> None:
     footprint.give_back()  # never raises
     trim = footprint._malloc_trim()
     assert (trim is not None) == (sys.platform.startswith("linux") and platform.libc_ver()[0] == "glibc")
+
+
+def test_the_server_s_memory_and_a_process_s_resident_memory_for_the_heartbeat(tmp_path: Path) -> None:
+    """#547: ``/proc/meminfo`` (a container reads the server's) and ``/proc/<pid>/status``."""
+    proc = tmp_path / "proc"
+    (proc / "77").mkdir(parents=True)
+    (proc / "77" / "status").write_text("Name:\tpython\nVmRSS:\t  307200 kB\n")
+    (proc / "meminfo").write_text(
+        "MemTotal: 1969600 kB\nMemAvailable: 831488 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n"
+    )
+    assert footprint.server_mb(proc) == (812.0, 0.0)
+    assert footprint.resident_mb(77, proc) == 300.0
+    assert footprint.resident_mb(78, proc) is None, "a process that ended"
+    (proc / "meminfo").write_text("MemTotal: 1969600 kB\nMemAvailable: 831488 kB\n")
+    assert footprint.server_mb(proc) == (812.0, None), "no swap lines"
+    assert footprint.server_mb(tmp_path / "none") == (None, None), "macOS: no /proc"

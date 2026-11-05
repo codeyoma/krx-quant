@@ -5,12 +5,18 @@ minute keyed by the minute's start, ``minimum`` and ``maximum`` 0 or 1 and no Sa
 particular order, in the caller's time zone; operations newest first. During the incident the
 instance check read 1 from 00:33 through 12:15 KST and 0 again from 12:16, after the user's reboot
 at 12:13:34; the system check read 0 throughout. Only times and 0/1 values are kept here.
+
+The CPU burst capacity (#547) is shaped as Lightsail answered on 2026-11-05 (probed read-only): a
+point every 5 minutes keyed :00, :05, ..., about a minute and a half after its time, ``minimum`` and
+``maximum`` alike, unit ``Percent``. A night replay on one of the two vCPUs took it down by about
+5.7 points an hour, idle it came back by about 3.6.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -43,6 +49,8 @@ FAIL_UNTIL = datetime(2026, 10, 28, 12, 15, tzinfo=KST)  # the last minute that 
 USER_REBOOT = datetime(2026, 10, 28, 12, 13, 34, 807000, tzinfo=KST)
 # A minute's point appeared 40-85 seconds after the minute ended (probed).
 VISIBLE_AFTER = timedelta(seconds=105)
+# A burst capacity point appeared about a minute and a half after its time (probed, #547).
+BURST_VISIBLE_AFTER = timedelta(seconds=90)
 # The instance's operations before the incident, as probed (types and times only).
 EARLIER_OPERATIONS = [
     ("AttachStaticIp", datetime(2026, 10, 15, 22, 43, 33, tzinfo=KST)),
@@ -59,14 +67,16 @@ def incident_instance(at: datetime) -> int:
     return 1 if FAIL_FROM <= at <= FAIL_UNTIL else 0
 
 
-def metric_answer(name: str, points: Sequence[tuple[datetime, int]], tz: timezone = UTC) -> dict[str, Any]:
+def metric_answer(
+    name: str, points: Sequence[tuple[datetime, float]], tz: timezone = UTC, unit: str = "Count"
+) -> dict[str, Any]:
     """``get-instance-metric-data``'s answer for Minimum and Maximum, in no particular order."""
     data = [
         {
             "maximum": float(v),
             "minimum": float(v),
             "timestamp": at.astimezone(tz).isoformat(),
-            "unit": "Count",
+            "unit": unit,
         }
         for at, v in points
     ]
@@ -125,6 +135,7 @@ class World:
     now: datetime
     instance: Callable[[datetime], int] = incident_instance
     system: Callable[[datetime], int] = lambda at: 0
+    burst: Callable[[datetime], float] = lambda at: 100.0  # the CPU burst capacity, percent (#547)
     state: str = "running"
     operations: list[dict[str, Any]] = field(
         default_factory=lambda: [operation(kind, at) for kind, at in EARLIER_OPERATIONS]
@@ -133,12 +144,15 @@ class World:
     calls: list[list[str]] = field(default_factory=list)
     telegram: list[str] = field(default_factory=list)
     fail: str = ""  # a command that fails
+    hang: str = ""  # a command that runs into ``run_command``'s time limit
 
     def run(self, args: Sequence[str], stdin: str | None = None) -> str:
         args = list(args)
         self.calls.append(args)
         if self.fail and self.fail in " ".join(args):
             raise RuntimeError(f"{self.fail} failed")
+        if self.hang and self.hang in " ".join(args):
+            raise subprocess.TimeoutExpired(args, 120)
         option = dict(zip(args[3::1], args[4::1], strict=False))
         if args[:2] == ["aws", "lightsail"]:
             return json.dumps(self.lightsail(args[2], option))
@@ -151,6 +165,18 @@ class World:
     def lightsail(self, command: str, option: dict[str, str]) -> Any:
         if command == "get-instance-state":
             return {"state": {"code": 16, "name": self.state}}
+        if command == "get-instance-metric-data" and option["--metric-name"] == watchdog.BURST:
+            start = datetime.fromisoformat(option["--start-time"])
+            end = datetime.fromisoformat(option["--end-time"])
+            assert option["--period"] == "60" and option["--unit"] == "Percent"
+            at = start.replace(second=0, microsecond=0)
+            at -= timedelta(minutes=at.minute % 5)
+            points = []
+            while at <= end:
+                if at >= start and at + BURST_VISIBLE_AFTER <= self.now:
+                    points.append((at, round(self.burst(at), 6)))
+                at += timedelta(minutes=5)
+            return metric_answer(watchdog.BURST, points, unit="Percent")
         if command == "get-instance-metric-data":
             start = datetime.fromisoformat(option["--start-time"])
             end = datetime.fromisoformat(option["--end-time"])
@@ -497,3 +523,155 @@ def test_the_workflow_runs_the_script_every_ten_minutes_with_the_watchdog_users_
     check = workflow.split("- name: Is the AWS key set?", 1)[1].split("- uses:", 1)[0]
     assert '[[ -z "$KEY_ID" || -z "$SECRET_KEY" ]]' in check and "deploy/create-watchdog-user.sh" in check
     assert workflow.count("if: steps.key.outputs.set == 'true'") == 3
+
+
+# ----- the CPU burst capacity (#547)
+
+
+def line(start: datetime, value: float, per_hour: float) -> Callable[[datetime], float]:
+    """A burst capacity of ``value`` at ``start``, moving by ``per_hour`` points an hour, within
+    0-100."""
+    return lambda at: min(100.0, max(0.0, value + per_hour * (at - start).total_seconds() / 3600))
+
+
+def replay_night(at: datetime) -> float:
+    """The night of 2026-11-04 as probed: full, then a replay on one vCPU from 21:00 for 4 h 40 min
+    (5.7 points an hour), then idle (3.6 points an hour back)."""
+    start, stop = datetime(2026, 11, 4, 21, 0, tzinfo=KST), datetime(2026, 11, 5, 1, 40, tzinfo=KST)
+    if at <= start:
+        return 100.0
+    if at <= stop:
+        return line(start, 100.0, -5.7)(at)
+    return line(stop, line(start, 100.0, -5.7)(stop), 3.6)(at)
+
+
+def test_a_night_replay_as_on_2026_11_05_is_written_on_the_summary_and_not_alerted(tmp_path: Path) -> None:
+    world = World(datetime(2026, 11, 4, 20, 4, tzinfo=KST), instance=lambda at: 0, burst=replay_night)
+
+    done = runs(world, datetime(2026, 11, 4, 20, 4, tzinfo=KST), datetime(2026, 11, 5, 9, 4, tzinfo=KST))
+
+    assert done == [] and world.telegram == []
+    assert replay_night(datetime(2026, 11, 5, 1, 40, tzinfo=KST)) == pytest.approx(73.4)
+    page = tmp_path / "summary.md"
+    world.now = datetime(2026, 11, 5, 1, 44, tzinfo=KST)
+    assert world.tick({**ENV, "GITHUB_STEP_SUMMARY": str(page)}) == 0
+    assert (
+        "- BurstCapacityPercentage: 73.4% · 가장 새 점 11-05 01:40 · 지난 40분의 가장 낮은 점 73.4%"
+        in page.read_text()
+    )
+    assert "- 버스트 판단: none. CPU 버스트 여유가 73.4%다(11-05 01:40) (열린 이슈: 없음)" in page.read_text()
+
+
+def test_below_half_it_alerts_once_and_closes_the_issue_back_at_sixty() -> None:
+    """Both vCPUs busy from midnight (15 points an hour) until 03:00, then idle."""
+    midnight = datetime(2026, 11, 6, 0, 0, tzinfo=KST)
+    three = midnight + timedelta(hours=3)
+
+    def busy(at: datetime) -> float:
+        return line(midnight, 80.0, -15.0)(at) if at <= three else line(three, 35.0, 3.6)(at)
+
+    world = World(midnight, instance=lambda at: 0, burst=busy)
+
+    done = runs(world, midnight + timedelta(minutes=4), midnight + timedelta(hours=10, minutes=24))
+
+    assert done == [
+        # 02:04 reads the 02:00 point, 50.0%: not below it. 02:14 reads 02:10's, 47.5%.
+        ("02:14", ["gh issue create"]),
+        # Back at 60% from the 10:00 point (60.2%); quiet while it climbs.
+        ("10:04", ["gh issue comment", "gh issue close"]),
+    ]
+    [issue] = world.issues.values()
+    assert issue["labels"] == ["server-burst"] and issue["state"] == "closed"
+    assert (
+        issue["title"]
+        == "서버 watchdog: krx-quant CPU 버스트 여유가 50% 아래다 (47.5%, 2026-11-06 02:14 KST)"
+    )
+    assert issue["body"].startswith(
+        "<!-- krx-quant-watchdog: burst-low -->\n**CPU 버스트 여유가 50% 아래다.**"
+    )
+    assert "- CPU 버스트 여유(`BurstCapacityPercentage`): 47.5% · 가장 새 점 11-06 02:10" in issue["body"]
+    assert issue["comments"][0]["body"].startswith("<!-- krx-quant-watchdog: burst-back -->")
+    assert "CPU 버스트 여유가 60.2%다(11-06 10:00). 60% 이상으로 돌아왔다" in issue["comments"][0]["body"]
+    assert world.telegram == [
+        "[watchdog] krx-quant CPU 버스트 여유가 47.5%로 50% 아래입니다. 바닥나면 CPU가 기준선(20%)으로"
+        f" 느려집니다. https://github.com/{REPO}/issues/401",
+        f"[watchdog] krx-quant CPU 버스트 여유가 60.2%로 돌아왔습니다. https://github.com/{REPO}/issues/401",
+    ]
+    assert world.reboots() == []
+
+
+def test_a_burst_capacity_late_or_missing_neither_alerts_nor_closes() -> None:
+    now = datetime(2026, 11, 6, 2, 14, tzinfo=KST)
+    low = [watchdog.Point(now - timedelta(minutes=m), 40.0, 40.0) for m in (24, 19, 16)]
+    assert watchdog.decide_burst(low, None, now).action == "none"
+    assert watchdog.decide_burst(low, None, now).stale
+    assert watchdog.decide_burst([], None, now).action == "none"
+    back = [watchdog.Point(now - timedelta(minutes=16), 70.0, 70.0)]
+    assert watchdog.decide_burst(back, incident(number=410), now).action == "none"
+    assert (
+        watchdog.decide_burst(
+            low[2:] + [watchdog.Point(now - timedelta(minutes=4), 40.0, 40.0)], None, now
+        ).action
+        == "low"
+    )
+
+
+def test_between_the_two_marks_it_keeps_what_it_did() -> None:
+    now = datetime(2026, 11, 6, 2, 14, tzinfo=KST)
+    at = [watchdog.Point(now - timedelta(minutes=4), 55.0, 55.0)]
+    assert watchdog.decide_burst(at, None, now).action == "none"
+    assert watchdog.decide_burst(at, incident(number=410), now).action == "none"
+    low = [watchdog.Point(now - timedelta(minutes=4), 49.9, 49.9)]
+    assert watchdog.decide_burst(low, incident(number=410), now).action == "none", "already alerted"
+    assert watchdog.decide_burst(low, None, now).action == "low", "its issue was closed by hand: again"
+
+
+@pytest.mark.parametrize(
+    ("fail", "hang"),
+    [
+        (watchdog.BURST, ""),
+        ("", watchdog.BURST),  # Lightsail does not answer: ``run_command``'s time limit
+        ("", "--label server-burst"),  # the burst issue's lookup
+    ],
+)
+def test_the_burst_capacity_unread_holds_no_reboot_and_fails_the_run(fail: str, hang: str) -> None:
+    world = World(datetime(2026, 10, 28, 0, 54, tzinfo=KST), fail=fail, hang=hang)
+    assert world.tick() == 1
+    assert len(world.reboots()) == 1 and len(world.issues) == 1
+    [issue] = world.issues.values()
+    assert issue["labels"] == ["server-watchdog"]
+    # The burst capacity is read after the reboot and its report: a read that hangs delays neither.
+    done = [
+        i
+        for i, c in enumerate(world.calls)
+        if c[:3] in (["aws", "lightsail", "reboot-instance"], ["gh", "issue", "create"])
+    ]
+    burst = [i for i, c in enumerate(world.calls) if watchdog.BURST in c or "server-burst" in c]
+    assert len(done) == 2 and burst and max(done) < min(burst)
+
+
+def test_the_reboot_issue_and_the_burst_issue_are_apart() -> None:
+    """An open burst issue is not the reboots' incident, and the other way round."""
+    world = World(datetime(2026, 11, 6, 2, 14, tzinfo=KST), instance=lambda at: 0, burst=lambda at: 47.5)
+    assert world.tick() == 0
+    world.now += timedelta(minutes=10)
+    assert world.tick() == 0
+    assert [i["labels"] for i in world.issues.values()] == [["server-burst"]]
+    assert world.issues[401]["state"] == "open" and world.issues[401]["comments"] == []
+
+
+def test_without_its_issue_the_burst_alert_is_not_sent_but_tried_again_next_run() -> None:
+    """The open issue keeps the next runs quiet: a Telegram line sent without it would come again
+    every 10 minutes while GitHub refuses."""
+    world = World(
+        datetime(2026, 11, 6, 2, 14, tzinfo=KST),
+        instance=lambda at: 0,
+        burst=lambda at: 47.5,
+        fail="issue create",
+    )
+    assert world.tick() == 1
+    assert world.issues == {} and world.telegram == []
+    world.fail = ""
+    world.now += timedelta(minutes=10)
+    assert world.tick() == 0
+    assert len(world.issues) == 1 and len(world.telegram) == 1

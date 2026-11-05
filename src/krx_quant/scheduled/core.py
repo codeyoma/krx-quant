@@ -45,7 +45,6 @@ from krx_quant.signal_review import fixed_days
 from krx_quant.smt_experiment import days_in_holdout as smt_days_in_holdout
 from krx_quant.state_backup import last_backup
 from krx_quant.swap import NightTraining
-from krx_quant.trader.fill_notices import notice_days
 from krx_quant.trader.mock_check import trader_in_mock
 from krx_quant.training import finished_days, is_recorded
 
@@ -294,9 +293,6 @@ class Facts:
     # ``SIGNAL_REVIEW_FROM`` are in the engine DB (#206, ``signal_review.fixed_days``): the signal
     # review's fixed window waits for them all.
     signal_review_days: int = 0
-    # The days the trader's fill notice recorder kept a frame of (#484, ``fill_notices.notice_days``):
-    # the fill notice layout's night waits for a day after its last run.
-    fill_notice_days: tuple[date, ...] = ()
     # How many days of the SMT experiment's holdout are in (#523, ``smt_experiment.days_in_holdout``, up to
     # ``smt_experiment.DAYS``, read from the day folders and the engine DB read-only): its verdict waits
     # for them all.
@@ -1078,7 +1074,6 @@ async def read_facts(
         signal_review_days=await asyncio.to_thread(
             fixed_days, settings.state_dir / DB_NAME, SIGNAL_REVIEW_FROM, SIGNAL_REVIEW_FIXED_DAYS
         ),
-        fill_notice_days=await asyncio.to_thread(notice_days, settings.state_dir),
         smt_holdout_days=await asyncio.to_thread(smt_days_in_holdout, settings, calendar, clock.now()),
         state_backup=await asyncio.to_thread(last_backup, settings.state_dir),
     )

@@ -295,7 +295,8 @@ def test_a_long_line_is_cut_at_a_space_before_it_waits_and_is_masked() -> None:
 async def test_an_oversized_record_waits_cut_counted_in_bytes_and_within_the_cap(
     fake: FakeLoki, shippers: Callable[..., Shipper]
 ) -> None:
-    # A training's whole output logged as one record (swap._train), in Korean: three bytes a letter.
+    # A long record in Korean (a training's whole output, as swap._train logged it before #580):
+    # three bytes a letter.
     shipper = shippers(fake.url, every=60.0, max_bytes=LINE_BYTES * 5 // 2)  # two cut lines fit
     shipper.put(loki.ENGINE, "info", "학습 " * 200_000)  # 1.4 MB
     status = shipper.status()
@@ -371,6 +372,34 @@ async def test_the_engine_sends_a_heartbeat_to_loki_only(
     assert labels == {"service": "krx-quant", "process": "engine", "level": "info"}
     assert re.search(r" INFO krx_quant\.loki: heartbeat: sent \d+, dropped 0, buffered \d+$", line)
     assert "heartbeat" not in caplog.text, "stdout does not have it"
+
+
+async def test_the_heartbeat_ends_with_its_fields_and_goes_without_them_when_they_fail(
+    fake: FakeLoki, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The engine's memory (#547, ``tests/test_heartbeat.py``) ends the line; a reading that fails
+    is said once, and the heartbeat goes on, the log-absence alert's line."""
+    handler, _ = loki.start(fake.values(), (), loki.ENGINE, "", formatter(), every=0.05)
+    assert handler is not None
+    reads = 0
+
+    async def fields() -> str:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise OSError("cannot read")
+        return "memory available 812 MB"
+
+    beating = asyncio.create_task(loki.keep_heartbeat(0.01, fields=fields))
+    try:
+        await until(lambda: sum("heartbeat: sent" in line for _, line in fake.lines()) >= 3)
+    finally:
+        beating.cancel()
+    first, second, third = [line for _, line in fake.lines() if "heartbeat: sent" in line][:3]
+    assert re.search(r"buffered \d+; memory available 812 MB$", first)
+    assert re.search(r"buffered \d+$", second) and re.search(r"buffered \d+$", third)
+    said = [r for r in caplog.records if "could not read its fields" in r.getMessage()]
+    assert len(said) == 1 and said[0].levelname == "ERROR"
 
 
 # A command, from its start to its end
