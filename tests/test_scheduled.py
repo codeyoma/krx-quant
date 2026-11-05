@@ -1091,10 +1091,11 @@ async def test_the_trader_report_job_runs_the_real_command(
 ) -> None:
     """Against an Engine API whose cost map names one cell, never predicting (#472: tried, and left
     out): the first policy, empty, is the champion, crowned in the night, so the report calls an agent
-    and the issue is labelled."""
+    and the issue is labelled. The practice's trades (none) are folded under it (#560), from the state
+    directory, where the server keeps the state file."""
     PredictionStore(empty_server / "state" / ENGINE_DB).close()
     failing = cost_map([cost_row("barrier", top=predictor("breiman", 0.60, "fail"))])
-    state = JobState.load(empty_server / STATE_FILE)
+    state = JobState.load(empty_server / "state" / STATE_FILE)
     async with (
         EngineApi([failing]).serving() as url,
         fake_github() as hub,
@@ -1125,3 +1126,6 @@ async def test_the_trader_report_job_runs_the_real_command(
     assert "매매할 칸: 없음" in refit and "뺀 칸: barrier breiman (top): few_days" in refit
     assert state.jobs["trader-report"].exit_code == 0
     assert hub.labels.get(417) == {"ready-for-agent"}, "a champion crowned in the night calls an agent"
+    fold = body[body.index("<details><summary>연습 매매별 줄</summary>") :].split("</details>")[0]
+    assert fold.endswith(": 그날 연습 매매가 없다.\n```\n\n"), "the report's night, the command's own clock"
+    assert "쓰지 않아" not in body, "written every night"
