@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from types import ModuleType
 
+import pytest
+
 from krx_quant import cli
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS
 from krx_quant.scheduled import JOBS, Job, daily_prevalidation_jobs, prevalidation_jobs, revision_jobs
@@ -37,7 +39,8 @@ LAST = (
     "neyman-backfill-532",
 )
 # The one-off jobs that ran, posted their results and left the list (#505), each with the command it
-# ran, which stays for a run by hand (as ``probe-kis-orders-403``'s did, #484).
+# ran, which stays for a run by hand (as ``probe-kis-orders-403``'s did, #484), but for those in
+# ``REMOVED``.
 RETIRED = {
     "diagnose-203-187": ("diagnose", "--days", "20"),
     "signal-review-206": ("signal-review", "--days", "20"),
@@ -68,6 +71,16 @@ RETIRED = {
     "poisson-link-439": ("poisson-link",),
     "turing-prior-448": ("turing-prior",),
 }
+# The probes removed with their modules once their questions were settled (#563): the user decided
+# it on 2026-11-05, over #505's "the commands stay". ``probe-candles`` ran by hand only (#111).
+REMOVED = (
+    "probe-candles",
+    "probe-close",
+    "probe-dividends",
+    "probe-expected-open",
+    "probe-member-frames",
+    "probe-net-buys",
+)
 
 
 def _families() -> tuple[ModuleType, ...]:
@@ -105,9 +118,20 @@ def test_every_job_a_family_defines_is_listed_once() -> None:
 
 
 def test_the_retired_jobs_are_gone_and_their_commands_stay() -> None:
-    """Left in, a lost state file would run them again on closed issues; by hand, each still runs."""
+    """Left in, a lost state file would run them again on closed issues; by hand, each still runs,
+    unless its command was removed since."""
     assert len(RETIRED) == 28
     assert sorted(set(RETIRED) & {j.name for j in JOBS}) == []
     parser = cli._parser()
     for name, argv in RETIRED.items():
-        assert callable(parser.parse_args(list(argv)).run), name
+        if argv[0] not in REMOVED:
+            assert callable(parser.parse_args(list(argv)).run), name
+
+
+def test_the_removed_probes_are_no_command_and_no_job_runs_one() -> None:
+    parser = cli._parser()
+    for command in REMOVED:
+        with pytest.raises(SystemExit) as exited:
+            parser.parse_args([command])
+        assert exited.value.code == 2, command
+    assert [j.name for j in JOBS if j.command[0] in REMOVED] == []

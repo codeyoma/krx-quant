@@ -48,6 +48,7 @@ from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.market_calendar import MarketCalendar, calendar_store
+from krx_quant.net_assets import DAILY, DAILY_DATE, ETFETN, PRICE, Query, object_at, one_object, row_list
 from krx_quant.probe_calls import CALL_ERRORS, Calls
 from krx_quant.probe_fields import MISSING, day_of, describe, flags, order_of, present, same
 from krx_quant.products import PRODUCTS, Product, Structure
@@ -67,22 +68,11 @@ UNITS = (("원", 1.0), ("천원", 1e3), ("백만원", 1e6), ("억원", 1e8))
 TOLERANCE = 0.005
 
 
-@dataclass(frozen=True)
-class Query:
-    tr: str
-    path: str
-    title: str  # KIS's name for it
-
-
-ETFETN = "/uapi/etfetn/v1/quotations"
-PRICE = Query("FHPST02400000", f"{ETFETN}/inquire-price", "ETF/ETN 현재가")
-DAILY = Query("FHPST02440200", f"{ETFETN}/nav-comparison-daily-trend", "NAV 비교추이(일)")
 TREND = Query("FHPST02440000", f"{ETFETN}/nav-comparison-trend", "NAV 비교추이(종목)")
 MINUTES = Query("FHPST02440100", f"{ETFETN}/nav-comparison-time-trend", "NAV 비교추이(분)")
 
 PRICE_FIELDS = ("etf_ntas_ttam", "etf_crcl_ntas_ttam", "nav", "prdy_last_nav", "lstn_stcn", "etf_crcl_stcn")
 TREND_FIELDS = ("nav", "prdy_clpr_nav")
-DAILY_DATE = "stck_bsop_date"
 MINUTE_TIME = "bsop_hour"
 # (a)'s total against (c): (the total, the units, the NAV).
 PAIRS = (
@@ -112,31 +102,10 @@ def has_value(value: Any) -> bool:
     return _number(value) is not None
 
 
-def _object(body: Mapping[str, Any], key: str) -> dict[str, Any] | None:
-    value = body.get(key)
-    if isinstance(value, list) and len(value) == 1:  # an object wrapped in a list
-        value = value[0]
-    return value if isinstance(value, dict) else None
-
-
-def one_object(body: Mapping[str, Any]) -> dict[str, Any] | None:
-    """A snapshot's object (``output``, else ``output1``); None if there is none."""
-    return next((o for key in ("output", "output1") if (o := _object(body, key)) is not None), None)
-
-
 def two_objects(body: Mapping[str, Any]) -> dict[str, dict[str, Any]] | None:
     """The objects of an answer of two (``output1``, ``output2``), by key; None if neither."""
-    parts = {key: o for key in ("output1", "output2", "output") if (o := _object(body, key)) is not None}
+    parts = {key: o for key in ("output1", "output2", "output") if (o := object_at(body, key)) is not None}
     return parts or None
-
-
-def row_list(body: Mapping[str, Any]) -> list[dict[str, Any]] | None:
-    """The answer's rows with any value (``output``, ``output2`` or ``output1``); None if no list."""
-    for key in ("output", "output2", "output1"):
-        value = body.get(key)
-        if isinstance(value, list):
-            return [r for r in value if isinstance(r, dict) and any(present(v) for v in r.values())]
-    return None
 
 
 @dataclass
