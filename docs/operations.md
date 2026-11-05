@@ -2891,7 +2891,7 @@ rm -rf ~/krx-quant/state/logs
   heartbeat: sent N, dropped M, buffered K; memory available 812 MB, swap used 0 MB; rss engine 431 MB, trader 182 MB, training 640 MB, job prevalidate-cox 300 MB
   ```
 
-  > **바뀜** (2026-11-05, #PRNUM): `heartbeat: sent N, dropped M, buffered K`뿐이었다 → 뒤에 메모리가 붙는다. 이유: Loki에 메모리 시계열이 없어 2 GB 서버의 여유를 장중 스냅샷(632–1,028 MB 여유)과 학습 최고치로만 짐작했다(#547). 줄을 더하지 않고 있던 줄에 붙였다.
+  > **바뀜** (2026-11-05, #556): `heartbeat: sent N, dropped M, buffered K`뿐이었다 → 뒤에 메모리가 붙는다. 이유: Loki에 메모리 시계열이 없어 2 GB 서버의 여유를 장중 스냅샷(632–1,028 MB 여유)과 학습 최고치로만 짐작했다(#547). 줄을 더하지 않고 있던 줄에 붙였다.
 
   - `available`: 서버의 `MemAvailable`(`/proc/meminfo`. 컨테이너도 서버의 값을 읽는다). 스왑하지 않고 내줄 수 있는 메모리다. `swap used`: 서버의 `SwapTotal` − `SwapFree`.
   - `rss`: 프로세스마다의 상주 메모리(`VmRSS`). `engine`은 엔진 자신이다. `trader`는 trader가 상태(`state/trader.sqlite3`의 `snapshot`)에 적은 제 값이다. trader는 다른 컨테이너라 엔진이 그 프로세스를 볼 수 없어서, trader가 상태를 쓸 때마다(5초마다는) 함께 적는다. 그 뒤로 엔진이 띄워 지금 도는 프로세스가 시작한 순서로 온다: `training`(밤 학습), `job <이름>`(예약 작업). 도는 것이 없으면 `engine`과 `trader`뿐이다.
