@@ -1,0 +1,12 @@
+{
+ "bar_close_s": {
+  "median": 1.026
+ },
+ "longest_gap_s": {
+  "median": 0.0361
+ },
+ "on_loop_s": {
+  "median": 0.0587
+ },
+ "rss_peak_mb": 643.9
+}

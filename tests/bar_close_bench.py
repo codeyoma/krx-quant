@@ -286,6 +286,15 @@ def peak_rss_mb() -> float:
     return round(peak / (2**20 if sys.platform == "darwin" else 2**10), 1)  # bytes on macOS, KiB on Linux
 
 
+def memory_max_mb() -> float | None:
+    """The memory this process's cgroup may use (cgroup v2's ``memory.max``), None without a limit."""
+    with contextlib.suppress(OSError, ValueError, IndexError):
+        group = Path("/proc/self/cgroup").read_text().splitlines()[0].split(":", 2)[2]
+        limit = (Path("/sys/fs/cgroup") / group.lstrip("/") / "memory.max").read_text().strip()
+        return None if limit == "max" else round(int(limit) / 2**20, 1)
+    return None
+
+
 def cpu_model() -> str:
     with contextlib.suppress(OSError):
         for line in Path("/proc/cpuinfo").read_text().splitlines():
@@ -427,6 +436,7 @@ def main() -> None:
                 "cpu_model": cpu_model(),
                 "busy": args.busy,
                 "calibration_s": round(calibration_s, 4),
+                "memory_max_mb": memory_max_mb(),
                 "rss_peak_mb": peak_rss_mb(),
                 **figures,
             }
