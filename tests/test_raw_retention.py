@@ -21,6 +21,7 @@ import pyarrow.parquet as pq
 import pytest
 from moto import mock_aws
 
+from krx_quant import archive as archiving
 from krx_quant.archive import PRUNED, RAW_KEEP_DAYS, Pin, RawMissing, archive, partition_batches, pruned_mark
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
@@ -302,6 +303,54 @@ async def test_a_partition_pruned_while_it_is_read_fails(tmp_path: Path) -> None
     assert first[0].name == "data.parquet"
     with pytest.raises(RawMissing):
         list(reading)  # the part it was to read next is gone, and the mark says why
+
+
+def test_a_partition_pruned_between_the_check_and_the_listing_of_its_files_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = tmp_path / "data"
+    store = LocalObjectStore(tmp_path / "store")
+    record(data, ["m0", "m1"])
+    asyncio.run(archive(data, store))
+    listing = archiving.partition_files
+    ran: list[bool] = []
+
+    def pruned_first(partition: Path) -> list[Path]:
+        if not ran:  # the archive's run lands here: the mark is written, then the file goes
+            ran.append(True)
+            asyncio.run(archive(data, store, today=OLD_ENOUGH))
+        return listing(partition)
+
+    monkeypatch.setattr(archiving, "partition_files", pruned_first)
+
+    with pytest.raises(RawMissing):
+        list(partition_batches(data / PARTITION, ["message"]))
+    assert ran and (data / PARTITION / PRUNED).is_file()
+
+
+async def test_a_partition_pruned_as_its_last_file_is_read_fails_once_it_is_read(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    store = LocalObjectStore(tmp_path / "store")
+    record(data, ["m0", "m1"])
+    await archive(data, store)
+    reading = partition_batches(data / PARTITION, ["message"])
+    first = next(reading)  # the merged file, open
+
+    await archive(data, store, today=OLD_ENOUGH)
+
+    assert messages([first]) == ["m0", "m1"]
+    with pytest.raises(RawMissing):
+        next(reading)
+
+
+async def test_a_merged_file_gone_without_a_mark_fails_rather_than_reading_as_no_rows(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    record(data, ["m0"])
+    await archive(data, LocalObjectStore(tmp_path / "store"))
+    (data / PARTITION / "data.parquet").unlink()  # deleted by hand: its upload record stays
+
+    with pytest.raises(RawMissing, match="upload record"):
+        list(partition_batches(data / PARTITION, ["message"]))
 
 
 async def test_a_pruned_day_is_read_back_from_the_store(store: ObjectStore, tmp_path: Path) -> None:

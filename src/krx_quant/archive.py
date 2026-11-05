@@ -437,11 +437,17 @@ def partition_batches(
     columns read from that file, None to leave the file out. A batch holds ``batch_rows`` rows at
     most. A file merged away while the partition is read, or read as it was written, is left out
     and the rest still counts; the batches it gave before stay given. A partition the archive pruned
-    (#607), before or while it is read, raises ``RawMissing``: its rows are not there to count.
+    (#607), before or while it is read, raises ``RawMissing``: its rows are not there to count. The
+    mark is written before the file goes, so it is looked for before the files are listed, after (a
+    prune between the two leaves the listing empty), on a file gone and once they are read; and a
+    listing found empty while the upload record (``.uploaded.json``) names the merged file raises too.
     """
-    if (partition / PRUNED).is_file():
-        raise _pruned(partition)
-    for path in partition_files(partition):
+    _check_not_pruned(partition)
+    files = partition_files(partition)
+    _check_not_pruned(partition)
+    if not files and _merged_was_stored(partition):
+        raise RawMissing(f"{partition}: its upload record says {MERGED} was stored, and it is not there")
+    for path in files:
         try:
             chosen = columns(path, pq.read_schema(path)) if callable(columns) else columns
             if chosen is None:
@@ -449,9 +455,23 @@ def partition_batches(
             for batch in pq.ParquetFile(path).iter_batches(batch_size=batch_rows, columns=list(chosen)):
                 yield path, batch
         except (FileNotFoundError, pa.ArrowInvalid, OSError):
-            if (partition / PRUNED).is_file():  # its mark is written before the file goes
-                raise _pruned(partition) from None
+            _check_not_pruned(partition)
             continue  # merged away in between, or written as it was read: the rest still counts
+    _check_not_pruned(partition)
+
+
+def _check_not_pruned(partition: Path) -> None:
+    if (partition / PRUNED).is_file():
+        raise _pruned(partition)
+
+
+def _merged_was_stored(partition: Path) -> bool:
+    """Whether the partition's upload record names its merged file, for any store."""
+    try:
+        marks = json.loads((partition / _UPLOADED).read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(marks, dict) and any(isinstance(m, dict) and MERGED in m for m in marks.values())
 
 
 def _held_parts(merged: Path) -> list[str]:
