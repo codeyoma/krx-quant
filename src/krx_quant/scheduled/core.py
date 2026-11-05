@@ -5,7 +5,8 @@ the scheduler that runs the due jobs and posts their results (``Scheduler``). Ho
 package's docstring (``krx_quant.scheduled``); the jobs are in its family modules.
 
 A condition that needs more of what the engine knows adds a field to ``Facts`` and reads it in
-``read_facts`` (or ``session_facts``), here: every job's facts are read in one place, once a night.
+``read_facts`` (or ``session_facts``), here: every job's facts are read in one place, once a night,
+and again after a job that says so (``Job.refreshes``, #599: the queue screen's order).
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from krx_quant.predictions import DB_NAME, Revision
 from krx_quant.prevalidation import LastReport, last_report, revision_report
 from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.process_log import Ran as Ran  # a job's process, once it ended
+from krx_quant.queue_screen import queue_order
 from krx_quant.redaction import redact
 from krx_quant.signal_review import fixed_days
 from krx_quant.smt_experiment import days_in_holdout as smt_days_in_holdout
@@ -300,6 +302,9 @@ class Facts:
     # The day of the last backup of the server's state this server made (#576, ``state_backup.MARK``):
     # the restore drill waits for one.
     state_backup: date | None = None
+    # The order of the bar-close pre-validations the latest queue screen set (#599,
+    # ``queue_screen.queue_order``): none without a screen of the last few nights.
+    queue: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -348,10 +353,28 @@ class Job:
     # the night had its turn, in the list's order; one due then runs if its time limit still ends by
     # 05:30. None: asked once a night, in its turn.
     quiet: Callable[[Night], bool] | None = None
+    # Whether the night's facts are read again once it ran (#599: the queue screen sets the order the
+    # pre-validations after it go by). False: the later jobs ask the facts read before it.
+    refreshes: bool = False
+    # The algorithm whose first pre-validation it runs (#599): the quiet night's turn asks those jobs,
+    # among their places in the list, in the queue screen's order (``Facts.queue``). None: in the list's.
+    queued: str | None = None
 
 
 # A job that gave way on this many nights since it last ran gives way no more: it runs first (#376).
 GIVE_WAY_NIGHTS = 2
+
+
+def in_queue(jobs: Sequence[Job], queue: Sequence[str]) -> list[Job]:
+    """``jobs`` in their order, but those queued (``Job.queued``, #599) in ``queue``'s order among their
+    own places; one ``queue`` does not name after those it does, in its place's order."""
+    places = [i for i, job in enumerate(jobs) if job.queued is not None]
+    rank = {name: i for i, name in enumerate(queue)}
+    queued = sorted((jobs[i] for i in places), key=lambda job: rank.get(job.queued or "", len(rank)))
+    out = list(jobs)
+    for i, job in zip(places, queued, strict=True):
+        out[i] = job
+    return out
 
 
 class Runner(Protocol):
@@ -419,7 +442,8 @@ class Scheduler:
     night if it can still start by its own last start, else the next night. Once a night; and once it
     gave way on ``GIVE_WAY_NIGHTS`` nights since it last ran (while it stayed due) it runs first.
     Once every job had its turn, those with a condition for a quiet night (``Job.quiet``, #546: a
-    second pre-validation) are asked it, and one due runs if it can still end by 05:30.
+    second pre-validation) are asked it, and one due runs if it can still end by 05:30. The facts are
+    read when the first job's turn comes, and again after a job that says so (``Job.refreshes``, #599).
 
     The session jobs (``Job.session``, #403) run apart from the nights: on each trading day, in the
     list's order, each from its time if it can still end by ``SESSION_UNTIL``, asked its condition
@@ -593,19 +617,22 @@ class Scheduler:
                 queue.insert(at, job)
             else:
                 await self._run(job, day)
+                if job.refreshes:
+                    facts = None  # read again for the next job (#599)
         await self._quiet_turn(day)
 
     async def _quiet_turn(self, day: date) -> None:
         """The night of ``day`` once every job had its turn (#546): the jobs with a condition for a
-        quiet night (``Job.quiet``) are asked it, in the list's order, on the facts read again (a run
-        tonight may have changed them); one due runs if its time limit still ends by 05:30. One that
-        would not is only logged: it had its turn, and waits for the next night's."""
+        quiet night (``Job.quiet``) are asked it, in the list's order (those queued in the queue
+        screen's, #599: ``in_queue``), on the facts read again (a run tonight may have changed them);
+        one due runs if its time limit still ends by 05:30. One that would not is only logged: it had
+        its turn, and waits for the next night's."""
         asked = [j for j in self._night_jobs if j.quiet is not None and not self._cut(j, day)]
         if not asked:
             return
         _, end = window(day, self._at)
         facts = await self._read_facts()
-        for job in asked:
+        for job in in_queue(asked, facts.queue):
             if not self._due(job, day, facts, quiet=True):
                 continue
             latest = end - job.timeout
@@ -1076,6 +1103,7 @@ async def read_facts(
         ),
         smt_holdout_days=await asyncio.to_thread(smt_days_in_holdout, settings, calendar, clock.now()),
         state_backup=await asyncio.to_thread(last_backup, settings.state_dir),
+        queue=await asyncio.to_thread(queue_order, settings.state_dir, clock.now()),
     )
 
 

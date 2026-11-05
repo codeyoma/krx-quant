@@ -33,8 +33,9 @@ FIRST = (
     "restore-drill-577",
 )
 # Between the daily kinds' pre-validations and the bar-close ones: the simulations, then the measure of
-# where making a day's samples spends its time (#512), which gives way to a pre-validation as they do.
-SIMULATIONS = ("simulate-daily-298", "simulate-bar-close-298", "sample-profile-512")
+# where making a day's samples spends its time (#512), which gives way to a pre-validation as they do,
+# then the queue screen (#599), which orders the bar-close ones and gives way to them too.
+SIMULATIONS = ("simulate-daily-298", "simulate-bar-close-298", "sample-profile-512", "screen-queue-599")
 # After the bar-close pre-validations: the experiments.
 LAST = (
     "neyman-variants-283",
