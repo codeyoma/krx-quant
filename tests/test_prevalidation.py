@@ -195,9 +195,10 @@ async def test_each_day_is_predicted_by_a_model_trained_only_on_the_days_before_
 
 
 async def listed(engine: PredictionEngine) -> dict[str, str]:
+    """Each registered algorithm's state in the API: its status if it runs, ``waiting`` if not (#561)."""
     async with api(engine) as client:
         body = await get_json(client, "/v1/algorithms")
-    return {a["name"]: a["status"]["status"] for a in body["algorithms"]}
+    return {a["name"]: a["state"] for a in body["algorithms"]}
 
 
 async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probation(
@@ -225,7 +226,7 @@ async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probat
         notify=outbox,
     )
 
-    assert await listed(engine) == {"alpha": "probation"}
+    assert await listed(engine) == {"alpha": "probation", "contrarian": "waiting"}
     assert engine.waiting() == ["contrarian"]
     assert not engine.store.status_counts("contrarian"), "not run"
 
@@ -565,8 +566,21 @@ async def test_the_algorithms_registered_before_and_those_enrolled_run_without_a
         enrolled_db, events, until=at("09:05:00"), algorithms=[ALPHA, Contrarian("contrarian")], admits=gate
     )
 
-    assert set(await listed(first_five)) == {"newton", "gauss", "granger", "markov", "turing"}
-    assert await listed(enrolled) == {"contrarian": "probation"}, "alpha is new: it waits"
+    states = await listed(first_five)
+    assert {name for name, state in states.items() if state != "waiting"} == {
+        "newton",
+        "gauss",
+        "granger",
+        "markov",
+        "turing",
+    }
+    enrolled_states = await listed(enrolled)
+    assert (enrolled_states["alpha"], enrolled_states["contrarian"]) == ("waiting", "probation"), (
+        "alpha is new: it waits"
+    )
+    assert {s for n, s in enrolled_states.items() if n not in {"alpha", "contrarian"}} == {"waiting"}, (
+        "the other kinds' new ones too"
+    )
 
 
 def test_the_command_reports_and_never_touches_the_live_engine_s_record(

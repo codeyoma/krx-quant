@@ -605,6 +605,8 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 
   > **바뀜** (2026-10-24, #369): ""사전 검증 대기"로 남고" → 거부로 한 번 알린다. 이유: 엔진이 거래일마다 다시 시작해(06:00 배포나 07:20 재시작) 거부된 채로 둔 `cox-5d`(#310)의 대기 알림이 날마다 왔다. 같은 코드로는 사전 검증이 다시 돌지 않으니 기다리는 것이 아니다.
 - **화면(fork, codeyoma/FinceptTerminal#104).** 예측 종류 버튼 "5거래일 시가→종가"(`/v1/kinds`의 `daily.sessions` 5)가 시가→종가와 같은 패널·순위표·상세 통계 창·일 보기를 쓴다. 다른 것: 예측마다 창 끝(정답 전에는 `target_at`의 날 "(예정)", 정답이 나오면 `path.end_day`)과 "채점 대기 (… 20:35부터, 최대 4거래일)", 정답의 다섯 세션 종가(`path.closes`, 패널 제목의 툴팁과 일 보기 호버), `ex_dividend`가 `true`인 창의 "배당락 낀 창", 순위표 표본 칸의 "45 (독립 3)"(`overlap_sessions`, `independent_days`)과 구간마다 "겹침 보정(Driscoll–Kraay)", 판정일(`daily.probation_days` 60·120·180). `GET /v1/algorithms`에 이 종류의 알고리즘이 없으면 패널 제목에 "기준 예측만"이 붙는다. 엔진은 거부된 `cox-5d`를 목록에서 뺄 뿐 이유를 API로 주지 않아 화면도 이유를 적지 않는다. 자세한 것은 `fincept/custom/README.md`의 "5거래일 시가→종가 패널"에 있다.
+
+  > **바뀜** (2026-11-06, #PRNUM): 엔진의 `GET /v1/algorithms`가 거부된 `cox-5d`도 `state` `refused`로, 거부한 리포트의 날짜·떨어진 검사·코드·정답 버전과 함께 보인다(`prevalidation`, [engine-api.md](engine-api.md#get-v1algorithms)). 화면이 이것을 보이는 일은 #562다. 이유: 거부를 텔레그램으로만 알았다(#561).
 - 세부와 경로·통계의 형식은 [engine-api.md](engine-api.md#5거래일-시가종가-310)에 있다.
 
 ### SMT 다이버전스 (#519, #520)
