@@ -383,9 +383,13 @@ class Account:
 
     # Orders: each a POST, sent once.
 
-    async def buy(self, symbol: str, quantity: int, price: int) -> Answer:
-        """A limit buy of ``quantity`` shares at ``price`` on KRX."""
-        return await self._order(BUY, symbol, quantity, price)
+    async def buy(
+        self, symbol: str, quantity: int, price: int, *, ready: Callable[[], None] | None = None
+    ) -> Answer:
+        """A limit buy of ``quantity`` shares at ``price`` on KRX. ``ready`` is called right before it
+        is sent, after the token and the limiter: what it raises keeps the order back, nothing sent
+        (the broker's last check, #543)."""
+        return await self._order(BUY, symbol, quantity, price, ready=ready)
 
     async def sell(self, symbol: str, quantity: int, price: int) -> Answer:
         """A limit sell (일반매도) of ``quantity`` shares at ``price`` on KRX."""
@@ -407,7 +411,14 @@ class Account:
         return await self.post(CANCEL.of(self.mock), CANCEL_PATH, body)
 
     async def _order(
-        self, tr: Tr, symbol: str, quantity: int, price: int, extra: Mapping[str, str] | None = None
+        self,
+        tr: Tr,
+        symbol: str,
+        quantity: int,
+        price: int,
+        extra: Mapping[str, str] | None = None,
+        *,
+        ready: Callable[[], None] | None = None,
     ) -> Answer:
         body = {
             **self._account.fields,
@@ -418,7 +429,7 @@ class Account:
             "EXCG_ID_DVSN_CD": KRX,
             **(extra or {}),
         }
-        return await self.post(tr.of(self.mock), ORDER_PATH, body)
+        return await self.post(tr.of(self.mock), ORDER_PATH, body, ready=ready)
 
     # Inquiries: GETs, one page each (the caller asks the next with the answer's context).
 
@@ -517,8 +528,10 @@ class Account:
     async def get(self, tr_id: str, path: str, params: Mapping[str, str], tr_cont: str = "") -> Answer:
         return await self._send("GET", tr_id, path, params=dict(params), tr_cont=tr_cont)
 
-    async def post(self, tr_id: str, path: str, body: Mapping[str, str]) -> Answer:
-        return await self._send("POST", tr_id, path, body=dict(body))
+    async def post(
+        self, tr_id: str, path: str, body: Mapping[str, str], *, ready: Callable[[], None] | None = None
+    ) -> Answer:
+        return await self._send("POST", tr_id, path, body=dict(body), ready=ready)
 
     async def _send(
         self,
@@ -529,11 +542,14 @@ class Account:
         params: dict[str, str] | None = None,
         body: dict[str, str] | None = None,
         tr_cont: str = "",
+        ready: Callable[[], None] | None = None,
     ) -> Answer:
         headers = {**self._headers, "authorization": f"Bearer {await self._token()}", "tr_id": tr_id}
         if tr_cont:
             headers["tr_cont"] = tr_cont
         await self._limiter.acquire()
+        if ready is not None:  # after every wait, right before it leaves: it may keep the call back
+            ready()
         began = time.monotonic()
         try:
             async with self._session.request(
@@ -951,14 +967,17 @@ class Broker:
         self._unsure = [buy for buy in self._unsure if buy.day >= day]
         return [buy for buy in [*self._open.values(), *self._unsure] if buy.day == day]
 
-    def _check(self, symbol: str, quantity: int, price: int) -> _Buy:
-        """The buy of ``quantity`` shares of ``symbol`` at ``price`` if it may be sent; ``Withheld``
-        (and a WARNING) if not."""
+    def _check(self, symbol: str, quantity: int, price: int, own: _Buy | None = None) -> _Buy:
+        """The buy of ``quantity`` shares of ``symbol`` at ``price`` if it may be sent now; ``Withheld``
+        (and a WARNING) if not. ``own`` is its own count among the buys that may still fill, from its
+        first check on: not counted again."""
         now = self._now()
         buy = _Buy(symbol, quantity, price, now.astimezone(KST).date())
         if self.limits is None or self._cap is None:
             return buy
         open_buys = self._open_buys(buy.day)
+        if own is not None and own in open_buys:
+            open_buys.remove(own)
         why = self._why_withheld(self.limits, self._cap, buy, open_buys, now)
         if why is None:
             return buy
@@ -1026,13 +1045,22 @@ class Broker:
 
     async def buy(self, symbol: str, quantity: int, price: int) -> Sent:
         """A limit buy of ``quantity`` shares at ``price`` on KRX, once the last check lets it go
-        (#543, the class's docstring): ``Withheld`` if it does not, nothing sent. Counted as a buy that
-        may still fill from before it is sent: a buy checked meanwhile counts it."""
+        (#543, the class's docstring): ``Withheld`` if it does not, nothing sent. Checked before
+        anything is asked (the token, a slot of the limiter), and again right before each time it is
+        sent, after those waits and before each send of the retries: the quote may have aged or moved
+        and the cap narrowed meanwhile. Counted as a buy that may still fill from its first check: a
+        buy checked meanwhile counts it."""
         buy = self._check(symbol, quantity, price)
         self._unsure.append(buy)
+
+        def ready() -> None:
+            self._check(symbol, quantity, price, own=buy)
+
         try:
-            sent = sent_of(await self._call("buy", partial(self.account.buy, symbol, quantity, price)))
-        except NoToken:  # nothing sent
+            sent = sent_of(
+                await self._call("buy", partial(self.account.buy, symbol, quantity, price, ready=ready))
+            )
+        except (NoToken, Withheld):  # nothing sent
             self._forget(buy)
             raise
         if sent.outcome != UNKNOWN:

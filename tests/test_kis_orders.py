@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 
 from krx_quant import kis, kis_orders, ratelimit
+from krx_quant.auth import TokenManager
 from krx_quant.config import DEFAULT_REST_URL, DEFAULT_WS_URL, Settings, SettingsError
 from krx_quant.fake_kis import NOTHING_TO_CANCEL, FakeAccount, FakeKis
 from krx_quant.feeds.base import KST
@@ -50,6 +51,7 @@ from krx_quant.kis_orders import (
 )
 from krx_quant.ratelimit import RateLimiter
 from tests.test_ratelimit import Monotonic
+from tests.waiting import until
 
 DAY = date(2026, 10, 30)
 NOW = datetime.combine(DAY, time(10, 0), KST)
@@ -789,6 +791,75 @@ async def test_two_buys_at_once_count_each_other(trader: tuple[FakeKis, FakeAcco
     assert isinstance(first, kis_orders.Sent) and first.accepted
     assert isinstance(second, Withheld)
     assert len(posted(fake, kis_orders.BUY)) == 1
+
+
+def gate_tokens(monkeypatch: pytest.MonkeyPatch, held: set[int]) -> tuple[asyncio.Event, list[int]]:
+    """The trader's token held back on its calls numbered in ``held`` (from 1), until the gate opens:
+    a token renewed, KIS's once-a-minute issuance waited out. The calls asked so far."""
+    gate, asked = asyncio.Event(), list[int]()
+    real = TokenManager.get
+
+    async def gated(self: TokenManager) -> str:
+        asked.append(len(asked) + 1)
+        if asked[-1] in held:
+            await gate.wait()
+        return await real(self)
+
+    monkeypatch.setattr(TokenManager, "get", gated)
+    return gate, asked
+
+
+WHY_AGAIN = {
+    "the quote ages": "is 11s old",
+    "the quote moves": "below the latest best bid",
+    "the cap narrows": "122% of the cap",
+}
+
+
+@pytest.mark.parametrize("meanwhile", list(WHY_AGAIN))
+async def test_a_buy_is_checked_again_after_waiting_for_its_token(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, meanwhile: str
+) -> None:
+    """The buy passed its first check, then waited for its token: checked again right before it is
+    sent, it is withheld once the quote is eleven seconds old, has moved 5% away, or the cap is the
+    first period's. Nothing is sent."""
+    fake, account = trader
+    gate, asked = gate_tokens(monkeypatch, {1})
+    clock = [NOW]
+    async with broker_of(fake, settings_of(fake, tmp_path), lambda: clock[0], LIMITS) as broker:
+        quote_of(broker, account)
+        buying = asyncio.create_task(broker.buy(SYMBOL, 5, account.ask))
+        await until(lambda: asked == [1])
+        if meanwhile == "the quote ages":
+            clock[0] = NOW + timedelta(seconds=11)
+        elif meanwhile == "the quote moves":
+            broker.quoted(SYMBOL, 64_100, 64_200, NOW + timedelta(seconds=1))
+        else:
+            broker.set_cap(250_000)
+        gate.set()
+        with pytest.raises(Withheld, match=WHY_AGAIN[meanwhile]):
+            await buying
+    assert account.placed(kis_orders.SIDE_BUY) == [] and posted(fake, kis_orders.BUY) == []
+
+
+async def test_a_buy_sent_again_after_a_refusal_for_the_limit_is_checked_again(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KIS's gateway refused the buy for its per-second limit (``BUSY``, not taken); before it goes
+    again the quote moved 5% away: the second send is withheld."""
+    fake, account = trader
+    fake.busy[kis_orders.BUY.mock] = 1
+    gate, asked = gate_tokens(monkeypatch, {2})
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        quote_of(broker, account)
+        buying = asyncio.create_task(broker.buy(SYMBOL, 5, account.ask))
+        await until(lambda: asked == [1, 2])
+        broker.quoted(SYMBOL, 57_800, 57_900, NOW + timedelta(seconds=1))
+        gate.set()
+        with pytest.raises(Withheld, match="above the latest best ask"):
+            await buying
+    assert account.placed(kis_orders.SIDE_BUY) == []
+    assert len(posted(fake, kis_orders.BUY)) == 1, "the refused send alone"
 
 
 async def test_a_buy_of_a_symbol_the_trader_does_not_buy_is_withheld(
