@@ -58,11 +58,11 @@
 
 명령은 자기가 돌 때 쓰는 모듈만 불러온다(#578, `tests/test_cli_imports.py`). 묶음 모듈은 맨 위에서 모든 명령이 어차피 불러오는 것(설정, `KST`)만 불러오고, 처리 함수가 나머지를 돌 때 불러온다. 인자의 기본값이 그런 모듈에서 오는 명령(`prevalidate --days`의 `prevalidation.PREVALIDATION_DAYS` 같은)은 인자를 parser를 만들 때가 아니라 그 명령을 읽거나 도움말을 낼 때 더한다(`cli/core.py`의 `Command`, `arguments`). Loki로 보내는 줄을 가릴 비밀값은 `config.lenient_settings`로 읽는다(전에는 `doctor.py`의 `doctor_settings`라서 모든 명령이 doctor가 읽는 모듈을 불러왔다). macOS의 저장소 venv에서 잰 최대 RSS는 `krx-quant trade` 시작 139 → 106 MB(`trader.run`만 불러온 것과 같다), `notify` 140 → 75 MB, `krx-quant --help` 140 → 75 MB다. LightGBM과 SciPy는 그것을 쓰는 학습·실험 명령만 불러온다.
 
-> **바뀜** (2026-11-06, #PRNUM): 명령은 모두 `cli.py` 한 파일에 있었고, 이 파일이 실행될 때 모든 명령의 모듈을 한꺼번에 불러왔다 → 명령은 `cli/` 패키지에 묶음마다 모듈 하나로 나뉘고, 명령마다 돌 때 쓰는 모듈만 불러온다. `krx-quant --help`가 명령을 보여 주는 순서는 묶음 순서가 됐다. 명령의 이름, 인자, 도움말, 종료 코드는 그대로다. 이유: `krx-quant trade`가 trader가 쓰지 않는 LightGBM과 SciPy까지 메모리에 올렸고(서버 메모리 2GB), `cli.py`는 커밋 408개 중 83개가 고친 파일이라 여러 PR이 동시에 고치다 자주 충돌했다(#578).
+> **바뀜** (2026-11-06, #586): 명령은 모두 `cli.py` 한 파일에 있었고, 이 파일이 실행될 때 모든 명령의 모듈을 한꺼번에 불러왔다 → 명령은 `cli/` 패키지에 묶음마다 모듈 하나로 나뉘고, 명령마다 돌 때 쓰는 모듈만 불러온다. `krx-quant --help`가 명령을 보여 주는 순서는 묶음 순서가 됐다. 명령의 이름, 인자, 도움말, 종료 코드는 그대로다. 이유: `krx-quant trade`가 trader가 쓰지 않는 LightGBM과 SciPy까지 메모리에 올렸고(서버 메모리 2GB), `cli.py`는 커밋 408개 중 83개가 고친 파일이라 여러 PR이 동시에 고치다 자주 충돌했다(#578).
 
 실전 진입점(수집기 `collector.py`, 엔진 `engine.py`, trader `trader/run.py`)은 프로브 모듈(`*_probe.py`)을 하나도 가져오지 않는다(#552, `tests/test_probe_imports.py`). 그래야 결론이 난 프로브를 고치거나 지워도 장 마감 흐름과 trader가 깨지지 않는다. 실전 코드와 프로브가 같이 쓰는 것은 실전 모듈에 두고 프로브가 거기서 가져온다: 녹화한 결측 구간 읽기(`read_gaps`)는 `health.py`에, KIS ETF/ETN 현재가와 NAV 비교추이(일)의 조회와 답 읽기(`PRICE`, `DAILY`, `one_object`, `row_list`)는 `net_assets.py`에, KRX ETF 일별매매정보의 주소, 필드, 값 읽기(`PATH`, `TOTAL`, `number`)는 `krx_net_assets.py`에 있다. 명령의 진입점 `cli`도 프로브를 가져오지 않는다: 프로브는 그 명령이 돌 때만 불러온다(#578). 프로브의 도우미 `probe_fields.py`(필드의 모양, 값 있음, 날 읽기)는 프로브가 아니고 실전 코드도 쓴다. 밤마다 도는 기록 품질 리포트(`recording_quality.py`, #570)는 프로브가 아니지만 `gaps_probe.py`와 `night_probe.py`의 읽기를 다시 쓴다. 그래서 `recording-quality` 명령만 돌 때 그 모듈을 가져오고, 예약 작업(`scheduled/probes.py`)은 명령 이름과 라벨 규칙(`trader.report.calls_agent`)만 둔다. 수집기는 그 모듈을 불러오지 않는다.
 
-> **바뀜** (2026-11-06, #PRNUM): "`cli.py`는 명령을 위해 모든 프로브를 가져오므로 검사하지 않는다" → `cli`도 실전 진입점과 같이 검사한다. 이유: 명령이 돌 때만 자기 모듈을 불러오게 됐다(#578).
+> **바뀜** (2026-11-06, #586): "`cli.py`는 명령을 위해 모든 프로브를 가져오므로 검사하지 않는다" → `cli`도 실전 진입점과 같이 검사한다. 이유: 명령이 돌 때만 자기 모듈을 불러오게 됐다(#578).
 
 | 모듈 | 하는 일 |
 |---|---|
