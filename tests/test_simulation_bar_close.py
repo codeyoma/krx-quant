@@ -169,7 +169,8 @@ def simulated(tmp_path_factory: pytest.TempPathFactory) -> Simulated:
     """Ten recorded days simulated once for the module (#590), for the tests that only read what the
     run left: on probation, contrarian, copycat (which calls as contrarian does, on its own feature)
     and the drift's frequency (a kind's algorithm, its kind beside the registered ones); alpha
-    registered on none. A test's own simulation of these days took 7-9 s on a laptop.
+    registered on none. The three tests that read it each simulated their own before, 7-9 s apiece
+    on a laptop; this one takes about 12 s.
 
     It runs to its end on an event loop of its own (``asyncio.run``) and leaves only data and files,
     so each test reads them from its own loop. #511's shared demo is a running engine instead, and its
