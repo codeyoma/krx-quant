@@ -1298,7 +1298,7 @@ docker compose run --rm engine probe-inverse-book                  # 장이 끝�
 docker compose run --rm engine probe-inverse-book --day 2026-11-09 # 그날
 ```
 
-- 읽는 것: 그날의 raw `H0STASP0`(모든 키 파티션), raw `_system`(구독 응답), `gaps`. 열은 수집기가 쓰는 스키마의 이름으로 읽는다. 쓰는 것은 7절의 임시 폴더뿐이고(끝나면 지운다) KIS API를 부르지 않는다. 엔진이 도는 중에 돌려도 된다.
+- 읽는 것: 그날의 raw `H0STASP0`(모든 키 파티션), raw `_system`(구독 응답), `gaps`. 열은 수집기가 쓰는 스키마의 이름으로 읽는다. archive가 서버에서 정리한 raw 날(#607, 30일 전)은 Object Store에서 받아 읽는다(`raw_days.RawDays`, 다른 probe와 같다). 쓰는 것은 7절의 임시 폴더뿐이고(끝나면 지운다) KIS API를 부르지 않는다. 엔진이 도는 중에 돌려도 된다.
 - 기본 날: 그날 장이 끝났으면 그날(자정 뒤 05:30까지는 전날 저녁의 날), 아니면 앞 거래일이다.
 - 절:
   1. 구독 응답: `H0STASP0`의 키별 응답(성공·거절 메시지, 횟수, 첫·마지막 시각)과 그날 세션 한도(`MAX SUBSCRIBE OVER`)로 거절된 모든 구독. 41번째 슬롯이 받아들여졌는지, 다른 피드를 밀어냈는지 본다.

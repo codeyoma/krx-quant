@@ -28,6 +28,7 @@ from krx_quant.inverse_book_probe import (
     verdict,
 )
 from krx_quant.market_calendar import MarketCalendar
+from krx_quant.raw_days import RawDays
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night
 from krx_quant.scheduled.probes import INVERSE_BOOK, INVERSE_BOOK_ISSUE
@@ -227,7 +228,7 @@ def test_the_burden_counts_what_recording_adds_to_the_read_only_pass(tmp_path: P
     over = 2.0 + RSS_BOUND_MB + 1
     # One raw pass of the three grew far more than the others: each figure is the median.
     resident = Resident((2.0, 2.5, over), (2.0, 60.0, over), (2.0, 2.5, over))
-    burden = measure_burden(settings.data_dir, DAY, 3, 30.0, resident)
+    burden = measure_burden(RawDays(settings.data_dir), DAY, 3, 30.0, resident)
 
     assert REPEATS == 3 and (burden.read.rss_mb, burden.raw.rss_mb, burden.all.rss_mb) == (2.0, 2.5, over)
     assert burden.without_reading_mb(burden.raw) == 0.5

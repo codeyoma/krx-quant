@@ -34,9 +34,10 @@ For a trading day it prints:
    within (``verdict``).
 
 It prints counts, rates, seconds, ticks, field names and codes: no price, quantity or other market
-value, so its output can go on the public issue. It reads files only, beside the running collector,
-and writes the burden's records to a temporary directory it removes. Its exit code is 0, or 3 when no
-frame of the book came that day.
+value, so its output can go on the public issue. It reads files only, beside the running collector (a
+raw day the archive pruned on the server, #607, is read back from the Object Store:
+``raw_days.RawDays``), and writes the burden's records to a temporary directory it removes. Its exit
+code is 0, or 3 when no frame of the book came that day.
 """
 
 from __future__ import annotations
@@ -65,7 +66,9 @@ from krx_quant.feeds.stock import KRX_BOOK_OLD_WIDTH
 from krx_quant.footprint import PEAK_STEP, Meter, give_back
 from krx_quant.health import Unread, read_gaps
 from krx_quant.market_calendar import MarketCalendar, Phase, Session, calendar_store
+from krx_quant.object_store import open_store
 from krx_quant.products import INVERSE_PRODUCTS
+from krx_quant.raw_days import RawDays
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.trader import SYMBOL as TRADED
 
@@ -120,9 +123,9 @@ class Ack:
     message: str
 
 
-def acknowledgements(data_dir: Path, day: date) -> list[Ack]:
+def acknowledgements(raw: RawDays, day: date) -> list[Ack]:
     """KIS's answers to the registrations recorded on ``day``, in order (the heartbeats left out)."""
-    root = data_dir / "raw" / f"date={day.isoformat()}" / "feed=_system"
+    root = raw.feed(day, "_system")
     acks: list[Ack] = []
     for partition in sorted(root.glob("symbol=*")):
         if partition.name == "symbol=_":  # PINGPONG
@@ -147,8 +150,9 @@ def _rows(partition: Path) -> Iterator[tuple[datetime, str]]:
         yield from zip(rows["received_at"], rows["message"], strict=True)
 
 
-def _partitions(data_dir: Path, day: date) -> list[Path]:
-    return sorted((data_dir / "raw" / f"date={day.isoformat()}" / f"feed={KRX_BOOK.tr_id}").glob("symbol=*"))
+def _partitions(raw: RawDays, day: date) -> list[Path]:
+    """``day``'s book partitions, one read back from the Object Store if the archive pruned it (#607)."""
+    return sorted(raw.feed(day, KRX_BOOK.tr_id).glob("symbol=*"))
 
 
 @dataclass
@@ -315,9 +319,9 @@ def _int(value: str) -> int:
         return 0
 
 
-def read_book(data_dir: Path, day: date, session: Session | None) -> Book:
+def read_book(raw: RawDays, day: date, session: Session | None) -> Book:
     book = Book(day, session)
-    for partition in _partitions(data_dir, day):
+    for partition in _partitions(raw, day):
         key = partition.name.removeprefix("symbol=")
         for at, text in _rows(partition):
             book.frame(at, text, key)
@@ -708,7 +712,7 @@ _MODES = ("read", "raw", "all")
 
 
 def measure_burden(
-    data_dir: Path, day: date, flush_rows: int, flush_seconds: float, meter: Meter | None = None
+    raw: RawDays, day: date, flush_rows: int, flush_seconds: float, meter: Meter | None = None
 ) -> Burden:
     """Handle the day's book frames again, timing only the handling: read only once to warm up
     (unreported: the first read sets up what the later ones reuse, and grew 45–55 MB more than they
@@ -720,12 +724,12 @@ def measure_burden(
     ``ParquetRecorder.flush_due``)."""
     meter = meter or Meter()
     _warm_up(flush_rows, flush_seconds, day)
-    _run_pass(data_dir, day, "read", flush_rows, flush_seconds, meter)
+    _run_pass(raw, day, "read", flush_rows, flush_seconds, meter)
     runs: dict[str, list[Pass]] = {mode: [] for mode in _MODES}
     counts: dict[str, tuple[int, int]] = {}
     for _ in range(REPEATS):
         for mode in _MODES:
-            done, frames, events = _run_pass(data_dir, day, mode, flush_rows, flush_seconds, meter)
+            done, frames, events = _run_pass(raw, day, mode, flush_rows, flush_seconds, meter)
             runs[mode].append(done)
             counts[mode] = frames, events
     medians = {mode: _median(passes) for mode, passes in runs.items()}
@@ -742,7 +746,7 @@ def _median(passes: Sequence[Pass]) -> Pass:
 
 
 def _run_pass(
-    data_dir: Path, day: date, mode: str, flush_rows: int, flush_seconds: float, meter: Meter
+    raw: RawDays, day: date, mode: str, flush_rows: int, flush_seconds: float, meter: Meter
 ) -> tuple[Pass, int, int]:
     """One pass of ``mode`` (``read``, ``raw`` or ``all``), and the frames and events it recorded."""
     frames = events = 0
@@ -751,7 +755,7 @@ def _run_pass(
         recorder = ParquetRecorder(Path(out), flush_rows, flush_seconds)
         buffers = _Buffers(flush_rows)
         cpu, written = 0.0, None
-        for partition in _partitions(data_dir, day):
+        for partition in _partitions(raw, day):
             for _, batch in partition_batches(partition, RAW_SCHEMA.names, BURDEN_BATCH_ROWS):
                 rows = batch.to_pydict()
                 started = clock.process_time()
@@ -794,10 +798,10 @@ def _run_pass(
         return Pass(cpu, buffers.peak / 2**20, resident.growth()), frames, events
 
 
-def burden_lines(data_dir: Path, day: date, book: Book, burden: Burden) -> list[str]:
-    root = data_dir / "raw" / f"date={day.isoformat()}"
-    book_bytes = sum(p.stat().st_size for p in (root / f"feed={KRX_BOOK.tr_id}").rglob("*.parquet"))
-    day_bytes = sum(p.stat().st_size for p in root.rglob("*.parquet"))
+def burden_lines(raw: RawDays, day: date, book: Book, burden: Burden) -> list[str]:
+    root = raw.data_dir / "raw" / f"date={day.isoformat()}"
+    book_bytes = sum(f.stat().st_size for p in _partitions(raw, day) for f in p.glob("*.parquet"))
+    day_bytes = sum(p.stat().st_size for p in root.rglob("*.parquet"))  # what the server holds
     lines = [
         f"디스크: raw {book_bytes / 2**20:.1f} MB(그날 raw 전체 {day_bytes / 2**20:.1f} MB의 "
         f"{_pct(book_bytes, day_bytes)})"
@@ -837,23 +841,29 @@ def burden_lines(data_dir: Path, day: date, book: Book, burden: Burden) -> list[
 
 
 def report(
-    settings: Settings, calendar: MarketCalendar, day: date, meter: Meter | None = None
+    settings: Settings,
+    calendar: MarketCalendar,
+    day: date,
+    meter: Meter | None = None,
+    raw: RawDays | None = None,
 ) -> tuple[str, int]:
-    """``day``'s report and the exit code; ``meter`` reads the burden's resident memory."""
+    """``day``'s report and the exit code; ``meter`` reads the burden's resident memory, and ``raw``
+    the raw days (by default the data directory's alone)."""
     started, run = clock.monotonic(), Meter()
     data_dir = settings.data_dir
+    raw = RawDays(data_dir) if raw is None else raw
     session = calendar.session(day)
-    book = read_book(data_dir, day, session)
-    burden = measure_burden(data_dir, day, settings.flush_rows, settings.flush_seconds, meter)
+    book = read_book(raw, day, session)
+    burden = measure_burden(raw, day, settings.flush_rows, settings.flush_seconds, meter)
     weekday = "월화수목금토일"[day.weekday()]
     sections = [
-        ("1. 구독 응답(KIS, raw _system)", ack_lines(acknowledgements(data_dir, day))),
+        ("1. 구독 응답(KIS, raw _system)", ack_lines(acknowledgements(raw, day))),
         (f"2. 프레임(raw {KRX_BOOK.tr_id})", frame_lines(book)),
         ("3. 필드", field_lines(book)),
         ("4. 시각", time_lines(book)),
         ("5. 연속매매의 1호가", best_lines(book)),
         ("6. 결측 구간(gaps)", gap_lines(data_dir, day)),
-        ("7. 기록 부담", burden_lines(data_dir, day, book, burden)),
+        ("7. 기록 부담", burden_lines(raw, day, book, burden)),
     ]
     peak = run.peak_mb()
     sections.append(
@@ -875,4 +885,5 @@ def report(
 def probe_inverse_book(settings: Settings, now: datetime, day: date | None = None) -> tuple[str, int]:
     """The command: ``day``'s report, by default the latest trading day whose session is over."""
     calendar = calendar_store(settings).calendar
-    return report(settings, calendar, probed_day(calendar, now) if day is None else day)
+    with RawDays(settings.data_dir, open_store(settings)) as raw:
+        return report(settings, calendar, probed_day(calendar, now) if day is None else day, raw=raw)
