@@ -1,6 +1,7 @@
 """Scored predictions and Engine API reads for the tests (#511): sure calls of the direction scored
 against made-up outcomes with their touch labels, the baselines', the barrier's board, the cost map
-served on a replayed holiday, a GET checked for its status, and the stream read until an event.
+served on a replayed holiday, a GET checked for its status, a connection to the stream once the
+stream counts it (#540), and the stream read until an event.
 """
 
 from __future__ import annotations
@@ -12,10 +13,10 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from aiohttp import ClientWebSocketResponse
+from aiohttp import ClientWebSocketResponse, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from krx_quant.api import create_app
+from krx_quant.api import STREAM_KEY, create_app
 from krx_quant.barriers import ANSWER_VERSION as BARRIER_VERSION
 from krx_quant.barriers import BARRIER, CLIMATE, DOWN_FIRST, PERSIST, TIMEOUT, UP_FIRST
 from krx_quant.baselines import Forecast
@@ -28,6 +29,7 @@ from krx_quant.pricing import Direction
 from krx_quant.touch import Reached, TouchResult
 from tests.api_schema import check
 from tests.replay_events import DAY, at, run
+from tests.waiting import until
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 SURE = {UP: Forecast(1, 0, 0, 0), FLAT: Forecast(0, 1, 0, 0), DOWN: Forecast(0, 0, 1, 0)}
@@ -167,6 +169,15 @@ def barrier_board(store: PredictionStore) -> None:
     store_barrier(store, CLIMATE, [TIMEOUT] * 40)
     store_barrier(store, PERSIST, [UP_FIRST] * 40)
     store_barrier(store, "alpha", BARRIER_OUTCOMES)  # always right
+
+
+async def listening(client: TestClient[web.Request, web.Application]) -> ClientWebSocketResponse:
+    """A connection to the stream, once the stream counts it: an event made before then reaches
+    no one."""
+    stream = client.app[STREAM_KEY]
+    ws = await client.ws_connect("/v1/stream")
+    await until(lambda: stream.clients == 1)
+    return ws
 
 
 async def receive_until(

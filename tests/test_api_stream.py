@@ -8,24 +8,29 @@ checked against the /v1 schema.
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import aiohttp
-from aiohttp import ClientWebSocketResponse, web
 from aiohttp.test_utils import TestClient, TestServer
 
+from krx_quant.algorithms import Model
 from krx_quant.api import STREAM_KEY, create_app
 from krx_quant.baselines import Forecast
 from krx_quant.clock import FakeClock
-from krx_quant.engine import PredictionEngine
+from krx_quant.consensus import FAST, Timing
+from krx_quant.engine import Change, KindPredictionsStored, PredictionEngine, PredictionsStored
+from krx_quant.features import FeatureVector
+from krx_quant.kinds import KindForecast
 from krx_quant.lifecycle import Status
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
-from tests.api_doubles import receive_until
+from tests.api_doubles import listening, receive_until
+from tests.kind_doubles import DRIFT, TEST_KIND, FixedKindAlgorithm
 from tests.replay_doubles import busy_morning
 from tests.replay_events import CALENDAR, FEE, SYMBOL, at, trade
 from tests.waiting import until
@@ -50,13 +55,14 @@ def engine_at(db: Path, start: datetime) -> tuple[PredictionEngine, FakeClock]:
     return PredictionEngine(store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms), clock
 
 
-async def listening(client: TestClient[web.Request, web.Application]) -> ClientWebSocketResponse:
-    """A connection to the stream, once the stream counts it: an event made before then reaches
-    no one."""
-    stream = client.app[STREAM_KEY]
-    ws = await client.ws_connect("/v1/stream")
-    await until(lambda: stream.clients == 1)
-    return ws
+def the_fast_one_first(events: list[dict[str, Any]]) -> None:
+    """A bar close's direction events (its predictions and consensus): the fast consensus before
+    the final one, and the final one last, as it waits for every member. The other kinds' events
+    come as each is made, between the two too (#540), so they are left out."""
+    direction = [e for e in events if e["type"] in ("prediction", "consensus")]
+    consensus = [e["kind"] for e in direction if e["type"] == "consensus"]
+    assert consensus == ["fast", "final"], "the fast one first"
+    assert direction[-1]["kind"] == "final", "after every member"
 
 
 async def test_a_client_receives_predictions_the_consensus_and_outcomes_as_they_are_made(
@@ -65,14 +71,13 @@ async def test_a_client_receives_predictions_the_consensus_and_outcomes_as_they_
     engine, clock = engine_at(tmp_path / "engine.db", at("09:00:00"))
 
     async with TestClient(TestServer(create_app(engine))) as client:
-        ws = await client.ws_connect("/v1/stream")
+        ws = await listening(client)
         await replay_into(engine, clock, busy_morning(end="09:05:30"), until=at("09:05:30"))
         events = await receive_until(ws, lambda e: e["type"] == "outcome")
         await ws.close()
 
     first = [e for e in events if e.get("bar_close") == "2026-10-12T09:01:00+09:00"]
-    kinds = [(e["type"], e.get("kind")) for e in first]
-    assert kinds[-2:] == [("consensus", "fast"), ("consensus", "final")], "the fast one first"
+    the_fast_one_first(first)
     made = {p["algorithm"] for e in first if e["type"] == "prediction" for p in e["predictions"]}
     assert made == {"baseline-flat", "baseline-persist", "baseline-random", "first", "second"}
     [final] = [e for e in first if e.get("kind") == "final"]
@@ -83,6 +88,80 @@ async def test_a_client_receives_predictions_the_consensus_and_outcomes_as_they_
     scored = {(p["algorithm"], p["bar_close"]) for p in outcome["outcomes"]}
     assert ("consensus-final", "2026-10-12T09:01:00+09:00") in scored
     assert all(p["outcome"] is not None for p in outcome["outcomes"])
+
+
+class Held(FixedAlgorithm):
+    """A member that predicts once ``after`` is set, waiting in its worker thread."""
+
+    def __init__(self, name: str, after: threading.Event, **options: Any) -> None:
+        super().__init__(name, **options)
+        self._after = after
+
+    def predict(self, features: FeatureVector, model: Model) -> Forecast:
+        self._after.wait(5)
+        return super().predict(features, model)
+
+
+class HeldKind(FixedKindAlgorithm):
+    """A kind's algorithm that predicts once ``after`` is set, waiting in its worker thread."""
+
+    def __init__(self, name: str, after: threading.Event, **options: Any) -> None:
+        super().__init__(name, **options)
+        self._after = after
+
+    def predict(self, features: FeatureVector, model: Model) -> KindForecast:
+        self._after.wait(5)
+        return super().predict(features, model)
+
+
+async def test_the_fast_consensus_comes_first_with_a_kind_s_event_between_the_two(tmp_path: Path) -> None:
+    """Input: a kind's algorithm held until the fast consensus is stored, and a member until the
+    kind's prediction is: the order of a loaded machine, where a kind's algorithm finishes after
+    the fast consensus (#540). Output: the kind's event between the two consensus events, and
+    the fast one first."""
+    fast_out, kind_out = threading.Event(), threading.Event()
+    store = PredictionStore(tmp_path / "engine.db")
+    members(store, "first", "second")
+    clock = FakeClock(at("09:00:00"))
+    algorithms = [
+        FixedAlgorithm("first", features=("velocity",), unique=("velocity",), forecast=UP),
+        Held("second", kind_out, features=("acceleration",), unique=("acceleration",), forecast=UP),
+    ]
+    late = HeldKind("late", fast_out, features=("velocity",), unique=("velocity",))
+    engine = PredictionEngine(
+        store,
+        CALENDAR,
+        (SYMBOL,),
+        FEE,
+        clock,
+        algorithms=algorithms,
+        kinds=(TEST_KIND,),
+        kind_algorithms=[late],
+        consensus_timing=Timing(fast_seconds=0.05),  # "second" is held past it
+    )
+    app = create_app(engine)
+
+    def stored(change: Change) -> None:  # after the stream's listener: once it is published
+        if isinstance(change, PredictionsStored) and FAST in change.ids:
+            fast_out.set()
+        if isinstance(change, KindPredictionsStored) and late.name in change.ids:
+            kind_out.set()
+
+    engine.listeners.append(stored)
+    async with TestClient(TestServer(app)) as client:
+        ws = await listening(client)
+        await replay_into(engine, clock, busy_morning(end="09:01:30"), until=at("09:01:30"))
+        events = await receive_until(ws, lambda e: e.get("kind") == "final")
+        await ws.close()
+
+    first = [e for e in events if e.get("bar_close") == "2026-10-12T09:01:00+09:00"]
+    made = [(e["type"], e.get("kind") or e.get("prediction_kind")) for e in first]
+    fast, final = made.index(("consensus", "fast")), made.index(("consensus", "final"))
+    [held] = [i for i, e in enumerate(first) if any(p["algorithm"] == late.name for p in e["predictions"])]
+    assert made[held] == ("kind_prediction", DRIFT) and fast < held < final, made
+    the_fast_one_first(first)
+    [consensus] = [e for e in first if e.get("kind") == "final"]
+    assert consensus["predictions"][0]["votes"] == {"up": 2, "flat": 0, "down": 0}, "it waited for second"
 
 
 async def test_a_status_change_from_another_process_is_streamed(tmp_path: Path) -> None:
