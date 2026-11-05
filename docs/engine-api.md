@@ -250,7 +250,7 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `smt`(날은 `smt_day`, 사건은 `smt_event`, #521), `supply`(항목은 `supply_day`, #226), `algorithms`(항목은 `algorithm`, 상태는 `algorithm_state`, #561), `algorithm_detail`, `leaderboard`, `leaderboard_days`(예측자는 `day_series`, #561), `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. 도전 정책 묶음은 `trader_cohort`, 그 판정은 `trader_cohort_verdict`, #473. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `smt`(날은 `smt_day`, 사건은 `smt_event`, #521), `supply`(항목은 `supply_day`, #226), `algorithms`(항목은 `algorithm`, 상태는 `algorithm_state`, #561), `algorithm_detail`, `leaderboard`, `leaderboard_days`(예측자는 `day_series`, #561), `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_decisions`(장부는 `trader_decision_book`, 합계는 `trader_decision_totals`, 결정은 `trader_decision`, #584), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. 도전 정책 묶음은 `trader_cohort`, 그 판정은 `trader_cohort_verdict`, #473. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭"). 장벽의 것은 `barrier_output`, `barrier_path`, `barrier_stats`다(#183, 아래 "장벽").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
@@ -1671,6 +1671,51 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 
   > **바뀜** (2026-10-30, #413): `exit_reason`은 `take_profit`, `stop_loss`, `time`이었다 → 정지와 손실 한도의 매도(`pause`, `daily_limit`, `cumulative_limit`)도 있다. 이유: 한도와 화면의 정지가 열린 포지션을 바로 판다(#396).
 - 데모 엔진(`krx-quant demo-engine`)에는 005930의 지어낸 매매가 있다: 10-07·10-08 오후와 10-12 아침(10:05까지 모의, 그 뒤 실전). 아침의 마지막 매매는 10:30에 아직 들고 있다. 데모의 호가로 모의 체결 규칙대로 채웠다(`demo.write_demo_trader`). 속도를 준 데모(`--pace`)도 처음부터 아침의 모든 매매를 주고, 화면은 그 봉이 온 뒤에 표시한다.
+
+### `GET /v1/trader/decisions?day=YYYY-MM-DD&book=B&before=T&limit=N` (#584)
+
+자동 매매 trader(설계 [14장](design.md#14-자동-매매-393))의 장부들이 그날 읽은 칸의 예측마다 한 일을 trader의 저장소(`state/trader.sqlite3`의 `decisions`)에서 읽기만 해서 준다(`trader/decisions.py`). 산 것과 사지 않았으면 그 이유(설계 14장 "진입"), 그때의 오름 확률과 θ·p*, 엔진이 그 예측에 정답을 냈으면 그 정답이다. 그날의 장부마다 이유별 합계도 준다. 밤 리포트(#402)로만 전해지던 결정과 그 이유를 화면이 낮에도 읽게 하려고 더했다. 가격은 주지 않는다(기준가, 틱, 목표가, 손절가, 호가, 체결가가 없다).
+
+- `day`: 결정한 날(KST, 결정 시각의 날짜). 기본은 엔진의 오늘이다.
+- `book`: 이 장부만 준다. `champion`, `practice`, `shadow`, `challenger`(아래). 없으면 그날 결정한 모든 장부를 따로따로 준다.
+- `limit`(1–1000, 기본 100), `before`: 장부마다 늦게 결정한 것부터 N개, `before`가 있으면 그 시각 전에 결정한 것이다. 쪽의 마지막 결정과 같은 시각의 결정이 더 있으면 `limit`을 넘어도 그 쪽에 모두 넣는다(`trader-marks`와 같다). 그래서 다음 쪽을 그 시각 앞(`before` = 이 쪽 마지막 결정의 `decided_at`)으로 읽으면 빠지는 결정이 없다.
+- 저장소가 없거나 그날 결정이 없으면 `books`가 `[]`다. 저장소가 없으면 만들지 않는다. 잘못된 `day`, `book`, `limit`, `before`는 400이다. 스키마는 `trader_decisions`(장부는 `trader_decision_book`, 합계는 `trader_decision_totals`, 결정은 `trader_decision`)다.
+- 읽기는 이벤트 루프 밖에서 한다. trader 저장소와 엔진 DB(`state/engine.sqlite3`, 정답) 모두 읽기 전용(`mode=ro`)으로 연다.
+
+```json
+{"day": "2026-10-14", "book": null, "books": [
+  {"book": "practice", "mode": "mock", "policy": null,
+   "totals": {"decisions": 300, "bought": 18, "waiting": 0, "unfilled": {"no_quote": 2},
+              "skipped": {"not_up": 230, "buy_limit": 30, "cooldown": 15, "holding": 5}},
+   "decisions": [{"id": 912, "decided_at": "2026-10-14T15:10:02.300000+09:00", "symbol": "005930",
+                  "kind": "barrier", "predictor": "breiman", "prediction_id": 4321,
+                  "bar_close": "2026-10-14T15:10:00+09:00", "displayed_at": "2026-10-14T15:10:02.100000+09:00",
+                  "probability": 0.41, "threshold": 0.6, "p_star": 0.58, "action": "skip", "reason": "not_up",
+                  "trade_id": null, "answer": "flat", "right": false}],
+   "more": true}]}
+```
+
+(값은 지어낸 예다.)
+
+- `books[]`: 장부 하나다. 장부는 섞지 않는다. 밤 리포트의 출처별 표(#560)와 같은 갈래로, 결정의 모드, 정책, 그 결정이 따른 고르기로 가른다.
+  - `champion`: 챔피언의 장부. trader 자신의 장부로, 한도가 세고 차트가 표시하는 매매를 낸다. trader가 돈 모드(`paper`, `mock`, `live`)의 결정이고, 챔피언 정책 아래의 것이다(첫 챔피언 전에는 정책이 없다).
+  - `practice`(#427): mock 장부가 연습 칸을 고른 동안(`selections.practice`) 읽은 예측이다. 정책이 없어 `policy`는 `null`이다(저장소의 결정에는 그때의 챔피언 버전이 남아 있다).
+  - `shadow`(#405): mock·live에서 KIS 장부 옆에서 챔피언 정책을 모의로 체결하는 그림자 장부다(`mode` `paper`). trader가 그때 mock이나 live로 시작해 있던(`runs`) 동안의 paper 결정 가운데 챔피언 정책(첫 챔피언 전에는 정책 없음)의 것이다.
+  - `challenger`(#400): 도전 정책의 모의 장부. 정책마다 따로 나온다. paper 결정 가운데, 그 결정이 따른 고르기를 한 때 챔피언이 아니던 정책(`champions`)의 것이다. 결정한 때가 아니라 고르기의 때로 가른다. 장부는 고르기에서만 챔피언을 읽기 때문이다. 그래서 승격한 밤 뒤 아침 고르기(08:30) 전에 챔피언 장부가 한 결정은 전날 챔피언의 것이고, 승격된 도전 정책이 그 고르기에서 물러나며 남긴 결정(`not_picked`)은 도전 정책의 것이다.
+  - 연습 그림자(#427부터 #548 전까지 연습 칸을 모의로 체결한 장부)의 결정은 어느 장부에도 넣지 않는다.
+  - 한 장부는 한 모드, 한 정책이다. 그날 다른 모드로 다시 시작했으면 둘로 나온다. 순서는 챔피언, 연습, 그림자, 도전 정책(버전 순)이고, 같은 장부는 정책 버전 순, 모드는 `paper`, `mock`, `live` 순이다.
+- `mode`, `policy`: 그 장부의 결정의 모드와 정책 버전(`GET /v1/trader/policies`의 `version`).
+- `totals`: 그 장부의 그날 결정 모두의 합계다(쪽의 것만이 아니다). 결정 수(`decisions`), 체결해 매매가 된 매수(`bought`), 아직 호가를 기다리는 매수(`waiting`), 체결하지 못한 매수의 이유별 수(`unfilled`: `no_quote`, `target_reached`, `no_shares`, `restarted` 등), 건너뛴 결정의 이유별 수(`skipped`: `not_up`, `below_threshold`, `buy_limit`, `cooldown`, `holding` 등). 이유는 많은 것부터다.
+- `more`: 이 쪽보다 앞서 결정한 것이 그날 더 있으면 참이다.
+- `decisions[]`: 결정 하나다.
+  - `id`: 저장소의 결정 id. `decided_at`: 결정한 때(trader가 읽은 때. 같은 봉 마감의 순위가 더 높은 칸을 기다렸으면 정한 때).
+  - `kind`, `predictor`, `prediction_id`, `bar_close`, `displayed_at`: 그 예측. 엔진 DB의 예측 id(방향은 `predictions.id`, 다른 종류는 `kind_predictions.id`), 봉 마감, 엔진이 표시한 때다.
+  - `probability`: 그 예측의 오름 확률(방향 `p_up`, 장벽 `p_up_first`). 예측이 없으면(`not_ok` 등) `null`이다.
+  - `threshold`, `p_star`: 그 결정이 따른 고르기에서 그 칸의 θ와 p*(시장가 왕복의 손익분기 맞힘률)다. 챔피언 정책과 도전 정책의 칸은 그 정책의 θ, 연습 칸은 그 검토 주기에 고정한 θ(#474)다. θ가 없는 고르기(#474 전의 연습 칸)는 trader가 그때 시작하며 남긴 `KRX_TRADER_THRESHOLD`(`runs`)이고, 남기지 않았으면 `null`이다. 고르기에 없는 칸(`not_picked`)과 첫 고르기 전의 결정은 둘 다 `null`이다.
+  - `action`: `buy` 또는 `skip`. `reason`: 건너뛴 이유, 또는 산 것이 체결하지 못한 이유다. 체결했거나 아직 호가를 기다리면 `null`이다. 이유의 뜻은 설계 14장 "진입"에 있다.
+  - `trade_id`: 체결했으면 그 매매(`GET /v1/trader/trades`의 `id`), 아니면 `null`.
+  - `answer`, `right`: 엔진이 그 예측에 낸 정답이다(밤 리포트 #560과 같은 `replay.day_answers`: 방향은 도달 정답, 다른 종류는 그 정답 버전의 것). `answer`는 `up`(그 종류의 오름: 방향 `up`, 장벽 `up_first`), `flat`(가운데: 방향 `flat`, 장벽 `timeout`), `down`(내림)이다. `right`는 오름이 왔는지다. trader는 오름에 걸고 사니, 산 결정이면 맞게 산 것이다(#560 리포트의 "맞음"). 건너뛴 결정이면 놓친 오름인지를 본다. 정답이 아직 없거나 엔진 DB를 읽지 못하면 둘 다 `null`이다.
+- 데모 엔진: 매매마다 그 사기 결정만 있다(건너뛴 결정은 없다). 고르기를 지어내지 않아 `threshold`와 `p_star`가 `null`이고, 데모의 엔진 DB는 `state/engine.sqlite3`가 아니어서 `answer`도 `null`이다. 10-12는 챔피언 장부 둘(10:05까지 `paper`, 그 뒤 `live`)과 도전 정책 2의 장부가 나온다.
 
 ### `GET /v1/trader/policies?limit=N` (#399)
 

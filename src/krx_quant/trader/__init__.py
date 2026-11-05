@@ -101,7 +101,8 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   its mode (``paper``, ``mock``) and its book's policy, the policy versions and the days each ran,
   the pauses, resumes and re-arms asked for, the halts, the failed orders, the trader's state now
   and each day's ledger; the Engine API reads it
-  (``GET /v1/trader``, ``/v1/trader/trades``, ``/v1/trader/days``, ``/v1/trader/policies``) and
+  (``GET /v1/trader``, ``/v1/trader/trades``, ``/v1/trader/days``, ``/v1/trader/policies``,
+  ``/v1/trader/decisions``, #584) and
   writes a pause into it (``POST /v1/trader/pause``), nothing else.
 """
 

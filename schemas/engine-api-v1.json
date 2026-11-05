@@ -3818,6 +3818,69 @@
         "practice": {"type": "boolean", "description": "#427: the mock book's practice trade (the trader's own, of no policy)."}
       }
     },
+    "trader_decisions": {
+      "description": "GET /v1/trader/decisions?day=YYYY-MM-DD&book=B&before=T&limit=N (#584): what the trader's books did with each prediction of a picked cell they read on day (KST, today by default), each book apart (book: the one asked, null for every book that decided that day), read from its store (state/trader.sqlite3); none before its first decision. No price.",
+      "type": "object",
+      "required": ["day", "book", "books"],
+      "additionalProperties": false,
+      "properties": {
+        "day": {"$ref": "#/$defs/day"},
+        "book": {"enum": ["champion", "practice", "shadow", "challenger", null]},
+        "books": {"type": "array", "items": {"$ref": "#/$defs/trader_decision_book"}}
+      }
+    },
+    "trader_decision_book": {
+      "description": "A book's decisions of the day (#584): the champion's book (the trader's own, of its mode), the mock practice's (#427, of no policy), the champion policy's paper shadow beside a KIS book (#405) or a challenger's paper book (#400, each policy its own), of one mode and one policy (null: before the first champion, or the practice). totals: the whole day's; decisions: the last N decided before T if given, newest first, and any more decided at the moment of the last of them; more: earlier ones are left for the next page.",
+      "type": "object",
+      "required": ["book", "mode", "policy", "totals", "decisions", "more"],
+      "additionalProperties": false,
+      "properties": {
+        "book": {"enum": ["champion", "practice", "shadow", "challenger"]},
+        "mode": {"enum": ["paper", "mock", "live"]},
+        "policy": {"type": ["integer", "null"], "minimum": 1},
+        "totals": {"$ref": "#/$defs/trader_decision_totals"},
+        "decisions": {"type": "array", "items": {"$ref": "#/$defs/trader_decision"}},
+        "more": {"type": "boolean"}
+      }
+    },
+    "trader_decision_totals": {
+      "description": "A book's decisions of the day (#584): how many, the buys filled (bought), a buy waiting for its quote (waiting), the buys that did not fill by why (unfilled) and the skips by why (skipped), the commonest first.",
+      "type": "object",
+      "required": ["decisions", "bought", "waiting", "unfilled", "skipped"],
+      "additionalProperties": false,
+      "properties": {
+        "decisions": {"type": "integer", "minimum": 0},
+        "bought": {"type": "integer", "minimum": 0},
+        "waiting": {"type": "integer", "minimum": 0},
+        "unfilled": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}},
+        "skipped": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}}
+      }
+    },
+    "trader_decision": {
+      "description": "A prediction of a picked cell a book read, and what it did (#584): when it decided, the prediction (its cell, id in the engine's database, bar close and display time), the rise's probability (null without a forecast), the cell's θ and p* in its pick then (null for a cell not in it; θ the trader's KRX_TRADER_THRESHOLD for a pick without one, null if its start did not keep it), buy or skip and why (a skip's reason; a buy's why it did not fill, null once filled or while it waits for its quote), its trade once filled, and once the engine answered the prediction its answer's class (up: the kind's rise, flat: its middle, down: its fall) and whether the rise came (right). No price.",
+      "type": "object",
+      "required": ["id", "decided_at", "symbol", "kind", "predictor", "prediction_id", "bar_close", "displayed_at",
+                   "probability", "threshold", "p_star", "action", "reason", "trade_id", "answer", "right"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "integer"},
+        "decided_at": {"$ref": "#/$defs/time"},
+        "symbol": {"type": "string"},
+        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+        "predictor": {"type": "string"},
+        "prediction_id": {"type": "integer"},
+        "bar_close": {"$ref": "#/$defs/time"},
+        "displayed_at": {"$ref": "#/$defs/time"},
+        "probability": {"$ref": "#/$defs/probability"},
+        "threshold": {"$ref": "#/$defs/probability"},
+        "p_star": {"$ref": "#/$defs/probability"},
+        "action": {"enum": ["buy", "skip"]},
+        "reason": {"type": ["string", "null"]},
+        "trade_id": {"type": ["integer", "null"]},
+        "answer": {"enum": ["up", "flat", "down", null]},
+        "right": {"type": ["boolean", "null"]}
+      }
+    },
     "trader_practice_frozen": {
       "description": "#474: the mock practice cell kept for a review cycle: chosen by the nightly job once for the cycle (chosen_at), of the cells with a verdict at a market order's round trip (pass or fail), the cell and θ (threshold) whose net per signal replayed alone a share (#470) has the greatest day-level 95% lower bound (per_signal, in ticks; it may be below 0) of those that bought at least 20 times. signals and bought: its signals and buys on the replay; wins: those that netted above 0; measured: the cell × θ measured that night; eligible: those that bought enough. gone_at: when a pick found its predictor gone (no practice until the cycle ends), else null.",
       "type": "object",

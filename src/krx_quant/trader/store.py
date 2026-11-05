@@ -9,7 +9,8 @@ by the nightly re-fit (#399, from the engine's container).
 - ``decisions``: each prediction of a picked cell a book read (#400: the champion's and each
   challenger's), and what it did: bought, or why not (``paper.py``'s reasons), under which pick
   and policy; unique by (mode, policy, kind, predictor, prediction), a store from before made
-  again so (``_key_decisions``);
+  again so (``_key_decisions``); ``GET /v1/trader/decisions`` gives them, each book apart (#584,
+  ``decisions.py``);
 - ``trades``: each position, from its entry to its exit: the cell and its pick (the predictor's
   role, p*, the hit rate's lower bound, the Kelly f* and the fraction bought: null since #471, which
   sizes by a loss budget), the prediction and
@@ -96,8 +97,9 @@ apart in the same tables (a pause and a resume hold whatever the mode). The reco
 policies' trades' P&L) are paper's whatever the mode (``promotion.records_of``, #405: in mock mode
 the champion's paper shadow keeps the champion's, ``shadow`` 1). The trader writes it, and the
 nightly re-fit its policies; the Engine API reads it read-only (``db.reading``: ``read_trades``,
-``read_trader``, ``read_days``, ``policy.read_policies``) and writes a pause into it
-(``request_pause``), and ``krx-quant trade resume|rearm`` a resume or a re-arm: nothing else. Times
+``read_trader``, ``read_days``, ``policy.read_policies``, ``decisions.read_decisions``) and writes a
+pause into it (``request_pause``), and ``krx-quant trade resume|rearm`` a resume or a re-arm: nothing
+else. Times
 are ISO 8601 strings in KST, which sort in time order (``db.iso``). The columns #395, #399, #400 and
 #405 added (``_ADDED``) are added to a store made before them, null in its rows.
 """
