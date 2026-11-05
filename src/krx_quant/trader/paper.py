@@ -4,7 +4,10 @@
 **Entry.** A prediction of a cell, as the trader reads it, buys when all hold, else it is skipped
 with its reason:
 
-- its cell is among those picked (``not_picked``: the picks changed while it was read);
+- its cell is among those picked (``not_picked``: the picks changed while it was read), and its
+  predictor is active (``predictor_inactive``, #603: a policy's cell whose predictor a pick found on
+  probation, on the bench, retired or a clone in the review cycle, ``Selection.inactive``; read, its
+  prediction skipped, and ranked below none);
 - it was made (status ok) and the engine did not block it (a final consensus, #88): ``not_ok``,
   ``blocked``. A prediction the engine made none of for a VI (status ``vi``) and a final
   consensus it blocked for a special situation are ``special``;
@@ -191,7 +194,7 @@ from krx_quant.trader.limits import (
     Simulated,
 )
 from krx_quant.trader.quotes import BestQuote
-from krx_quant.trader.selection import Pick, Selection
+from krx_quant.trader.selection import PREDICTOR_INACTIVE, Pick, Selection
 from krx_quant.trader.store import RESIDENT, WAITED, Entry, Exit, OpenTrade, Stall, TraderStore
 
 if TYPE_CHECKING:
@@ -717,6 +720,7 @@ class PaperTrader:
         self._selection: int | None = None  # the picks' row in the store
         self._policy: int | None = challenger  # the policy version the picks are under (#399)
         self._picks: dict[Cell, tuple[int, Pick]] = {}  # each picked cell's rank and pick
+        self._inactive: tuple[Cell, ...] = ()  # the policy's cells held off, read and never bought (#603)
         self._special: list[Window] = []
         self._read: dict[datetime, set[Cell]] = {}  # the cells read of each recent bar close
         self._pending: dict[datetime, list[Rise]] = {}  # rises waiting, by bar close
@@ -780,8 +784,8 @@ class PaperTrader:
         return self._policy
 
     def trades(self, cell: Cell) -> bool:
-        """Whether ``cell`` is among those it picked."""
-        return cell in self._picks
+        """Whether it reads ``cell``'s predictions: among those it picked, or held off (#603)."""
+        return cell in self._picks or cell in self._inactive
 
     @property
     def busy(self) -> bool:
@@ -812,8 +816,9 @@ class PaperTrader:
 
     @property
     def cells(self) -> list[Cell]:
-        """The cells picked, first ranked first."""
-        return [c for c, _ in sorted(self._picks.items(), key=lambda item: item[1][0])]
+        """The cells it reads: those picked, first ranked first, then those held off (#603)."""
+        picked = [c for c, _ in sorted(self._picks.items(), key=lambda item: item[1][0])]
+        return [*picked, *(c for c in self._inactive if c not in self._picks)]
 
     def select(self, selection: Selection, at: datetime) -> None:
         """The cells to trade from ``at`` on, kept in the store; a rise waiting of a cell no longer
@@ -821,6 +826,7 @@ class PaperTrader:
         self._selection = self.store.add_selection(self.mode, at, selection)
         self._policy = selection.policy if self.challenger is None else self.challenger
         self._picks = {p.cell: (rank, p) for rank, p in enumerate(selection.picks)}
+        self._inactive = selection.inactive
         if self.challenger is not None:
             log.info("trader: challenger %s in paper: %s", self.challenger, selection.describe())
         elif self.shadow:
@@ -846,7 +852,7 @@ class PaperTrader:
         """A challenger no longer run (#400: dropped, or promoted, its paper book giving way to the
         champion's): it picks nothing more, a rise waiting is skipped (``not_picked``); a buy waiting
         for its quote and an open position go on to their ends."""
-        self._picks = {}
+        self._picks, self._inactive = {}, ()
         for close in list(self._pending):
             for c in self._pending.pop(close):
                 self._skip(c.signal, at, NOT_PICKED)
@@ -895,7 +901,9 @@ class PaperTrader:
         self._read.setdefault(signal.bar_close, set()).add(cell)
         if self.store.decided(self.mode, self._policy, signal.kind, signal.predictor, signal.prediction_id):
             return
-        if cell not in self._picks:
+        if cell in self._inactive and cell not in self._picks:
+            self._skip(signal, at, PREDICTOR_INACTIVE)
+        elif cell not in self._picks:
             self._skip(signal, at, NOT_PICKED)
         else:
             session = self._sessions(kst_day(signal.bar_close))

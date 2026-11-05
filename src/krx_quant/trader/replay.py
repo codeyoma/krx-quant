@@ -11,7 +11,12 @@ what the nightly re-fit fits a policy on (``refit.py``).
   the reference, the width and a final consensus's block), each read when it was displayed
   (``displayed_at``: the trader reads every half second, the replay at the earliest). An algorithm's
   prediction by a model trained on another target than the one the cost map scores it on is read
-  and never buys (``off_target``, as ``stats.on_target`` leaves it out);
+  and never buys (``off_target``, as ``stats.on_target`` leaves it out). Nor does one of a day a pick
+  would have held its cell off (``predictor_inactive``, #603, ``inactive_days``): its predictor's
+  lifecycle status at that day's pick (``PICK_AT``, as the engine's ``statuses`` kept it then) not
+  active, or not active at the pick of an earlier trading day of the same review cycle (the trader's
+  ``evaluation``, when one is given: the trader holds it off until the next review); such a cell ranks
+  below none that day, as in the paper book;
 - the special windows the engine kept (``special_windows``), each known from its start (the engine
   learns a VI, a circuit breaker or a sidecar as it begins), with the end it kept.
 
@@ -109,15 +114,19 @@ from krx_quant.predictions import KIND_ANSWER_JOIN, TOUCH_JOIN
 from krx_quant.pricing import SELL_TAX
 from krx_quant.special import Window, touching
 from krx_quant.stats import Interval, day_mean
-from krx_quant.trader import SYMBOL
+from krx_quant.trader import PICK_AT, SYMBOL, review
 from krx_quant.trader.cells import (
+    ACTIVE,
     DIRECTION_COLUMNS,
     DIRECTION_FROM,
     KIND_COLUMNS,
     Cell,
+    History,
     Signal,
     direction_signal,
     kind_signal,
+    status_at,
+    statuses,
     traded_kind,
 )
 from krx_quant.trader.limits import RUNNING, SALE, Simulated
@@ -141,6 +150,7 @@ from krx_quant.trader.paper import (
     size,
 )
 from krx_quant.trader.quotes import BestQuote
+from krx_quant.trader.selection import PREDICTOR_INACTIVE
 
 log = logging.getLogger(__name__)
 
@@ -371,6 +381,35 @@ def _upper_first(path: str | None) -> bool:
 def known(windows: Sequence[Window], at: datetime) -> list[Window]:
     """The special windows known at ``at``: those begun by then (module doc)."""
     return [w for w in windows if w.start <= at]
+
+
+def inactive_days(
+    history: History,
+    days: Collection[date],
+    sessions: Callable[[date], Session | None],
+    evaluation: review.Evaluation | None = None,
+) -> frozenset[date]:
+    """The ``days`` a pick would have held a cell off new buys (#603, module doc), its predictor's
+    status changes ``history``: its status at the day's pick not active, or (with ``evaluation``, from
+    its first day) not active at the pick of a trading day of the same review cycle before it, counted
+    on ``sessions``. None for a predictor without a status."""
+    if not history:
+        return frozenset()
+
+    def held(day: date) -> bool:
+        status = status_at(history, datetime.combine(day, PICK_AT, KST))
+        return status is not None and status != ACTIVE
+
+    out = set()
+    for day in days:
+        if held(day):
+            out.add(day)
+        elif evaluation is not None and day >= evaluation.first_day:
+            first = review.cycle_of(evaluation, day, sessions).first
+            earlier = (first + timedelta(days=n) for n in range((day - first).days))
+            if any(sessions(d) is not None and held(d) for d in earlier):
+                out.add(day)
+    return frozenset(out)
 
 
 # The fills.
@@ -713,15 +752,23 @@ class Policy:
     def result(self) -> Result:
         return Result(self.total, self.cells, self.days, dict(self.missing), dict(self.skipped))
 
-    def day(self, reads: Mapping[Cell, Sequence[Read]], fills: Fills, windows: Sequence[Window]) -> None:
+    def day(
+        self,
+        reads: Mapping[Cell, Sequence[Read]],
+        fills: Fills,
+        windows: Sequence[Window],
+        inactive: Collection[Cell] = (),
+    ) -> None:
         """The day of ``reads`` (each cell's), on ``fills``, with the special ``windows`` of the day: the
-        predictions in the order read, the clock at each rise's deadline (``settle``)."""
+        predictions in the order read, the clock at each rise's deadline (``settle``). A cell of
+        ``inactive`` (#603) is held off that day: its predictions skipped, and it ranks below none."""
         rules = self._rules
         self._fills, self._held = fills, None
         self._buys, self._exits = 0, []
         pending: dict[datetime, list[Rise]] = {}
         seen: dict[datetime, set[Cell]] = {}
         deadlines: list[datetime] = []
+        ranks = {c: r for c, r in self.ranks.items() if c not in inactive}
         events = sorted(
             ((r.at, r.signal.bar_close, self.ranks[c], r) for c in self.ranks for r in reads.get(c, ())),
             key=lambda e: (e[0], e[1], e[2]),
@@ -731,7 +778,7 @@ class Policy:
             settle(
                 pending,
                 seen,
-                self.ranks,
+                ranks,
                 known(windows, now),
                 now,
                 rules,
@@ -746,7 +793,9 @@ class Policy:
             ranked = self.ranked[rank]
             seen.setdefault(close, set()).add(ranked.cell)
             signal = read.signal
-            if not read.on_target:
+            if ranked.cell in inactive:
+                self._skip(signal, at, PREDICTOR_INACTIVE)
+            elif not read.on_target:
                 self._skip(signal, at, OFF_TARGET)
             else:
                 session = self._sessions(kst_day(close))
@@ -872,8 +921,8 @@ class Source:
 @dataclass(frozen=True)
 class Pass:
     """A pass's outputs: each policy's ``Result``, in the order asked; each cell measured alone, its
-    ``Signals`` at each θ, the counts of its predictions read (``read``, ``off_target``, the entry
-    rules' reasons, ``rises``) and its calibration (#475)."""
+    ``Signals`` at each θ, the counts of its predictions read (``read``, ``off_target``,
+    ``predictor_inactive``, #603, the entry rules' reasons, ``rises``) and its calibration (#475)."""
 
     results: tuple[Result, ...]
     signals: Mapping[Cell, Mapping[float, Signals]]
@@ -885,7 +934,9 @@ class Replayer:
     """The recorded days of ``cells`` (module doc), from the engine's database ``db`` (read-only) and
     the recordings under ``data_dir``, with the special ``windows`` the engine kept; a day at a time,
     a pass at each ``run``, its policies held by ``rules``. ``thresholds``: the θ each signal measured
-    alone is tallied at."""
+    alone is tallied at. ``evaluation``: the trader's (#469), whose review cycles hold a cell off for
+    the rest of the cycle once its predictor was not active at a day's pick (#603; None: that day
+    alone)."""
 
     def __init__(
         self,
@@ -899,12 +950,20 @@ class Replayer:
         target_version: int,
         thresholds: Sequence[float],
         meter: Meter | None = None,
+        evaluation: review.Evaluation | None = None,
     ) -> None:
         self._db = db
         self._data_dir = data_dir
         self._sessions = sessions
         self._windows = sorted(windows, key=lambda w: w.start)
         self._cells = dict(cells)
+        # The days a pick would have held each cell off (#603, ``inactive_days``), from the statuses as
+        # the engine kept them.
+        found = statuses(db, {c.predictor for c in self._cells})
+        self.inactive = {
+            c: inactive_days(found.get(c.predictor, ()), source.days, sessions, evaluation)
+            for c, source in self._cells.items()
+        }
         self._target_version = target_version
         self._thresholds = tuple(thresholds)
         self.rules = rules  # the trader's (#471: its capital, loss budget, risk rules and loss limits)
@@ -941,10 +1000,17 @@ class Replayer:
                 for c in sorted(cells, key=lambda c: (c.kind, c.predictor))
                 if day in self._cells[c].days
             }
+            held = {c for c in cells if day in self.inactive.get(c, ())}
             for book in books:
-                book.day(reads, fills, windows)
+                book.day(reads, fills, windows, held)
             for cell in alone:
                 if day not in self._cells[cell].days:
+                    continue
+                if cell in held:  # #603: read, never bought
+                    n = len(reads.get(cell, ()))
+                    if n:
+                        counts[cell]["read"] += n
+                        counts[cell][PREDICTOR_INACTIVE] += n
                     continue
                 answers = day_answers(self._db, cell, day)
                 self._alone(
