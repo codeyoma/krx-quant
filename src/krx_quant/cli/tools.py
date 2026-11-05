@@ -1,5 +1,5 @@
-"""The tools' commands (#578): the server's state, the Telegram notices, and the fake KIS and the
-demo engine to work without the server."""
+"""The tools' commands (#578): the server's state, its backup and restore, the Telegram notices, and
+the fake KIS and the demo engine to work without the server."""
 
 from __future__ import annotations
 
@@ -10,10 +10,14 @@ import math
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from krx_quant.cli.core import Commands
-from krx_quant.config import Settings, lenient_settings
+from krx_quant.config import Settings, SettingsError, lenient_settings
 from krx_quant.feeds.base import KST
+
+if TYPE_CHECKING:
+    from krx_quant.object_store import ObjectStore
 
 
 async def _test_alert() -> int:
@@ -38,6 +42,61 @@ async def _doctor(api: str | None) -> int:
     settings, error = lenient_settings()
     print(await doctor(settings, datetime.now(KST), api, config_error=error), end="")
     return 0
+
+
+def _state_store(settings: Settings) -> ObjectStore:
+    from krx_quant.object_store import open_store
+
+    store = open_store(settings)
+    if store is None:
+        raise SettingsError("KRX_OBJECT_STORE is not set")
+    return store
+
+
+def _backup_state() -> int:
+    """The nightly backup of the server's state (#576), now."""
+    from krx_quant.state_backup import BackupRefused, back_up
+
+    settings = Settings.from_env(require_kis=False)
+    try:
+        made = back_up(settings.state_dir, _state_store(settings), datetime.now(KST), commit=settings.commit)
+    except BackupRefused as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"backed up: {made.files} files, {made.size / 2**20:,.1f} MB in {made.seconds:.1f}s")
+    return 0
+
+
+def _restore_state(source: Path | None, replace: bool, if_backed_up: bool) -> int:
+    """Put the last backup of the server's state back (#576), before the engine starts."""
+    from krx_quant.object_store import open_store
+    from krx_quant.state_backup import KEY as STATE_BACKUP_KEY
+    from krx_quant.state_backup import RestoreRefused, restore
+
+    settings = Settings.from_env(require_kis=False)
+    store = None if source is not None else open_store(settings)
+    if source is None and store is None:
+        if if_backed_up:
+            print("KRX_OBJECT_STORE is not set: nothing restored")
+            return 0
+        raise SettingsError("KRX_OBJECT_STORE is not set")
+    if if_backed_up and store is not None and store.digest(STATE_BACKUP_KEY) is None:
+        print(f"no backup of the server state in the store ({STATE_BACKUP_KEY}): nothing restored")
+        return 0
+    try:
+        done = restore(settings.state_dir, store, datetime.now(KST), source=source, replace=replace)
+    except RestoreRefused as e:
+        print(f"not restored: {e}", file=sys.stderr)
+        return 1
+    return 0 if done else 1
+
+
+def _restore_drill() -> int:
+    """The monthly restore drill (#576): the latest backup checked, the state folder left as it is."""
+    from krx_quant.state_backup import drill
+
+    settings = Settings.from_env(require_kis=False)
+    return 0 if drill(settings.state_dir, _state_store(settings), datetime.now(KST)) else 1
 
 
 async def _notify(text: str) -> int:
@@ -120,6 +179,33 @@ def add(sub: Commands) -> None:
         " engine service)",
     )
     doctor_cmd.set_defaults(run=lambda args: asyncio.run(_doctor(args.api)))
+    sub.add_parser(
+        "backup-state",
+        help="back the server's state up to KRX_OBJECT_STORE now, as the collector does each night (#576)",
+    ).set_defaults(run=lambda args: _backup_state())
+    restore_cmd = sub.add_parser(
+        "restore-state",
+        help="put the latest backup of the server's state back into the state folder, once it checks out"
+        " (#576; stop the engine and the trader first)",
+    )
+    restore_cmd.add_argument(
+        "--from", dest="source", type=Path, help="a backup's state.tar.gz instead of the store's latest"
+    )
+    restore_cmd.add_argument(
+        "--replace",
+        action="store_true",
+        help="move what is in the state folder aside (state/before-restore-<time>/) instead of refusing",
+    )
+    restore_cmd.add_argument(
+        "--if-backed-up",
+        action="store_true",
+        help="without a backup in the store (or a store), restore nothing and exit 0 (a new server's setup)",
+    )
+    restore_cmd.set_defaults(run=lambda args: _restore_state(args.source, args.replace, args.if_backed_up))
+    sub.add_parser(
+        "restore-drill",
+        help="check the latest backup of the server's state in a scratch folder (#576, read-only)",
+    ).set_defaults(run=lambda args: _restore_drill())
     notify_cmd = sub.add_parser("notify", help="send a notice to the Telegram chat that receives alerts")
     notify_cmd.add_argument("text")
     notify_cmd.set_defaults(run=lambda args: asyncio.run(_notify(args.text)))

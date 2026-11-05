@@ -1,9 +1,9 @@
 usage: krx-quant [-h]
-                 {collect,replay,rescore,fit,prevalidate,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,replay,rescore,fit,prevalidate,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
     replay              replay a recorded day through the engine into its own
                         database (no KIS needed)
@@ -170,6 +170,13 @@ positional arguments:
     doctor              print the server's state, masked (engine, KIS,
                         PINGPONG, scheduled jobs, disk, memory, #322); reads
                         only, prints no market value
+    backup-state        back the server's state up to KRX_OBJECT_STORE now, as
+                        the collector does each night (#576)
+    restore-state       put the latest backup of the server's state back into
+                        the state folder, once it checks out (#576; stop the
+                        engine and the trader first)
+    restore-drill       check the latest backup of the server's state in a
+                        scratch folder (#576, read-only)
     notify              send a notice to the Telegram chat that receives
                         alerts
     fake-kis            run a local fake KIS server for offline testing

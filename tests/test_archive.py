@@ -102,11 +102,11 @@ class Counting:
     def digest(self, key: str) -> str | None:
         return self.store.digest(key)
 
-    def put(self, key: str, source: Path, digest: str) -> None:
+    def put(self, key: str, source: Path, digest: str, *, encrypted: bool = False) -> None:
         if self.fail:
             raise OSError("store unreachable")
         self.puts.append(key)
-        self.store.put(key, source, digest)
+        self.store.put(key, source, digest, encrypted=encrypted)
 
     def get(self, key: str, target: Path) -> None:
         self.store.get(key, target)

@@ -54,7 +54,7 @@
 
 ### 모듈 지도
 
-코드는 `src/krx_quant/`에 있다. 명령은 `cli/` 패키지의 `krx-quant <명령>`이다(README의 "명령"). 명령은 묶음마다 모듈 하나에 있다(#578): `engine`(수집기, 알고리즘의 재생·재채점·학습·사전 검증·수습 시뮬레이션·되돌리기·은퇴), `trader`(자동 매매와 그 제어, 정책 다시 맞추기, 리포트, 모의·실전 서버 확인과 프로브), `data`(KIS 구독 한도와 REST 대체 조회, 1분봉 백필, 업로드, 그날 기록 품질, 매크로), `probes`(바깥 출처 데이터의 뜻을 재는 프로브와 마감 흐름 확인), `research`(검토와 실험), `tools`(서버 요약, 텔레그램 알림, 가짜 KIS, 데모 엔진). 묶음마다 `add(sub)`가 자기 명령을 `krx-quant`의 parser에 더하고, `cli/__init__.py`의 `_parser`가 `FAMILIES` 순서로 묶음을 부른다. 그래서 `krx-quant --help`는 명령을 묶음 순서로 보여 준다. 명령마다 그 parser가 처리 함수를 `set_defaults(run=...)`로 가지고, `main`은 명령을 고르지 않고 그 처리 함수를 부른다(#499). 새 명령은 그 묶음의 `add`에 parser와 처리 함수를 더하고, README의 "명령" 표에 줄을 더하고, `uv run python -m tests.test_cli_help`로 그 도움말을 `tests/cli_help/`에 쓴다. 그 테스트는 `krx-quant --help`와 명령마다 `--help`가 그 파일과 같은지 본다(리뷰에서 도움말이 바뀐 것이 보인다). 처리 함수가 없는 명령은 종료 코드 1로 끝난다: 전에는 `main`의 `elif`에서 가지를 빠뜨린 명령이 아무것도 하지 않고 0으로 끝나, 그 명령을 부른 예약 작업이 성공으로 보고될 수 있었다.
+코드는 `src/krx_quant/`에 있다. 명령은 `cli/` 패키지의 `krx-quant <명령>`이다(README의 "명령"). 명령은 묶음마다 모듈 하나에 있다(#578): `engine`(수집기, 알고리즘의 재생·재채점·학습·사전 검증·수습 시뮬레이션·되돌리기·은퇴), `trader`(자동 매매와 그 제어, 정책 다시 맞추기, 리포트, 모의·실전 서버 확인과 프로브), `data`(KIS 구독 한도와 REST 대체 조회, 1분봉 백필, 업로드, 그날 기록 품질, 매크로), `probes`(바깥 출처 데이터의 뜻을 재는 프로브와 마감 흐름 확인), `research`(검토와 실험), `tools`(서버 요약, 서버 상태의 백업·복원·복원 연습, 텔레그램 알림, 가짜 KIS, 데모 엔진). 묶음마다 `add(sub)`가 자기 명령을 `krx-quant`의 parser에 더하고, `cli/__init__.py`의 `_parser`가 `FAMILIES` 순서로 묶음을 부른다. 그래서 `krx-quant --help`는 명령을 묶음 순서로 보여 준다. 명령마다 그 parser가 처리 함수를 `set_defaults(run=...)`로 가지고, `main`은 명령을 고르지 않고 그 처리 함수를 부른다(#499). 새 명령은 그 묶음의 `add`에 parser와 처리 함수를 더하고, README의 "명령" 표에 줄을 더하고, `uv run python -m tests.test_cli_help`로 그 도움말을 `tests/cli_help/`에 쓴다. 그 테스트는 `krx-quant --help`와 명령마다 `--help`가 그 파일과 같은지 본다(리뷰에서 도움말이 바뀐 것이 보인다). 처리 함수가 없는 명령은 종료 코드 1로 끝난다: 전에는 `main`의 `elif`에서 가지를 빠뜨린 명령이 아무것도 하지 않고 0으로 끝나, 그 명령을 부른 예약 작업이 성공으로 보고될 수 있었다.
 
 명령은 자기가 돌 때 쓰는 모듈만 불러온다(#578, `tests/test_cli_imports.py`). 묶음 모듈은 맨 위에서 모든 명령이 어차피 불러오는 것(설정, `KST`)만 불러오고, 처리 함수가 나머지를 돌 때 불러온다. 인자의 기본값이 그런 모듈에서 오는 명령(`prevalidate --days`의 `prevalidation.PREVALIDATION_DAYS` 같은)은 인자를 parser를 만들 때가 아니라 그 명령을 읽거나 도움말을 낼 때 더한다(`cli/core.py`의 `Command`, `arguments`). Loki로 보내는 줄을 가릴 비밀값은 `config.lenient_settings`로 읽는다(전에는 `doctor.py`의 `doctor_settings`라서 모든 명령이 doctor가 읽는 모듈을 불러왔다). macOS의 저장소 venv에서 잰 최대 RSS는 `krx-quant trade` 시작 139 → 106 MB(`trader.run`만 불러온 것과 같다), `notify` 140 → 75 MB, `krx-quant --help` 140 → 75 MB다. LightGBM과 SciPy는 그것을 쓰는 학습·실험 명령만 불러온다.
 
@@ -353,7 +353,8 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   - **실행 기록:** SQLite `runs`에는 CPU 예산 건너뜀, 일일 점검, 은퇴 후보 알림, 국면 없음, 예산 알림만 남는다. 밤 학습 실행은 Object Store의 `reports/`, `promotions/`와 Loki(`process="training"`, #358)에, 재생과 사전 검증 실행은 따로 만드는 재생 DB에 있다.
   - 위치와 필드는 [operations.md](operations.md#8-저장-위치)에 있다.
 - 결측 구간: 지금은 `gaps` 계층의 Parquet로 기록한다(#4). SQLite의 `data_gaps`로 옮기는 일은 아직 하지 않았다.
-- 백업: Lightsail 스냅샷을 매일 뜬다.
+- 백업: Lightsail 스냅샷을 매일 뜬다. 서버에만 있는 상태(`engine.sqlite3`, `trader.sqlite3`, `prevalidations/`, `scheduled.json`, `models/`)는 매일 05:35 압축본 하나로 S3에 올리고(서버 측 암호화, 버킷 버전 관리로 30일), 예약 작업이 달마다 받아 복원을 시험한다(#576). `fill_notices.sqlite3`는 올리지 않는다. 절차는 [operations.md](operations.md#서버-상태-백업과-복원-576)에 있다.
+  > **바뀜** (2026-11-06, #581): Lightsail 스냅샷만 → 상태 파일의 밤 백업(S3)과 월간 복원 시험도. 이유: 스냅샷은 같은 계정, 같은 리전에 7개만 남고 복원을 시험한 기록이 없었다. `prevalidations/`나 `trader.sqlite3`를 잃으면 사전 검증과 실전 관문의 기록이 처음부터 다시 쌓인다(#576).
 - 로컬 파일과 Object Store 키의 전체 목록은 [operations.md](operations.md#8-저장-위치)에 있다.
 
 > **바뀜** (2026-10-09, #37, #38): "피처, 예측, 채점, 통계를 SQLite에 저장" → 예측과 채점만 저장하고, 피처와 통계는 그때그때 계산한다. 이유 기록 없음.

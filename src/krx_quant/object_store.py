@@ -46,8 +46,9 @@ class ObjectStore(Protocol):
         """SHA-256 (hex) of the stored object, or None if there is none."""
         ...
 
-    def put(self, key: str, source: Path, digest: str) -> None:
-        """Store ``source`` under ``key``, replacing any object there."""
+    def put(self, key: str, source: Path, digest: str, *, encrypted: bool = False) -> None:
+        """Store ``source`` under ``key``, replacing any object there; ``encrypted``: asked to be
+        encrypted at rest (S3's SSE-S3; a local directory has nothing to ask)."""
         ...
 
     def get(self, key: str, target: Path) -> None: ...
@@ -104,7 +105,7 @@ class LocalObjectStore:
         path = self._root / key
         return file_digest(path) if path.is_file() else None
 
-    def put(self, key: str, source: Path, digest: str) -> None:
+    def put(self, key: str, source: Path, digest: str, *, encrypted: bool = False) -> None:
         path = self._root / key
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
@@ -155,10 +156,14 @@ class S3ObjectStore:
         value = head.get("Metadata", {}).get("sha256")
         return str(value) if value else None
 
-    def put(self, key: str, source: Path, digest: str) -> None:
-        self._client.upload_file(
-            str(source), self._bucket, self._prefix + key, ExtraArgs={"Metadata": {"sha256": digest}}
-        )
+    def put(self, key: str, source: Path, digest: str, *, encrypted: bool = False) -> None:
+        """``encrypted`` asks S3 for its own keys (SSE-S3, ``AES256``), which needs no KMS right; the
+        server's state backup asks for it (#576). The rest leaves it to the bucket's default
+        (SSE-S3 too on AWS): an S3-compatible store without a key service (MinIO's) refuses the ask."""
+        extra: dict[str, Any] = {"Metadata": {"sha256": digest}}
+        if encrypted:
+            extra["ServerSideEncryption"] = "AES256"
+        self._client.upload_file(str(source), self._bucket, self._prefix + key, ExtraArgs=extra)
 
     def get(self, key: str, target: Path) -> None:
         self._client.download_file(self._bucket, self._prefix + key, str(target))

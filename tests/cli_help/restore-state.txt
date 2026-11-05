@@ -1,0 +1,10 @@
+usage: krx-quant restore-state [-h] [--from SOURCE] [--replace]
+                               [--if-backed-up]
+
+options:
+  -h, --help      show this help message and exit
+  --from SOURCE   a backup's state.tar.gz instead of the store's latest
+  --replace       move what is in the state folder aside (state/before-
+                  restore-<time>/) instead of refusing
+  --if-backed-up  without a backup in the store (or a store), restore nothing
+                  and exit 0 (a new server's setup)

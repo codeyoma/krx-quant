@@ -3,12 +3,12 @@
 The commands are in a module by family (#578): ``engine`` (the collector, and the algorithms'
 models and standing), ``trader`` (the auto trader's), ``data`` (KIS's limits, the backfill, the
 upload, a day's recording quality, the macro indicators), ``probes`` (what an outside source's data
-means), ``research`` (reviews and experiments) and ``tools`` (the server's state, the notices, the
-fake KIS and the demo engine). Each family's ``add`` adds its commands to ``krx-quant``'s parser
-(``_parser``), in the order ``FAMILIES`` gives, each with the handler that runs it as its ``run``
-default (#499): it takes the parsed arguments and returns the exit code. A new command goes in its
-family's ``add``, with a row in README's command table, and its help in ``tests/cli_help/``
-(``uv run python -m tests.test_cli_help``).
+means), ``research`` (reviews and experiments) and ``tools`` (the server's state and its backup,
+the notices, the fake KIS and the demo engine). Each family's ``add`` adds its commands to
+``krx-quant``'s parser (``_parser``), in the order ``FAMILIES`` gives, each with the handler that
+runs it as its ``run`` default (#499): it takes the parsed arguments and returns the exit code. A
+new command goes in its family's ``add``, with a row in README's command table, and its help in
+``tests/cli_help/`` (``uv run python -m tests.test_cli_help``).
 
 A command loads only what it runs (#578): a family imports at its top only what every command
 loads anyway (the settings, ``KST``), and each handler imports the rest when it runs. A command
