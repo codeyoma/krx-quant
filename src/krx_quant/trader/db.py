@@ -6,8 +6,7 @@
   through it fails), its rows ``sqlite3.Row``, closed once the read is done; None if there is no
   store. The trader keeps it in write-ahead-log mode, so a reader sees each commit as it is made.
   The Engine API's reads open it so (``store.read_trader``, ``read_trades``, ``read_days``,
-  ``marks.read_marks``, ``policy.read_policies``), and so do the mock check (``mock_check.py``) and
-  the passive entry's measure (``passive.champion_thresholds``).
+  ``marks.read_marks``, ``policy.read_policies``), and so does the mock check (``mock_check.py``).
 
 The other read-only opens are not this one and keep their own: the engine's database
 (``cells.open_engine_db``, whose caller closes the connection; ``predictions.read_only`` and
