@@ -356,7 +356,7 @@ curl http://krx-quant:8080/v1/macro
 | `KRX_CALENDAR_URL` | `https://economic-calendar.tradingview.com/events` | 경제 캘린더 주소(TradingView의 공개 피드). 테스트용이다 |
 | `KRX_REGIME_SHOCK_SOX_PERCENT`, `KRX_REGIME_SHOCK_VIX`, `KRX_REGIME_SHOCK_USDKRW_PERCENT`, `KRX_REGIME_SOX_MOVE_PERCENT`, `KRX_REGIME_WEAK_WON_PERCENT` | `3`, `30`, `1`, `1`, `0.5` | 일일 국면 문턱값([design.md](design.md#45-매크로-지표)) |
 | `KRX_SIGNAL_ALERT` | `off` | `on`이면 텔레그램 신호 알림을 보낸다([engine-api.md](engine-api.md#텔레그램-신호-알림-19)). VI·서킷브레이커, 기준가 없음, 목표 시각 지남이면 보내지 않는다. 보낸·막힌 신호는 DB `runs`에 `signal_sent`, `signal_blocked`로 남는다 |
-| `KRX_SIGNAL_MIN_PROBABILITY` | `0.7` | 신호를 보낼 최종 합의의 상승(하락) 확률. 0.5–1. 알림이 꺼져 있어도 값을 검사한다. 0.70은 잠정값이다: 2026-11-04부터 20거래일 뒤 예약 작업 `signal-review-206-1201`이 다시 잰다(2장 "신호 기준 검토 (#206)") |
+| `KRX_SIGNAL_MIN_PROBABILITY` | `0.7` | 신호를 보낼 최종 합의의 상승(하락) 확률. 0.5–1. 알림이 꺼져 있어도 값을 검사한다. 0.70은 잠정값이다: 2026-11-04부터 20거래일 뒤 예약 작업 `signal-review-206-1201`이 다시 잰다(2장 "신호 기준 검토 (#206)"). 알림이 꺼져 있어도 엔진 API `/v1/status`의 `signal_rule`로 내고, 앱의 신호 알림은 사용자가 앱에서 직접 정한 값이 없으면 이 값과 `KRX_SIGNAL_MIN_AGREE`를 따른다(#617) |
 | `KRX_SIGNAL_MIN_AGREE` | `2` | 같은 방향을 예측해야 하는 정식 알고리즘 수. 1 이상. 두 값의 후보별 신호 수와 적중률은 `signal-review`(#206, 2장 "신호 기준 검토 (#206)")가 낸다 |
 
 > **바뀜** (2026-11-03, #483): `KRX_SIGNAL_MIN_PROBABILITY` 기본 0.6 → 0.70. 이유: `signal-review-206-1102`(2026-11-02 밤)의 5절(newton·turing이 내내 구성원이었다면, 7일, 같은 방향 ≥ 2)에서 상승 신호 적중률이 0.60에서 58.1%(하루 35.6번), 0.70에서 67.0% [57.7–75.1%](하루 15.7번), 0.75에서 70.3%(하루 9.1번)였고, 같은 봉 마감의 도달 정답 상승 비율은 29.8%였다(#206의 2026-11-03 결정). 0.70의 하한 57.7%가 0.60의 점추정보다 낮아 잠정값이고, 2026-11-04부터 20거래일로 다시 잰다. `KRX_SIGNAL_MIN_AGREE`(2), `KRX_SIGNAL_ALERT`(끔), `KRX_TRADER_THRESHOLD`(0.6, 따로인 설정)는 그대로다. 서버 `.env`에 `KRX_SIGNAL_MIN_PROBABILITY`를 적어 두었다면 그 값이 이기므로, 새 기본값을 쓰려면 그 줄을 지운다.

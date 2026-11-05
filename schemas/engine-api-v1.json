@@ -25,7 +25,7 @@
     "status": {
       "description": "GET /v1/status",
       "type": "object",
-      "required": ["mode", "now", "commit", "started_at", "phase", "session", "last_bar_close", "pending_outcomes", "special", "training", "cpu", "usd_futures"],
+      "required": ["mode", "now", "commit", "started_at", "phase", "session", "last_bar_close", "pending_outcomes", "special", "training", "cpu", "usd_futures", "signal_rule"],
       "additionalProperties": false,
       "properties": {
         "mode": {"enum": ["live", "demo", "replay"]},
@@ -91,6 +91,16 @@
               }
             }
           ]
+        },
+        "signal_rule": {
+          "description": "The rule a signal of the final consensus follows (KRX_SIGNAL_MIN_PROBABILITY, KRX_SIGNAL_MIN_AGREE), whether the Telegram alerts are on or off (#617).",
+          "type": "object",
+          "required": ["min_probability", "min_agree"],
+          "additionalProperties": false,
+          "properties": {
+            "min_probability": {"type": "number", "minimum": 0.5, "maximum": 1},
+            "min_agree": {"type": "integer", "minimum": 1}
+          }
         },
         "kis": {"$ref": "#/$defs/kis"},
         "loki": {"$ref": "#/$defs/loki"}

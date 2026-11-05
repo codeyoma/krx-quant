@@ -253,7 +253,7 @@ from krx_quant.predictions import (
 )
 from krx_quant.pricing import Direction, classify, flat_ticks, most_likely, tick_size
 from krx_quant.reference import Bar
-from krx_quant.signals import SENT, Blocked, Judged, Signals
+from krx_quant.signals import SENT, Blocked, Judged, SignalRule, Signals
 from krx_quant.smt import LIVE as SMT_LIVE
 from krx_quant.smt import Detector as SmtDetector
 from krx_quant.special import KOSPI, Kind, SpecialSituations, Window, in_vi, touching
@@ -466,6 +466,7 @@ class PredictionEngine:
         consensus_timing: Timing | None = None,
         leaders: Leaders | None = None,
         signals: Signals | None = None,
+        signal_rule: SignalRule | None = None,
         regimes: Regimes | None = None,
         admits: Admits | None = None,
         refused: Refused | None = None,
@@ -604,6 +605,9 @@ class PredictionEngine:
         self._stages: tuple[Any, dict[str, Stage]] | None = None
         self.listeners: list[Listener] = []
         self.signals = signals  # Telegram signal alerts, off without
+        # The signal settings in force, whether the alerts are on or off: the status serves them,
+        # and the screen's signal alerts follow them unless the user set their own (#617).
+        self.signal_rule = signal_rule or SignalRule()
         self._signals_resumed = False  # from the signals sent before a restart, at the first final
         self._regimes = regimes  # without: no macro regime, and nothing to say about it
         self._regime_days: dict[date, str | None] = {}

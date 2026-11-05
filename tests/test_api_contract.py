@@ -26,6 +26,7 @@ from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.demo import demo_app
 from krx_quant.fake_kis import FakeKis
+from krx_quant.signals import SignalRule
 from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import KIND_ROUTES, ROUTES, SCHEMA, STREAM, WRITES, check
 from tests.collector_doubles import settings_for
@@ -244,6 +245,18 @@ async def test_the_status_names_the_commit_running_and_when_the_engine_started(t
     assert deployed["started_at"] == "2026-10-12T00:00:00+09:00", "the replay's clock when it was made"
 
 
+async def test_the_status_serves_the_signal_rule_the_screen_follows(tmp_path: Path) -> None:
+    engine = await run(tmp_path / "engine.db", [], until=at("09:00:00"))
+    async with TestClient(TestServer(create_app(engine))) as client:
+        default = await (await client.get("/v1/status")).json()
+        engine.signal_rule = SignalRule(0.65, 3)
+        configured = await (await client.get("/v1/status")).json()
+
+    check("status", configured)
+    assert default["signal_rule"] == {"min_probability": 0.7, "min_agree": 2}, "the engine's defaults (#483)"
+    assert configured["signal_rule"] == {"min_probability": 0.65, "min_agree": 3}
+
+
 async def test_live_and_demo_need_their_kis_status(tmp_path: Path) -> None:
     engine = await run(tmp_path / "engine.db", [], until=at("09:00:00"))
 
@@ -447,7 +460,9 @@ async def test_the_demo_engine_keeps_the_contract(tmp_path: Path) -> None:
 
 async def test_the_live_engine_keeps_the_contract(kis: FakeKis, tmp_path: Path) -> None:
     port = free_port()
-    settings = replace(settings_for(kis, tmp_path), api_port=port)
+    # The signal settings, with the Telegram alerts off: the status serves them all the same (#617).
+    settings = replace(settings_for(kis, tmp_path), api_port=port, signal_thresholds=SignalRule(0.65, 3))
+    assert settings.signal_rule is None
     clock = FakeClock(at("09:30:10"))
     kis.script[("H0UNASP0", "005930")] = [
         book_frame({"MKSC_SHRN_ISCD": "005930", "BSOP_HOUR": "093010", "BIDP1": "81200", "ASKP1": "81300"})
@@ -458,7 +473,7 @@ async def test_the_live_engine_keeps_the_contract(kis: FakeKis, tmp_path: Path) 
         await kis.wait_for_subscriptions(set(kis.script))
         await kis.round_trip()
         base = f"http://127.0.0.1:{port}"
-        await poll(f"{base}/v1/status", lambda b: True)
+        status = await poll(f"{base}/v1/status", lambda b: True)
         async with aiohttp.ClientSession(base) as http, http.ws_connect("/v1/stream") as ws:
             # The KIS status first: the stream queues it as it counts the client, so the bar
             # close after it reaches this client (#574). Not listening() (#540): the collector
@@ -484,5 +499,6 @@ async def test_the_live_engine_keeps_the_contract(kis: FakeKis, tmp_path: Path) 
         await asyncio.wait_for(task, 5)
 
     assert checked["status"] == 1
+    assert status["signal_rule"] == {"min_probability": 0.65, "min_agree": 3}
     assert events[0]["type"] == "health", "the KIS status first, on connecting"
     assert {e["type"] for e in events} >= {"prediction", "consensus"}

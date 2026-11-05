@@ -340,6 +340,7 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
         # A running bar-close algorithm whose code changed is judged again (#454).
         revisions=RevisionGate(settings.state_dir, settings.target_version),
         commit=settings.commit,
+        signal_rule=settings.signal_thresholds,  # served by the status (#617)
         review_rules=Rules.of(settings),
         target_version=settings.target_version,  # the target learned and forecast (#169)
         climate=load_climate(settings.state_dir) if settings.target_version >= 2 else None,
