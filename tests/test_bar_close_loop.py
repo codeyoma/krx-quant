@@ -18,7 +18,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 import sqlite3
+import subprocess
 import sys
 import threading
 import time as timer
@@ -36,7 +39,7 @@ from krx_quant.collector import GIL_SWITCH_SECONDS, run_collector
 from krx_quant.engine import PredictionEngine
 from krx_quant.fake_kis import FakeKis
 from krx_quant.kinds import Answer, Followed, KindForecast, KindInputs
-from krx_quant.loop_watch import LOOP_HELD
+from krx_quant.loop_watch import LIMIT_SECONDS, LOOP_HELD
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from krx_quant.touch import TARGET_VERSION
@@ -47,6 +50,7 @@ from tests.replay_doubles import busy_morning
 from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, at, vi
 from tests.waiting import until
 
+ROOT = Path(__file__).resolve().parents[1]
 QUARTER = timedelta(minutes=15)
 HEAVY_AT = at("09:15:00")  # the window from here ends at the 09:30 bar close
 ANSWER_SECONDS = 1.0  # an hour of a busy symbol's quotes, answered on a slow server
@@ -208,3 +212,121 @@ async def test_the_collector_hands_the_gil_over_sooner_while_it_runs(kis: FakeKi
     assert running == pytest.approx(GIL_SWITCH_SECONDS)
     assert GIL_SWITCH_SECONDS == pytest.approx(0.0005)
     assert sys.getswitchinterval() == before
+
+
+# A busy morning's bar closes on the server's two CPUs and 2 GB, against the reference (#600). The
+# ci workflow's `bar-close` job runs it (BAR_CLOSE_BENCH=1), and a deploy waits for the whole run
+# (#541): a commit that slows the bar closes is not deployed. The bench (``bar_close_bench.py``) runs
+# in a process of its own with the image's BLAS and OpenMP threads, not the tests' (``__init__``).
+TESTS = Path(__file__).resolve().parent
+BENCH = TESTS / "bar_close_bench.py"
+REFERENCE = TESTS / "bar_close_reference.json"
+THREAD_VARIABLES = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+CPUS = 2  # the server's vCPUs
+MEMORY = "2G"  # the server's
+BUSY = 1  # a process spinning on the same CPUs: the trader, KIS frames, API requests
+# A figure over its limit fails only if the morning measured again is over too: one slow run (a busy
+# runner) is not a slower engine.
+ATTEMPTS = 2
+# The limits, each the reference's figure times its factor. The reference is the median of 50 mornings
+# of main on GitHub's runners on 2026-11-06 (three CPU models: EPYC 7763, 9V74, 9V45); of those, the
+# median longest gap reached 1.38 times the reference's, the time on the loop 1.22, the bar close
+# 1.27 (the CPU model moves it: 0.69-0.86 s on a 9V45, 0.89-1.26 s on a 9V74, and a morning measured
+# again runs on the same one) and the peak RSS 1.01. #538's double answering (12 mornings) took the
+# median gap to 35-64 times, the time on the loop to 10-19 times and the gaps' p95 to 1.3-2.4 s. The
+# gaps' p95 is held to the engine's own WARNING limit (``loop_watch.LIMIT_SECONDS``) instead: a full
+# garbage collection holds the loop 0.5-0.7 s, and where the few in a morning land moved the p95 of its
+# 32 bar closes from 0.04 s to 0.52 s.
+FACTORS = {
+    ("longest_gap_s", "median"): 3.0,
+    ("on_loop_s", "median"): 3.0,
+    ("bar_close_s", "median"): 1.75,
+    ("rss_peak_mb",): 1.2,
+}
+
+
+def image_threads() -> dict[str, str]:
+    """The BLAS and OpenMP threads the image sets for each of its processes (``Dockerfile``, #589)."""
+    text = (ROOT / "Dockerfile").read_text().replace("\\\n", " ")
+    lines = [line for line in text.splitlines() if line.startswith("ENV ")]
+    return dict(re.findall(r"\b((?:OPENBLAS|OMP|MKL)_NUM_THREADS)=(\S+)", "\n".join(lines)))
+
+
+def bench(*args: str, limited: bool = False) -> dict[str, Any]:
+    """One run of the bench, with the image's threads; ``limited``: on two CPUs (``taskset``) in a
+    cgroup of 2 GB (``systemd-run``), as the server's."""
+    env = {k: v for k, v in os.environ.items() if k not in THREAD_VARIABLES} | image_threads()
+    command = [sys.executable, str(BENCH), *args]
+    if limited:
+        assert hasattr(os, "sched_getaffinity"), "taskset and systemd-run (Linux)"
+        cpus = ",".join(str(cpu) for cpu in sorted(os.sched_getaffinity(0))[:CPUS])
+        memory = ["-p", f"MemoryMax={MEMORY}", "-p", "MemorySwapMax=0"]
+        command = ["systemd-run", "--user", "--scope", "-q", *memory, "taskset", "-c", cpus, *command]
+    done = subprocess.run(command, env=env, capture_output=True, text=True, timeout=900, check=False)
+    assert done.returncode == 0, f"{' '.join(command)} ended with {done.returncode}:\n{done.stderr[-3000:]}"
+    out: dict[str, Any] = json.loads(done.stdout)
+    return out
+
+
+def figure(figures: dict[str, Any], key: tuple[str, ...]) -> float:
+    value: Any = figures
+    for part in key:
+        value = value[part]
+    return float(value)
+
+
+def over_limits(figures: dict[str, Any], reference: dict[str, Any]) -> list[str]:
+    """What of a morning is over its limit: each figure against the reference's times its factor,
+    and the gaps' p95 against the WARNING's limit."""
+    over = []
+    for key, factor in FACTORS.items():
+        value, limit = figure(figures, key), factor * figure(reference, key)
+        if value > limit:
+            over.append(f"{'.'.join(key)} {value:g} over {limit:.4g} ({factor:g} x the reference's)")
+    p95 = figures["longest_gap_s"]["p95"]
+    if p95 > LIMIT_SECONDS:
+        over.append(f"longest_gap_s.p95 {p95:g} over the WARNING's {LIMIT_SECONDS:g}s")
+    return over
+
+
+@pytest.mark.skipif(
+    os.environ.get("BAR_CLOSE_BENCH") != "1", reason="minutes on two CPUs: the ci workflow's bar-close job"
+)
+@pytest.mark.skipif(sys.platform != "linux", reason="taskset and systemd-run (Linux)")
+# The models' fit (about a minute) and up to two mornings of 3-6 minutes each on a runner.
+@pytest.mark.timeout(1800)
+def test_a_busy_morning_s_bar_closes_on_two_cpus_stay_near_the_reference(tmp_path: Path) -> None:
+    """Input: the bench's morning, with every algorithm's model fitted on a made-up day, on two
+    CPUs and 2 GB beside a busy process, the image's threads. Output: its figures within the
+    reference's limits, in the first morning or, if not, in a second; each figure written where
+    ``BAR_CLOSE_FIGURES`` says, for the reference's refresh."""
+    reference = json.loads(REFERENCE.read_text())
+    fitted = bench("fit", str(tmp_path))["fitted"]
+    assert all(isinstance(samples, int) for samples in fitted.values()), f"each fitted: {fitted}"
+    mornings: list[dict[str, Any]] = []
+    for _ in range(ATTEMPTS):
+        figures = bench("replay", str(tmp_path), "--busy", str(BUSY), limited=True)
+        mornings.append(figures)
+        if (written := os.environ.get("BAR_CLOSE_FIGURES")) is not None:
+            Path(written).parent.mkdir(parents=True, exist_ok=True)
+            Path(written).write_text(json.dumps(mornings, indent=1) + "\n")
+        assert figures["fitted_models"] == sorted(fitted), "the engine predicts with the fitted models"
+        assert figures["threads"] == {k: image_threads().get(k) for k in figures["threads"]}
+        assert len(figures["cpus"]) == CPUS and figures["memory_max_mb"] == 2048, figures
+        assert figures["bar_closes"] == 32, "every bar close from 10:00 to 10:31 measured"
+        over = over_limits(figures, reference)
+        if not over:
+            return
+    shown = [{k: m[k] for k in ("cpu_model", "longest_gap_s", "on_loop_s", "bar_close_s")} for m in mornings]
+    pytest.fail(f"over the reference's limits in {ATTEMPTS} mornings: {over}\n{json.dumps(shown)}")
+
+
+def test_the_ci_workflow_runs_the_bench_on_a_runner_of_its_own() -> None:
+    """The ci workflow's ``bar-close`` job runs the bench's test with ``BAR_CLOSE_BENCH`` (the shards
+    skip it) and keeps its figures; the check a merge waits for needs it (``tests/test_ci_shard.py``)."""
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    job = workflow.split("\n  bar-close:\n", 1)[1].split("\n  test:\n", 1)[0]
+    name = test_a_busy_morning_s_bar_closes_on_two_cpus_stay_near_the_reference.__name__
+    assert f"uv run pytest -q tests/test_bar_close_loop.py::{name}" in job
+    assert 'BAR_CLOSE_BENCH: "1"' in job and "BAR_CLOSE_FIGURES: results/bar-close.json" in job
+    assert "name: bar-close" in job and "path: results/bar-close.json" in job
