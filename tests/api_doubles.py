@@ -1,7 +1,8 @@
 """Scored predictions and Engine API reads for the tests (#511): sure calls of the direction scored
 against made-up outcomes with their touch labels, the baselines', the barrier's board, the cost map
-served on a replayed holiday, a GET checked for its status, a connection to the stream once the
-stream counts it (#540), and the stream read until an event.
+served on a replayed holiday with the algorithms its ``top`` may name made active (#594), a GET
+checked for its status, a connection to the stream once the stream counts it (#540), and the stream
+read until an event.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from krx_quant.baselines import Forecast
 from krx_quant.daily import StoredDays
 from krx_quant.engine import PredictionEngine
 from krx_quant.kinds import Answer
+from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
@@ -139,6 +141,20 @@ async def cost_map(
     app = create_app(engine, min_sample=min_sample, state_dir=tmp_path / "state")
     async with TestClient(TestServer(app)) as client:
         yield engine, client
+
+
+def standing(store: PredictionStore, status: Status | None, *algorithms: str) -> None:
+    """Give ``algorithms`` the status ``status`` before the day (None: none, as an algorithm the
+    engine never registered)."""
+    if status is None:
+        return
+    for name in algorithms:
+        store.add_status(name, at("08:00:00"), None, status, "test")
+
+
+def activate(store: PredictionStore, *algorithms: str) -> None:
+    """Make ``algorithms`` active: the cost map's ``top`` is an active algorithm (#594)."""
+    standing(store, Status.ACTIVE, *algorithms)
 
 
 def store_barrier(store: PredictionStore, algorithm: str, calls: Sequence[str], width: int = 10) -> None:

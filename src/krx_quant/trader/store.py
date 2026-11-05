@@ -9,7 +9,8 @@ by the nightly re-fit (#399, from the engine's container).
 - ``decisions``: each prediction of a picked cell a book read (#400: the champion's and each
   challenger's), and what it did: bought, or why not (``paper.py``'s reasons), under which pick
   and policy; unique by (mode, policy, kind, predictor, prediction), a store from before made
-  again so (``_key_decisions``);
+  again so (``_key_decisions``); ``GET /v1/trader/decisions`` gives them, each book apart (#584,
+  ``decisions.py``);
 - ``trades``: each position, from its entry to its exit: the cell and its pick (the predictor's
   role, p*, the hit rate's lower bound, the Kelly f* and the fraction bought: null since #471, which
   sizes by a loss budget), the prediction and
@@ -84,10 +85,12 @@ by the nightly re-fit (#399, from the engine's container).
 practises one cell a share at a time (``desk.Desk``). Its pick is kept with ``selections.practice``
 1, its trades with ``trades.practice`` 1 (``PRACTICE_TRADE``) and the buys of which nothing filled
 with ``unfilled_buys.practice`` 1 (and in their ``entry``, which a restart adopts or opens a trade
-from); a trade's orders and fills are its trade's. A practice trade of the mock book is the trader's
-own (``champion`` 1: the cash, the risk rules, the KIS checks, the reconcile and the chart count
-it), of no policy (``policy_id`` null: no record, promotion or live gate counts it), and since #533
-no loss limit counts it (``realized``: the account's P&L, not the limits'); its paper
+from); a trade's orders and fills are its trade's. Each KIS practice buy's row there, kept before it
+is sent, gives by its decision the bar close the practice's spacing counts from (#598,
+``last_practice_buy``). A practice trade of the mock book is the trader's own (``champion`` 1: the
+cash, the risk rules, the KIS checks, the reconcile and the chart count it), of no policy
+(``policy_id`` null: no record, promotion or live gate counts it), and since #533 no loss limit
+counts it (``realized``: the account's P&L, not the limits'); its paper
 shadow's (``shadow`` 1) is of no policy either, and the paper account leaves it out
 (``paper_account``). The cell practised is frozen for each review cycle (#474, ``practice.py``):
 ``practice_cycles`` keeps it, one row a cycle, written by the nightly job (its cell, its θ, the cost
@@ -99,8 +102,9 @@ apart in the same tables (a pause and a resume hold whatever the mode). The reco
 policies' trades' P&L) are paper's whatever the mode (``promotion.records_of``, #405: in mock mode
 the champion's paper shadow keeps the champion's, ``shadow`` 1). The trader writes it, and the
 nightly re-fit its policies; the Engine API reads it read-only (``db.reading``: ``read_trades``,
-``read_trader``, ``read_days``, ``policy.read_policies``) and writes a pause into it
-(``request_pause``), and ``krx-quant trade resume|rearm`` a resume or a re-arm: nothing else. Times
+``read_trader``, ``read_days``, ``policy.read_policies``, ``decisions.read_decisions``) and writes a
+pause into it (``request_pause``), and ``krx-quant trade resume|rearm`` a resume or a re-arm: nothing
+else. Times
 are ISO 8601 strings in KST, which sort in time order (``db.iso``). The columns #395, #399, #400 and
 #405 added (``_ADDED``) are added to a store made before them, null in its rows.
 """
@@ -1330,6 +1334,27 @@ class TraderStore:
         to send, kept before it is (``unfilled_buys``, #406: those KIS refused, of which nothing filled
         or whose answer was lost too); a paper book's each buy it filled (a trade)."""
         return day_buys(self._db, mode, since, None, challenger, shadow, practice)
+
+    def last_practice_buy(self, mode: str, since: datetime) -> datetime | None:
+        """The bar close of the champion's book's last practice buy order of ``mode`` since ``since``
+        (its day's 00:00), what the practice's spacing counts from (#598, ``paper.spaced``): of the KIS
+        book (``mock``, ``live``) each practice buy it sent or tried to send (``unfilled_buys``, kept
+        before it is, by its decision: those KIS refused, of which nothing filled or whose answer was
+        lost too), as ``day_buys`` counts them; of a paper book each practice buy it filled. None
+        without one."""
+        if mode in KIS_MODES:
+            row = self._db.execute(
+                "SELECT max(d.bar_close) FROM unfilled_buys u JOIN decisions d ON d.id = u.decision_id"
+                " WHERE u.mode = ? AND u.placed_at >= ? AND coalesce(u.practice, 0) = 1",
+                (mode, iso(since)),
+            ).fetchone()
+        else:
+            row = self._db.execute(
+                "SELECT max(t.bar_close) FROM trades t WHERE t.mode = ? AND t.entry_at >= ?"
+                f" AND {CHAMPION_TRADE} AND {PRACTICE_TRADE}",
+                (mode, iso(since)),
+            ).fetchone()
+        return None if row[0] is None else datetime.fromisoformat(row[0])
 
     def open_challengers(self, mode: str) -> list[int]:
         """The challengers with a paper trade of ``mode`` not exited (#400: the trader stopped before

@@ -15,7 +15,7 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
 
 - **Cells** (``selection.py``, #395): a cell is a (kind, predictor): the four-minute direction
   (width k) or the 4-, 15- or 30-minute barrier (width w), and the final consensus (the
-  direction's only), the kind's first-ranked algorithm or its strongest baseline. The trader
+  direction's only), the kind's first-ranked active algorithm (#594) or its strongest baseline. The trader
   trades the champion policy's cells (below), whatever their verdict on the engine's cost map
   (``GET /v1/cost-map``, 005930, the last 20 days), read at each start and every day at 08:30 for
   their figures (#472: its pass at a market order's round trip is a diagnosis, no condition); none
@@ -76,7 +76,8 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   position's at the best bid, after its costs; a day's of 10% of the capital stops the day (sold
   at once, trading again the next trading day), a cumulative one of 20% stops the trader until
   ``krx-quant trade rearm``. The risk rules (#471, ``paper.risk_held``): three net losses in a row
-  stop new buys for 30 minutes, and at most 20 buy orders go a day, those refused counted. The
+  stop new buys for 30 minutes, and at most 20 buy orders go a day, those refused counted; the mock
+  practice's buys besides at least 15 minutes apart (#598, ``paper.spaced``). The
   screen's two pauses (``POST /v1/trader/pause``: new entries, or that and a sale now) last until
   ``krx-quant trade resume`` on the server. They hold the trades the trader makes, the champion's: no
   policy changes them.
@@ -101,7 +102,8 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   its mode (``paper``, ``mock``) and its book's policy, the policy versions and the days each ran,
   the pauses, resumes and re-arms asked for, the halts, the failed orders, the trader's state now
   and each day's ledger; the Engine API reads it
-  (``GET /v1/trader``, ``/v1/trader/trades``, ``/v1/trader/days``, ``/v1/trader/policies``) and
+  (``GET /v1/trader``, ``/v1/trader/trades``, ``/v1/trader/days``, ``/v1/trader/policies``,
+  ``/v1/trader/decisions``, #584) and
   writes a pause into it (``POST /v1/trader/pause``), nothing else.
 """
 
@@ -127,7 +129,7 @@ KIS_MODES = (MOCK, LIVE)
 # minutes. The 60-minute barrier and the daily kinds are not traded.
 TRADED_KINDS = ("direction", "barrier", "barrier_15m", "barrier_30m")
 # A cell's predictor, as the cost map names it (#307, #395): the final consensus (the direction's
-# only), the kind's first-ranked algorithm besides the consensus, its strongest baseline.
+# only), the kind's first-ranked active algorithm besides the consensus (#594), its strongest baseline.
 ROLES = ("consensus", "top", "baseline")
 
 # The capital the trader may use, in won (#393): ``.env`` may narrow it, never widen it.
@@ -152,6 +154,14 @@ RISK_PER_TRADE_PERCENT = 0.5
 LOSS_STREAK = 3
 COOLDOWN = timedelta(minutes=30)
 DAILY_BUY_ORDERS = 20
+# The mock practice's spacing (#598, ``paper.spaced``): a practice rise buys only at a bar close at
+# least this long after the bar close of the day's last practice buy order. Not a risk rule: the
+# practice's alone, so that its buys reach the afternoon and the time exits by 15:15 (on 2026-11-04
+# and 11-05 its 20 buys were gone by 13:14 and 11:04). 20 buys this far apart span 4 h 45 m, inside
+# the 6 h 6 m of a 4-minute cell's entries (09:05 to 15:11), so #533's 20 a day still fit; with a rise
+# one minute in four or five, as on those days, each buy waits a few minutes more for the next rise,
+# about 19 minutes a buy, and the 20 spread over the whole session.
+PRACTICE_SPACING = timedelta(minutes=15)
 
 # The cost map the cells are picked from (#395): 005930's, its last 20 days with predictions, the
 # special situations left out (the trader buys in none). Picked at each start, and every day at

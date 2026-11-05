@@ -180,6 +180,7 @@ from krx_quant.model_shelf import Shelf
 from krx_quant.names import logo_url
 from krx_quant.net_assets import read_net_assets
 from krx_quant.open_to_close import OPEN_TO_CLOSE
+from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import Excluded, SimulationRecord, iso
 from krx_quant.prevalidation import REGISTERED_BEFORE, Refusal
 from krx_quant.pricing import flat_ticks, tick_size
@@ -203,6 +204,7 @@ from krx_quant.stats import (
 from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, kind_target, prediction_json
 from krx_quant.supply import FIELDS as SUPPLY_FIELDS
 from krx_quant.supply import stored_supply
+from krx_quant.trader.decisions import BOOKS, read_decisions
 from krx_quant.trader.marks import read_marks
 from krx_quant.trader.policy import read_policies
 from krx_quant.trader.store import DB_NAME as TRADER_DB
@@ -398,6 +400,7 @@ def create_app(
     app.router.add_get("/v1/trader/days", _trader_days)
     app.router.add_post("/v1/trader/pause", _trader_pause)
     app.router.add_get("/v1/trader/policies", _trader_policies)
+    app.router.add_get("/v1/trader/decisions", _trader_decisions)
     app.router.add_get("/v1/symbols/{symbol}/trader-marks", _trader_marks)
     return app
 
@@ -1725,20 +1728,28 @@ async def _kind_algorithm_stats(request: web.Request, name: str, kind: Predictio
 async def _cost_map(request: web.Request) -> web.Response:
     """``/v1/cost-map`` (#307, ``cost_map.py``): the symbols' cost cards, a row each kind with
     a direction, from its leaderboard's statistics for the query (each kind's days its own,
-    computed and kept as the leaderboard's), and the period base rates kept
-    (``base_rates.py``)."""
+    computed and kept as the leaderboard's) and the algorithms' statuses (#594), and the period
+    base rates kept (``base_rates.py``)."""
     engine = request.app[ENGINE_KEY]
     query = _query(request, engine)
     min_sample = request.app[MIN_SAMPLE_KEY]
     fee = engine.fee_rate
 
+    # The algorithms active now, the only ones a row's ``top`` may name (#594), read at each request on
+    # the event loop (the store's own connection). They are part of each row's question: a status set
+    # by another process (``krx-quant retire``) does not change this store's version, which alone keeps
+    # a row computed.
+    active = tuple(sorted(name for name, s in engine.store.statuses().items() if s.status is Status.ACTIVE))
+    question = ("cost-map", *active)
+
     def direction(
         algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]], excluded: dict[str, Excluded]
     ) -> dict[str, Any]:
         board = leaderboard(algorithms, baselines, min_sample, fee)
-        return direction_row(DIRECTION_KIND, board, {**algorithms, **baselines}, fee, min_sample, query.days)
+        records = {**algorithms, **baselines}
+        return direction_row(DIRECTION_KIND, board, records, fee, min_sample, query.days, active=active)
 
-    rows = [await _stats(request, ("cost-map",), query, direction)]
+    rows = [await _stats(request, question, query, direction)]
     for kind in [*engine.kinds, *engine.daily_kinds]:
         if kind.sides is None:
             continue  # no direction: no long nor short to cost (the range)
@@ -1752,9 +1763,9 @@ async def _cost_map(request: web.Request) -> web.Response:
             days: tuple[date, ...] = of_kind.days,
         ) -> dict[str, Any]:
             board = kind_leaderboard(algorithms, baselines, min_sample, kind, engine.calendar)
-            return kind_row(kind, board, {**algorithms, **baselines}, fee, min_sample, days)
+            return kind_row(kind, board, {**algorithms, **baselines}, fee, min_sample, days, active=active)
 
-        rows.append(await _kind_stats(request, kind, ("cost-map",), of_kind, build))
+        rows.append(await _kind_stats(request, kind, question, of_kind, build))
     names = request.app[NAMES_KEY]
     symbols = []
     for symbol in [query.symbol] if query.symbol is not None else engine.symbols:
@@ -1950,6 +1961,28 @@ async def _trader_policies(request: web.Request) -> web.Response:
     # The cohorts' days (#473) counted on the engine's market calendar.
     calendar = request.app[ENGINE_KEY].calendar.session
     return _json(await asyncio.to_thread(read_policies, state_dir / TRADER_DB, limit, None, calendar))
+
+
+async def _trader_decisions(request: web.Request) -> web.Response:
+    """The trader's decisions of ``day`` (#584, today by default): each book apart, or ``book``'s alone,
+    a page of each newest first with its totals of the day by reason, the calls answered from the
+    engine's database; read from its store (read-only, off the event loop). None without the store."""
+    engine = request.app[ENGINE_KEY]
+    day = _day_query(request, "day") or kst_day(engine.clock.now())
+    book = request.query.get("book")
+    if book is not None and book not in BOOKS:
+        raise _error(web.HTTPBadRequest, f"book must be one of {', '.join(BOOKS)}, got {book!r}")
+    before = _time_query(request, "before")
+    limit = _limit_query(request, DEFAULT_LIMIT, MAX_LIMIT)
+    state_dir = request.app[STATE_DIR_KEY]
+    books = (
+        []
+        if state_dir is None
+        else await asyncio.to_thread(
+            read_decisions, state_dir / TRADER_DB, state_dir / ENGINE_DB, day, book, before, limit
+        )
+    )
+    return _json({"day": day.isoformat(), "book": book, "books": books})
 
 
 async def _trader_marks(request: web.Request) -> web.Response:
