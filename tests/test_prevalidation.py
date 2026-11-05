@@ -484,7 +484,7 @@ def test_left_out_is_a_refusal_of_the_code_it_has_by_an_algorithm_the_engine_doe
 def test_the_statuses_are_read_beside_the_engine_without_writing(tmp_path: Path) -> None:
     # #544: the night's training and a pre-validation read them as the engine keeps them.
     db = tmp_path / "state" / DB_NAME
-    assert read_statuses(db) == {}, "no engine DB (a night on Spot): none"
+    assert read_statuses(db) == {}, "no engine DB: none"
     store = PredictionStore(db)
     store.add_status("contrarian", at("09:00:00"), None, Status.PROBATION, "registered")
     store.add_status("contrarian", at("15:40:00"), Status.PROBATION, Status.RETIRED, "refused")

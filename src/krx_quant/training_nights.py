@@ -38,7 +38,7 @@ _STARTED = re.compile(r"started step (\S+)")
 @dataclass(frozen=True)
 class Failure:
     """Why a night's training did not finish: for the alert (``reason``), the exit code
-    (None: stopped at the time limit, or not run here: a Spot night) and the last step it
+    (None: stopped at the time limit, or the process could not be run) and the last step it
     started (None: none, or not known)."""
 
     reason: str

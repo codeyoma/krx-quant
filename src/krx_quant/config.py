@@ -161,18 +161,11 @@ class Settings:
     min_sample: int = DEFAULT_MIN_SAMPLE
     # The collector starts the nightly training at this time (KST) on trading days, once the
     # day's bars are archived (KRX_TRAIN_AT: 21:30 unless set; "off": no nightly training).
-    # None here, so a collector built in a test never trains.
+    # None here, so a collector built in a test never trains. It trains in its own process here.
+    # (삭제됨 2026-11-06, #PRNUM: KRX_TRAIN_ON, the training on EC2 Spot, and the Cost Guard's
+    # KRX_COST_BUDGET, KRX_TRAINING_SCHEDULES, KRX_COST_CHECK_SECONDS. 이유: #23 계획 없음, 계정
+    # 정책이 Spot을 막음. 대신: 서버 안 밤 학습, 필요하면 git 이력. One still set is not read.)
     train_at: time | None = None
-    # Where that night's training runs (KRX_TRAIN_ON): "server", in its own process here,
-    # or "spot", on EC2 Spot started by AWS at the same time (#23): then the collector only
-    # publishes what the run needs and waits for its result.
-    train_on: str = "server"
-    # Cost Guard (#23): the AWS Budgets budget the server watches (KRX_COST_BUDGET; unset:
-    # none), the EventBridge Scheduler schedules of the Spot training it turns off at the
-    # budget and on again in a new month (KRX_TRAINING_SCHEDULES), and how often it looks.
-    cost_budget: str | None = None
-    training_schedules: tuple[str, ...] = ()
-    cost_check_seconds: float = 3600.0
     # Disk Watch (#379): the collector alerts when less than this share of the disk under the
     # data or the state folder is free, in percent (KRX_DISK_MIN_FREE_PERCENT: 20 unless set;
     # 0: never). 0 here, so a collector built in a test never alerts on the test machine's disk.
@@ -348,10 +341,6 @@ class Settings:
                 raise SettingsError(f"{name} must stay within {MAX_REVIEW_DAY} days (the history reviewed)")
             return days
 
-        if values.get("KRX_COST_BUDGET", "").strip() and not codes("KRX_TRAINING_SCHEDULES", ""):
-            raise SettingsError(
-                "KRX_COST_BUDGET needs KRX_TRAINING_SCHEDULES: the schedules it turns off at the budget"
-            )
         algorithm_seconds = float(number("KRX_ALGORITHM_SECONDS", "10", float, maximum=55))
         cpu_budget_seconds = float(number("KRX_CPU_BUDGET_SECONDS", "30", float))
         if algorithm_seconds >= cpu_budget_seconds:
@@ -479,10 +468,6 @@ class Settings:
             cpu_budget_seconds=cpu_budget_seconds,
             min_sample=int(number("KRX_MIN_SAMPLE", str(DEFAULT_MIN_SAMPLE), int)),
             train_at=train_at,
-            train_on=_one_of("KRX_TRAIN_ON", values.get("KRX_TRAIN_ON", "server"), TRAIN_ON),
-            cost_budget=values.get("KRX_COST_BUDGET", "").strip() or None,
-            training_schedules=codes("KRX_TRAINING_SCHEDULES", ""),
-            cost_check_seconds=float(number("KRX_COST_CHECK_SECONDS", "3600", float, minimum=60)),
             disk_min_free_percent=float(
                 number("KRX_DISK_MIN_FREE_PERCENT", "20", float, minimum=0, maximum=99)
             ),
@@ -562,8 +547,6 @@ def _on_or_off(name: str, raw: str) -> bool:
     raise SettingsError(f"{name} must be on or off, got {raw!r}")
 
 
-# Where the nightly training runs: on this server, or on EC2 Spot (#23).
-TRAIN_ON = ("server", "spot")
 # The touch target before #187 (crossed quotes dropped): its rule is gone, so it is refused.
 GONE_TARGET = "2"
 
