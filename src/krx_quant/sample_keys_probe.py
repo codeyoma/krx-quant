@@ -43,7 +43,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-from krx_quant.archive import MERGED, partition_files
+from krx_quant.archive import MERGED, RawMissing, guarded_files
 from krx_quant.config import Settings
 from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
@@ -258,7 +258,9 @@ def _unmerged(merged: Path) -> str:
     if not merged.is_file():
         return ""
     try:
-        parts = [f for f in partition_files(merged.parent) if f.name != MERGED]
+        parts = [f for f in guarded_files(merged.parent) if f.name != MERGED]
+    except RawMissing:
+        return ", 서버에서 지웠다(#607)"
     except _ARROW_ERRORS as e:
         return f", part를 셀 수 없다({type(e).__name__})"
     return f", part {len(parts)}개"
@@ -279,12 +281,15 @@ def _late_section(settings: Settings, day: date, key: KeyFile) -> str:
         engine = []
     read |= {files[0].parent for _, files in engine if files}
     late: list[tuple[Path, list[Path]]] = []
-    unreadable = 0
+    unreadable = pruned = 0
     for partition in sorted(data.glob(f"*/date={day.isoformat()}/feed=*/symbol=*")):
         if not partition.is_dir():
             continue
         try:
-            parts = [f for f in partition_files(partition) if f.name != MERGED]
+            parts = [f for f in guarded_files(partition) if f.name != MERGED]
+        except RawMissing:  # a raw partition the archive pruned (#607): no part is left in it
+            pruned += 1
+            continue
         except _ARROW_ERRORS:
             unreadable += 1
             continue
@@ -294,6 +299,7 @@ def _late_section(settings: Settings, day: date, key: KeyFile) -> str:
         f"3. {day}의 합치지 않은 part 파일 (데이터 폴더: 아카이브의 마지막 실행 뒤에 쓴 행)",
         f"  part가 남은 파티션 {len(late)}개"
         + (f", 읽지 못한 파티션 {unreadable}개" if unreadable else "")
+        + (f", 서버에서 지운 raw 파티션 {pruned}개(#607, part 없음)" if pruned else "")
         + ". 이 뒤의 행은 다음 아카이브 실행(06:00 시작, 장 마감 15분 뒤, 21:00)이 합친다",
     ]
     mine = [(p, parts) for p, parts in late if p in read]

@@ -23,7 +23,8 @@ the two days' partitions) it prints:
 
 It prints counts, times, field names and contract codes: no price, volume or other market
 value, so its output can go on the public issue. It reads files and the public master
-files only, beside the running collector.
+files only, beside the running collector; a raw day the archive pruned on the server (#607)
+is read back from the Object Store (``raw_days.RawDays``).
 """
 
 from __future__ import annotations
@@ -46,6 +47,8 @@ from krx_quant.feeds import KOSPI200_FUTURES, NIGHT_FUTURES, NIGHT_FUTURES_BOOK,
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.masters import MasterError, download
+from krx_quant.object_store import open_store
+from krx_quant.raw_days import RawDays
 
 # Records received this long after 06:00 still count as the night's (a closing record).
 LATE = timedelta(minutes=10)
@@ -87,9 +90,9 @@ def _batches(partition: Path, columns: Sequence[str]) -> Iterator[dict[str, list
         yield batch.to_pydict()
 
 
-def acknowledgements(data_dir: Path, day: date) -> list[Ack]:
+def acknowledgements(raw: RawDays, day: date) -> list[Ack]:
     """KIS's answers to the night feeds' registrations recorded on ``day``, in order."""
-    root = data_dir / "raw" / f"date={day.isoformat()}" / "feed=_system"
+    root = raw.feed(day, "_system")
     acks: list[Ack] = []
     for partition in sorted(root.glob("symbol=*")):
         if partition.name == "symbol=_":  # heartbeats
@@ -106,7 +109,7 @@ def acknowledgements(data_dir: Path, day: date) -> list[Ack]:
 
 
 def subscribed_nights(
-    data_dir: Path, calendar: MarketCalendar, before: date, back: int = LOOK_BACK_DAYS
+    raw: RawDays, calendar: MarketCalendar, before: date, back: int = LOOK_BACK_DAYS
 ) -> list[date]:
     """The trading days of the ``back`` days before ``before`` whose night the collector had
     subscribed for when it began: KIS accepted its night trades' registration that day by
@@ -118,7 +121,7 @@ def subscribed_nights(
             continue
         opens = datetime.combine(day, NIGHT_OPEN, KST)
         try:
-            acks = acknowledgements(data_dir, day)
+            acks = acknowledgements(raw, day)
         except OSError:
             continue
         if any(a.ok and a.tr_id == NIGHT_FUTURES.tr_id and a.received_at <= opens for a in acks):
@@ -202,12 +205,12 @@ def _days(day: date) -> tuple[date, date]:
     return day, day + timedelta(days=1)
 
 
-def read_night(data_dir: Path, day: date, feed: Feed) -> _Feed:
+def read_night(data_dir: Path, raw: RawDays, day: date, feed: Feed) -> _Feed:
     """What ``feed`` delivered in the night after ``day``'s session."""
     window = night_window(day)
     seen = _Feed(feed)
     for partition_day in _days(day):
-        root = data_dir / "raw" / f"date={partition_day.isoformat()}" / f"feed={feed.tr_id}"
+        root = raw.feed(partition_day, feed.tr_id)
         for partition in sorted(root.glob("symbol=*")):
             key = partition.name.removeprefix("symbol=")
             for batch in _batches(partition, ("received_at", "message")):
@@ -223,11 +226,11 @@ def read_night(data_dir: Path, day: date, feed: Feed) -> _Feed:
     return seen
 
 
-def _frames_in(data_dir: Path, day: date, tr_id: str) -> int:
+def _frames_in(raw: RawDays, day: date, tr_id: str) -> int:
     """Frames of ``tr_id`` received in the night after ``day``'s session."""
     window, count = night_window(day), 0
     for partition_day in _days(day):
-        root = data_dir / "raw" / f"date={partition_day.isoformat()}" / f"feed={tr_id}"
+        root = raw.feed(partition_day, tr_id)
         for partition in root.glob("symbol=*"):
             for batch in _batches(partition, ("received_at",)):
                 count += sum(1 for at in batch["received_at"] if _in(window, at))
@@ -377,11 +380,14 @@ def report(
     now: datetime,
     masters: Sequence[str],
     day: date | None = None,
+    raw: RawDays | None = None,
 ) -> str:
     """The report on the night after ``day``'s session; by default the latest night over by
-    ``now`` that the collector subscribed for, else the latest trading day's."""
+    ``now`` that the collector subscribed for, else the latest trading day's. ``raw`` reads the raw
+    days (by default the data directory's, a pruned one failing)."""
+    raw = RawDays(data_dir) if raw is None else raw
     ended = evening(now)  # nights before this evening's are over
-    nights = subscribed_nights(data_dir, calendar, ended)
+    nights = subscribed_nights(raw, calendar, ended)
     if day is None:
         day = nights[-1] if nights else calendar.previous_trading_day(ended)
     start, _ = night_window(day)
@@ -396,20 +402,20 @@ def report(
         + (", ".join(str(d) for d in nights) or "없음"),
         f"만기 규칙이 이 밤에 고르는 월물: {contract}",
     ]
-    acks = [
-        a for d in _days(day) for a in acknowledgements(data_dir, d) if a.received_at < night_window(day)[1]
-    ]
+    acks = [a for d in _days(day) for a in acknowledgements(raw, d) if a.received_at < night_window(day)[1]]
     sections: list[tuple[str, list[str]]] = [("1. 구독 응답(KIS, raw _system)", _ack_lines(acks))]
     for n, feed in enumerate(FEEDS, start=2):
         name = "체결" if feed is NIGHT_FUTURES else "호가"
-        sections.append((f"{n}. {feed.tr_id} {name}", _feed_section(read_night(data_dir, day, feed), day)))
+        sections.append(
+            (f"{n}. {feed.tr_id} {name}", _feed_section(read_night(data_dir, raw, day, feed), day))
+        )
     sections.append(("4. 결측 구간(gaps)", _gaps(data_dir, day)))
-    day_frames = _frames_in(data_dir, day, KOSPI200_FUTURES.tr_id)
+    day_frames = _frames_in(raw, day, KOSPI200_FUTURES.tr_id)
     sections.append(("5. 같은 밤 주간 선물 피드", [f"{KOSPI200_FUTURES.tr_id} 프레임 {day_frames}개"]))
     sections.append(("6. KIS 마스터", list(masters) or ["읽지 않았다"]))
     others = []
     for other in (d for d in nights if d != day):
-        trades, book = (read_night(data_dir, other, f) for f in FEEDS)
+        trades, book = (read_night(data_dir, raw, other, f) for f in FEEDS)
         received = sorted(trades.received + book.received)
         span = f" · 첫 {_when(received[0], other)} · 마지막 {_when(received[-1], other)}" if received else ""
         others.append(f"{other}: 체결 레코드 {trades.records} · 호가 레코드 {book.records}{span}")
@@ -421,7 +427,10 @@ def report(
 
 
 async def probe_night(settings: Settings, now: datetime, day: date | None = None) -> str:
-    """The report, with the masters read from ``KIS_MASTER_URL``."""
+    """The report, with the masters read from ``KIS_MASTER_URL`` and a pruned raw day from the
+    Object Store."""
     index_text, night_text, errors = await read_masters(settings.master_url)
     calendar = calendar_store(settings).calendar
-    return report(settings.data_dir, calendar, now, master_lines(index_text, night_text, errors), day)
+    masters = master_lines(index_text, night_text, errors)
+    with RawDays(settings.data_dir, open_store(settings)) as raw:
+        return report(settings.data_dir, calendar, now, masters, day, raw)

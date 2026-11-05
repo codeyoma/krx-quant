@@ -412,6 +412,10 @@ compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예
 
 Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state`로 돈다(`Dockerfile`). `PATH`의 맨 앞은 앱의 venv(`/app/.venv/bin`)다(#322). 그래서 `docker compose exec engine krx-quant <명령>`이 명령을 찾고, 컨테이너 안의 `python`이 앱의 파이썬(`/app/.venv/bin/python`)이다. 엔트리포인트는 `/app/.venv/bin/krx-quant`라 `docker compose run --rm engine <명령>`은 늘 됐다.
 
+이미지는 `OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1`로도 돈다(#589). NumPy의 BLAS(OpenBLAS)와 OpenMP가 부른 스레드에서만 계산한다. 이미지의 모든 프로세스가 같다: 엔진, 엔진이 띄우는 밤 학습과 예약 작업, trader, 손으로 돌리는 명령. 엔진은 봉 마감마다 알고리즘을 저마다 작업 스레드에서 함께 돌린다. 그 스레드들이 서버의 vCPU 둘을 BLAS 스레드와 다투지 않게 한다. 잰 값과 까닭은 [design.md](design.md) 5장 "시간 예산"의 "BLAS·OpenMP 스레드(#589)"에 있다. 사용자가 할 일은 없다: 06:00 배포가 새 이미지로 컨테이너를 만든다. `.env`에 두지 않는다(두면 `.env`의 값이 이긴다).
+
+> **바뀜** (2026-11-06, #602): NumPy의 BLAS는 OpenBLAS의 기본대로 CPU마다 스레드 하나(서버에서 둘)로 계산했다 → 이미지의 모든 프로세스에서 부른 스레드 하나로 계산한다. 이유: 알고리즘마다의 작업 스레드가 동시에 돌 때 ito의 고유값 분해가 BLAS 스레드를 기다리며 CPU를 썼다. CPU 둘로 묶은 컨테이너에 바쁜 프로세스 하나를 같이 돌리면 봉 마감 하나가 0.80초 → 0.30초, ito가 0.49초 → 5–6 ms였다. 밤 학습은 BLAS 스레드 둘로 더 빠르지 않았다(#589).
+
 > **바뀜** (2026-10-20, #329): 이미지의 `PATH`에 앱의 venv가 없었다 → 맨 앞에 둔다. 이유: `docker compose exec engine krx-quant <명령>`이 `krx-quant`를 찾지 못했고, 컨테이너의 `python`은 앱의 패키지(`pyarrow` 등)가 없는 이미지의 기본 파이썬이었다. #308 때 에이전트가 그 `python`으로 명령을 줘 틀렸다(#322).
 
 ### 2.3 첫 거래일 확인 (#7)
@@ -980,7 +984,7 @@ docker compose run --rm engine probe-night                  # 구독한 가장 �
 docker compose run --rm engine probe-night --day 2026-10-20 # 그날 저녁의 밤
 ```
 
-- 읽는 것: 그 밤의 두 날짜 파티션(`raw`, `events`, `gaps`)에서 받은 시각이 18:00부터 다음 날 06:10 전까지인 것, 그리고 KIS 마스터 둘(`fo_idx_code_mts.mst`, 야간선물 마스터 `fo_cme_code.mst`, `KIS_MASTER_URL`). 쓰는 것은 없고 KIS API를 부르지 않는다. 엔진이 도는 중에 돌려도 된다.
+- 읽는 것: 그 밤의 두 날짜 파티션(`raw`, `events`, `gaps`)에서 받은 시각이 18:00부터 다음 날 06:10 전까지인 것, 그리고 KIS 마스터 둘(`fo_idx_code_mts.mst`, 야간선물 마스터 `fo_cme_code.mst`, `KIS_MASTER_URL`). 쓰는 것은 없고 KIS API를 부르지 않는다. 엔진이 도는 중에 돌려도 된다. 30일 지나 서버에서 지운 raw(#607)는 S3(`KRX_OBJECT_STORE`)에서 임시 폴더로 받아 읽고, 받지 못하면 실패한다(3장 "서버의 raw 30일 (#607)").
 - 기본 밤: 앞 7일의 거래일 중 18:00 전에 KIS가 `H0MFCNT0` 구독을 받은 날(raw `_system`의 구독 응답) 가운데 가장 최근 것의 밤이다. 그런 날이 없으면 가장 최근 거래일의 밤이다.
 - 절:
   1. 구독 응답: 야간 피드 둘의 키별 응답(성공·거절 메시지, 횟수, 첫·마지막 시각).
@@ -1012,7 +1016,7 @@ docker compose run --rm engine night-book-bytes            # 잰 밤들
 docker compose run --rm engine night-book-bytes --verdict  # 규칙을 적용한 판정
 ```
 
-- 읽는 것: 밤마다 그 밤이 시작한 날과 다음 날의 `raw`, `events` 파티션(`feed=H0MFASP0`)에서 받은 시각 열(`received_at`)과 Parquet 메타데이터. 프레임의 내용은 읽지 않는다. `--verdict`는 설치된 `krx_quant`의 모듈 소스도 읽는다. 쓰는 것은 `state/night-book-605.json`뿐이고 KIS API를 부르지 않는다. 엔진이 도는 중에 돌려도 된다.
+- 읽는 것: 밤마다 그 밤이 시작한 날과 다음 날의 `raw`, `events` 파티션(`feed=H0MFASP0`)에서 받은 시각 열(`received_at`)과 Parquet 메타데이터. 프레임의 내용은 읽지 않는다. `--verdict`는 설치된 `krx_quant`의 모듈 소스도 읽는다. 쓰는 것은 `state/night-book-605.json`뿐이고 KIS API를 부르지 않는다. 엔진이 도는 중에 돌려도 된다. 30일 지나 서버에서 지운 raw의 밤(#607)은 S3(`KRX_OBJECT_STORE`)에서 임시 폴더로 받아 잰다. 받은 파일은 합친 파일과 바이트가 같다(3장 "서버의 raw 30일 (#607)"). 판정(11-20)까지의 밤은 30일 안이라 받을 일이 없다.
 - 밤: 2026-11-06부터의 거래일 저녁마다, 그 밤의 행이 다 들어온 뒤(다음 날 12:00 뒤)다. 완전한 밤이 7개가 되면 그 뒤의 밤은 재지 않는다. 실행마다 녹화에서 처음부터 다시 잰다.
 - **밤의 바이트.** 수집기는 행을 받은 날(KST)의 파티션에 쓴다([events.md](events.md)). 그래서 한 밤(18:00–다음 날 06:00)은 두 날의 파티션에 있고, 파티션마다 다른 밤과 나눠 쓴다. 호가는 밤에만 오므로 그 저녁 12:00부터 다음 날 12:00까지 받은 행을 그 밤의 것으로 본다. 합친 파일의 row group마다 압축 크기에 그 밤의 행의 비율을 곱해 더하고, 파일 끝의 메타데이터는 파일 전체 행의 비율로 나눈다. row group은 받은 순서대로 256,000행이라 한 파일의 두 밤이 나눠 갖는 row group은 많아야 하나다. 그래서 모든 밤의 몫을 더하면 합친 파일의 크기다.
 - **완전한 밤.** 셋 다일 때 센다.
@@ -1151,7 +1155,7 @@ docker compose run --rm engine probe-nav
 docker compose run --rm engine probe-gaps
 ```
 
-- 읽는 것: 녹화가 있는 모든 날(raw에 WebSocket 피드의 프레임이 있거나 `gaps`가 있는 날, 오늘까지)의 `gaps`, raw의 WebSocket 피드(`_system`·`_unparsed` 포함)의 받은 시각(`received_at`), events의 KRX 체결(`H0STCNT0`)과 통합 체결(`H0UNCNT0`), `bars`(`FHKST03010230`)의 봉 시각. 종목은 `KRX_SYMBOLS`(통합·KRX 체결), `KRX_ETF_SYMBOLS`(KRX 체결, 1분봉)와 그날 events에 녹화된 다른 종목이다. 거래 일정은 서버의 `state/market_calendar.json`이다. 쓰는 것은 없고 KIS API를 부르지 않는다. 엔진이 도는 중에 돌려도 된다.
+- 읽는 것: 녹화가 있는 모든 날(raw에 WebSocket 피드의 프레임이 있거나 `gaps`가 있는 날, 오늘까지)의 `gaps`, raw의 WebSocket 피드(`_system`·`_unparsed` 포함)의 받은 시각(`received_at`), events의 KRX 체결(`H0STCNT0`)과 통합 체결(`H0UNCNT0`), `bars`(`FHKST03010230`)의 봉 시각. 종목은 `KRX_SYMBOLS`(통합·KRX 체결), `KRX_ETF_SYMBOLS`(KRX 체결, 1분봉)와 그날 events에 녹화된 다른 종목이다. 거래 일정은 서버의 `state/market_calendar.json`이다. 쓰는 것은 없고 KIS API를 부르지 않는다. 엔진이 도는 중에 돌려도 된다. 30일 지나 서버에서 지운 raw(#607)의 날도 그대로 센다(폴더가 남는다). 그 프레임은 S3(`KRX_OBJECT_STORE`)에서 하루씩 임시 폴더로 받아 읽고, 받지 못하면 실패한다(3장 "서버의 raw 30일 (#607)"). 그래서 모든 날을 읽는 이 명령은 지운 날마다 그날의 WebSocket raw를 받는다.
 - 열은 수집기가 쓰는 스키마(`health.GAP_SCHEMA`, `RAW_SCHEMA`, 체결 피드의 스키마, `backfill.BAR_SCHEMA`)의 이름으로 읽는다. 그 열이 없거나 시각 열의 타입이 다른 파일은 읽지 않고 세어 끝에 보인다("스키마와 다른 파일"). 체결의 코드 열이 없는 파일은 그 열 없이 읽고 센다.
 - 절:
   1. 날마다 요약: 거래일·휴장일, 결측 구간 수와 이유별 묶음 수(`<이유> N번(구간 M개)`, 묶음은 3절), 거래일이면 종가 단일가 구간의 가장 긴 침묵과 그 구간에 겹친 끊김 수.
@@ -1536,6 +1540,28 @@ Toss: 109 calls, 1 failed; tokens issued: 0
 - 올리는 작업은 다시 돌려도 결과가 같다. 바뀐 파일만 다시 올린다.
 - 손으로 돌리려면 `docker compose run --rm engine archive`를 실행한다.
 - 업로드 기록은 서버의 각 파티션 `.uploaded.json`에 저장소별로 남는다. S3 쪽에서 객체가 사라졌을 수 있으면 `docker compose run --rm engine archive --recheck`로 모든 파일을 S3와 비교해 빠진 것을 올린다.
+- 업로드가 끝나면 30일 지난 `raw`를 서버에서 지운다. S3 사본을 받아 SHA-256이 같은 파티션만이다(아래 "서버의 raw 30일 (#607)").
+
+> **바뀜** (2026-11-06, #613): 업로드는 합친 part 파일만 지웠다 → 30일 지난 `raw` 파티션의 합친 파일도, S3 사본의 SHA-256을 확인한 뒤 서버에서 지운다. 이유: 서버 데이터의 대부분이 raw이고 날마다 는다(2026-10-27에 3.3 GB 중 2.4 GB). raw는 S3에 영구 보관된다. 사용자가 2026-11-06에 추천안대로 하기로 했다(#607).
+
+### 서버의 raw 30일 (#607)
+
+서버의 로컬 데이터는 2026-10-27에 3.3 GB였고 그중 2.4 GB가 `raw`였다. 날마다 는다. raw는 S3에 영구 보관된다. 그래서 S3 사본을 확인한 날만, 30일이 지나면 서버에서 지운다. 2026-11-06에 사용자가 추천안대로 하라고 했다.
+
+- **언제.** 아카이브가 돌 때마다(수집기가 시작할 때, 장 마감 15분 뒤, 21:00, 손으로 돌린 `archive`), 합치고 올린 다음에 한다. 이 변경을 담은 06:00 배포가 띄운 수집기의 첫 아카이브부터다. 사용자가 할 일은 없다.
+- **무엇을.** 달력으로 그 실행의 날(KST)보다 30일 넘게 앞선 날의 `raw` 파티션만 지운다(`archive.RAW_KEEP_DAYS`). 11-07 실행이면 10-07까지다. `events`, `gaps`, `bars`, `macro`, 일·주·월·년봉은 지우지 않는다.
+- **어떻게.** 아카이브 잠금(`.archive.lock`) 아래에서 파티션을 하나씩 본다. 합친 파일(`data.parquet`) 하나만 남은 파티션의 S3 사본을 파티션 폴더에 받아 SHA-256을 로컬 파일과 견주고, 같을 때만 지운다. `.uploaded.json`과 S3 객체 옆의 SHA-256 메타데이터는 믿지 않는다. 보낸 것의 기록일 뿐, S3가 가진 바이트가 아니기 때문이다. 받은 사본은 견주자마자 지운다. 그래서 디스크는 파티션 하나만큼만 잠깐 더 쓴다. 지우기 전에 폴더에 표시 `.pruned.json`(S3 키, SHA-256, 크기, 확인한 때(UTC), 저장소)을 쓰고 디스크에 내린다. 폴더와 표시는 남으므로, 그날 무엇을 녹화했는지는 계속 보인다. 표시를 쓰고 파일을 지우기 전에 멈췄으면, 다음 실행이 남은 파일을 표시의 SHA-256과 견주고 지운다.
+- **지우지 않는 것.** 다음 실행이 다시 본다.
+  - S3 사본의 SHA-256이 다른 파티션, S3에 사본이 없는 파티션, 받지 못한 파티션.
+  - 아직 합치지 않은 part 파일이나 쓰는 중인 파일(`.tmp`)이 있는 파티션.
+  - 고정한 날(아래).
+- 지운 파티션에 행이 다시 기록되면(한 달 뒤의 날에 녹화될 일은 없다. 시계가 한 달 뒤로 돌아간 때뿐이다) 합치지도 올리지도 않는다. 합치면 S3의 온전한 사본을 그 행만 든 파일로 덮어쓰기 때문이다. 그 파티션은 업로드 실패로 알린다(텔레그램 `장 마감 데이터 업로드가 … 실패했습니다`).
+- **로그.** 실행마다 한 줄이 남는다: `raw on the server (#607): pruned <N> partitions, <M> MB; left <K> partitions, <L> MB (<P> pinned, <Q> past 30 days kept)`. 지운 양과 서버에 남은 raw의 양이다. 30일이 지났는데 지우지 않은 파티션마다 WARNING `not pruning raw/date=…: <까닭>`이 남는다. `krx-quant archive`도 같은 줄을 낸다. Loki: `{service="krx-quant"} |= "raw on the server (#607)"`.
+- **되살리기.** raw를 읽는 명령(`recording-quality --day`, `probe-night --day`, `probe-gaps`, `night-book-bytes`)은 지운 파티션을 S3(`KRX_OBJECT_STORE`)에서 임시 폴더로 받아 읽는다(`raw_days.RawDays`). 받은 파일의 SHA-256은 표시와 견준다. 한 번에 이틀 치까지만 두고, 명령이 끝나면 지운다. 지우지 않은 파티션은 서버의 것을 그대로 읽는다. `KRX_OBJECT_STORE`가 없거나, S3에 사본이 없거나, 사본이 다르면 그 파티션을 말하며 실패한다(`archive.RawMissing`). 지운 파티션을 그냥 읽어도 같은 오류로 실패한다. 수집기 옆에서 파티션의 파일을 늘어놓는 곳은 모두 `archive.guarded_files`를 거친다(`archive.partition_batches`, 야간 호가 측정, 표본 키 프로브, 지난 정답 채우기 등. `tests/test_raw_retention.py`가 소스로 확인한다. 예외는 표본 저장소의 키에 든 코드 셋으로, raw를 읽지 않는다). 그래서 읽는 사이에 지워져도(파일을 늘어놓기 전과 뒤, 파일이 사라졌을 때, 다 읽은 뒤에 표시를 본다), 표시 없이 합친 파일만 사라졌어도(업로드 기록 `.uploaded.json`이 그 파일을 말한다) 같다. 빈 날로 읽는 일은 없다. 밤마다 도는 기록 품질 리포트(#570)는 그 주의 raw만 읽어 받을 일이 없다.
+  - 손으로 받으려면 표시의 `key`를 쓴다. 키는 `KRX_OBJECT_STORE`의 접두사 아래 데이터 폴더와 같은 경로다(`raw/date=<날>/feed=<TR>/symbol=<키>/data.parquet`). 예: `aws s3 cp --recursive s3://<버킷>/<접두사>/raw/date=<날>/ <폴더>/raw/date=<날>/`. 서버의 데이터 폴더에는 받지 않는다. 다음 아카이브가 다시 견주고 지운다.
+- **고정.** 끝나지 않은 조사가 서버 디스크에서 30일 지난 raw를 읽어야 하면, `archive.RAW_PINS`에 날짜 범위와 이슈와 까닭을 더하는 PR을 연다. 그 이슈를 닫는 PR이 고정을 뺀다. raw를 읽는 명령에는 고정이 필요 없다(S3에서 받는다). 지금 고정한 날은 없다. 표본 키 프로브(#565)는 표본 저장소의 마지막 두 날만 보고 raw를 입력으로 읽지 않는다. 야간 호가 측정(#605)은 11-20 판정 전의 밤들을 읽어 30일 안이다.
+- **raw를 읽지 않는 것.** 엔진, 재생, 학습과 표본 저장소, 지난 정답 채우기는 events, bars, macro만 읽는다. `doctor`는 오늘의 raw PINGPONG만 읽는다. 표본 키 프로브의 3절은 마지막 날의 part 파일 목록만 본다(지운 파티션에는 part가 없다).
+- **비용.** 지울 때 그날의 raw를 S3에서 한 번 받는다. 하루 한 번, 그날 녹화한 raw만큼이다.
 
 ### 자동 매매 (#394)
 
@@ -1731,6 +1757,12 @@ mock으로 시작한 날부터 비용 지도에서 시장가 왕복으로 통과
   - 같은 분에 trader의 `quotes stalled`가 있는지 맞춰 본다. 단계가 `records`나 `consensus`이고 알고리즘들이 도는 동안이면 저장소 호출이 GIL을 기다린 것이다(수집기는 GIL을 0.5 ms마다 넘긴다, `collector.GIL_SWITCH_SECONDS`). `other`가 크면 그 시각의 엔진 API 요청(화면)이나 다른 작업을 본다.
 - Loki: `{service="krx-quant", process="engine"} |= "held the event loop"`. 하루 수: `sum(count_over_time({service="krx-quant", process="engine"} |= "held the event loop" [1d]))`. 끊김과 함께 보려면 `{service="krx-quant"} |~ "held the event loop|quotes stalled"`.
 - 할 일: 하루 몇 번이고 1–2초면 없다. 5초 가까운 줄이 잦으면 가장 큰 단계를 이슈로 남긴다(무엇을 루프 밖으로 옮기거나 가볍게 할지). 알림 기준(trader의 5초)은 바꾸지 않는다(#538).
+- BLAS·OpenMP 스레드를 하나로 둔 배포(#589, 위 2장의 Docker 이미지) 뒤 첫 거래일 밤에 예약 작업 `bar-close-times-589`가 `krx-quant bar-close-times --tonight`을 돌려 #589에 남긴다(아래 "예약 작업 (#215)"의 표. 그날 예측이 없으면 다음 거래일 밤에 다시 돈다). 그날을 앞 거래일 5일과 견준다:
+  - 날마다 봉 마감에서 첫 저장(기준 예측: 채점과 입력), 최종 합의, 마지막 저장(봉 마감 전체)까지의 초, trader의 호가 끊김 수(끝난 끊김은 마지막 호가에서 다음 호가까지의 가장 긴 초, 아직 끝나지 않은 끊김은 따로 지금까지의 초). 엔진 DB의 예측이 저장된 시각(`displayed_at`)으로 잰다. 장중 엔진은 저장할 때의 시계를 적는다.
+  - 알고리즘마다 첫 저장 뒤 그 예측이 저장되기까지의 초(작업 스레드와 GIL을 기다린 시간과 계산)와 시간 초과·오류가 난 봉 마감 수. ito가 앞 날들보다 짧아야 한다.
+  - 그날 이벤트 루프를 1초 넘게 쥔 봉 마감과 그 가장 큰 단계. 엔진은 #589부터 위 WARNING을 쓸 때 저장소의 `runs`에도 `loop_held`로 남긴다(서버는 Loki를 읽지 못한다, [engine-api.md](engine-api.md)의 `runs`). 앞 날들의 수는 Loki에 있다(위 질의).
+  - 넘친 알고리즘은 WARNING으로도 남는다: `<이름> took over 10.0s at <봉 마감>; skipped`(알고리즘 하나의 한도), `<이름> skipped at <봉 마감> for the CPU budget (expected …s; budget 30.0s per bar close)`. 질의: `{service="krx-quant", process="engine"} |~ "took over|for the CPU budget"`.
+  - 알고리즘마다 봉 마감 한 번에 걸린 시간의 지수 평균은 `/v1/status`의 `cpu.algorithms`다([engine-api.md](engine-api.md)). 엔진 API에 닿는 사용자가 화면이나 `curl -s http://krx-quant:8080/v1/status | jq .cpu`로 본다. 잰 값으로는 ito가 봉 마감마다 수 ms다. 0.1초를 넘는 일이 잦으면 고정이 들었는지 본다(컨테이너 안 `printenv OPENBLAS_NUM_THREADS`가 `1`인지 본다).
 
 #### trader 침묵 (#542)
 
@@ -2207,7 +2239,7 @@ report: /state/prevalidations/mandelbrot.json
 docker compose run --rm engine recording-quality [--day YYYY-MM-DD]
 ```
 
-- 읽는 것: 그날의 `gaps`, `bars`(`FHKST03010230` 1분봉, 20:30 백필), events의 통합 체결(`H0UNCNT0`)과 KRX 체결(`H0STCNT0`), raw의 WebSocket 피드와 `_unparsed`, 야간선물(`H0MFCNT0`, `H0MFASP0`)의 raw와 events, raw `_system`의 야간선물 구독 응답, 엔진의 `/v1/status`(`doctor`와 같이 이 컨테이너의 엔진 API, 아니면 compose의 `engine` 서비스). 종목은 `KRX_SYMBOLS`와 `KRX_ETF_SYMBOLS`다. 쓰는 것은 없고 KIS API를 부르지 않는다. 엔진이 도는 중에 돌려도 된다. 열은 수집기가 쓰는 스키마의 이름으로 읽고, 그 열이 없거나 타입이 다른 파일은 읽지 않고 세어 끝에 보인다("스키마와 다른 파일").
+- 읽는 것: 그날의 `gaps`, `bars`(`FHKST03010230` 1분봉, 20:30 백필), events의 통합 체결(`H0UNCNT0`)과 KRX 체결(`H0STCNT0`), raw의 WebSocket 피드와 `_unparsed`, 야간선물(`H0MFCNT0`, `H0MFASP0`)의 raw와 events, raw `_system`의 야간선물 구독 응답, 엔진의 `/v1/status`(`doctor`와 같이 이 컨테이너의 엔진 API, 아니면 compose의 `engine` 서비스). 종목은 `KRX_SYMBOLS`와 `KRX_ETF_SYMBOLS`다. 쓰는 것은 없고 KIS API를 부르지 않는다. 30일 지나 서버에서 지운 raw(`--day`로 고른 옛날, #607)는 S3(`KRX_OBJECT_STORE`)에서 임시 폴더로 받아 읽고, 받지 못하면 실패한다(3장 "서버의 raw 30일 (#607)"). 엔진이 도는 중에 돌려도 된다. 열은 수집기가 쓰는 스키마의 이름으로 읽고, 그 열이 없거나 타입이 다른 파일은 읽지 않고 세어 끝에 보인다("스키마와 다른 파일").
 - 날: `--day`가 없으면 그날 20:30(1분봉이 확정되는 `BARS_FINAL_AT`) 뒤부터 다음 날 06:00 전까지는 그날, 아니면 앞 거래일이다. 거래일이 아닌 날을 주면 그렇다고 한 줄만 낸다.
 - 첫 줄은 제목, 둘째 줄은 `에이전트 차례:` 줄이다(#402의 리포트와 같은 꼴, `trader.report.AGENT`). 기준을 넘은 것마다 그 수와 기준을 `;`로 이어 적고, 없으면 `에이전트 차례: 아님(기준 안: 기록만, 라벨을 바꾸지 않는다)`이다.
 - 절:
@@ -2280,6 +2312,7 @@ docker compose run --rm engine recording-quality [--day YYYY-MM-DD]
 | `recording-quality-570` | 거래일 밤마다 한 번(밤 학습 뒤, `trader-report` 바로 다음). 실패하거나 끊겼으면 다음 거래일 밤에 다시 돈다 | `recording-quality` | 15분. 넉넉히 잡은 상한이다(서버 크기의 하루가 맥에서 6초, 최대 RSS 365 MB). 22:30 무렵 `trader-report` 바로 다음에 돌아, 엔진이 메모리에만 두는 그날의 REST 조회 수를 자정 전에 읽는다. 짧게 잡아 그 뒤 작업이 마지막 시작 시각(00:30, `breiman`은 23:30)을 넘기지 않게 한다 | #571(상시 이슈, 닫지 않는다): 출력 전체(위 "기록 품질 리포트 (#570)"). 리포트의 `에이전트 차례:` 줄이 기준을 넘은 까닭을 말하는 밤과 작업이 실패한 밤에만 `ready-for-agent`를 붙이고, 떼는 라벨은 없다. 에이전트가 할 일은 [docs/agents/recording-quality.md](agents/recording-quality.md)에 있다. 시세 값은 없다(개수, 초, 비율, 시각, 피드 이름, 키, 월물 코드) |
 | `night-book-bytes-605` | 거래일 밤마다 한 번(밤 학습 뒤, `recording-quality-570` 바로 다음), 완전한 밤이 7개가 될 때까지(`Facts.night_book_nights`: 상태 파일 `state/night-book-605.json`의 완전한 밤 수). `night-book-verdict-605`가 끝까지 돈 뒤에는 돌지 않는다. 실패하거나 끊겼으면 다음 거래일 밤에 다시 돈다. 밤마다 완전하면 2026-11-09 밤부터 2026-11-17 밤까지 일곱 번이다 | `night-book-bytes` | 15분. 넉넉히 잡은 상한이다(밤 열 개쯤의 받은 시각 열과 Parquet 메타데이터만 읽는다. 지어낸 서버 크기의 밤(호가 78만 행씩, raw와 events를 256,000행 row group으로 합친 파일)에서 완전한 밤 7개를 재고 판정하는 데 맥에서 0.3초, 최대 RSS 141 MB(가져오기만 93 MB)였다). 짧게 잡아 그 뒤 작업이 마지막 시작 시각을 넘기지 않게 한다 | #605: 출력 전체(2장 "야간 호가 기록량과 판정 (#605)"). 기록이라 실패한 밤에만 `ready-for-agent`를 붙이고, 떼는 라벨은 없다. 시세 값은 없다(바이트, 행 수, 시각) |
 | `night-book-verdict-605` | 2026-11-20 밤(놓치면 그 뒤 첫 밤), 한 번(거래일이 아니어도). 실패하면 다른 코드가 배포된 뒤 다시 돈다. `night-book-bytes-605` 바로 다음이다 | `night-book-bytes --verdict` | 15분(위와 같다. 모듈 소스 읽기가 더해진다) | #605: 출력 전체. `결론:` 줄이 규칙의 결론(구독을 멈춘다, 계속 기록한다)과 까닭이고, 그다음 줄이 할 일이다. 멈추는 변경은 에이전트가 따로 PR로 한다. 시세 값은 없다(바이트, 행 수, 시각, 모듈 이름) |
+| `bar-close-times-589` | 이 작업을 담은 엔진이 배포된 뒤 첫 거래일 밤(밤 학습 뒤, `recording-quality-570`과 야간 호가 작업 다음). 그 밤의 날(`--tonight`: 날짜, 06:00 전이면 그 앞날)을 본다. 앞날의 예측(배포 전)은 쓰지 않는다. 그날 예측이 없거나(엔진이 멈췄던 날) 실패하거나 끊겼으면 같은 코드라도 다음 거래일 밤에 다시 돈다. 끝까지 돈 뒤에는 돌지 않는다 | `bar-close-times --tonight` | 5분. 넉넉히 잡은 상한이다(엔진 DB와 trader DB에서 여섯 거래일의 예측 저장 시각과 끊김만 읽는다) | #589: 출력 전체. BLAS·OpenMP 스레드를 하나로 둔 배포(#589, 2장의 Docker 이미지) 뒤 첫 거래일의 봉 마감 시간을 앞 거래일 5일과 견준다(아래 "봉 마감의 이벤트 루프 막힘 (#538)"). 에이전트가 견준 결과를 #589에 적고, 나아졌으면 닫고 아니면 이슈를 연다. 시세 값은 없다(날짜, 개수, 초) |
 | `check-mock-trades-405` | **삭제됨** (2026-11-04, #506): `JOBS`에서 뺐다. 2026-11-02 밤에 돌아 결과를 #405에 올렸다(결과는 `같다`). 이유: 할 일을 마쳤다. `JOBS`에 남겨 두면 상태 파일(`state/scheduled.json`)을 잃었을 때 다시 돌아 같은 결과를 또 올린다. 대신: 손으로 `docker compose run --rm engine check-mock-trades --day YYYY-MM-DD`. 뺀 때의 조건: trader가 mock 모드로 돈 거래일(그날 mock 장부가 있다, `Facts.mock_days`)의 밤, 한 번. 그날 장부에도 KIS에도 trader의 주문이 없었거나(종료 코드 3) 저장소나 KIS를 읽지 못했으면(4) 다음 mock 거래일 밤에 다시 돈다. 같거나(0) 다르면(5) 끝난다 | `check-mock-trades` | 5분. 넉넉히 잡은 상한이다(저장소 읽기와 KIS 조회 몇 번, 몇 초). `trader-report` 다음에 돈다 | #405: 출력 전체. 그날 챔피언의 mock 주문을 KIS 주문 체결 조회와 KIS 주문번호로 맞춰 주문마다 매수·매도, 주문 수량, 체결 수량, 체결가 차이(틱)를 보이고, KIS에 없는 장부의 주문과 장부에 없는 KIS의 주문을 적는다. 주문 프로브(#403)가 그날 돈 동안의 KIS 주문은 프로브의 것이라 세지 않는다(`state/scheduled.json`의 그 작업의 시작과 걸린 시간). 주문번호, 계좌번호, 키, 가격은 없다. `결과: 같다`면 에이전트가 #405를 닫는다(완료 조건 3). trader 자신의 모의 키(`KRX_TRADER_KIS_*`)로 모의투자 서버에만 묻는다 |
 | `probe-live-account-408` | 거래일 밤, 실전 키(`KRX_TRADER_LIVE_KIS_*`)가 서버 `.env`에 있을 때(`Facts.trader_live_kis`). 통과(종료 코드 0)할 때까지 거래일 밤마다 한 번. 키가 없으면 돌지 않는다 | `probe-live-account` | 5분. 넉넉히 잡은 상한이다(조회 넷, 몇 초) | #417(리포트 이슈. #408은 그 PR이 닫는다): 출력 전체. 실전 계좌를 조회만으로 읽는다(현재가, 잔고, 매수가능조회, 그날 주문 체결 조회. 주문 TR은 보내지 않는다). trader가 읽는 필드마다 실전의 답에 있는지와 그 꼴(정수, 숫자, 글자)을 보이고 결과를 trader 저장소(`live_probes`)에 남긴다. live 모드는 한 번 통과(`같다`)해야 주문한다(실행 점검 `live_probe`). `다르다`면 에이전트가 `kis_orders.py`의 읽기를 고치는 PR을 연다. 키, 계좌번호, 주문번호, 값은 없다(#408) |
 | `error-breakdown-431` | **삭제됨** (2026-11-04, #506): `JOBS`에서 뺐다. 2026-11-01 밤에 돌아 결과를 #431에 올렸다. 이유: 할 일을 마쳤다. `JOBS`에 남겨 두면 상태 파일(`state/scheduled.json`)을 잃었을 때 다시 돌아 같은 결과를 또 올린다. 대신: 손으로 `docker compose run --rm engine error-breakdown --days 20 --algorithm turing`. 뺀 때의 조건: 이 작업을 담은 엔진(#433)이 배포된 뒤 첫 밤, 한 번(거래일이 아니어도. 저장된 날만 읽는다) | `error-breakdown --days 20 --algorithm turing` | 1시간. 넉넉히 잡은 상한이다(DB만 읽는다, 하루씩). 시뮬레이션과 사전 검증보다 먼저 돈다 | #431: 출력 전체(가격과 시세 값 없음, 개수·비율·lift만). 탐색용이다. 에이전트가 정확도를 올릴 만한 곳(시간대, 스프레드, 변동성, 종목)과 후속 티켓 후보를 남기고 `ready-for-human`으로 돌린다. 고른 칸은 그 뒤의 날들(홀드아웃)로 판정한다(2장 "오류 분석 (#431)") |
@@ -2735,7 +2768,7 @@ docker compose logs --tail 200 engine
 | 로그의 INFO `KIS REST <TR> answered on a new connection after its pooled one closed before an answer (<오류>)` (#363) | Loki `{service="krx-quant", process="engine"} \|= "answered on a new connection"` | KIS가 답하기 전에 연결을 닫아(KIS는 5초 쉰 연결을 닫는다), REST 클라이언트가 그 조회를 곧바로 새 연결로 한 번 더 보내 답을 받았다. 잃은 것은 없다. 할 일은 없다. 하루 몇 번을 넘게 나오면 KIS의 연결 유지 시간이 바뀌었는지 다시 잰다([kis-feeds.md](kis-feeds.md#세션과-한도), `kis.KEEPALIVE_SECONDS`). |
 | 로그의 WARNING `poll <TR> <키> failed: Server disconnected` (또는 `Connection reset by peer`) | 같은 때의 위 INFO 줄, Loki `{service="krx-quant", process="engine"} \|= "Server disconnected"` | 새 연결로 한 번 더 보낸 것도 답 전에 끊겼다. 그 조회는 다음 간격에 다시 묻는다(VI 현황은 5초 뒤, `KRX_VI_POLL_SECONDS`). 그동안 그 종목의 VI를 그만큼 늦게 안다. 2026-10-23에는 고치기 전이라 VI 현황에서 26번 나왔다. 배포 뒤에도 하루 여러 번이면 KIS나 서버의 네트워크 문제다. 같은 때의 다른 경고(WebSocket 끊김 등)를 본다. |
 | 로그의 `no macro regime for <날짜>` | `docker compose logs engine \| grep macro`, `/v1/macro` | 그날 개장 전에 정한 매크로 국면이 없다(07:30 수집이 꺼졌거나 모든 출처가 실패했거나, 수집기가 개장 뒤에 시작했다). Markov가 그날 기본 전이행렬로 돈다. `runs`에 `no_regime`으로 남는다. 할 일은 없고, 매일 나오면 07:30 수집을 확인한다. |
-| 디스크가 찬다, `[장애] 서버 디스크의 여유가 <N> GB(<M>%)로 기준 20%보다 작습니다(데이터 폴더 /data). …` (#379) | `docker system df`, `df -h`, `du -sh data/*/ state/*/`, 06:00 업데이트 보고의 끝 줄(`디스크 여유 … · Docker 이미지 …, 빌드 캐시 …`, Loki의 `command=notify`: 깨끗한 업데이트는 #614부터 로그에만), `krx-quant doctor` 6절 | 1. Docker부터 본다. 06:00 업데이트가 정리한다(4장, #568): 쓰는 이미지와 `krx-quant:latest`, `krx-quant:previous`만 남기고, 하루 쓰지 않은 빌드 캐시를 지우고, 3 GB를 넘으면 빌드 캐시를 모두 지운다. 되돌린 날은 정리하지 않아서 그날 만든 것이 다음 성공까지 남는다. 사용자가 docker 명령을 칠 일은 없다. 보고의 끝 줄(정리 전과 뒤)과 `Docker 정리 실패` 줄을 Loki에서 읽고(4장의 쿼리), 정리가 실패하거나 빌드 캐시가 줄지 않으면 #568처럼 이슈로 고친다. Docker의 이미지 크기는 빌드 캐시를 다시 센 것일 수 있어서, 비운 양은 디스크 여유로 본다.<br>2. 로컬 데이터는 자동으로 지우지 않는다. 지우기 전에 `docker compose run --rm engine archive --recheck`를 실행하고, `0 failed`로 끝나는지(종료 코드 0) 확인한다. `.uploaded.json`이 있다는 것만으로는 지금 파일이 S3에 있다고 볼 수 없다. 파티션을 합친 뒤 업로드가 실패하면 그 전 파일의 기록이 남아 있기 때문이다. 확인한 뒤에는 오래된 날짜 폴더를 `raw`, `events`, `gaps`에서 지워도 된다. `bars`는 지우지 않는다(백필이 다시 받는다). `state/training-cache/`는 밤 학습이 끝날 때 그 밤에 쓰지 않은 오래된 날짜를 지운다. 남은 것도 지워도 된다(밤 학습이 S3에서 다시 받는다).<br>3. 여유가 기준보다 2%p 넘게 생기면 `[복구] 서버 디스크의 여유가 <N> GB(<M>%)로 돌아왔습니다(…)`가 온다. 알림은 한 번만 온다(재시작해도 `state/disk_alert.json`으로 다시 보내지 않는다). |
+| 디스크가 찬다, `[장애] 서버 디스크의 여유가 <N> GB(<M>%)로 기준 20%보다 작습니다(데이터 폴더 /data). …` (#379) | `docker system df`, `df -h`, `du -sh data/*/ state/*/`, 06:00 업데이트 보고의 끝 줄(`디스크 여유 … · Docker 이미지 …, 빌드 캐시 …`, Loki의 `command=notify`: 깨끗한 업데이트는 #614부터 로그에만), `krx-quant doctor` 6절 | 1. Docker부터 본다. 06:00 업데이트가 정리한다(4장, #568): 쓰는 이미지와 `krx-quant:latest`, `krx-quant:previous`만 남기고, 하루 쓰지 않은 빌드 캐시를 지우고, 3 GB를 넘으면 빌드 캐시를 모두 지운다. 되돌린 날은 정리하지 않아서 그날 만든 것이 다음 성공까지 남는다. 사용자가 docker 명령을 칠 일은 없다. 보고의 끝 줄(정리 전과 뒤)과 `Docker 정리 실패` 줄을 Loki에서 읽고(4장의 쿼리), 정리가 실패하거나 빌드 캐시가 줄지 않으면 #568처럼 이슈로 고친다. Docker의 이미지 크기는 빌드 캐시를 다시 센 것일 수 있어서, 비운 양은 디스크 여유로 본다.<br>2. `raw`는 30일이 지나면 아카이브가 S3 사본의 SHA-256을 확인하고 서버에서 지운다(3장 "서버의 raw 30일 (#607)"). 지운 양과 남은 양은 아카이브 로그의 `raw on the server (#607)` 줄에 있다. `raw` 폴더는 손으로 지우지 않는다. 표시(`.pruned.json`) 없이 사라진 날은 raw를 읽는 명령이 녹화가 없던 날로 본다. 그 밖의 로컬 데이터는 자동으로 지우지 않는다. 지우기 전에 `docker compose run --rm engine archive --recheck`를 실행하고, `0 failed`로 끝나는지(종료 코드 0) 확인한다. `.uploaded.json`이 있다는 것만으로는 지금 파일이 S3에 있다고 볼 수 없다. 파티션을 합친 뒤 업로드가 실패하면 그 전 파일의 기록이 남아 있기 때문이다. 확인한 뒤에는 오래된 날짜 폴더를 `events`, `gaps`에서 지워도 된다. `bars`는 지우지 않는다(백필이 다시 받는다). `state/training-cache/`는 밤 학습이 끝날 때 그 밤에 쓰지 않은 오래된 날짜를 지운다. 남은 것도 지워도 된다(밤 학습이 S3에서 다시 받는다).<br>3. 여유가 기준보다 2%p 넘게 생기면 `[복구] 서버 디스크의 여유가 <N> GB(<M>%)로 돌아왔습니다(…)`가 온다. 알림은 한 번만 온다(재시작해도 `state/disk_alert.json`으로 다시 보내지 않는다). |
 | 서버가 멈췄다: `[Grafana] krx-quant 엔진 로그가 10분 넘게 없습니다…`가 오고 Tailscale로 닿지 않는다. 또는 `[watchdog] krx-quant …` 텔레그램이나 라벨 `server-watchdog`인 이슈 (#385) | 맥에서 `aws lightsail get-instance-state --instance-name krx-quant --region ap-southeast-2`와 `get-instance-metric-data`의 `StatusCheckFailed_Instance`·`StatusCheckFailed_System`([agents/server-snapshot.md](agents/server-snapshot.md)의 "If nothing comes"), 그 이슈 | 인스턴스 상태 검사만 실패하면 OS가 멈춘 것이다. 커널이 스스로 재부팅하지 못한 멈춤은 watchdog이 15분 실패 뒤 재부팅하고 이슈에 남긴다(아래 "서버가 멈추면 (#385)"). 기다리지 않으려면 맥에서 `aws lightsail reboot-instance --instance-name krx-quant --region ap-southeast-2`(그 뒤 1시간은 watchdog이 재부팅하지 않는다). 다시 뜨면 서버에서 `sudo journalctl -b -1 -k -n 200`으로 멈추기 전 부팅의 커널 로그를 본다. 시스템 상태 검사도 실패하면 AWS 쪽 문제다: 기다리거나 Lightsail 콘솔에서 멈춘 뒤 다시 시작한다. |
 | `[watchdog] krx-quant CPU 버스트 여유가 <N>%로 50% 아래입니다. …` 텔레그램이나 라벨 `server-burst`인 이슈 (#547) | 그 이슈와 server-watchdog 실행의 요약 화면, Loki에서 그때의 엔진 heartbeat(`rss`에 돌던 밤 학습·예약 작업의 이름이 있다), 맥에서 `aws lightsail get-instance-metric-data`의 `BurstCapacityPercentage`(아래 "CPU 버스트 여유 (#547)") | 0%가 되면 CPU가 기준선(20%)으로 묶인다. 그때 돌던 무거운 작업이 장 전까지 끝나지 않을 것 같으면 그 작업을 미루거나 줄이는 PR을 낸다. 같은 일이 되풀이되면 2.3의 "CPU 여유 재기" 4번대로 요금제를 바꾼다. 60% 이상으로 돌아오면 watchdog이 이슈를 닫는다 |
 | 서버를 잃었다 | Lightsail 콘솔의 스냅샷 | 1. 옛 인스턴스가 아직 있으면 먼저 멈추거나 지운다. 같은 Tailscale 신원으로 두 대가 동시에 뜨지 않게 하려는 것이다.<br>2. 마지막 자동 스냅샷으로 새 인스턴스를 만든다. 디스크에 Tailscale 신원, `.env`, 데이터가 그대로 있어서 부팅하면 `krx-quant`로 다시 붙고 엔진도 스스로 뜬다. Tailscale admin의 기기는 지우지 않는다. 지우면 접속할 길이 없어진다.<br>3. 새 인스턴스의 Lightsail 방화벽은 41641/udp만 열어 둔다(2.2의 10단계 명령).<br>4. `docker compose run --rm engine archive --recheck`로 S3와 맞춘다.<br>마지막 스냅샷 뒤에 녹화하고 아직 올리지 못한 데이터는 잃는다.<br>스냅샷을 쓸 수 없으면 S3의 서버 상태 백업으로 새로 만든다(아래 "서버 상태 백업과 복원 (#576)"의 "서버를 새로 만들 때"). |
@@ -2751,6 +2784,8 @@ docker compose logs --tail 200 engine
 > **바뀜** (2026-10-23, #365): `poll <TR> <키> failed: Server disconnected` 경고는 KIS가 쉬던 연결을 닫은 것만으로 났다(aiohttp의 두 번째 보내기도 풀의 닫힌 연결로 갔다) → 새 연결로 곧바로 한 번 더 보낸 것까지 실패해야 나고, 그 한 번이 답을 받으면 INFO `answered on a new connection` 줄이 남는다. 위 표에 두 줄의 행을 더했다. 이유: VI 현황 조회가 2026-10-23 하루 26번 이 경고로 실패했다(#363).
 
 > **바뀜** (2026-10-27, #380): 위 표의 `디스크가 찬다` 행은 `df -h`, `du -sh data/*/`와 로컬 데이터를 지우는 법만 적었고, 디스크 알림이 없었다 → Docker의 빌드 캐시와 이미지를 먼저 보고, 엔진이 여유가 20%보다 작아지면 알린다. 이유: 디스크를 먹은 것은 데이터(약 4 GB)가 아니라 Docker(이미지 18.76 GB, 빌드 캐시 21.5 GB)였고, 여유가 줄어드는 것을 서버 요약으로만 알았다(#379).
+
+> **바뀜** (2026-11-06, #613): 위 표의 `디스크가 찬다` 행 2는 로컬 데이터를 자동으로 지우지 않고, `archive --recheck`로 확인한 뒤 오래된 `raw`도 손으로 지워도 된다고 했다 → `raw`는 30일 뒤 아카이브가 S3 사본의 SHA-256을 확인하고 지운다. 손으로는 지우지 않는다. 이유: raw가 서버 데이터의 대부분이고 날마다 는다(2026-10-27에 3.3 GB 중 2.4 GB). 손으로 지운 날에는 표시가 없어서, 읽는 명령이 S3에서 되살리지 못하고 빈 날로 읽는다. 사용자가 2026-11-06에 추천안대로 하기로 했다(#607).
 
 > **바뀜** (2026-11-06, #582): 위 표의 `디스크가 찬다` 행 1은 장 시간 밖에서 `docker builder prune -af && docker image prune -af`를 손으로 실행하라고 했다 → 06:00 업데이트가 정리하고, 사용자는 docker 명령을 치지 않는다. 정리가 모자라면 알림과 Loki로 보고 코드로 고친다. `자동 업데이트` 행의 끝 줄은 정리한 뒤의 크기만 보였다 → 정리 전과 뒤, Docker 버전, 모두 지운 것과 실패를 보인다. 이유: 사용자가 docker 명령을 직접 치지 않기로 했고, 정리가 아무것도 비우지 못한 것을 알림만으로는 알 수 없었다(#568).
 
@@ -3265,7 +3300,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 
 | 경로 | 내용 |
 |---|---|
-| `raw/date=<날짜>/feed=<TR>/symbol=<키>/` | 받은 메시지 원문. KIS 제어 메시지는 `feed=_system`, 알아볼 수 없는 메시지는 `feed=_unparsed` |
+| `raw/date=<날짜>/feed=<TR>/symbol=<키>/` | 받은 메시지 원문. KIS 제어 메시지는 `feed=_system`, 알아볼 수 없는 메시지는 `feed=_unparsed`. 서버에는 30일만 둔다(#607, 3장 "서버의 raw 30일 (#607)"). 그 뒤에는 폴더와 `.pruned.json`만 남고, 원문은 S3에만 있다 |
 | `events/date=…/feed=…/symbol=…/` | 정규화한 이벤트 |
 | `gaps/date=…/feed=…/symbol=…/` | 결측 구간 |
 | 위 세 계층의 `part-<HHMMSS>-<id>.parquet`, `data.parquet` | 장중에 쓰는 part 파일과, 업로드가 합친 파일 하나 |
@@ -3276,7 +3311,8 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `candles/period=day/symbol=<종목>/krx.parquet` | KRX 시장만의 일봉(#264). 하루 한 번 예측 종류의 정답과 학습이 시가를 읽는다. 업로드가 바뀌면 올린다. 일·주·월·년봉과 함께 파일마다 다시 받기의 기록(parquet 메타데이터 `krx_quant`)을 둔다 |
 | `candles/period=day/symbol=<종목>/auctions.parquet` | 그날의 시가·종가 단일가 가격(#264, #317, [events.md](events.md#auctions-단일가-가격-rest-264)). `open_to_close`의 정답과 학습이 종가를 읽는다. 업로드가 바뀌면 올린다 |
 | `macro/date=…/feed=readings/symbol=<지표>/`, `macro/date=…/feed=regime/symbol=market/` | 매크로 지표와 그날 국면([events.md](events.md#매크로-지표와-일일-국면-8)). 다시 읽으면 줄이 더해지고, 마지막 줄이 최신이다. 업로드도 다른 계층과 같다 |
-| 각 파티션의 `.uploaded.json` | 저장소별로 올린 파일의 크기, 수정 시각(ns), SHA-256. 바뀌지 않은 파일은 다시 올리지 않는다 |
+| 각 파티션의 `.uploaded.json` | 저장소별로 올린 파일의 크기, 수정 시각(ns), SHA-256. 바뀌지 않은 파일은 다시 올리지 않는다. 30일 지나 지운 raw 파티션에서는 함께 지운다 |
+| 30일 지난 `raw` 파티션의 `.pruned.json` | 아카이브가 지운 합친 파일의 S3 키, SHA-256, 크기, 확인한 때(UTC), 저장소(#607). raw를 읽는 명령은 이것을 보고 S3에서 받아 SHA-256을 견준다. 지우지 않는다 |
 | 각 파티션의 `.*.tmp` | 쓰는 중인 임시 파일. 10분 넘은 것은 업로드가 지운다 |
 | `.archive.lock` | 업로드를 한 번에 하나만 돌리는 잠금 파일(`flock`) |
 

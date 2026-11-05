@@ -47,6 +47,7 @@ from krx_quant.night_book import (
 )
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.process_log import Ran
+from krx_quant.raw_days import RawDays
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.scheduled import JOBS, NIGHT_BOOK_BYTES, NIGHT_BOOK_VERDICT, Facts, JobRecord, Night
 
@@ -172,6 +173,48 @@ def test_a_night_s_bytes_are_its_rows_share_of_the_merged_files_of_both_days(
     assert mixed == 1  # Monday's morning and Tuesday's evening share one row group
     mine += (shared.stat().st_size - sum(sizes)) * sum(1 for t in times if t < at(tuesday, "12:00")) / start
     assert nights[0].raw.bytes == pytest.approx(own.stat().st_size + mine)
+
+
+def test_a_night_pruned_on_the_server_is_measured_from_the_store_s_copy(tmp_path: Path) -> None:
+    """#607: 30 days on the archive has deleted the raw night on the server; its copy in the store is the
+    merged file byte for byte, so the night measures the same."""
+    data, store = tmp_path / "data", LocalObjectStore(tmp_path / "store")
+    monday = date(2026, 11, 9)
+    record_night(data, monday)
+    merge(data, tmp_path)
+    before = measure_night(data, monday)
+    asyncio.run(archive(data, store, today=monday + timedelta(days=archiving.RAW_KEEP_DAYS + 2)))
+    assert not merged(data, "raw", monday).exists()
+
+    with pytest.raises(archiving.RawMissing):
+        measure_night(data, monday)
+    with RawDays(data, store) as raw:
+        assert measure_night(data, monday, raw) == before
+
+
+def test_a_night_pruned_as_it_is_measured_fails_rather_than_measuring_zero_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#607: the archive prunes the raw night after ``RawDays`` found it on the server and before its
+    files are listed; the measure fails, it does not count the night as empty."""
+    data, store = tmp_path / "data", LocalObjectStore(tmp_path / "store")
+    monday = date(2026, 11, 9)
+    record_night(data, monday)
+    merge(data, tmp_path)
+    listing = archiving.partition_files
+    ran: list[bool] = []
+
+    def pruned_first(partition: Path) -> list[Path]:
+        if not ran and "raw" in partition.parts:
+            ran.append(True)
+            asyncio.run(archive(data, store, today=monday + timedelta(days=archiving.RAW_KEEP_DAYS + 2)))
+        return listing(partition)
+
+    monkeypatch.setattr(archiving, "partition_files", pruned_first)
+
+    with RawDays(data, store) as raw, pytest.raises(archiving.RawMissing):
+        measure_night(data, monday, raw)
+    assert ran
 
 
 def test_a_night_with_a_long_silence_or_a_late_start_or_nothing_does_not_count(tmp_path: Path) -> None:

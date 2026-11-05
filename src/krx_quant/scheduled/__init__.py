@@ -128,6 +128,7 @@ from krx_quant.scheduled.prevalidations import (
     screened_order,
 )
 from krx_quant.scheduled.probes import (
+    BAR_CLOSE_TIMES,
     NIGHT_BOOK_BYTES,
     NIGHT_BOOK_VERDICT,
     RECORDING_QUALITY,
@@ -156,6 +157,7 @@ from krx_quant.swap import NightTraining
 __all__ = [
     "AGAIN",
     "BAR_CLOSE_SIMULATION",
+    "BAR_CLOSE_TIMES",
     "CLIMATE_GATE",
     "DAILY_SIMULATION",
     "ERROR_HOLDOUT",
@@ -282,6 +284,7 @@ JOBS: tuple[Job, ...] = (
     RECORDING_QUALITY,
     NIGHT_BOOK_BYTES,
     NIGHT_BOOK_VERDICT,
+    BAR_CLOSE_TIMES,
     SIGNAL_REVIEW_FIXED,
     LIVE_PROBE,
     ERROR_HOLDOUT,

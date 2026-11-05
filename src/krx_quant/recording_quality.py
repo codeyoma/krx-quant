@@ -45,7 +45,9 @@ constant below; a reason says the figure and its threshold.
 
 **What it prints.** Counts, seconds, rates, times, feed names, keys and contract codes: no price, no
 volume, so its output can go on the public issue. It reads files and the engine's status only,
-beside the running collector, and calls no KIS API.
+beside the running collector, and calls no KIS API. A raw day the archive pruned on the server, older
+than 30 days (#607), is read back from the Object Store (``raw_days.RawDays``): a run for such a day
+(``--day``) downloads its frames, and fails if they cannot be read back.
 
 **Memory and time.** A day's files are read a batch at a time (arrow's batches of a file), a
 symbol's trades at a time for the bars, and a night's frames for their counts alone; what stays is
@@ -83,7 +85,9 @@ from krx_quant.health import Gap, GapKind, Unread, read_batches, read_gaps
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 from krx_quant.night_probe import FEEDS as NIGHT_FEEDS
 from krx_quant.night_probe import LATE, acknowledgements, evening, night_window, subscribed_nights
+from krx_quant.object_store import open_store
 from krx_quant.poll_outages import SUSTAINED_FAILURES
+from krx_quant.raw_days import RawDays
 from krx_quant.reference import BAR, Bar, BarBuilder
 from krx_quant.trader.report import AGENT, NO_CALL
 
@@ -541,18 +545,16 @@ def _true(mask: Any) -> int:
     return int(pc.sum(pc.cast(mask, pa.int64())).as_py() or 0)
 
 
-def frames_of_day(data_dir: Path, day: date, unread: Unread) -> tuple[dict[str, FeedFrames], int, Any]:
+def frames_of_day(raw: RawDays, day: date, unread: Unread) -> tuple[dict[str, FeedFrames], int, Any]:
     """The day's WebSocket frames by feed (``WS_FEEDS``' partitions of ``raw``), and the frames the
     collector could not parse (``_unparsed``): how many and the first's receipt."""
-    root = data_dir / "raw" / f"date={day.isoformat()}"
     by_feed: dict[str, FeedFrames] = {}
     unparsed, first_unparsed = 0, None
-    for feed_dir in sorted(root.glob("feed=*")):
-        tr_id = feed_dir.name.removeprefix("feed=")
+    for tr_id in raw.feeds(day):
         feed = WS_FEEDS.get(tr_id)
         if tr_id != UNPARSED and feed is None:
             continue  # the control frames (``_system``) and the REST answers
-        for partition in sorted(feed_dir.glob("symbol=*")):
+        for partition in sorted(raw.feed(day, tr_id).glob("symbol=*")):
             key = partition.name.removeprefix("symbol=")
             for batch in read_batches(partition, (_RECEIVED, _MESSAGE), unread, batch_rows=RAW_BATCH_ROWS):
                 received = _timestamps(batch, _RECEIVED, unread, f"raw {tr_id}")
@@ -584,9 +586,9 @@ def frames_of_day(data_dir: Path, day: date, unread: Unread) -> tuple[dict[str, 
     return by_feed, unparsed, first_unparsed
 
 
-def frames_section(found: Found, data_dir: Path) -> list[str]:
+def frames_section(found: Found, raw: RawDays) -> list[str]:
     """Section 3: the day's frames by shape; their reasons to call an agent."""
-    by_feed, unparsed, first_unparsed = frames_of_day(data_dir, found.day, found.unread)
+    by_feed, unparsed, first_unparsed = frames_of_day(raw, found.day, found.unread)
     day = found.day
     total = sum(f.frames for f in by_feed.values())
     lines = [f"읽은 데이터 프레임 {total:,}개(피드 {len(by_feed)}개)"]
@@ -724,15 +726,16 @@ class Night:
     events: int = 0
 
 
-def read_night(data_dir: Path, evening_of: date, feed: Feed, unread: Unread, events: bool) -> Night:
+def read_night(
+    data_dir: Path, raw: RawDays, evening_of: date, feed: Feed, unread: Unread, events: bool
+) -> Night:
     """The frames and records of ``feed`` received in the night after ``evening_of`` (both days'
     partitions, ``night_probe.night_window``), and, if asked, its events."""
     tr_id = feed.tr_id
     start, end = night_window(evening_of)
     seen = Night()
     for partition_day in (evening_of, evening_of + timedelta(days=1)):
-        root = data_dir / "raw" / f"date={partition_day.isoformat()}" / f"feed={tr_id}"
-        for partition in sorted(root.glob("symbol=*")):
+        for partition in sorted(raw.feed(partition_day, tr_id).glob("symbol=*")):
             for batch in read_batches(partition, (_RECEIVED, _MESSAGE), unread, batch_rows=RAW_BATCH_ROWS):
                 received = _timestamps(batch, _RECEIVED, unread, f"raw {tr_id}")
                 messages = _strings(batch, _MESSAGE, unread, f"raw {tr_id}")
@@ -758,7 +761,9 @@ def _between(values: Any, start: datetime, end: datetime) -> Any:
     return pc.fill_null(pc.and_(low, pc.less(values, pa.scalar(end, type=values.type))), False)
 
 
-def night_section(found: Found, data_dir: Path, calendar: MarketCalendar) -> tuple[str, list[str]]:
+def night_section(
+    found: Found, data_dir: Path, raw: RawDays, calendar: MarketCalendar
+) -> tuple[str, list[str]]:
     """Section 5: the night that ended this morning against the nights before; its reasons."""
     unread = found.unread
     last = calendar.previous_trading_day(found.day)
@@ -771,7 +776,7 @@ def night_section(found: Found, data_dir: Path, calendar: MarketCalendar) -> tup
     keys = sorted(
         {
             a.key
-            for a in acknowledgements(data_dir, last)
+            for a in acknowledgements(raw, last)
             if a.ok and a.tr_id == NIGHT_FUTURES.tr_id and a.received_at <= opens
         }
     )
@@ -780,13 +785,14 @@ def night_section(found: Found, data_dir: Path, calendar: MarketCalendar) -> tup
         if keys
         else f"구독: {NIGHT_OPEN:%H:%M} 전에 KIS가 받은 {NIGHT_FUTURES.tr_id} 구독이 없다"
     ]
-    before = subscribed_nights(data_dir, calendar, last)
+    before = subscribed_nights(raw, calendar, last)
     earlier = {
-        d: {f.tr_id: read_night(data_dir, d, f, unread, events=False) for f in NIGHT_FEEDS} for d in before
+        d: {f.tr_id: read_night(data_dir, raw, d, f, unread, events=False) for f in NIGHT_FEEDS}
+        for d in before
     }
     for feed in NIGHT_FEEDS:
         name = "체결" if feed is NIGHT_FUTURES else "호가"
-        seen = read_night(data_dir, last, feed, unread, events=True)
+        seen = read_night(data_dir, raw, last, feed, unread, events=True)
         lost = seen.records - seen.events
         counts = [earlier[d][feed.tr_id].records for d in before if earlier[d][feed.tr_id].records]
         median = statistics.median(counts) if counts else None
@@ -849,11 +855,14 @@ def measure(
     day: date,
     symbols: Sequence[str],
     polls: Polls,
+    raw: RawDays | None = None,
 ) -> Found | None:
-    """Every section of ``day``'s report, with its reasons; None if ``day`` does not trade."""
+    """Every section of ``day``'s report, with its reasons; None if ``day`` does not trade. ``raw``
+    reads the raw days (by default the data directory's, a pruned one failing)."""
     session = calendar.session(day)
     if session is None:
         return None
+    raw = RawDays(data_dir) if raw is None else raw
     found = Found(day, session)
     gaps = read_gaps(data_dir, day, found.unread)
     span = f"{session.open:%H:%M}–{session.close:%H:%M}"
@@ -866,10 +875,10 @@ def measure(
         )
     )
     give_back()  # a section's memory freed goes back to the system before the next one reads
-    found.sections.append(("3. 프레임 (raw, 그날 받은 것)", frames_section(found, data_dir)))
+    found.sections.append(("3. 프레임 (raw, 그날 받은 것)", frames_section(found, raw)))
     give_back()
     found.sections.append(("4. REST 조회 실패 (/v1/status의 kis.polls)", polls_section(found, polls)))
-    found.sections.append(night_section(found, data_dir, calendar))
+    found.sections.append(night_section(found, data_dir, raw, calendar))
     return found
 
 
@@ -903,24 +912,32 @@ def render(found: Found) -> str:
     return "\n".join(out).rstrip("\n")
 
 
-def report(data_dir: Path, calendar: MarketCalendar, day: date, symbols: Sequence[str], polls: Polls) -> str:
+def report(
+    data_dir: Path,
+    calendar: MarketCalendar,
+    day: date,
+    symbols: Sequence[str],
+    polls: Polls,
+    raw: RawDays | None = None,
+) -> str:
     """``day``'s report without its run's own section (``recording_quality`` adds it)."""
-    found = measure(data_dir, calendar, day, symbols, polls)
+    found = measure(data_dir, calendar, day, symbols, polls, raw)
     if found is None:
         return f"{TITLE}: {day}는 거래일이 아니다"
     return render(found)
 
 
 async def recording_quality(settings: Settings, now: datetime, day: date | None = None) -> str:
-    """The command: the engine's polls read through its API, then the files."""
+    """The command: the engine's polls read through its API, then the files (a pruned raw day's from
+    the Object Store)."""
     started = monotonic()
     calendar = calendar_store(settings).calendar
     day = report_day(calendar, now) if day is None else day
     async with aiohttp.ClientSession() as session:
         status = await fetch_status(session, api_candidates(settings))
-    found = measure(
-        settings.data_dir, calendar, day, [*settings.symbols, *settings.etf_symbols], polls_of(status, day)
-    )
+    symbols = [*settings.symbols, *settings.etf_symbols]
+    with RawDays(settings.data_dir, open_store(settings)) as raw:
+        found = measure(settings.data_dir, calendar, day, symbols, polls_of(status, day), raw)
     if found is None:
         return f"{TITLE}: {day}는 거래일이 아니다"
     ran(found, monotonic() - started, Meter().peak_mb())

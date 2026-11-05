@@ -758,7 +758,8 @@ async def _keep_archived(
     """Archive finished days at start, then every day after the close and at night.
 
     Buffered rows are written first so the archive holds everything recorded so far;
-    rows recorded later go into the next run. A failure (a bad store setting included)
+    rows recorded later go into the next run. Each run prunes the raw days past 30 days on the
+    server whose copies in the store are checked (#607, ``archive``). A failure (a bad store setting included)
     raises one alert, cleared by the next run that archives everything; recording goes on.
     """
     # At start, today is left for later only while none of today's runs is due yet: a
@@ -773,7 +774,7 @@ async def _keep_archived(
             store = open_store(settings)
             assert store is not None
             recorder.flush()
-            report = await archive(settings.data_dir, store, before=before)
+            report = await archive(settings.data_dir, store, before=before, today=kst_day(now()))
         except Exception:
             log.exception("archiving failed")
             alerts.raise_(_ARCHIVE_ALERT, "장 마감 데이터 업로드가 실패했습니다.")
