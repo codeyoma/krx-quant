@@ -346,7 +346,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
   - 위치와 필드는 [operations.md](operations.md#8-저장-위치)에 있다.
 - 결측 구간: 지금은 `gaps` 계층의 Parquet로 기록한다(#4). SQLite의 `data_gaps`로 옮기는 일은 아직 하지 않았다.
 - 백업: Lightsail 스냅샷을 매일 뜬다. 서버에만 있는 상태(`engine.sqlite3`, `trader.sqlite3`, `prevalidations/`, `scheduled.json`, `models/`)는 매일 05:35 압축본 하나로 S3에 올리고(서버 측 암호화, 버킷 버전 관리로 30일), 예약 작업이 달마다 받아 복원을 시험한다(#576). `fill_notices.sqlite3`는 올리지 않는다. 절차는 [operations.md](operations.md#서버-상태-백업과-복원-576)에 있다.
-  > **바뀜** (2026-11-06, #PRNUM): Lightsail 스냅샷만 → 상태 파일의 밤 백업(S3)과 월간 복원 시험도. 이유: 스냅샷은 같은 계정, 같은 리전에 7개만 남고 복원을 시험한 기록이 없었다. `prevalidations/`나 `trader.sqlite3`를 잃으면 사전 검증과 실전 관문의 기록이 처음부터 다시 쌓인다(#576).
+  > **바뀜** (2026-11-06, #581): Lightsail 스냅샷만 → 상태 파일의 밤 백업(S3)과 월간 복원 시험도. 이유: 스냅샷은 같은 계정, 같은 리전에 7개만 남고 복원을 시험한 기록이 없었다. `prevalidations/`나 `trader.sqlite3`를 잃으면 사전 검증과 실전 관문의 기록이 처음부터 다시 쌓인다(#576).
 - 로컬 파일과 Object Store 키의 전체 목록은 [operations.md](operations.md#8-저장-위치)에 있다.
 
 > **바뀜** (2026-10-09, #37, #38): "피처, 예측, 채점, 통계를 SQLite에 저장" → 예측과 채점만 저장하고, 피처와 통계는 그때그때 계산한다. 이유 기록 없음.
