@@ -23,8 +23,10 @@ decision source's trades that day in one table (#560, ``Source``: the champion's
 practice, the champion policy's paper shadow, each challenger: their fills' P&L, costs and net in
 ticks and won, how they exited, and the share of the calls they traded that the engine's answers
 proved right, beside those calls' p*); when no cell traded, why, as it held (#560: the champion had no
-cell, and what the fit of the night it was kept left out and why, or its cells were held), then the
-day's pick from the cost map, every cell considered and its verdict (since #480 they decide nothing); each
+cell, and what the fit of the night it was kept left out and why, or its cells were held: ``gone``,
+``predictor_inactive``, #603), and beside the cells traded the policy's cells that bought nothing and
+why (#603), then the day's pick from the cost map, every cell considered and its verdict (since #480
+they decide nothing); each
 policy's paper record to the day and, for a challenger, where it stands against its cohort's
 champion on the days of its cycle to the day (``promotion.judge_cohort``, #473: a figure until its
 review night, which judges it once); what the night changed (the champion, the cohort judged and its
@@ -1504,6 +1506,9 @@ def _pick_section(report: Report) -> str:
                 f"{n}. {_cell(p['kind'], p['predictor'], p['role'])}: {_pick_figures(p)} · θ {theta} · "
                 + sized
             )
+        rested = _rested(pick)
+        if rested:  # #603: the policy's cells that bought nothing beside them, and why
+            lines.append(f"사지 않은 정책의 칸: {rested}")
         return "\n".join(lines)
     lines.append(f"매매할 칸 없음: {_no_cell(report, pick)}")
     lines += _champion_fit(report, pick["reason"])
@@ -1539,13 +1544,19 @@ def _no_cell(report: Report, pick: Mapping[str, Any]) -> str:
             f"챔피언 정책 {policy.version}에 칸이 없다(빈 정책 · 고르기의 기록은 {reason}이나, #480 뒤로 "
             "비용 지도의 판정은 매매를 정하지 않는다)"
         )
-    held = ", ".join(
+    held = _rested(pick)
+    return f"챔피언 정책 {policy.version}의 칸 {len(policy.cells)}개가 그날 매매하지 않았다" + (
+        f": {held}({reason})" if held else f"({reason})"
+    )
+
+
+def _rested(pick: Mapping[str, Any]) -> str:
+    """The pick's policy cells that did not trade, each with why (#469: ``gone``; #603:
+    ``predictor_inactive``, read and never bought)."""
+    return ", ".join(
         f"{_cell(c['kind'], c.get('predictor'), c.get('role'))} {c.get('why') or '?'}"
         for c in pick.get("cells") or []
         if not c.get("traded")
-    )
-    return f"챔피언 정책 {policy.version}의 칸 {len(policy.cells)}개가 그날 매매하지 않았다" + (
-        f": {held}({reason})" if held else f"({reason})"
     )
 
 
@@ -1605,14 +1616,10 @@ def _practice_line(report: Report) -> list[str]:
     if kept is None:
         return []
     cell = _cell(kept.pick.kind, kept.pick.predictor, kept.pick.role)
-    gone = (
-        ""
-        if kept.gone_at is None
-        else f" · {kept.gone_at.astimezone(KST):%Y-%m-%d %H:%M}에 예측자가 없어져(gone) 주기 끝까지 쉰다"
-    )
     return [
         f"연습 칸 (#474): 주기 {kept.cycle}에 고정 · {cell} · θ {kept.threshold:g}"
-        f"({kept.chosen_at.astimezone(KST):%Y-%m-%d %H:%M}에 고름) · {practice.figures(kept.chosen)}{gone}"
+        f"({kept.chosen_at.astimezone(KST):%Y-%m-%d %H:%M}에 고름) · {practice.figures(kept.chosen)}"
+        f"{practice.resting(kept)}"
     ]
 
 

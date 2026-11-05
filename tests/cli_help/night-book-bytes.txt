@@ -1,0 +1,7 @@
+usage: krx-quant night-book-bytes [-h] [--verdict]
+
+options:
+  -h, --help  show this help message and exit
+  --verdict   also apply the rule set for 2026-11-20: a median over 100 MiB a
+              night of seven complete nights and no live module naming the
+              book stop its subscription, anything else keeps it

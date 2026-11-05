@@ -846,7 +846,7 @@ async def _algorithms(request: web.Request) -> web.Response:
     engine = request.app[ENGINE_KEY]
     stages = await engine.stages()
     simulations = engine.store.simulations()
-    standings = await _standings(engine)
+    standings = await _standings(engine, request.app[STATE_DIR_KEY])
     return _json(
         {
             "algorithms": [
@@ -877,7 +877,7 @@ async def _algorithm(request: web.Request) -> web.Response:
     ]
     stages = await engine.stages()
     simulations = engine.store.simulations()
-    standing = (await _standings(engine))[name]
+    standing = (await _standings(engine, request.app[STATE_DIR_KEY]))[name]
     return _json(
         {**_algorithm_json(engine, algorithm, stages, simulations, standing), "model_history": history}
     )
@@ -906,14 +906,22 @@ class _Standing:
     queue: int | None = None
 
 
-async def _standings(engine: PredictionEngine) -> dict[str, _Standing]:
+async def _standings(engine: PredictionEngine, state_dir: Path | None = None) -> dict[str, _Standing]:
     """Each registered algorithm's ``_Standing``. The reports are read and the code digested in a
-    worker thread (``prevalidation.refusals``, ``admits``)."""
-    # The scheduler's order of the pre-validations (#204); its module imports this one's.
-    from krx_quant.scheduled.prevalidations import prevalidation_order
+    worker thread (``prevalidation.refusals``, ``admits``), and so is the latest queue screen's order
+    in ``state_dir`` (#599)."""
+    # The scheduler's order of the pre-validations (#204), as the queue screen set it (#599); its
+    # module imports this one's.
+    from krx_quant.queue_screen import queue_order
+    from krx_quant.scheduled.prevalidations import prevalidation_order, screened_order
 
-    refused, waiting, held = await asyncio.to_thread(
-        lambda: (engine.refused(), engine.waiting(), engine.held())
+    refused, waiting, held, screened = await asyncio.to_thread(
+        lambda: (
+            engine.refused(),
+            engine.waiting(),
+            engine.held(),
+            () if state_dir is None else queue_order(state_dir, engine.clock.now()),
+        )
     )
     statuses = engine.store.statuses()
     runs: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
@@ -923,7 +931,8 @@ async def _standings(engine: PredictionEngine) -> dict[str, _Standing]:
     ]
     running = {a.name for a in runs}
     bar_close = [a.name for a in engine.registered] + [a.name for a in engine.kind_registered]
-    queue = [name for name in prevalidation_order(bar_close) if name in waiting]
+    order = screened_order(screened, prevalidation_order(bar_close))
+    queue = [name for name in order if name in waiting]
     out: dict[str, _Standing] = {}
     for a in _registered(engine):
         name, standing = a.name, statuses.get(a.name)

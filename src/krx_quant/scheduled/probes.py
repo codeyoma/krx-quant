@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from krx_quant.night_book import NIGHTS, VERDICT_DAY
 from krx_quant.process_log import Ran
 from krx_quant.scheduled.core import FAILED, OK, Job, Night, Target
 from krx_quant.trader.report import calls_agent
@@ -141,6 +142,89 @@ RECORDING_QUALITY = Job(
                 "있다. 다시 보기(읽기만): `docker compose run --rm engine recording-quality --day <날>`"
                 "(그날 밤이 지나면 REST 실패는 모른다). 출력에는 시세 값이 없다(개수, 초, 비율, 시각, "
                 "피드 이름, 키만)."
+            ),
+        ),
+    ),
+)
+
+
+# The night futures' book (#605, ``night_book.py``): the bytes a night of ``H0MFASP0`` takes, raw and
+# parsed as the merged files hold them, over seven complete nights from 2026-11-06's evening; then, on
+# 2026-11-20, the rule set in advance: a median over 100 MiB a night and no live model reading the book
+# stop its subscription (in a PR of its own), anything else keeps it. The night trades and what was
+# recorded stay either way. The command reads the two days' partitions of each night (their received
+# times and the files' Parquet metadata, not the frames) and writes only its state file, whose count of
+# complete nights the measure's condition reads (``Facts.night_book_nights``).
+#
+# The measure runs each trading night right after the recording's quality, so the night that ended the
+# morning before was merged at 21:00 (``archive.NIGHTLY_ARCHIVE``), until it has its seven complete
+# nights or the verdict ran. Each run posts the whole table again on #605 as a record: the issue gets
+# ``ready-for-agent`` only when the run failed, and no label is taken off. The verdict runs once, on the
+# night of 2026-11-20 (the first after it if that one is missed; after a failure, again on other code),
+# and labels the issue for the agent that acts on it. Both re-measure from the files, about ten nights'
+# timestamps, in seconds; fifteen minutes is a bound, short so that the jobs after them keep their starts.
+NIGHT_BOOK_ISSUE = 605
+_NIGHT_BOOK_VERDICT = "night-book-verdict-605"
+
+
+def _until_seven_complete_nights(night: Night) -> bool:
+    """Each trading night, once, until the measure has its complete nights or the verdict ran; a run a
+    restart cut runs the next trading night."""
+    if night.facts.night_book_nights >= NIGHTS:
+        return False
+    verdict = night.records.get(_NIGHT_BOOK_VERDICT)
+    if verdict is not None and verdict.outcome == OK:
+        return False
+    return _each_trading_night(night)
+
+
+def _failed(ran: Ran) -> bool:
+    return ran.exit_code != 0 or ran.timed_out
+
+
+def _on_the_verdict_day(night: Night) -> bool:
+    """Once, on the verdict's night or the first after it (after a failure, again on other code)."""
+    return night.day >= VERDICT_DAY and _again_on_other_code(night)
+
+
+NIGHT_BOOK_BYTES = Job(
+    name="night-book-bytes-605",
+    due=_until_seven_complete_nights,
+    command=("night-book-bytes",),
+    timeout=timedelta(minutes=15),
+    label_if=_failed,
+    unlabel=(),  # a record: a question an agent put to the user on the issue (``ready-for-human``) stays
+    targets=(
+        Target(
+            NIGHT_BOOK_ISSUE,
+            note=(
+                "야간 호가(H0MFASP0) 기록량(#605): 2026-11-06 저녁부터 거래일 밤마다 raw와 parsed(events)의"
+                " 합친 Parquet 바이트, 행 수, 18:00–06:00의 가장 긴 침묵, 완전한 밤인지. 완전한 밤 7개가 차면"
+                " 더 돌지 않는다. 기록이라 실패한 밤에만 `ready-for-agent`를 붙인다. 판정은 2026-11-20 밤"
+                " `night-book-verdict-605`가 올린다. 다시 보기(상태 파일 `state/night-book-605.json`만 쓴다):"
+                " `docker compose run --rm engine night-book-bytes`. 출력에는 시세 값이 없다(바이트, 행 수,"
+                " 시각만)."
+            ),
+        ),
+    ),
+)
+
+NIGHT_BOOK_VERDICT = Job(
+    name=_NIGHT_BOOK_VERDICT,
+    due=_on_the_verdict_day,
+    command=("night-book-bytes", "--verdict"),
+    timeout=timedelta(minutes=15),
+    targets=(
+        Target(
+            NIGHT_BOOK_ISSUE,
+            note=(
+                "야간 호가(H0MFASP0) 판정(#605): 완전한 밤 7개의 raw+parsed 합 중앙값이 100 MiB를 넘고"
+                " 이 호가를 읽는 실전 모델이 없으면 구독을 멈춘다. 그렇지 않으면 계속 기록한다."
+                " 야간 체결(H0MFCNT0)과 지난 기록은 어느 경우든 그대로 둔다. `결론:` 줄이 규칙의 결론이고"
+                " 그다음 줄이 할 일이다. 멈추는 변경은 에이전트가 따로 PR로 한다(docs/operations.md"
+                ' "야간 호가 기록량과 판정 (#605)"). 다시 돌리기:'
+                " `docker compose run --rm engine night-book-bytes --verdict`. 출력에는 시세 값이 없다"
+                "(바이트, 행 수, 시각, 모듈 이름만)."
             ),
         ),
     ),
