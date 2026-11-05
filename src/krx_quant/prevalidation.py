@@ -41,7 +41,15 @@ are dropped before the next day is trained, and the memory they freed is handed 
 killed it (2026-10-27). A replayed day's end (the engine's status review, which judges the days
 replayed before it too, and the consensus refit) reads only the fields it judges by of each scored
 prediction, the refit its members' only (#487, ``PredictionStore.reviewed``): reading whole rows,
-each replayed day's peak grew by about 60 MB a day replayed before it (2026-11-03).
+each replayed day's peak grew by about 60 MB a day replayed before it (2026-11-03). And it reads
+each day once (#546, ``lifecycle._Read``): the clone check a day at a time, keeping each predictor's
+leans in place of its rows, the stats the judged algorithm's and the baselines' rows only. Each set
+of days the review asked for (the days each status counts, the latest days) had kept every
+predictor's rows, and the peak still grew by about 20 MB a day replayed before it (made-up days
+shaped like the server's; 18 days of breiman-30m on the server reached 993 MB, 2026-11-04). The
+verdict reads the fields it judges by too (``_judge``: every predictor's whole rows of every replayed
+day made the run's end its peak, 1,062 MB on 14 made-up days, 442 since), and its memory is logged
+as one more line.
 
 A running bar-close algorithm whose code changed (#454, ``revisions.py``) is judged again by the
 same check on the recorded days after the change only (``prevalidate --revision``, ``since``: the
@@ -685,12 +693,15 @@ async def prevalidate(
         seed_history(settings.state_dir, name)
         before, on_days = earlier_runs(settings.state_dir, name, replayed)
         tries = on_days + 1  # this run among those on any of these days: the bar it is held to
-        if kind is None:
-            others = [a.name for a in beside if a is not candidate]
-            result = _judge(settings, candidate, others, replayed, models, db, now, tries)
-        else:
-            same = [a.name for a in own_algorithms if a is not candidate]
-            result = _judge_kind(settings, candidate, kind, same, replayed, models, db, now, tries)
+        usage = DayUsage(Meter())  # the verdict reads every replayed day at once: its memory (#546)
+        with usage.phase("verdict"):
+            if kind is None:
+                others = [a.name for a in beside if a is not candidate]
+                result = _judge(settings, candidate, others, replayed, models, db, now, tries)
+            else:
+                same = [a.name for a in own_algorithms if a is not candidate]
+                result = _judge_kind(settings, candidate, kind, same, replayed, models, db, now, tries)
+        log.info("%s: memory of the verdict on %d days: %s", name, len(replayed), usage.line())
         result = replace(result, earlier_runs=before, earlier_on_these_days=on_days)
         if measured is not None:
             diagnostics, lines = measured.result()
@@ -885,8 +896,10 @@ def _judge(
     try:
         statuses = store.status_counts(name)
         skipped = store.count_runs("cpu_budget", datetime.combine(replayed[0], time(), KST), name)
-        algos, baselines = split(scored_by_algorithm(store.scored_predictions(replayed, None, False)), names)
-        measured = correlations(name, others, store.scored_predictions(replayed, None, True))
+        # The fields they read of each prediction (#546, ``PredictionStore.reviewed``): whole rows
+        # (about 2.2 kB each, every predictor's of every replayed day) made the run's end its peak.
+        algos, baselines = split(scored_by_algorithm(store.reviewed(replayed, False)), names)
+        measured = correlations(name, others, store.reviewed(replayed, True))
     finally:
         store.close()
     # Ranked with the others, as the leaderboard would: its lifts' FDR adjustment is theirs.
@@ -938,9 +951,10 @@ def _judge_kind(
         # As the API and the statuses go by: only forecasts of models trained on the kind's
         # answers (a default model, as on the first replayed day, or another version's sits out).
         version = kind.answer_version
-        scored = on_target(store.kind_scored(kind.name, version, replayed, None, False), names, version)
+        # The fields they read (#546, ``kind_reviewed``), as the direction's verdict.
+        scored = on_target(store.kind_reviewed(kind.name, version, replayed, False), names, version)
         algos, baselines = kind_split(scored_of_kind(scored, kind), names)
-        every = on_target(store.kind_scored(kind.name, version, replayed, None, True), names, version)
+        every = on_target(store.kind_reviewed(kind.name, version, replayed, True), names, version)
         measured = correlations(name, others, every, kind_scoring(kind).lean)
     finally:
         store.close()

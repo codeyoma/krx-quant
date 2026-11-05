@@ -276,8 +276,8 @@ def review(
     (#298), whose days count as the module doc says.
     """
     rules = rules or Rules()
-    cached = _cached(rows, baselines, scoring.target_version)
-    judge = _Judge(cached, list(days[:recent]), min_sample, fee_rate, rules, baselines, scoring)
+    read = _Read(rows, baselines, scoring.target_version)
+    judge = _Judge(read, list(days[:recent]), min_sample, fee_rate, rules, baselines, scoring, read.of)
     changes: list[Change] = []
     candidates: list[Candidate] = []
     for i, name in enumerate(algorithms):
@@ -339,9 +339,8 @@ def review_at_once(
     days.
     """
     rules = rules or Rules()
-    judge = _Judge(
-        _cached(rows, baselines, scoring.target_version), [], min_sample, fee_rate, rules, baselines, scoring
-    )
+    read = _Read(rows, baselines, scoring.target_version)
+    judge = _Judge(read, [], min_sample, fee_rate, rules, baselines, scoring, read.of)
     out: list[AtOnce] = []
     for i, name in enumerate(algorithms):
         standing, sim = standings.get(name), simulated.get(name)
@@ -376,17 +375,65 @@ def review_at_once(
     return out
 
 
-def _cached(rows: Rows, baselines: Collection[str], target_version: int) -> Rows:
-    """``rows`` read once per set of days, only the target's models' kept (``stats.on_target``)."""
-    read: dict[tuple[tuple[date, ...], bool], list[dict[str, Any]]] = {}
+class _Read:
+    """``rows`` as a review reads them, only the target's models' kept (``stats.on_target``) (#546).
 
-    def cached(chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
-        key = (tuple(chosen), special)
-        if key not in read:
-            read[key] = on_target(rows(chosen, special), baselines, target_version)
-        return read[key]
+    - With special predictions (the clone check's, a day at a time: ``_Judge.correlated``), each read
+      is passed on, not kept.
+    - Without, of some predictors (``of``: the one judged and the baselines): a day is read once for
+      every predictor asked of it so far, and only their rows are kept (a predictor asked later reads
+      the day again). The days are in order, oldest first, each in the read's order: the order a read
+      of every day gives (the store's reads are in their bar closes' order).
+    - Without, of every predictor (a simulated probation's judge, ``_with``): one read of every day
+      asked so far, and a set of days is that read's rows of those days, in its order; a day asked
+      that it does not hold reads every day again, the read before let go first.
 
-    return cached
+    Before, each set of days a review asked for (the days each status counts, from its own first
+    day; the latest days; an active algorithm's days active, #545) was read and kept apart, every
+    predictor's rows with special ones and without, until the review ended: a pre-validation's
+    replay, which reviews each replayed day on the days before it too, grew by about 20 MB a day
+    replayed before it (made-up days shaped like the server's, 2026-11-06)."""
+
+    def __init__(self, rows: Rows, baselines: Collection[str], target_version: int) -> None:
+        self._rows = rows
+        self._baselines = baselines
+        self._target = target_version
+        self._every: tuple[frozenset[date], list[dict[str, Any]]] | None = None
+        self._asked: frozenset[str] = frozenset()  # the predictors asked of ``of`` so far
+        self._kept: dict[date, tuple[frozenset[str], list[dict[str, Any]]]] = {}  # a day's, of them
+
+    def _read(self, chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
+        return on_target(self._rows(chosen, special), self._baselines, self._target)
+
+    def __call__(self, chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
+        if special:
+            return self._read(chosen, True)
+        asked = frozenset(chosen)
+        if self._every is None or not asked <= self._every[0]:
+            days = asked | (self._every[0] if self._every is not None else frozenset())
+            self._every = None  # the smaller read goes before the larger one is made
+            self._every = (days, self._read(sorted(days, reverse=True), False))
+        days, held = self._every
+        if asked == days:
+            return held
+        keep = {d.isoformat() for d in asked}
+        return [r for r in held if r["bar_close"][:10] in keep]
+
+    def of(self, chosen: Sequence[date], predictors: Collection[str]) -> list[dict[str, Any]]:
+        """The rows of ``predictors`` made on ``chosen`` days, special ones left out, oldest first."""
+        wanted = frozenset(predictors)
+        self._asked |= wanted
+        out: list[dict[str, Any]] = []
+        for day in sorted(set(chosen)):
+            kept, held = self._kept.get(day, (frozenset(), []))
+            if not wanted <= kept:
+                kept = self._asked
+                del held
+                self._kept.pop(day, None)
+                held = [r for r in self._read([day], False) if r["algorithm"] in kept]
+                self._kept[day] = (kept, held)
+            out += [r for r in held if r["algorithm"] in wanted]
+        return out
 
 
 def _counted(
@@ -409,7 +456,7 @@ def _with(judge: _Judge, sim: Simulated | None, scoring: Scoring) -> _Judge:
         return judge
     live = judge.rows
     simulated_days = set(sim.days)
-    replayed = _cached(sim.rows, judge.baselines, scoring.target_version)
+    replayed = _Read(sim.rows, judge.baselines, scoring.target_version)
 
     def rows(chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
         mine = [d for d in chosen if d in simulated_days]
@@ -419,7 +466,7 @@ def _with(judge: _Judge, sim: Simulated | None, scoring: Scoring) -> _Judge:
             out += replayed(mine, special)
         return out
 
-    return replace(judge, rows=rows)
+    return replace(judge, rows=rows, of=None)  # its rows are the live ones and the simulation's
 
 
 @dataclass
@@ -431,6 +478,22 @@ class _Judge:
     rules: Rules
     baselines: Collection[str] = BASELINE_NAMES
     scoring: Scoring = DIRECTION_SCORING
+    # The rows of some predictors only (``_Read.of``): where it is given, the stats read the judged
+    # algorithm's and the baselines' from it (#546); every predictor's (``rows``) where not.
+    of: Callable[[Sequence[date], Collection[str]], list[dict[str, Any]]] | None = None
+
+    # Each day's leans (``leans``), read a day at a time with special predictions: what the clone check
+    # reads of its rows, kept in their place (#546). Not copied by ``replace``: a judge reading other
+    # rows (``_with``) reads its own.
+    _leans: dict[date, Leans] = field(default_factory=dict, init=False, repr=False)
+
+    def correlated(self, name: str, others: Sequence[str], days: Sequence[date]) -> dict[str, float]:
+        """``correlations`` of ``name`` with ``others`` on the predictions of ``days``, special ones
+        too: each day's leans read once (``_leans``)."""
+        for day in days:
+            if day not in self._leans:
+                self._leans[day] = leans(self.rows([day], True), self.scoring.lean)
+        return correlated(name, others, [self._leans[d] for d in days])
 
     def decide(
         self, name: str, status: Status, held: list[date], earlier: list[str], *, due: bool | None = None
@@ -439,7 +502,7 @@ class _Judge:
         of ``held``'s count, or as ``due`` says (a simulation's review at once, #298); active, on
         the latest of ``held``, its days active, once there are ``Rules.min_active_days`` (#545)."""
         if status in (Status.PROBATION, Status.CLONE):
-            measured = correlations(name, earlier, self.rows(held, True), self.scoring.lean)
+            measured = self.correlated(name, earlier, held)
             twin = most_correlated(measured)
             if twin is not None and twin[1] > CLONE_CORRELATION:
                 if status is Status.PROBATION:
@@ -500,9 +563,9 @@ class _Judge:
 
     def measure(self, name: str, days: Sequence[date]) -> Lifted:
         """``name``'s stats against the baselines on ``days``, enough to judge by or not."""
-        return self.scoring.measure(
-            name, self.rows(days, False), self.baselines, self.fee_rate, self.rules.confidence
-        )
+        # Its rows and the baselines' only, which are all the measure reads (#487, #546).
+        rows = self.rows(days, False) if self.of is None else self.of(days, {name, *self.baselines})
+        return self.scoring.measure(name, rows, self.baselines, self.fee_rate, self.rules.confidence)
 
     def _passed_by_day(self, name: str, days: Sequence[date]) -> Lift | None:
         """``name``'s weakest lift by trading day on ``days``, if its lower bound is above 0."""
@@ -531,13 +594,34 @@ def correlations(
     probability less its third's) with each of ``others`` it can be measured against: enough
     bar closes both predicted, and neither always the same.
     """
-    scores: dict[str, dict[tuple[str, str], float]] = {}
+    return correlated(name, others, [leans(rows, lean, {name, *others})])
+
+
+# Each predictor's lean at each (symbol, bar close) it predicted (#546): what a clone check reads.
+Leans = dict[str, dict[tuple[str, str], float]]
+
+
+def leans(
+    rows: Sequence[Mapping[str, Any]],
+    lean: Callable[[Mapping[str, Any]], float],
+    predictors: Collection[str] | None = None,
+) -> Leans:
+    """Each predictor's (of ``predictors`` only, if given) ``lean`` in ``rows``, by (symbol, bar
+    close): the last row of each, as there is one (the store keeps one prediction a predictor, symbol
+    and bar close)."""
+    out: Leans = {}
     for row in rows:
-        scores.setdefault(row["algorithm"], {})[(row["symbol"], row["bar_close"])] = lean(row)
-    mine = scores.get(name, {})
+        if predictors is None or row["algorithm"] in predictors:
+            out.setdefault(row["algorithm"], {})[(row["symbol"], row["bar_close"])] = lean(row)
+    return out
+
+
+def correlated(name: str, others: Sequence[str], days: Sequence[Leans]) -> dict[str, float]:
+    """``correlations`` from the leans of each day (``leans``): a (symbol, bar close) is one day's."""
+    mine = _merged(days, name)
     measured: dict[str, float] = {}
     for other in others:
-        theirs = scores.get(other, {})
+        theirs = _merged(days, other)
         shared = sorted(mine.keys() & theirs.keys())
         if len(shared) < MIN_PAIRS_TESTED:
             continue
@@ -546,6 +630,16 @@ def correlations(
         except statistics.StatisticsError:
             continue  # one side never moves
     return measured
+
+
+def _merged(days: Sequence[Leans], name: str) -> dict[tuple[str, str], float]:
+    """``name``'s leans of every day of ``days``."""
+    if len(days) == 1:
+        return days[0].get(name, {})
+    out: dict[tuple[str, str], float] = {}
+    for day in days:
+        out.update(day.get(name, {}))
+    return out
 
 
 @dataclass(frozen=True)
