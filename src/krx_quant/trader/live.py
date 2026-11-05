@@ -41,7 +41,7 @@ starts it again in the other mode (``run.py``).
     before #475, has no decision quote), their mean at most ``GAP_MEAN`` (1) and their 95th
     percentile (nearest rank) at most ``GAP_P95`` (2);
 
-    > **바뀜** (2026-11-05, #NNN): each leg against the paper shadow's fill of the same prediction
+    > **바뀜** (2026-11-05, #557): each leg against the paper shadow's fill of the same prediction
     > (``gap.pairing``, the practice trades against the practice shadow's), a KIS trade its shadow did
     > not trade measured by no leg and only counted → every KIS leg against the paper rules' price at
     > its decision quote, and at least 90% of them measured. 이유: the shadows keep their own cooldown

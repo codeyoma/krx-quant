@@ -57,7 +57,7 @@ same cells' predictions and the same quotes, in one process.
   no policy and no record counts them (``store.PRACTICE_TRADE``); the KIS checks, the risk rules and
   the cash do (#427). No loss limit counts them since #533 (``limits.py`` "The practice").
 
-  > **바뀜** (2026-11-05, #NNN): the practice had a paper shadow of its own (``practice_shadow``, on
+  > **바뀜** (2026-11-05, #557): the practice had a paper shadow of its own (``practice_shadow``, on
   > the practice cell's picks), which the live mode's gap paired the practice trades with → none; a
   > shadow's trade of it left open is sold. 이유: a shadow keeps its own cooldown and buy count and
   > drifts from the KIS book: on 2026-11-04, 13 of the 20 practice round trips had no shadow trade to

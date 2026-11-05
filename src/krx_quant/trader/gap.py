@@ -27,7 +27,7 @@ champion policy's trade of the day is in exactly one pair (``pairing``): a predi
 holds more than once (it should not: a book decides a prediction once) pairs none of them, each
 one-sided, so that no trade is dropped unseen.
 
-> **바뀜** (2026-11-05, #NNN): a pair was of one book, the practice trades against the practice
+> **바뀜** (2026-11-05, #557): a pair was of one book, the practice trades against the practice
 > shadow's (each pair's ``practice``), and ``Pairing.alone`` counted the KIS trades the live mode's gap
 > check did not measure → the practice is left out and the pairs have no ``practice``. 이유: the
 > practice shadow is gone (``desk.py``) and the gap check measures every KIS leg.
