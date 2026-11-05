@@ -4,7 +4,8 @@ they run.
 
 The mock day's check against KIS, the passive entry's measurement and the cost map's audit ran,
 posted their results and left ``JOBS`` (#505), as a one-off job does once it has done its work.
-Their commands stay for a run by hand.
+The mock check's command stays for a run by hand; the other two left with their code once
+concluded (#559).
 """
 
 from __future__ import annotations

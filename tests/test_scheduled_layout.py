@@ -9,7 +9,10 @@ algorithm needs no entry (AGENTS.md "Timed server work").
 
 from __future__ import annotations
 
+import importlib.util
 from types import ModuleType
+
+import pytest
 
 from krx_quant import cli
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS
@@ -62,11 +65,15 @@ RETIRED = {
     "check-mock-trades-405": ("check-mock-trades",),
     "signal-review-206-1102": ("signal-review", "--days", "20"),
     "error-breakdown-431": ("error-breakdown", "--days", "20", "--algorithm", "turing"),
-    "passive-entry-432": ("measure-passive-entry",),
-    "cost-map-audit-438": ("cost-map-audit",),
     "climate-prior-429": ("climate-prior",),
-    "poisson-link-439": ("poisson-link",),
-    "turing-prior-448": ("turing-prior",),
+}
+# The retired jobs whose experiments were concluded: their commands and code were removed too
+# (#559), overriding #505's choice to keep them for a run by hand. Each with its command and module.
+REMOVED = {
+    "passive-entry-432": ("measure-passive-entry", "krx_quant.trader.passive"),
+    "cost-map-audit-438": ("cost-map-audit", "krx_quant.cost_map_audit"),
+    "poisson-link-439": ("poisson-link", "krx_quant.poisson_link"),
+    "turing-prior-448": ("turing-prior", "krx_quant.turing_prior"),
 }
 
 
@@ -106,8 +113,18 @@ def test_every_job_a_family_defines_is_listed_once() -> None:
 
 def test_the_retired_jobs_are_gone_and_their_commands_stay() -> None:
     """Left in, a lost state file would run them again on closed issues; by hand, each still runs."""
-    assert len(RETIRED) == 28
-    assert sorted(set(RETIRED) & {j.name for j in JOBS}) == []
+    assert len(RETIRED) == 24
+    assert sorted((set(RETIRED) | set(REMOVED)) & {j.name for j in JOBS}) == []
     parser = cli._parser()
     for name, argv in RETIRED.items():
         assert callable(parser.parse_args(list(argv)).run), name
+
+
+def test_the_concluded_experiments_left_with_their_code(capsys: pytest.CaptureFixture[str]) -> None:
+    """#559: no command parses for them, and their modules are not there to import."""
+    parser = cli._parser()
+    for name, (command, module) in REMOVED.items():
+        with pytest.raises(SystemExit):
+            parser.parse_args([command])
+        assert f"invalid choice: '{command}'" in capsys.readouterr().err, name
+        assert importlib.util.find_spec(module) is None, name

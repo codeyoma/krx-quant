@@ -7,7 +7,7 @@ which run last, the backfilled days' verdict on neyman's variants (#532) the ver
 The diagnosis and the entry delay, the first two signal reviews, the structure check, the error
 breakdown and the climate, link and turing prior experiments ran, posted their results and left
 ``JOBS`` (#505), as a one-off job does once it has done its work. Their commands stay for a run by
-hand.
+hand, but the link and turing prior experiments', which left with their code once concluded (#559).
 """
 
 from __future__ import annotations

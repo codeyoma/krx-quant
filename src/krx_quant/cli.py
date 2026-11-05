@@ -34,7 +34,6 @@ from krx_quant.close_probe import probe_close
 from krx_quant.closing_flow_check import check_closing_flow, check_krx_net_assets
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError, read_values
-from krx_quant.cost_map_audit import run_audit as run_cost_map_audit
 from krx_quant.daily import DailyKind
 from krx_quant.daily_check import DAYS as DAILY_CHECK_DAYS
 from krx_quant.daily_check import daily_check
@@ -75,9 +74,6 @@ from krx_quant.normal_order import normal_order_experiment
 from krx_quant.notify import send_notice, send_test_alert
 from krx_quant.object_store import open_store
 from krx_quant.order_probe import probe_kis_orders
-from krx_quant.poisson_link import REPORT as POISSON_LINK_REPORT
-from krx_quant.poisson_link import lines as poisson_link_lines
-from krx_quant.poisson_link import poisson_link_experiment
 from krx_quant.predictions import (
     DB_NAME,
     REVISION_CHANGED,
@@ -121,7 +117,6 @@ from krx_quant.trader.limits import CONTROL_SECONDS
 from krx_quant.trader.limits import ask as ask_trader
 from krx_quant.trader.mock_check import check_mock_trades
 from krx_quant.trader.notice_layout import fill_notice_layout
-from krx_quant.trader.passive import run_passive_entry
 from krx_quant.trader.promotion import mode_at
 from krx_quant.trader.refit import run_refit
 from krx_quant.trader.report import run_night, run_report
@@ -130,9 +125,6 @@ from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import TraderStore
 from krx_quant.training import fit_algorithm
-from krx_quant.turing_prior import REPORT as TURING_PRIOR_REPORT
-from krx_quant.turing_prior import lines as turing_prior_lines
-from krx_quant.turing_prior import turing_prior_experiment
 
 # A command's handler (#499): the parsed arguments in, the exit code out.
 Run = Callable[[argparse.Namespace], int]
@@ -207,23 +199,6 @@ async def _refit_policy(engine_url: str | None, report: bool) -> int:
     if report:
         return await run_night(settings, trader, datetime.now(KST), engine_url)
     return await run_refit(settings, trader, datetime.now(KST), engine_url)
-
-
-async def _measure_passive_entry(engine_url: str | None) -> int:
-    """A passive entry at the best bid against the trader's marketable one, on the recordings (#432),
-    read-only, in the engine's container: what the scheduled job ``passive-entry-432`` ran until it
-    left ``JOBS`` (#505)."""
-    settings = Settings.from_env(require_kis=False)
-    return await run_passive_entry(settings, TraderSettings.from_env(), engine_url)
-
-
-async def _cost_map_audit(engine_url: str | None) -> int:
-    """Every ranked algorithm of the trader's kinds judged as the cost map's top (#438), read-only:
-    in the engine's container: what the scheduled job ``cost-map-audit-438`` ran until it left
-    ``JOBS`` (#505)."""
-    settings = Settings.from_env(require_kis=False)
-    url = engine_url or TraderSettings.from_env().engine_url
-    return await run_cost_map_audit(settings.state_dir / DB_NAME, url, settings.target_version)
 
 
 async def _check_mock_trades(day: date | None) -> int:
@@ -631,31 +606,6 @@ def _normal_order(days: int) -> int:
     return 0
 
 
-def _poisson_link(days: int) -> int:
-    """The asymmetric link experiment for poisson (#439): its lines; exit 1 without a recorded day."""
-    settings = Settings.from_env(require_kis=False)
-    try:
-        result = poisson_link_experiment(settings, days=days)
-    except FileNotFoundError as e:
-        print(e, file=sys.stderr)
-        return 1
-    print("\n".join(poisson_link_lines(result, settings.state_dir / POISSON_LINK_REPORT)))
-    return 0
-
-
-def _turing_prior(days: int) -> int:
-    """The symbol and climate prior experiment for turing (#448): its lines; exit 1 without a
-    recorded day."""
-    settings = Settings.from_env(require_kis=False)
-    try:
-        result = turing_prior_experiment(settings, days=days)
-    except FileNotFoundError as e:
-        print(e, file=sys.stderr)
-        return 1
-    print("\n".join(turing_prior_lines(result, settings.state_dir / TURING_PRIOR_REPORT)))
-    return 0
-
-
 def _neyman_variants(backfill: bool = False) -> int:
     """Neyman's variants experiment (#455): its next step's lines (the discovery, the window's
     progress or its verdict), or with ``backfill`` its verdict on the backfilled days (#532); exit 1
@@ -971,30 +921,6 @@ def _parser() -> argparse.ArgumentParser:
         " trader-report's",
     )
     refit_cmd.set_defaults(run=lambda args: asyncio.run(_refit_policy(args.engine_url, args.report)))
-    passive_cmd = sub.add_parser(
-        "measure-passive-entry",
-        help="measure on the recorded quotes and KRX trades how a buy resting at the best bid would have"
-        " done against the trader's marketable entry (#432), on the signals of tonight's cost map's cells"
-        " and days: fill rates under two fill assumptions, hit rates, net ticks; read-only, no price",
-    )
-    passive_cmd.add_argument(
-        "--engine-url",
-        help="the Engine API the cost map is read from (default KRX_TRADER_ENGINE_URL, which compose sets"
-        " to the engine service's, http://engine:8080; else http://127.0.0.1:8080)",
-    )
-    passive_cmd.set_defaults(run=lambda args: asyncio.run(_measure_passive_entry(args.engine_url)))
-    audit_cmd = sub.add_parser(
-        "cost-map-audit",
-        help="judge every ranked algorithm of the trader's kinds as tonight's cost map judges its top"
-        " (#438): the visible top against the cost map to the number, the hidden ones by the same rule,"
-        " the rise and fall calls' hit rates apart; exploratory, read-only, no price",
-    )
-    audit_cmd.add_argument(
-        "--engine-url",
-        help="the Engine API the cost map is read from (default KRX_TRADER_ENGINE_URL, which compose sets"
-        " to the engine service's, http://engine:8080; else http://127.0.0.1:8080)",
-    )
-    audit_cmd.set_defaults(run=lambda args: asyncio.run(_cost_map_audit(args.engine_url)))
     report_cmd = sub.add_parser(
         "trader-report",
         help="print the trader's report of a trading day (#402), read-only from state/trader.sqlite3: its"
@@ -1230,18 +1156,6 @@ def _parser() -> argparse.ArgumentParser:
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
     climate_prior_cmd.set_defaults(run=lambda args: _climate_prior(args.days))
-    poisson_link_cmd = sub.add_parser(
-        "poisson-link",
-        help="compare the climate baseline, poisson and poisson's lean through an asymmetric multinomial"
-        " link on the pre-validation's folds (#439; reads the training samples, replays nothing)",
-    )
-    poisson_link_cmd.add_argument(
-        "--days",
-        type=_positive,
-        default=PREVALIDATION_DAYS,
-        help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
-    )
-    poisson_link_cmd.set_defaults(run=lambda args: _poisson_link(args.days))
     normal_order_cmd = sub.add_parser(
         "normal-order",
         help="compare newton, gauss, granger, markov and kalman with normal_forecast's targets taken as"
@@ -1255,18 +1169,6 @@ def _parser() -> argparse.ArgumentParser:
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
     normal_order_cmd.set_defaults(run=lambda args: _normal_order(args.days))
-    turing_prior_cmd = sub.add_parser(
-        "turing-prior",
-        help="compare the climate baseline, turing, and turing with the symbol, each slot's class frequencies"
-        " or both on the pre-validation's folds (#448; reads the training samples, replays nothing)",
-    )
-    turing_prior_cmd.add_argument(
-        "--days",
-        type=_positive,
-        default=PREVALIDATION_DAYS,
-        help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
-    )
-    turing_prior_cmd.set_defaults(run=lambda args: _turing_prior(args.days))
     neyman_variants_cmd = sub.add_parser(
         "neyman-variants",
         help="neyman's variants (#455): the discovery that fixes the window's N, then the verdict on the"
