@@ -27,6 +27,7 @@ FIRST = (
     "error-holdout-447",
     "climate-gate-449",
     "nightly-hit-rates-437",
+    "restore-drill-577",
 )
 # Between the daily kinds' pre-validations and the bar-close ones: the simulations, then the measure of
 # where making a day's samples spends its time (#512), which gives way to a pre-validation as they do.
@@ -97,9 +98,9 @@ REMOVED_MODULES = (
 
 
 def _families() -> tuple[ModuleType, ...]:
-    from krx_quant.scheduled import prevalidations, probes, research, trader
+    from krx_quant.scheduled import prevalidations, probes, research, trader, upkeep
 
-    return probes, research, trader, prevalidations
+    return probes, research, trader, upkeep, prevalidations
 
 
 def test_the_jobs_run_in_the_order_they_ran_before_the_split() -> None:
