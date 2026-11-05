@@ -44,7 +44,7 @@ comment's first line say what came of it (``_what``, #440): 성공 (a pre-valida
 (a pre-validation's 예외), 시간 초과 or 신호로 죽음. A refusal's exit code is 1, as an error's is: it is
 told apart by the report the run wrote.
 
-> **바뀜** (2026-11-06, #PRNUM): each run's line, a deferral's, a run cut by a restart's and a late
+> **바뀜** (2026-11-06, #616): each run's line, a deferral's, a run cut by a restart's and a late
 > post's went to Telegram → they are logged (``told``); the readiness line counts them. 이유: a line a
 > job was most of a night's Telegram, and each result is on its issue (#614).
 

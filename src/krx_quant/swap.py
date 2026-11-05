@@ -12,7 +12,7 @@ their pre-validation refused the code they have (#544, ``not_run``). The line is
 morning's readiness line tells whether the night's list was applied and how many models changed
 (#614, ``MorningSwap``, ``readiness.py``).
 
-> **바뀜** (2026-11-06, #PRNUM): the line went to Telegram at 08:00, every model with its version →
+> **바뀜** (2026-11-06, #616): the line went to Telegram at 08:00, every model with its version →
 > logged only; the 08:40 readiness line carries its outcome. 이유: the night's summary had told the
 > same promotions the night before, and the line named 11 and more versions a morning (#614).
 
