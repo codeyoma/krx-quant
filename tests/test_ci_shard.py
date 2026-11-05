@@ -167,7 +167,7 @@ def test_ci_runs_four_shards_behind_one_check_and_cancels_only_superseded_pr_run
     assert "scripts/ci_shard.py collect" in workflow and "scripts/ci_shard.py verify" in workflow
     # The check a merge waits for keeps its name, whatever the number of shards.
     test_job = workflow.split("\n  test:\n", 1)[1]
-    assert "needs: [lint, pytest]" in test_job and "if: ${{ !cancelled() }}" in test_job
+    assert "needs: [lint, pytest, bar-close]" in test_job and "if: ${{ !cancelled() }}" in test_job
     # A push to main is never cancelled: its group is the run's own.
     assert "group: ci-${{ github.event.pull_request.number || github.run_id }}" in workflow
     assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in workflow

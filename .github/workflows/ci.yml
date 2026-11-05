@@ -87,18 +87,46 @@ jobs:
           retention-days: 1
           overwrite: true
 
-  # The one check a merge waits for, whatever the number of shards: lint and every shard
-  # passed, and every test of the suite ran in exactly one shard.
+  # A busy morning's bar closes on the server's two CPUs and 2 GB, against the reference (#600):
+  # a commit that slows them fails here, before its merge and before a deploy (which waits for the
+  # whole run, #541). On a runner of its own beside the shards, as their tests would compete for
+  # its CPU: 4-7 minutes (the models' fit, then a morning; another when the first is over a limit,
+  # 9-12). The figures go to the artifact `bar-close` (tests/bar_close_reference.json's refresh).
+  bar-close:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: "0.12.23"
+      - run: uv sync --frozen
+      - name: A busy morning's bar closes on two CPUs and 2 GB
+        env:
+          BAR_CLOSE_BENCH: "1"
+          BAR_CLOSE_FIGURES: results/bar-close.json
+        run: uv run pytest -q tests/test_bar_close_loop.py::test_a_busy_morning_s_bar_closes_on_two_cpus_stay_near_the_reference
+      - uses: actions/upload-artifact@v7
+        if: ${{ !cancelled() }}
+        with:
+          name: bar-close
+          path: results/bar-close.json
+          overwrite: true
+
+  # The one check a merge waits for, whatever the number of shards: lint, every shard and the
+  # bar closes passed, and every test of the suite ran in exactly one shard.
   test:
-    needs: [lint, pytest]
+    needs: [lint, pytest, bar-close]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Lint and every shard passed
-        if: ${{ needs.lint.result != 'success' || needs.pytest.result != 'success' }}
+      - name: Lint, every shard and the bar closes passed
+        if: ${{ needs.lint.result != 'success' || needs.pytest.result != 'success' || needs.bar-close.result != 'success' }}
         run: |
-          echo "::error::lint: ${{ needs.lint.result }}, pytest: ${{ needs.pytest.result }}"
+          echo "::error::lint: ${{ needs.lint.result }}, pytest: ${{ needs.pytest.result }}, bar-close: ${{ needs.bar-close.result }}"
           exit 1
       # Only the script: no submodule, no project install.
       - uses: actions/checkout@v7

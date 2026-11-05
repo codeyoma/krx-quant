@@ -228,17 +228,19 @@ BUSY = 1  # a process spinning on the same CPUs: the trader, KIS frames, API req
 # A figure over its limit fails only if the morning measured again is over too: one slow run (a busy
 # runner) is not a slower engine.
 ATTEMPTS = 2
-# The limits, each the reference's figure times its factor, from GitHub's runners on 2026-11-06
-# (see the PR): of 20 runs of main on three CPU models (EPYC 7763, 9V74, 9V45), the median longest
-# gap reached 1.14 times the reference's, the time on the loop 1.05, the bar close 1.09 and the
-# peak RSS 1.01; #538's double answering took the median gap to 38-56 times and the time on the
-# loop to 12-17 times. The gaps' p95 is held to the engine's own WARNING limit instead
-# (``loop_watch.LIMIT_SECONDS``): one bar close in ten or so meets a full garbage collection, which
-# holds the loop 0.4-0.7 s there, so the p95 of 32 bar closes moves with where those land.
+# The limits, each the reference's figure times its factor. The reference is the median of 50 mornings
+# of main on GitHub's runners on 2026-11-06 (three CPU models: EPYC 7763, 9V74, 9V45); of those, the
+# median longest gap reached 1.38 times the reference's, the time on the loop 1.22, the bar close
+# 1.27 (the CPU model moves it: 0.69-0.86 s on a 9V45, 0.89-1.26 s on a 9V74, and a morning measured
+# again runs on the same one) and the peak RSS 1.01. #538's double answering (12 mornings) took the
+# median gap to 35-64 times, the time on the loop to 10-19 times and the gaps' p95 to 1.3-2.4 s. The
+# gaps' p95 is held to the engine's own WARNING limit (``loop_watch.LIMIT_SECONDS``) instead: a full
+# garbage collection holds the loop 0.5-0.7 s, and where the few in a morning land moved the p95 of its
+# 32 bar closes from 0.04 s to 0.52 s.
 FACTORS = {
     ("longest_gap_s", "median"): 3.0,
     ("on_loop_s", "median"): 3.0,
-    ("bar_close_s", "median"): 1.5,
+    ("bar_close_s", "median"): 1.75,
     ("rss_peak_mb",): 1.2,
 }
 
