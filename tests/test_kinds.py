@@ -46,6 +46,7 @@ from krx_quant.ranges import RANGE
 from krx_quant.replay import replay_into
 from krx_quant.touch import RESTARTED, SILENT, TARGET_VERSION, TouchWindow
 from tests.algorithm_doubles import FixedAlgorithm
+from tests.api_doubles import listening
 from tests.api_schema import check
 from tests.kind_doubles import DRIFT, SURE_RISE, TEST_KIND, FixedKindAlgorithm, drift_of
 from tests.replay_doubles import busy_morning, stored
@@ -575,7 +576,7 @@ async def test_a_client_gets_a_kind_s_predictions_and_answers_as_they_are_made(t
     events = busy_morning(end="09:06:00")
 
     async with TestClient(TestServer(create_app(engine))) as client:
-        ws = await client.ws_connect("/v1/stream")
+        ws = await listening(client)
         await _replay_more(engine, events, at("09:06:00"))
         received: list[dict[str, Any]] = []
         async with asyncio.timeout(5):
@@ -607,7 +608,7 @@ async def test_a_client_that_knows_only_the_old_events_sees_them_as_without_the_
     async def heard(db: Path, **options: Any) -> list[dict[str, Any]]:
         engine = await run(db, [], until=at("09:00:00"), target_version=TARGET_VERSION, **options)
         async with TestClient(TestServer(create_app(engine, stream_poll_seconds=3600))) as client:
-            ws = await client.ws_connect("/v1/stream")
+            ws = await listening(client)
             await _replay_more(engine, busy_morning(end="09:06:00"), at("09:06:00"))
             got: list[dict[str, Any]] = []
             async with asyncio.timeout(5):
