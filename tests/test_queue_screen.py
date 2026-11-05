@@ -10,6 +10,7 @@ lifts and score, the order and its seats, the screen's files and lines, and the 
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import subprocess
@@ -22,6 +23,7 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
 
+import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -36,6 +38,7 @@ from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.features import FeatureVector, Leaders
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.github import GitHub
 from krx_quant.kind_registry import kind_named
 from krx_quant.kinds import Answer, Kind, KindForecast, KindInputs
 from krx_quant.lifecycle import Status
@@ -68,10 +71,13 @@ from krx_quant.scheduled import (
     OK,
     PREVALIDATION_ISSUE,
     QUEUE_SCREEN,
+    STATE_FILE,
     Facts,
     JobRecord,
+    JobState,
     Night,
     Ran,
+    Scheduler,
     in_queue,
     prevalidation_job_name,
     screened_order,
@@ -81,13 +87,13 @@ from krx_quant.stats import Lift
 from krx_quant.touch import WINDOW
 from krx_quant.training import finished_days
 from tests.algorithm_doubles import FixedAlgorithm, stand_in_card, stand_in_meanings
+from tests.fake_github import REPO
 from tests.prevalidation_doubles import AFTER, DAYS, Contrarian, refuse, swings
 from tests.prevalidation_doubles import settings as recorded_settings
 from tests.replay_doubles import busy_morning, record
 from tests.replay_events import at as replay_at
 from tests.replay_events import run
-from tests.scheduled_doubles import COMMIT, FRIDAY, Runs, scheduling, settle
-from tests.waiting import until
+from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, Runs, Told
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 DAY = date(2026, 9, 14)
@@ -740,18 +746,30 @@ class Screens(Runs):
 
 
 async def test_the_night_s_pre_validations_go_by_the_order_its_screen_set_that_night(tmp_path: Path) -> None:
+    """The whole night, to its end (its quiet turn too): the screen first, then the first in the
+    order it set (without the facts read again, mandelbrot's), then the quiet night's second in that
+    order (in the list's, mandelbrot's again)."""
     queue: list[str] = []
-    clock = FakeClock(datetime.combine(FRIDAY, time(22), KST))
+    clock = FakeClock(datetime.combine(FRIDAY, time(22, 30), KST))
     runs = Screens(clock, queue)
-    jobs = [QUEUE_SCREEN, *FIRST_ONES]
 
-    def facts() -> Facts:
+    async def facts() -> Facts:
         return Facts(recorded_days=MIN_DAYS, waiting=ORDER, queue=tuple(queue))
 
-    async with scheduling(tmp_path, clock.now(), jobs, runs=runs, facts=facts, clock=clock):
-        clock.set(datetime.combine(FRIDAY, time(22, 30), KST))
-        await until(lambda: len(runs.commands) == 3)
-        await settle()
+    async with aiohttp.ClientSession() as session:
+        scheduler = Scheduler(
+            [QUEUE_SCREEN, *FIRST_ONES],
+            AT,
+            CALENDAR,
+            JobState.load(tmp_path / STATE_FILE),
+            GitHub(session, None, REPO, "http://127.0.0.1:9"),
+            Told(),
+            clock,
+            commit=COMMIT,
+            facts=facts,
+            runner=runs,
+        )
+        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
 
     assert runs.commands == ["screen-queue", "prevalidate poisson", "prevalidate kalman"]
 
