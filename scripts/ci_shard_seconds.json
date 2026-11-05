@@ -26,7 +26,6 @@
  "tests/test_consensus.py": 22.89,
  "tests/test_contracts.py": 0.01,
  "tests/test_cost_map_api.py": 0.39,
- "tests/test_cost_map_audit.py": 1.45,
  "tests/test_cox.py": 6.73,
  "tests/test_cox5d.py": 14.62,
  "tests/test_daily.py": 4.54,
@@ -96,7 +95,6 @@
  "tests/test_order_probe.py": 3.26,
  "tests/test_overlap_stats.py": 13.3,
  "tests/test_poisson.py": 2.99,
- "tests/test_poisson_link.py": 10.54,
  "tests/test_poll_outages.py": 0.23,
  "tests/test_pr_docs.py": 0.14,
  "tests/test_pr_refs.py": 0.13,
@@ -166,7 +164,6 @@
  "tests/test_trader_marks.py": 0.28,
  "tests/test_trader_mock.py": 17.55,
  "tests/test_trader_paper.py": 0.66,
- "tests/test_trader_passive.py": 2.03,
  "tests/test_trader_policy.py": 0.19,
  "tests/test_trader_practice.py": 0.79,
  "tests/test_trader_practice_cycle.py": 0.34,
@@ -183,6 +180,5 @@
  "tests/test_trader_stall.py": 1.0,
  "tests/test_training_nights.py": 2.12,
  "tests/test_turing.py": 6.87,
- "tests/test_turing_prior.py": 10.45,
  "tests/test_us_daily.py": 0.02
 }

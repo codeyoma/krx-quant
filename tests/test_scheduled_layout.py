@@ -9,6 +9,7 @@ algorithm needs no entry (AGENTS.md "Timed server work").
 
 from __future__ import annotations
 
+import importlib.util
 from types import ModuleType
 
 import pytest
@@ -71,8 +72,9 @@ RETIRED = {
     "poisson-link-439": ("poisson-link",),
     "turing-prior-448": ("turing-prior",),
 }
-# The probes removed with their modules once their questions were settled (#563): the user decided
-# it on 2026-11-05, over #505's "the commands stay". ``probe-candles`` ran by hand only (#111).
+# The commands removed with their modules once their questions were settled: the probes (#563) and
+# the concluded experiments (#559). The user decided both on 2026-11-05, over #505's "the commands
+# stay". ``probe-candles`` ran by hand only (#111).
 REMOVED = (
     "probe-candles",
     "probe-close",
@@ -80,6 +82,17 @@ REMOVED = (
     "probe-expected-open",
     "probe-member-frames",
     "probe-net-buys",
+    "measure-passive-entry",
+    "cost-map-audit",
+    "poisson-link",
+    "turing-prior",
+)
+# The concluded experiments' modules, removed with their commands (#559).
+REMOVED_MODULES = (
+    "krx_quant.trader.passive",
+    "krx_quant.cost_map_audit",
+    "krx_quant.poisson_link",
+    "krx_quant.turing_prior",
 )
 
 
@@ -135,3 +148,8 @@ def test_the_removed_probes_are_no_command_and_no_job_runs_one() -> None:
             parser.parse_args([command])
         assert exited.value.code == 2, command
     assert [j.name for j in JOBS if j.command[0] in REMOVED] == []
+
+
+def test_the_concluded_experiments_modules_are_gone() -> None:
+    """#559: removed with their commands (``REMOVED``), nothing is left to import."""
+    assert [m for m in REMOVED_MODULES if importlib.util.find_spec(m) is not None] == []

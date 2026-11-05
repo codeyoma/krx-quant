@@ -98,15 +98,13 @@ resident memory (``footprint.Meter``, the highest of its passes) is kept in the 
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import sqlite3
 import time as clock
-from collections import Counter
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -115,24 +113,19 @@ import aiohttp
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.footprint import Meter
-from krx_quant.kinds import DIRECTION
 from krx_quant.market_calendar import Session, calendar_store
 from krx_quant.predictions import DB_NAME as ENGINE_DB
-from krx_quant.predictions import KIND_ANSWER_JOIN, KIND_SCORED, SCORED, TOUCH_JOIN
-from krx_quant.pricing import tick_size
-from krx_quant.special import Window
 from krx_quant.stats import Interval, day_mean
 from krx_quant.trader import ROLES, SYMBOL, TRADED_KINDS, cohort, promotion, review
 from krx_quant.trader import policy as policies
-from krx_quant.trader.cells import Cell, Signal, open_engine_db, special_windows, traded_kind
-from krx_quant.trader.paper import NO_QUOTE, Plan, Rules, plan
+from krx_quant.trader.cells import Cell, open_engine_db, special_windows
+from krx_quant.trader.paper import NO_QUOTE, Rules
 from krx_quant.trader.replay import (
     GAP,
     GAPPED,
     LEVEL,
     NO_EXIT_QUOTE,
     NO_RECORDING,
-    OFF_TARGET,
     Calibration,
     Ranked,
     Replayer,
@@ -140,7 +133,6 @@ from krx_quant.trader.replay import (
     Signals,
     Source,
     Tally,
-    target_of,
 )
 from krx_quant.trader.selection import CostMapError, Pick, choose, read_cost_map
 from krx_quant.trader.settings import TraderSettings
@@ -319,137 +311,6 @@ def checked(result: Result, days: Sequence[date]) -> Interval | None:
     """The whole policy's daily net in won over ``days`` (a day without a trade 0), with its day-level
     interval at ``LEVEL`` (module doc "The whole policy"); None from fewer than two days."""
     return day_mean({d: [result.days.get(d, 0.0)] for d in days}, LEVEL)
-
-
-# The stored predictions with their answers, as the cost map counts them: the passive entry's
-# measurement reads its signals so (#432, ``passive.py``).
-
-
-def _on_days(days: Sequence[date]) -> tuple[str, list[Any]]:
-    """A condition on predictions ``p`` of 005930 made on ``days``, as the stats ask it
-    (``predictions._made_on``): a time range for the index, then the days themselves."""
-    marks = ", ".join("?" for _ in days)
-    where = (
-        f"p.symbol = ? AND p.bar_close >= ? AND p.bar_close < ? AND substr(p.bar_close, 1, 10) IN ({marks})"
-    )
-    params: list[Any] = [
-        SYMBOL,
-        datetime.combine(min(days), time(), KST).isoformat(),
-        datetime.combine(max(days) + timedelta(days=1), time(), KST).isoformat(),
-        *(d.isoformat() for d in days),
-    ]
-    return where, params
-
-
-def rises(
-    db: sqlite3.Connection,
-    cell: Cell,
-    role: str,
-    days: Sequence[date],
-    sessions: Callable[[date], Session | None],
-    windows: Sequence[Window],
-    target_version: int,
-    counts: Counter[str],
-) -> Iterator[tuple[Signal, Plan, Mapping[str, Any], str]]:
-    """``cell``'s stored predictions of ``days`` that ``paper.plan`` lets buy at some θ (its rises,
-    the entry rules met), each with its plan, its answer's path and its answer's class; read a row
-    at a time, as the cost map counts them: made, their answer known and no special situation in
-    their window, an algorithm's by models trained on its target. Each row read is counted in
-    ``counts`` (``read``), and each kept out by why: ``off_target``, ``paper.plan``'s reasons. The
-    passive entry's measurement (#432, ``passive.py``) reads its signals so; the re-fit replays the
-    recordings instead (#470, ``replay.day_reads``)."""
-    if not days:
-        return
-    kind = traded_kind(cell.kind)
-    rules = Rules(threshold=0.0)  # every rise: θ is the caller's
-    rows = _direction_rows(db, cell, days) if kind.name == DIRECTION else _kind_rows(db, cell, days)
-    # An algorithm's predictions by models trained on the answers they are scored on, as the
-    # statistics keep them (``stats.on_target``); every one of a baseline's and a consensus's.
-    target = target_of(cell, role, target_version)
-    for row, signal, path, label in rows:
-        counts["read"] += 1
-        if target is not None and row["model_target"] != target:
-            counts[OFF_TARGET] += 1
-            continue
-        planned = plan(signal, rules, sessions(kst_day(signal.bar_close)), signal.displayed_at, windows)
-        if not isinstance(planned, Plan):
-            counts[planned] += 1
-            continue
-        yield signal, planned, path, label
-
-
-Row = tuple[sqlite3.Row, Signal, Mapping[str, Any], str]
-
-
-def _direction_rows(db: sqlite3.Connection, cell: Cell, days: Sequence[date]) -> Iterator[Row]:
-    on, params = _on_days(days)
-    cursor = db.execute(
-        "SELECT p.id, p.bar_close, p.displayed_at, p.status, p.p_up, p.p_flat, p.p_down, o.mid_close,"
-        " o.flat_ticks, b.reason AS blocked, t.class AS label, t.path AS path,"
-        " m.target_version AS model_target"
-        " FROM predictions p JOIN outcomes o ON o.prediction_id = p.id"
-        f" LEFT JOIN blocks b ON b.prediction_id = p.id {TOUCH_JOIN}"
-        " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version"
-        f" WHERE p.algorithm = ? AND {on} AND {SCORED} AND o.special = 0 ORDER BY p.bar_close, p.id",
-        (cell.predictor, *params),
-    )
-    kind = traded_kind(DIRECTION)
-    for r in cursor:
-        anchor = r["mid_close"]
-        signal = Signal(
-            prediction_id=r["id"],
-            kind=DIRECTION,
-            predictor=cell.predictor,
-            symbol=SYMBOL,
-            bar_close=datetime.fromisoformat(r["bar_close"]),
-            displayed_at=datetime.fromisoformat(r["displayed_at"]),
-            status=r["status"],
-            probabilities=(r["p_up"], r["p_flat"], r["p_down"]),
-            rise=kind.index(kind.sides[0]) if kind.sides else 0,
-            anchor=anchor,
-            tick=None if anchor is None else float(tick_size(anchor)),
-            width=r["flat_ticks"],
-            horizon=kind.horizon,
-            blocked=r["blocked"],
-        )
-        yield r, signal, json.loads(r["path"]), r["label"]
-
-
-def _kind_rows(db: sqlite3.Connection, cell: Cell, days: Sequence[date]) -> Iterator[Row]:
-    kind = traded_kind(cell.kind)
-    on, params = _on_days(days)
-    cursor = db.execute(
-        "SELECT p.id, p.bar_close, p.displayed_at, p.status, p.output, p.anchor, p.tick, p.width_ticks,"
-        " a.class AS label, a.path AS path, m.target_version AS model_target"
-        f" FROM kind_predictions p {KIND_ANSWER_JOIN}"
-        " LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version = p.model_version"
-        f" WHERE p.kind = ? AND p.algorithm = ? AND {on} AND {KIND_SCORED} AND a.special = 0"
-        " ORDER BY p.bar_close, p.id",
-        (kind.answer_version, kind.name, cell.predictor, *params),
-    )
-    rise = kind.index(kind.sides[0]) if kind.sides else 0
-    for r in cursor:
-        try:
-            probabilities = kind.probabilities(json.loads(r["output"]))
-        except (ValueError, KeyError, TypeError):
-            log.warning("refit: kind prediction %s has an output it cannot read", r["id"])
-            continue
-        signal = Signal(
-            prediction_id=r["id"],
-            kind=kind.name,
-            predictor=cell.predictor,
-            symbol=SYMBOL,
-            bar_close=datetime.fromisoformat(r["bar_close"]),
-            displayed_at=datetime.fromisoformat(r["displayed_at"]),
-            status=r["status"],
-            probabilities=probabilities,
-            rise=rise,
-            anchor=r["anchor"],
-            tick=None if r["tick"] is None else float(r["tick"]),
-            width=r["width_ticks"],
-            horizon=kind.horizon,
-        )
-        yield r, signal, json.loads(r["path"]), r["label"]
 
 
 def cost_map_days(body: Mapping[str, Any]) -> dict[str, tuple[date, ...]]:
