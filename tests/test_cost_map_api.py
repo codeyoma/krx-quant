@@ -279,7 +279,7 @@ async def test_a_kind_without_an_active_algorithm_has_no_top_until_one_is_made_a
     tmp_path: Path,
 ) -> None:
     """#594: the barrier's alpha ranks first on probation: no top, the baseline as before. Made
-    active, it is the top at the next read: a status change changes the store, as a prediction does."""
+    active, it is the top at the next read."""
     async with cost_map(tmp_path) as (engine, client):
         barrier_board(engine.store)
         standing(engine.store, Status.PROBATION, "alpha")
@@ -292,6 +292,24 @@ async def test_a_kind_without_an_active_algorithm_has_no_top_until_one_is_made_a
     assert row(before, "barrier")["top"] is None
     assert row(before, "barrier")["baseline"]["algorithm"] == row(after, "barrier")["baseline"]["algorithm"]
     assert (row(after, "barrier")["top"]["algorithm"], row(after, "barrier")["top"]["rank"]) == ("alpha", 1)
+
+
+async def test_a_status_set_by_another_process_is_seen_at_the_next_read(tmp_path: Path) -> None:
+    """#594: alpha, the barrier's top, is retired through a store of its own on the engine's database,
+    as ``krx-quant retire`` does: the engine's store does not change, yet the next read has no top."""
+    async with cost_map(tmp_path) as (engine, client):
+        barrier_board(engine.store)
+        activate(engine.store, "alpha")
+        before = await ask(client)
+        version = engine.store.version
+        other = PredictionStore(tmp_path / "engine.db")
+        other.add_status("alpha", at("17:00:00"), Status.ACTIVE, Status.RETIRED, "retired by command")
+        other.close()
+        after = await ask(client)
+
+    assert engine.store.version == version, "the engine's store did not change"
+    assert row(before, "barrier")["top"]["algorithm"] == "alpha"
+    assert row(after, "barrier")["top"] is None
 
 
 async def test_the_daily_kind_s_row_is_in_basis_points_without_a_breakeven(tmp_path: Path) -> None:

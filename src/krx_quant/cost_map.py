@@ -62,8 +62,9 @@ selection.py``), the nightly fit tries every cell named (``trader/refit.py``), a
 can become the champion that trades (``trader/promotion.py``); the mock practice cell is one of them
 too (``trader/practice.py``). None of them reads the status: an algorithm on probation, a clone,
 benched or retired that ranked first was a cell to trade, its lifecycle review (its lift over the
-baselines) not passed. The ``top`` is therefore the first ranked of the algorithms active now, None
-when none is; its ``rank`` stays the leaderboard's.
+baselines) not passed. The ``top`` is therefore the first ranked of the algorithms active when the
+cost map is asked for (``api``: read at each request, a status another process set too), None when
+none is; its ``rank`` stays the leaderboard's.
 """
 
 from __future__ import annotations
