@@ -1,0 +1,5 @@
+usage: krx-quant train [-h] [--day DAY]
+
+options:
+  -h, --help  show this help message and exit
+  --day DAY   the night to train, YYYY-MM-DD (default: latest)

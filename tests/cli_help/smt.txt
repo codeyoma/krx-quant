@@ -1,0 +1,5 @@
+usage: krx-quant smt [-h] [--day DAY]
+
+options:
+  -h, --help  show this help message and exit
+  --day DAY   the day, YYYY-MM-DD (default: today)

@@ -40,7 +40,7 @@ from krx_quant.kis_orders import Servers, trader_broker, trader_live_broker
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
 from krx_quant.redaction import secrets_of
-from krx_quant.trader import LIVE, MOCK, PAPER, live, promotion
+from krx_quant.trader import LIVE, MOCK, PAPER, limits, live, promotion
 from krx_quant.trader import policy as policies
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import ENTRIES_PAUSED, RUNNING, ask
@@ -1074,7 +1074,7 @@ def test_a_live_trader_running_as_paper_re_arms_its_paper_limit(
     monkeypatch.chdir(tmp_path)  # no .env
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("KRX_TRADER_MODE", LIVE)
-    monkeypatch.setattr(cli, "CONTROL_SECONDS", 0.01)
+    monkeypatch.setattr(limits, "CONTROL_SECONDS", 0.01)  # the command's wait for the trader
     store = TraderStore(tmp_path / "state" / DB_NAME)
     try:
         store.add_run(at("09:00:00"), PAPER, {"configured": LIVE})

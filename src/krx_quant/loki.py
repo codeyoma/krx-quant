@@ -37,7 +37,9 @@ sent.
   lines of a process killed outright (SIGKILL, the kernel's out-of-memory kill), never reach Loki.
   Only stdout had them: ``docker compose logs``, until the next deploy.
 - The engine also sends a line of its own every ``HEARTBEAT_SECONDS`` from its event loop
-  (``keep_heartbeat``), to Loki only: the log-absence alert reads it when the engine is quiet.
+  (``keep_heartbeat``), to Loki only: the log-absence alert reads it when the engine is quiet. It
+  says the shipping's counts, and since #547 the server's memory and each process's
+  (``heartbeat.py``).
 - ``status_json`` is ``/v1/status``'s ``loki`` and ``doctor``'s section 8.
 """
 
@@ -54,7 +56,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import deque
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -489,8 +491,9 @@ class LokiHandler(logging.Handler):
         except Exception:
             self.handleError(record)
 
-    def beat(self) -> None:
-        """The heartbeat line, to Loki only (not the root logger: stdout does not have it)."""
+    def beat(self, fields: str = "") -> None:
+        """The heartbeat line, to Loki only (not the root logger: stdout does not have it): the
+        shipping's counts, then ``fields`` (the memory, #547) after a ``; ``."""
         s = self.shipper.status()
         self.handle(
             logging.LogRecord(
@@ -498,8 +501,8 @@ class LokiHandler(logging.Handler):
                 logging.INFO,
                 __file__,
                 0,
-                "heartbeat: sent %d, dropped %d, buffered %d",
-                (s.sent, s.dropped, s.buffered),
+                "heartbeat: sent %d, dropped %d, buffered %d%s",
+                (s.sent, s.dropped, s.buffered, f"; {fields}" if fields else ""),
                 None,
             )
         )
@@ -597,11 +600,25 @@ def status_json() -> dict[str, Any]:
     }
 
 
-async def keep_heartbeat(every: float = HEARTBEAT_SECONDS) -> None:
+async def keep_heartbeat(
+    every: float = HEARTBEAT_SECONDS, fields: Callable[[], Awaitable[str]] | None = None
+) -> None:
     """The engine's heartbeat line every ``every`` seconds, until cancelled. From its event loop:
-    a loop that stops turning stops it, and the log-absence alert fires (docs/operations.md)."""
+    a loop that stops turning stops it, and the log-absence alert fires (docs/operations.md). The
+    line ends with what ``fields`` reads then (the engine's: ``heartbeat.readings``, #547); one that
+    fails is said once, and the line goes without it."""
+    said = False
     while True:
         await asyncio.sleep(every)
         handler = _handler
-        if handler is not None:
-            handler.beat()
+        if handler is None:
+            continue
+        read = ""
+        if fields is not None:
+            try:
+                read = await fields()
+            except Exception:
+                if not said:
+                    log.exception("heartbeat: could not read its fields; it goes without them")
+                said = True
+        handler.beat(read)

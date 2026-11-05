@@ -1,0 +1,9 @@
+usage: krx-quant simulate [-h] {daily,bar-close}
+
+positional arguments:
+  {daily,bar-close}  daily: the daily kinds' algorithms; bar-close: the
+                     direction's and the other kinds' (the latest recorded
+                     days, 10 to 20)
+
+options:
+  -h, --help         show this help message and exit

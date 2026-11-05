@@ -25,7 +25,7 @@ from krx_quant.config import Settings, SettingsError
 from krx_quant.feeds import BOOK
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
-from krx_quant.trader import CAPITAL
+from krx_quant.trader import CAPITAL, limits
 from krx_quant.trader.cells import open_engine_db
 from krx_quant.trader.limits import ask
 from krx_quant.trader.quotes import QuoteFeed
@@ -402,7 +402,7 @@ def test_trade_resume_and_rearm_on_the_server(
     trader reads it when it runs."""
     monkeypatch.chdir(tmp_path)  # no .env
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setattr(cli, "CONTROL_SECONDS", 0.01)
+    monkeypatch.setattr(limits, "CONTROL_SECONDS", 0.01)  # the command's wait for the trader
     path = tmp_path / "state" / TRADER_DB
 
     assert cli.main(["trade", "resume"]) == 1

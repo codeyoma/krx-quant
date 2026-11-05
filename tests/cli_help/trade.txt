@@ -1,0 +1,9 @@
+usage: krx-quant trade [-h] [{resume,rearm}]
+
+positional arguments:
+  {resume,rearm}  instead of trading, ask the running trader to resume after a
+                  pause, or to re-arm its cumulative loss limit (counted again
+                  from then)
+
+options:
+  -h, --help      show this help message and exit

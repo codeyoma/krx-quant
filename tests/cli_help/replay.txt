@@ -1,0 +1,9 @@
+usage: krx-quant replay [-h] [--db DB] day
+
+positional arguments:
+  day         the recorded day, YYYY-MM-DD
+
+options:
+  -h, --help  show this help message and exit
+  --db DB     database to write, replaced if it exists (default:
+              state/replay-<day>.sqlite3)

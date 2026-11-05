@@ -1,0 +1,6 @@
+usage: krx-quant trader-report [-h] [--day DAY]
+
+options:
+  -h, --help  show this help message and exit
+  --day DAY   the trading day, YYYY-MM-DD (default: the latest at or before
+              tonight's evening)

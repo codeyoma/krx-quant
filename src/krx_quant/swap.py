@@ -11,8 +11,8 @@ Telegram line names the models it installed, but not those of the algorithms the
 run because their pre-validation refused the code they have (#544, ``not_run``).
 
 The nightly training runs at ``KRX_TRAIN_AT`` on trading days, here, in its own process (its
-whole output and exit code in Loki, ``process="training"``, #358). The scheduled jobs (#215)
-wait for the night (``NightTraining``).
+whole output and exit code in Loki, ``process="training"``, #358; the engine's own log says how it
+ended in a line, #580). The scheduled jobs (#215) wait for the night (``NightTraining``).
 
 Each night's outcome is kept in the state folder (#355, ``training_nights``). A failure is
 alerted with the exit code and the last step the training started; from ``STREAK_ALERT`` nights
@@ -35,6 +35,7 @@ from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
@@ -51,7 +52,7 @@ from krx_quant.nightly import LIVE, Night, model_key, promotions_key
 from krx_quant.notify import Alerts
 from krx_quant.object_store import ObjectStore, Stored, get_json, put_json
 from krx_quant.prevalidation import left_out
-from krx_quant.process_log import KRX_QUANT, Child, run_logged
+from krx_quant.process_log import KRX_QUANT, Child, duration, run_logged
 from krx_quant.training_nights import Failure, Outcome, TrainingNights, exit_text, last_step
 
 log = logging.getLogger(__name__)
@@ -69,6 +70,10 @@ _TRAINING_ALERT = "training"
 # one is alerted (#355).
 STREAK_ALERT = 2
 TRAIN_COMMAND = (*KRX_QUANT, "train")
+# A failed training's last lines the engine logs (#580): enough for the end of a traceback (the
+# exception and its innermost frames, where it failed) or, after a kill, the last steps' lines (each
+# step's start, result, and time and memory). The whole output is in Loki (``process="training"``).
+TAIL_LINES = 20
 
 
 class NightTraining:
@@ -599,7 +604,11 @@ async def _train(
 ) -> Failure | None:
     """Run the night's training; None if it finished, else why not: the exit code and the last
     step it started (#355), also when it is stopped at ``timeout``. Its whole output and exit
-    code also go to Loki as they come when it is set, labelled ``process="training"`` (#358)."""
+    code also go to Loki as they come when it is set, labelled ``process="training"`` (#358).
+
+    The engine's own log says how it ended in one line (#580), and after a failure the output's
+    last ``TAIL_LINES`` lines in an INFO record of their own (``_tell_tail``)."""
+    began = monotonic()
     ran = await run_logged(  # read as it comes: what it wrote is kept if it is stopped
         (*command, "--day", day.isoformat()),
         timeout,
@@ -607,17 +616,49 @@ async def _train(
         child=Child.training(day),  # its lines' copy in Loki (#358)
     )
     code = None if ran.timed_out else ran.exit_code
-    text = ran.stdout.strip()
-    step = last_step(text)
+    lines = ran.stdout.strip().splitlines()
+    step = last_step(ran.stdout)
     started = f"마지막으로 시작한 단계 {step or '없음'}"
-    if code is None:
-        log.error("nightly training of %s stopped after %s:\n%s", day, timeout, text)
-        return Failure(f"not done in {timeout}, {started}", None, step)
+    after = duration(monotonic() - began)
     if code == 0:
-        log.info("nightly training of %s finished:\n%s", day, text)
+        log.info("nightly training of %s finished after %s (%d lines of output)", day, after, len(lines))
         return None
-    log.error("nightly training of %s failed (exit %s):\n%s", day, code, text)
-    return Failure(f"{exit_text(code)}, {started}", code, step)
+    if code is None:
+        log.error(
+            "nightly training of %s stopped at its time limit (%s); last step started: %s",
+            day,
+            timeout,
+            step or "none",
+        )
+        failure = Failure(f"not done in {timeout}, {started}", None, step)
+    else:
+        log.error(
+            "nightly training of %s failed: %s after %s; last step started: %s",
+            day,
+            exit_text(code),
+            after,
+            step or "none",
+        )
+        failure = Failure(f"{exit_text(code)}, {started}", code, step)
+    _tell_tail(day, lines)
+    return failure
+
+
+def _tell_tail(day: date, lines: Sequence[str]) -> None:
+    """A failed training's last ``TAIL_LINES`` lines in the engine's log, at INFO: the whole output
+    is in Loki already (``process="training"``), and its own WARNING and ERROR lines copied at the
+    engine's ERROR would count again as the engine's (the Grafana rule ``krx-quant-engine-error``
+    reads those, docs/operations.md)."""
+    if not lines:
+        return
+    tail = lines[-TAIL_LINES:]
+    log.info(
+        "nightly training of %s, the last %d of its %d lines:\n%s",
+        day,
+        len(tail),
+        len(lines),
+        "\n".join(tail),
+    )
 
 
 def swap_notice(status: NightStatus, refused: Collection[str] = ()) -> str | None:

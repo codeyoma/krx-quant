@@ -46,7 +46,7 @@ server, or an agent reading an issue, looks at first when something seems wrong.
    statuses from the engine DB, the models from ``state/models``, and who waits for or was refused
    at the gate unknown: only the engine knows.
 
-The command reads the settings leniently (``doctor_settings``): a malformed one, which keeps
+The command reads the settings leniently (``config.lenient_settings``): a malformed one, which keeps
 the engine from starting, is a finding at the top, and the rest comes from the data and state
 directories, the API's address and the secrets to mask, read as they are.
 
@@ -79,7 +79,7 @@ import aiohttp
 from krx_quant import kis, loki
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, load_models
 from krx_quant.archive import partition_batches
-from krx_quant.config import Settings, SettingsError, read_values
+from krx_quant.config import Settings
 from krx_quant.disk_watch import LABELS as DISK_LABELS
 from krx_quant.disk_watch import alerted as disk_alerted
 from krx_quant.feeds.base import KST
@@ -355,62 +355,6 @@ def _shown(value: object) -> str:
     return HIDDEN
 
 
-def doctor_settings(
-    env: Mapping[str, str] | None = None, dotenv_path: Path | None = Path(".env")
-) -> tuple[Settings, str | None]:
-    """The settings ``doctor`` reads, and the configuration error if there is one. A setting
-    that keeps the engine from starting must not keep its summary from printing: then only
-    what the summary reads is taken, as it is (the directories, the API's address, the commit,
-    the secrets to mask), and the error is returned to be shown."""
-    try:
-        return Settings.from_env(env, dotenv_path, require_kis=False), None
-    except SettingsError as e:
-        error = str(e)
-    values = read_values(env, dotenv_path)
-    try:
-        port = int(values.get("KRX_API_PORT", "8080"))
-    except ValueError:
-        port = 8080
-
-    def text(name: str) -> str | None:
-        return values.get(name, "").strip() or None
-
-    settings = Settings(
-        kis_app_key=text("KIS_APP_KEY") or "",
-        kis_app_secret=text("KIS_APP_SECRET") or "",
-        # Every secret ``redaction.secrets_of`` masks (a test keeps the two alike).
-        telegram_bot_token=text("TELEGRAM_BOT_TOKEN"),
-        telegram_chat_id=text("TELEGRAM_CHAT_ID"),
-        aws_access_key_id=text("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=text("AWS_SECRET_ACCESS_KEY"),
-        ecos_api_key=text("KRX_ECOS_API_KEY"),
-        fred_api_key=text("KRX_FRED_API_KEY"),
-        github_token=text("KRX_GITHUB_TOKEN"),
-        toss_client_id=text("TOSS_CLIENT_ID"),
-        toss_client_secret=text("TOSS_CLIENT_SECRET"),
-        krx_openapi_key=text("KRX_OPENAPI_KEY"),
-        object_store=text("KRX_OBJECT_STORE"),
-        s3_endpoint_url=text("KRX_S3_ENDPOINT_URL"),
-        bind_address=text("KRX_BIND_ADDRESS"),
-        loki_url=text("KRX_LOKI_URL"),
-        loki_user=text("KRX_LOKI_USER"),
-        loki_token=text("KRX_LOKI_TOKEN"),
-        trader_kis_app_key=text("KRX_TRADER_KIS_APP_KEY"),
-        trader_kis_app_secret=text("KRX_TRADER_KIS_APP_SECRET"),
-        trader_kis_account=text("KRX_TRADER_KIS_ACCOUNT"),
-        trader_kis_hts_id=text("KRX_TRADER_KIS_HTS_ID"),
-        trader_live_kis_app_key=text("KRX_TRADER_LIVE_KIS_APP_KEY"),
-        trader_live_kis_app_secret=text("KRX_TRADER_LIVE_KIS_APP_SECRET"),
-        trader_live_kis_account=text("KRX_TRADER_LIVE_KIS_ACCOUNT"),
-        data_dir=Path(values.get("KRX_DATA_DIR", "data")),
-        state_dir=Path(values.get("KRX_STATE_DIR", "state")),
-        api_host=values.get("KRX_API_HOST", "127.0.0.1"),
-        api_port=port if 0 < port < 65536 else 8080,
-        commit=text("KRX_COMMIT") or "unknown",
-    )
-    return settings, error
-
-
 async def doctor(
     settings: Settings, now: datetime, api: str | None = None, *, config_error: str | None = None
 ) -> str:
@@ -432,7 +376,7 @@ def report(
 ) -> str:
     """The summary, masked; ``logs`` are the engine's (None: this process cannot read them),
     ``process`` names whose memory ``VmRSS`` is, ``config_error`` is the settings' error
-    (``doctor_settings``)."""
+    (``config.lenient_settings``)."""
     head = (
         f"서버 상태 {now.astimezone(KST):%Y-%m-%d %H:%M:%S} KST "
         "(krx-quant doctor: 읽기만 한다, 시세 값은 싣지 않는다)"

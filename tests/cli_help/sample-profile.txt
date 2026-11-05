@@ -1,0 +1,14 @@
+usage: krx-quant sample-profile [-h] [--day DAY]
+                                [--algorithms ALGORITHMS [ALGORITHMS ...]]
+                                [--limit LIMIT] [--top TOP]
+
+options:
+  -h, --help            show this help message and exit
+  --day DAY             the recorded day, YYYY-MM-DD (default: the latest
+                        finished)
+  --algorithms ALGORITHMS [ALGORITHMS ...]
+                        the algorithms also profiled alone, with their own
+                        features (default: newton turing)
+  --limit LIMIT         minutes for every run together; a run still going
+                        stops there, the rest do not start (default 170)
+  --top TOP             functions listed by own time (default 25)
