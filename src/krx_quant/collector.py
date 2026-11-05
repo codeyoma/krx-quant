@@ -16,7 +16,7 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-from krx_quant import heartbeat, kis, loki
+from krx_quant import heartbeat, kis, loki, route_counts
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, load_models
 from krx_quant.api import create_app
 from krx_quant.archive import NIGHTLY_ARCHIVE, archive
@@ -572,7 +572,7 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
             background.append(
                 asyncio.create_task(fill_names(names, session, settings, lambda: datetime.now().astimezone()))
             )
-            api = await _serve_api(settings, engine, live, alerts, names)
+            api = await _serve_api(settings, engine, live, alerts, names, session_clock)
             quote_stream = await _serve_quotes(settings, quotes, alerts)
             # The past bar closes' touch labels, once the API answers (#168): the 06:00 deploy
             # checks it within 3 minutes, and the fill can take longer.
@@ -629,23 +629,24 @@ async def _serve_api(
     live_status: LiveStatus,
     alerts: Alerts,
     names: Mapping[str, str],
+    clock: SessionClock,
 ) -> web.AppRunner | None:
-    """Start the Engine API; if it cannot listen, alert and go on recording without it."""
+    """Start the Engine API; if it cannot listen, alert and go on recording without it. No line a
+    request: its requests are counted by route, a line a day (#588, ``route_counts``)."""
     if settings.api_port is None:
         return None
-    runner = web.AppRunner(
-        create_app(
-            engine,
-            mode="live",
-            live_status=live_status,
-            min_sample=settings.min_sample,
-            data_dir=settings.data_dir,
-            shelf=Shelf(settings.state_dir),
-            names=names,
-            state_dir=settings.state_dir,
-        ),
-        access_log=None,
+    app = create_app(
+        engine,
+        mode="live",
+        live_status=live_status,
+        min_sample=settings.min_sample,
+        data_dir=settings.data_dir,
+        shelf=Shelf(settings.state_dir),
+        names=names,
+        state_dir=settings.state_dir,
     )
+    route_counts.install(app, clock)
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     try:
         await web.TCPSite(runner, settings.api_host, settings.api_port).start()
