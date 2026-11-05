@@ -49,6 +49,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -58,18 +60,6 @@ from typing import Any
 import aiohttp
 
 from krx_quant.feeds.base import KST, Row
-from krx_quant.krx_etf_probe import (
-    BLOCK,
-    DAY_FIELD,
-    DAY_PARAM,
-    HINTS,
-    KEY_HEADER,
-    NAV,
-    PATH,
-    SHARES,
-    TOTAL,
-    number,
-)
 from krx_quant.loki import TEMPLATE_ONLY
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.net_assets import KIS, KRX, UNIT, demand_day, keep_rows, read_net_assets
@@ -77,6 +67,23 @@ from krx_quant.probe_fields import day_of
 from krx_quant.products import Product
 
 log = logging.getLogger(__name__)
+
+# The service's address and fields (``probe-krx-etf`` asks it too).
+SERVICE = "etf_bydd_trd"  # ETF 일별매매정보
+PATH = f"/svc/apis/etp/{SERVICE}.json"
+KEY_HEADER = "AUTH_KEY"
+DAY_PARAM = "basDd"
+BLOCK = "OutBlock_1"
+DAY_FIELD = "BAS_DD"
+NAV, TOTAL, SHARES = "NAV", "INVSTASST_NETASST_TOTAMT", "LIST_SHRS"
+# What KRX's FAQ says each refusal means.
+HINTS = {
+    401: "KRX FAQ: 인증키만 받고 이 서비스를 이용 신청·승인받지 않았거나, 갱신 전 인증키, 오타·공백",
+    403: "KRX FAQ: 주소·인증키의 오타, 샘플 경로(/svc/sample/apis), http",
+    429: "KRX FAQ: 인증키의 하루 한도 10,000번을 넘었다, 자정에 초기화",
+}
+# A number written with thousands commas, which ``clean`` drops.
+GROUPED_NUMBER = re.compile(r"[+-]?\d{1,3}(,\d{3})+(\.\d+)?")
 
 CODE_FIELD = "ISU_CD"  # the product's code as it is (probe-krx-etf-305)
 PUBLISHED_AT = time(8, 0)  # a day's rows are out from then on the next business day (KRX FAQ)
@@ -143,6 +150,28 @@ def latest_published(calendar: MarketCalendar, now: datetime) -> date:
     while not published(calendar, day, now):
         day = calendar.previous_trading_day(day)
     return day
+
+
+def clean(value: Any) -> str:
+    """A KRX value as ``probe_fields`` reads it: ``-`` (none) as empty, a number's thousands
+    commas dropped."""
+    text = "" if value is None else str(value).strip()
+    if text == "-":
+        return ""
+    return text.replace(",", "") if GROUPED_NUMBER.fullmatch(text) else text
+
+
+def number(value: Any) -> float | None:
+    """A KRX value as a number; None when there is none (empty, ``-``), it is 0 (no figure, as
+    KIS's 0, #295) or it is not a number."""
+    text = clean(value)
+    if not text:
+        return None
+    try:
+        found = float(text)
+    except ValueError:
+        return None
+    return found if found != 0 and math.isfinite(found) else None
 
 
 def rows_of(

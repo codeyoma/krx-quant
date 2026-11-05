@@ -45,8 +45,6 @@ is valid. Nothing more is asked after ``BUDGET``.
 from __future__ import annotations
 
 import json
-import math
-import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -60,19 +58,24 @@ from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError, RestClient, rest_session
-from krx_quant.market_calendar import MarketCalendar, calendar_store
-from krx_quant.nav_probe import (
-    DAILY,
-    DAILY_DATE,
-    PRICE,
-    UNITS,
-    Query,
-    grouped,
-    latest_trading_day,
-    legend,
-    one_object,
-    row_list,
+from krx_quant.krx_net_assets import (
+    BLOCK,
+    DAY_FIELD,
+    DAY_PARAM,
+    GROUPED_NUMBER,
+    HINTS,
+    KEY_HEADER,
+    NAV,
+    PATH,
+    SERVICE,
+    SHARES,
+    TOTAL,
+    clean,
+    number,
 )
+from krx_quant.market_calendar import MarketCalendar, calendar_store
+from krx_quant.nav_probe import UNITS, grouped, latest_trading_day, legend
+from krx_quant.net_assets import DAILY, DAILY_DATE, PRICE, Query, one_object, row_list
 from krx_quant.probe_calls import CALL_ERRORS, Calls
 from krx_quant.probe_fields import day_of, describe, flags
 from krx_quant.products import PRODUCTS, Product
@@ -81,10 +84,6 @@ from krx_quant.supply_probe import REQUEST_TIMEOUT, kis_error
 
 Out = Callable[[str], None]
 
-SERVICE = "etf_bydd_trd"  # ETF 일별매매정보
-PATH = f"/svc/apis/etp/{SERVICE}.json"
-KEY_HEADER = "AUTH_KEY"
-DAY_PARAM = "basDd"
 PACE = 1.0  # seconds between KRX calls: KRX sets no per-second limit (FAQ); asked gently anyway
 KIS_PACE = 0.5  # as probe-nav's
 LAST_DAYS = 5  # the last trading days asked one after another: day-to-day changes, and timing
@@ -116,44 +115,13 @@ DOCUMENTED = (
     "CMPPREVDD_IDX",
     "FLUC_RT_IDX",
 )
-BLOCK = "OutBlock_1"
-DAY_FIELD = "BAS_DD"
-NAV, TOTAL, SHARES, MKTCAP, CLOSE = "NAV", "INVSTASST_NETASST_TOTAMT", "LIST_SHRS", "MKTCAP", "TDD_CLSPRC"
+MKTCAP, CLOSE = "MKTCAP", "TDD_CLSPRC"
 WANTED = (NAV, TOTAL, SHARES, MKTCAP, CLOSE)
-# What KRX's FAQ says each refusal means.
-HINTS = {
-    401: "KRX FAQ: 인증키만 받고 이 서비스를 이용 신청·승인받지 않았거나, 갱신 전 인증키, 오타·공백",
-    403: "KRX FAQ: 주소·인증키의 오타, 샘플 경로(/svc/sample/apis), http",
-    429: "KRX FAQ: 인증키의 하루 한도 10,000번을 넘었다, 자정에 초기화",
-}
-_GROUPED_NUMBER = re.compile(r"[+-]?\d{1,3}(,\d{3})+(\.\d+)?")
 _SHORT = 60  # an error body's text values shown up to this length
 
 
 def _ymd(day: date) -> str:
     return day.strftime("%Y%m%d")
-
-
-def _clean(value: Any) -> str:
-    """A KRX value as ``probe_fields`` reads it: ``-`` (none) as empty, a number's thousands
-    commas dropped."""
-    text = "" if value is None else str(value).strip()
-    if text == "-":
-        return ""
-    return text.replace(",", "") if _GROUPED_NUMBER.fullmatch(text) else text
-
-
-def number(value: Any) -> float | None:
-    """A KRX value as a number; None when there is none (empty, ``-``), it is 0 (no figure, as
-    KIS's 0, #295) or it is not a number."""
-    text = _clean(value)
-    if not text:
-        return None
-    try:
-        found = float(text)
-    except ValueError:
-        return None
-    return found if found != 0 and math.isfinite(found) else None
 
 
 def code_form(value: Any, codes: frozenset[str]) -> tuple[str, str] | None:
@@ -446,9 +414,9 @@ def field_lines(answers: Sequence[Answer]) -> list[str]:
         + f" · 페이지에 없는 필드 {len(extra)}"
         + (f"({', '.join(extra)})" if extra else "")
     )
-    lines.append(f"  모양: {describe(flags([{k: _clean(v) for k, v in row.items()} for row in rows]))}")
+    lines.append(f"  모양: {describe(flags([{k: clean(v) for k, v in row.items()} for row in rows]))}")
     commas = Counter(
-        n for row in rows for n, v in row.items() if _GROUPED_NUMBER.fullmatch(str(v or "").strip())
+        n for row in rows for n, v in row.items() if GROUPED_NUMBER.fullmatch(str(v or "").strip())
     )
     dashes = Counter(n for row in rows for n, v in row.items() if str(v or "").strip() == "-")
     lines.append(f"  천 단위 쉼표가 있는 필드(행 수): {_counts(commas)}")

@@ -24,7 +24,8 @@ import pytest
 from krx_quant import cli, nav_probe
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
-from krx_quant.nav_probe import DAILY, MAX_FAILED_IN_A_ROW, MINUTES, PRICE, TREND, probe_nav
+from krx_quant.nav_probe import MAX_FAILED_IN_A_ROW, MINUTES, TREND, probe_nav
+from krx_quant.net_assets import DAILY, PRICE
 from krx_quant.products import PRODUCTS
 from tests.collector_doubles import settings_for
 from tests.kis_rest import requests_for
