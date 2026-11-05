@@ -168,10 +168,18 @@ scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "scheduled job
 scripts/loki-query.sh '{service="krx-quant", process="command"} |= "command=doctor "' --since 7d --forward
 ```
 
-**The 06:00 deploy and its Docker cleanup** (#568): the deploy script runs on the host and its journal does not reach Loki; its Telegram notice does, as the lines of the `notify` command. The disk line is `디스크 여유 <before> → <after> / <size> · Docker 이미지 <before> → <after>, 빌드 캐시 <before> → <after> · Docker <version> <storage driver>`, followed on a day the whole build cache went by `빌드 캐시가 하루 정리 뒤에도 3GB를 넘어(…) 모두 지웠습니다. …`, and on a day a cleanup step failed by `Docker 정리 실패: <what>(<Docker's last error line>). …`. Docker's image size counts the build cache's layers too (Docker before 29.6 with the containerd image store), so read freed space from the disk line's free space. What to expect is in operations.md, section 4.
+**The 06:00 deploy and its Docker cleanup** (#568): the deploy script runs on the host and its journal does not reach Loki; its report does, as the lines of the `notify` command: `notice, logged only: 자동 업데이트: …` for a clean update (`notify --log-only`, #614: Telegram hears of it from the readiness line), `alert: 자동 업데이트: …` and `telegram sent: …` when a cleanup step failed. The disk line is `디스크 여유 <before> → <after> / <size> · Docker 이미지 <before> → <after>, 빌드 캐시 <before> → <after> · Docker <version> <storage driver>`, followed on a day the whole build cache went by `빌드 캐시가 하루 정리 뒤에도 3GB를 넘어(…) 모두 지웠습니다. …`, and on a day a cleanup step failed by `Docker 정리 실패: <what>(<Docker's last error line>). …`. Docker's image size counts the build cache's layers too (Docker before 29.6 with the containerd image store), so read freed space from the disk line's free space. What to expect is in operations.md, section 4.
 
 ```bash
 scripts/loki-query.sh '{service="krx-quant", process="command"} |= "command=notify " |~ "디스크 여유|빌드 캐시|Docker 정리"' --since 7d --forward
+```
+
+**The routine notices, in the log since #614** (operations.md 6장 "준비 줄과 바로 가는 알림"): the 08:40 readiness line, and the lines it stands for, which no longer go to Telegram.
+
+```bash
+scripts/loki-query.sh '{service="krx-quant", process="engine"} |~ "telegram sent: \\[알림\\] 준비 |the readiness line of"' --since 7d --forward
+scripts/loki-query.sh '{service="krx-quant", process="engine"} |~ "scheduled: |the morning swap: "' --since 2d --forward
+scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "out of the session: not alerted"' --since 7d
 ```
 
 **Is the server sending?**

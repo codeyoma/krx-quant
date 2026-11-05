@@ -37,11 +37,16 @@ is masked (``redaction.py``) and posted on each issue, which then gets ``ready-f
 place of ``ready-for-human`` and ``needs-triage``; a job with ``Job.label_if`` (#402: the trader's
 nightly report; #570: the recording's quality) changes the labels only on the runs it says call
 an agent. Without ``KRX_GITHUB_TOKEN``, or when
-GitHub fails, the result waits in the state and is posted at the next night or start. Telegram
-gets a line per run, with the comments' addresses. The line and the comment's first line say what
-came of it (``_what``, #440): 성공 (a pre-validation's 통과), 거부, 실패 (a pre-validation's 예외), 시간
-초과 or 신호로 죽음. A refusal's exit code is 1, as an error's is: it is told apart by the report the
-run wrote.
+GitHub fails, the result waits in the state and is posted at the next night or start. The log
+gets a line per run, with the comments' addresses; the trading morning's readiness line counts the
+runs since the last one and names the failed ones (#614, ``readiness.py``). The line and the
+comment's first line say what came of it (``_what``, #440): 성공 (a pre-validation's 통과), 거부, 실패
+(a pre-validation's 예외), 시간 초과 or 신호로 죽음. A refusal's exit code is 1, as an error's is: it is
+told apart by the report the run wrote.
+
+> **바뀜** (2026-11-06, #PRNUM): each run's line, a deferral's, a run cut by a restart's and a late
+> post's went to Telegram → they are logged (``told``); the readiness line counts them. 이유: a line a
+> job was most of a night's Telegram, and each result is on its issue (#614).
 
 The package (#500): ``core`` holds what a job is, the facts its condition asks (``Facts``, read by
 ``read_facts``), the state file and the scheduler. The jobs are in a module by family: ``probes``
@@ -68,7 +73,6 @@ from krx_quant.config import Settings
 from krx_quant.engine import PredictionEngine
 from krx_quant.github import GitHub
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.notify import Alerts
 from krx_quant.redaction import secrets_of
 from krx_quant.scheduled.core import (
     FAILED,
@@ -224,11 +228,18 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 
+async def told(line: str) -> bool:
+    """A scheduled job's line (a run's outcome, a deferral, a run cut by a restart, a result posted
+    late): logged, not sent (#614). The trading morning's readiness line counts the runs and names the
+    failed ones, and each result is on its issue."""
+    log.info("scheduled: %s", line)
+    return True
+
+
 async def keep_jobs(
     settings: Settings,
     session: aiohttp.ClientSession,
     calendar: MarketCalendar,
-    alerts: Alerts,
     clock: SessionClock,
     training: NightTraining,
     engine: PredictionEngine,
@@ -246,7 +257,7 @@ async def keep_jobs(
         calendar,
         JobState.load(settings.state_dir / STATE_FILE),
         github,
-        alerts.deliver,
+        told,
         clock,
         commit=settings.commit,
         secrets=secrets_of(settings),

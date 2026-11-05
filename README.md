@@ -274,7 +274,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `rollback <알고리즘>` | 직전 모델로 되돌린다. 도달 정답에서는 그 정답으로 학습한 모델로만(#193) | 없어도 된다 |
 | `retire <알고리즘>`, `unretire <알고리즘>` | 은퇴시킨다, 은퇴를 풀어 수습으로 되돌린다 | 없어도 된다 |
 | `test-alert` | 텔레그램에 `[테스트]` 메시지를 보낸다 | 필요(쓰지는 않는다) |
-| `notify <글>` | 텔레그램에 `[알림] <글>`을 보낸다. `deploy/auto-update.sh`가 쓴다 | 없어도 된다 |
+| `notify <글> [--log-only]` | 텔레그램에 `[알림] <글>`을 보낸다. `--log-only`면 보내지 않고 INFO 줄(`notice, logged only: <글>`)로 로그에만 남긴다(#614: 깨끗한 배포의 보고. 텔레그램에는 08:40 준비 줄이 커밋을 적는다). `deploy/auto-update.sh`가 쓴다 | 없어도 된다 |
 | `fake-kis [--port 18080] [--host 127.0.0.1] [--trades]` | 가짜 KIS 서버(아래 "키 없이 확인하기") | 없어도 된다 |
 | `demo-engine [--port 8090] [--host 127.0.0.1] [--db state/demo.sqlite3] [--pace 초]` | 데모 엔진 API(아래 "화면을 만들 때"). `--pace`는 10:00부터 이어 재생하며 스트림을 보낸다 | 없어도 된다 |
 

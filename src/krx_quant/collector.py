@@ -79,6 +79,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import admits, refusals
 from krx_quant.products import products_of
 from krx_quant.ratelimit import RateLimiter
+from krx_quant.readiness import Readiness, keep_ready
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.rescore import EngineLock, keep_touches_filled
 from krx_quant.revisions import RevisionGate
@@ -123,6 +124,14 @@ WS_CLOSE_SECONDS = 5.0
 # the [복구] and is counted in a WARNING instead. KIS closed the connection (code 1006) 17 times
 # from 2026-10-27 to 11-03, and data came back 1.7-3.0 s later each time. The gap, ``connected``
 # and the health change at the drop, as before.
+#
+# Out of the session (#614: a trading day before its open or after its close, a holiday) the wait
+# counts from when the drop is noticed, a silent connection's too (#308): the trader buys and sells
+# only in the session, and the collector reconnects by itself, so a drop back within the wait there
+# touches no trade and is logged alone (``KIS WebSocket back …, out of the session: not alerted``).
+# In the session a silent one's wait counts from its last frame, as before: its 60 s without quotes
+# held the trader, so it is alerted at once. On 2026-11-05 the connection went silent at 15:35 and was
+# back in about 3 s after the collector closed it at 15:36, after the close: a [장애] and a [복구].
 WS_ALERT_AFTER_SECONDS = 30.0
 
 # How often buffered partitions whose time limit has passed are flushed.
@@ -396,7 +405,17 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
             for feed, key in plan[:cap]:
                 health.watch((feed.tr_id, key))
             stream = _Stream(
-                session, settings, plan[:cap], recorder, now, stop, poller, health, alerts, on_event
+                session,
+                settings,
+                plan[:cap],
+                recorder,
+                now,
+                stop,
+                poller,
+                health,
+                alerts,
+                on_event,
+                calendar.calendar,
             )
             # The closing flow's days (#305): after the history task's runs and after KRX's net
             # assets come in, one computation at a time (they write the same file).
@@ -486,11 +505,21 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                 if object_store is not None and settings.train_at is not None
                 else None
             )
+            # The trading morning's routine notices as one line at 08:40 (#614): the swap's outcome,
+            # the trader's pick and limits, the night's jobs.
+            readiness = Readiness(
+                settings.state_dir,
+                settings.state_dir / TRADER_DB,
+                settings.commit,
+                partial(alerts.deliver, level=logging.INFO),
+                swaps=object_store is not None,
+            )
             background.append(
                 asyncio.create_task(
-                    keep_models(object_store, shelf, engine, calendar.calendar, alerts.deliver, now, watch)
+                    keep_models(object_store, shelf, engine, calendar.calendar, readiness.swapped, now, watch)
                 )
             )
+            background.append(asyncio.create_task(keep_ready(readiness, calendar.calendar, session_clock)))
             if object_store is not None and settings.train_at is not None:
                 trained_on = object_store
 
@@ -538,9 +567,7 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                 # catches up is due before the jobs look.
                 background.append(
                     asyncio.create_task(
-                        keep_jobs(
-                            settings, session, calendar.calendar, alerts, session_clock, training, engine
-                        )
+                        keep_jobs(settings, session, calendar.calendar, session_clock, training, engine)
                     )
                 )
             if settings.calendar_every is not None:
@@ -958,12 +985,14 @@ def silence(seconds: float) -> str:
 
 @dataclass(frozen=True)
 class _Drop:
-    """A KIS WebSocket drop not alerted yet (#488): when it began on the loop's clock, why, and the
-    task that alerts it once it is ``WS_ALERT_AFTER_SECONDS`` old."""
+    """A KIS WebSocket drop not alerted yet (#488): when it began on the loop's clock, why, the task
+    that alerts it once it is ``WS_ALERT_AFTER_SECONDS`` old, and whether it is a silent one out of
+    the session, whose wait began when it was noticed (#614)."""
 
     began: float
     detail: str
     alert: asyncio.Task[None]
+    out: bool = False
 
 
 class _Stream:
@@ -981,9 +1010,12 @@ class _Stream:
         health: FeedHealth,
         alerts: Alerts,
         on_event: Callable[[str, dict[str, Any]], None],
+        calendar: MarketCalendar | None = None,
     ) -> None:
         self._session = session
         self._settings = settings
+        # Whose sessions tell a drop in the session from one out of it (#614); None: always in it.
+        self._calendar = calendar
         # Registered on every (re)connect; keys refused for the session limit leave the list.
         self._subscriptions = list(subscriptions)
         self._recorder = recorder
@@ -1101,8 +1133,9 @@ class _Stream:
         """Mark the subscriptions as in a disconnect gap at once, and alert once the drop is
         ``WS_ALERT_AFTER_SECONDS`` old with the connection not back (#488). The alert goes at any
         hour, in or out of market hours. A ``silent`` connection's drop began at its last sign of
-        life (#308), ``ws_silence_seconds`` ago: its gap starts there, and with the default 60 s
-        its alert goes at once."""
+        life (#308), ``ws_silence_seconds`` ago: its gap starts there, and in the session, with the
+        default 60 s, its alert goes at once. Out of the session its alert waits as any drop's, from
+        now (#614)."""
         self._acknowledged = False
         if self._recovery is not None:
             self._recovery.cancel()  # it did not stay up long enough to count as recovered
@@ -1112,13 +1145,22 @@ class _Stream:
         if self._drop is not None or self._alerts.is_active(_WS_ALERT):
             return  # the same outage: a reconnect failed, or it dropped again before recovering
         loop = asyncio.get_running_loop()
-        began = self._heard_at if silent else loop.time()
+        out = silent and not self._in_session()
+        began = self._heard_at if silent and not out else loop.time()
         text = f"KIS WebSocket 연결이 끊겼습니다 ({detail}). 재연결을 시도합니다."
         left = began + WS_ALERT_AFTER_SECONDS - loop.time()
         if left <= 0:
             self._alerts.raise_(_WS_ALERT, text)
         else:
-            self._drop = _Drop(began, detail, asyncio.create_task(self._alert_drop(left, text)))
+            self._drop = _Drop(began, detail, asyncio.create_task(self._alert_drop(left, text)), out)
+
+    def _in_session(self) -> bool:
+        """Whether it is a trading day's session now, from its open to its close (#614)."""
+        if self._calendar is None:
+            return True
+        now = self._now()
+        session = self._calendar.session(kst_day(now))
+        return session is not None and session.open <= now < session.close
 
     async def _alert_drop(self, seconds: float, text: str) -> None:
         await asyncio.sleep(seconds)
@@ -1130,6 +1172,13 @@ class _Stream:
         [복구], a WARNING with the day's count of such drops instead."""
         drop.alert.cancel()
         self._drop = None
+        if drop.out:  # a silent one out of the session (#614): not one of #488's short drops
+            log.warning(
+                "KIS WebSocket back %.1fs after it dropped (%s), out of the session: not alerted (#614)",
+                asyncio.get_running_loop().time() - drop.began,
+                drop.detail,
+            )
+            return
         day = kst_day(self._now())
         if day != self._short_drops_day:
             self._short_drops, self._short_drops_day = 0, day
