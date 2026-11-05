@@ -101,7 +101,7 @@ from krx_quant.entry_delay import Quotes, day_quotes
 from krx_quant.feeds import BOOK, TRADE
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.footprint import Meter, give_back
-from krx_quant.gaps_probe import Unread, read_gaps
+from krx_quant.health import Unread, read_gaps
 from krx_quant.kinds import DIRECTION
 from krx_quant.macro import read_partition
 from krx_quant.market_calendar import Session

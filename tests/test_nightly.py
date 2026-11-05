@@ -40,11 +40,12 @@ from krx_quant.kinds import DIRECTION_KIND, Kind, table_baselines
 from krx_quant.macro import MACRO, REGIME_SCHEMA
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
-from krx_quant.nightly import STARTED_STEP, VALIDATION_DAYS, train_night
+from krx_quant.nightly import STARTED_STEP, VALIDATION_DAYS, Night, train_night
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D
 from krx_quant.predictions import PredictionStore
+from krx_quant.prevalidation import left_out
 from krx_quant.pricing import Direction
 from krx_quant.ranges import CLASSES as RANGE_CLASSES
 from krx_quant.ranges import CLIMATE as RANGE_CLIMATE
@@ -56,6 +57,7 @@ from krx_quant.training import TrainingDay, training_day
 from tests.algorithm_doubles import FrequencyAlgorithm, PlacedAlgorithm
 from tests.api_schema import check
 from tests.nightly_doubles import DAYS, FEE, FINISHED, NIGHT, archive_bars, archive_events, read
+from tests.prevalidation_doubles import refuse
 from tests.replay_doubles import busy_morning
 from tests.replay_events import api, at, book, every, get_json, index_tick, trade
 
@@ -422,6 +424,47 @@ def test_a_night_cut_short_resumes_after_the_algorithms_it_finished(store_root: 
         "a finished night"
     )
     assert len(learner.fitted_on) == 1
+
+
+def test_a_refused_algorithm_is_neither_trained_nor_promoted_until_its_code_changes(
+    store_root: Path, tmp_path: Path
+) -> None:
+    # #544: its latest pre-validation refused the code it has, and the engine does not run it.
+    learner, refused = FrequencyAlgorithm("learner", "velocity"), FrequencyAlgorithm("refused", "volatility")
+    state = tmp_path / "state"
+    refuse(state, refused, target_version=1)
+    store = LocalObjectStore(store_root)
+
+    def train(day: date) -> Night:
+        return train_night(
+            store,
+            tmp_path / "cache",
+            symbols=("005930",),
+            fee_rate=FEE,
+            algorithms=[learner, refused],
+            now=lambda: datetime.combine(day, time(21, 40), KST),
+            day=day,
+            kinds=(DIRECTION_KIND,),
+            left_out=left_out(state, {}),
+        )
+
+    first = train(DAYS[-2])
+
+    assert [r["algorithm"] for r in first.reports] == ["learner"] and refused.fitted_on == []
+    assert list(first.promoted) == ["learner"], "never promoted, so never swapped in"
+    assert first.refused == {"refused": "stats: weakest lift -0.0100"}
+    assert read(store_root, f"promotions/{DAYS[-2]}.json")["refused"] == first.refused
+    assert not (store_root / f"reports/{DAYS[-2]}/refused.json").exists()
+    summary = first.summary().splitlines()
+    assert summary[-1] == "사전 검증 거부로 학습하지 않음: refused"
+    assert not any(line.startswith("- refused") for line in summary)
+    refuse(state, refused, target_version=1, code="0123456789abcdef")  # its code changed since
+
+    second = train(NIGHT)
+
+    assert [r["algorithm"] for r in second.reports] == ["learner", "refused"] and len(refused.fitted_on) == 1
+    assert second.refused == {} and "refused" not in read(store_root, f"promotions/{NIGHT}.json")
+    assert "사전 검증 거부" not in second.summary()
 
 
 # Every registered algorithm trained on eight days: about 10 s on a laptop, near the 30 s default
