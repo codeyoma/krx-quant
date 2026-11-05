@@ -5,8 +5,8 @@ BLAS and OpenMP threads (read from the ``Dockerfile``), and compares what it mea
 reference. Run by its path, never as ``tests.bar_close_bench``: the package's ``__init__`` sets
 NumPy's BLAS threads for the tests (#574), and this measures the engine as the image runs it.
 
-  python tests/bar_close_bench.py fit <models>              the models, fitted into <models>
-  python tests/bar_close_bench.py replay <models> [--busy N]  one morning; one JSON line
+  python tests/bar_close_bench.py fit <state>                the models, fitted into <state>/models
+  python tests/bar_close_bench.py replay <state> [--busy N]  one morning with them; one JSON line
 
 The morning is #538's reproduction, as #589 timed it: 3 symbols at 40 book updates and 20 trades a
 second each, the KOSPI and the KOSPI 200 futures once a second, from 09:00 to 10:31; every bar-close
@@ -123,9 +123,10 @@ def morning(day: date, rate: float, end: time) -> Iterator[Event]:
     return heapq.merge(*streams, leaders(), key=lambda event: event[1]["received_at"])
 
 
-def fit(models: Path) -> dict[str, Any]:
-    """Every bar-close and kind algorithm's model fitted on the made-up training day, kept in
-    ``models`` as the training keeps them; the samples each learned from, by name."""
+def fit(state: Path) -> dict[str, Any]:
+    """Every bar-close and kind algorithm's model fitted on the made-up training day, kept under
+    ``state`` as the training keeps them (``models/<name>.json``); the samples each learned from, by
+    name."""
     every: list[Algorithm | KindAlgorithm] = [*ALGORITHMS, *KIND_ALGORITHMS]
     names = sorted({f for a in every for f in a.features})
     made, answers, left_out = recorded_day(
@@ -146,7 +147,7 @@ def fit(models: Path) -> dict[str, Any]:
     for algorithm in ALGORITHMS:
         try:
             training = day.of(algorithm.features)
-            save_model(models, algorithm.name, algorithm.fit(training))
+            save_model(state, algorithm.name, algorithm.fit(training))
             learned[algorithm.name] = len(training)
         except NothingToLearn as e:
             learned[algorithm.name] = f"default: {e}"
@@ -155,7 +156,7 @@ def fit(models: Path) -> dict[str, Any]:
         assert kind is not None
         try:
             answered = day.of_kind(kind, kind_algorithm.features)
-            save_model(models, kind_algorithm.name, kind_algorithm.fit(answered))
+            save_model(state, kind_algorithm.name, kind_algorithm.fit(answered))
             learned[kind_algorithm.name] = len(answered)
         except NothingToLearn as e:
             learned[kind_algorithm.name] = f"default: {e}"
@@ -303,7 +304,7 @@ def cpu_model() -> str:
     return platform.processor() or platform.machine()
 
 
-async def replay_morning(models: Path) -> dict[str, Any]:
+async def replay_morning(state: Path) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
     loop.set_default_executor(ThreadPoolExecutor(WORKERS))
     sys.setswitchinterval(GIL_SWITCH_SECONDS)
@@ -314,6 +315,8 @@ async def replay_morning(models: Path) -> dict[str, Any]:
     for algorithm in every:
         store.add_status(algorithm.name, registered, None, Status.ACTIVE, "bench")
     store.mark_target(TARGET_VERSION, registered)
+    loaded = load_models(state, every)
+    fitted = sorted(a.name for a in every if loaded[a.name].version != a.default_model().version)
     clock = FakeClock(datetime.combine(DAY, time(), KST))
     measured_from = datetime.combine(DAY, MEASURED_FROM, KST)
     heart = Heartbeat()
@@ -368,7 +371,7 @@ async def replay_morning(models: Path) -> dict[str, Any]:
         algorithms=ALGORITHMS,
         kind_algorithms=KIND_ALGORITHMS,
         kinds=KINDS,
-        models=load_models(models, every),
+        models=loaded,
         target_version=TARGET_VERSION,
         watch_loop=True,
     )
@@ -387,6 +390,7 @@ async def replay_morning(models: Path) -> dict[str, Any]:
     names = sorted({name for c in closes for name in c["steps"]})
     on_loop = [sum(c["steps"].values()) for c in closes]
     return {
+        "fitted_models": fitted,
         "events": sum(events.values()),
         "replay_s": round(replay_s, 1),
         "bar_closes": len(closes),
@@ -411,11 +415,11 @@ async def replay_morning(models: Path) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("what", choices=("fit", "replay"))
-    parser.add_argument("models", type=Path)
+    parser.add_argument("state", type=Path, help="the folder of the models (models/<name>.json)")
     parser.add_argument("--busy", type=int, default=0, help="processes spinning beside it")
     args = parser.parse_args()
     if args.what == "fit":
-        print(json.dumps({"fitted": fit(args.models)}), flush=True)
+        print(json.dumps({"fitted": fit(args.state)}), flush=True)
         return
     cpus = sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
     busy = [
@@ -423,7 +427,7 @@ def main() -> None:
     ]  # on this process's CPUs: a child keeps its parent's
     try:
         calibration_s = calibration()
-        figures = asyncio.run(replay_morning(args.models))
+        figures = asyncio.run(replay_morning(args.state))
     finally:
         for process in busy:
             process.kill()

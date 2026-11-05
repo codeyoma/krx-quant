@@ -299,15 +299,16 @@ def test_a_busy_morning_s_bar_closes_on_two_cpus_stay_near_the_reference(tmp_pat
     reference's limits, in the first morning or, if not, in a second; each figure written where
     ``BAR_CLOSE_FIGURES`` says, for the reference's refresh."""
     reference = json.loads(REFERENCE.read_text())
-    fitted = bench("fit", str(tmp_path / "models"))["fitted"]
-    assert all(isinstance(samples, int) for samples in fitted.values()), fitted
+    fitted = bench("fit", str(tmp_path))["fitted"]
+    assert all(isinstance(samples, int) for samples in fitted.values()), f"each fitted: {fitted}"
     mornings: list[dict[str, Any]] = []
     for _ in range(ATTEMPTS):
-        figures = bench("replay", str(tmp_path / "models" / "models"), "--busy", str(BUSY), limited=True)
+        figures = bench("replay", str(tmp_path), "--busy", str(BUSY), limited=True)
         mornings.append(figures)
         if (written := os.environ.get("BAR_CLOSE_FIGURES")) is not None:
             Path(written).parent.mkdir(parents=True, exist_ok=True)
             Path(written).write_text(json.dumps(mornings, indent=1) + "\n")
+        assert figures["fitted_models"] == sorted(fitted), "the engine predicts with the fitted models"
         assert figures["threads"] == {k: image_threads().get(k) for k in figures["threads"]}
         assert len(figures["cpus"]) == CPUS and figures["memory_max_mb"] == 2048, figures
         assert figures["bar_closes"] == 32, "every bar close from 10:00 to 10:31 measured"
@@ -316,3 +317,14 @@ def test_a_busy_morning_s_bar_closes_on_two_cpus_stay_near_the_reference(tmp_pat
             return
     shown = [{k: m[k] for k in ("cpu_model", "longest_gap_s", "on_loop_s", "bar_close_s")} for m in mornings]
     pytest.fail(f"over the reference's limits in {ATTEMPTS} mornings: {over}\n{json.dumps(shown)}")
+
+
+def test_the_ci_workflow_runs_the_bench_on_a_runner_of_its_own() -> None:
+    """The ci workflow's ``bar-close`` job runs the bench's test with ``BAR_CLOSE_BENCH`` (the shards
+    skip it) and keeps its figures; the check a merge waits for needs it (``tests/test_ci_shard.py``)."""
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    job = workflow.split("\n  bar-close:\n", 1)[1].split("\n  test:\n", 1)[0]
+    name = test_a_busy_morning_s_bar_closes_on_two_cpus_stay_near_the_reference.__name__
+    assert f"uv run pytest -q tests/test_bar_close_loop.py::{name}" in job
+    assert 'BAR_CLOSE_BENCH: "1"' in job and "BAR_CLOSE_FIGURES: results/bar-close.json" in job
+    assert "name: bar-close" in job and "path: results/bar-close.json" in job
