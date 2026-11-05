@@ -22,7 +22,7 @@ again.
 schema's metadata). Its next run asks KIS for the whole history and replaces each stored candle
 KIS now has otherwise, so no provisional day kept from before stays. Each file also notes the
 last ``NOTED`` candles a run replaced because KIS had changed them (the day, the run's time, the
-fields). ``probe-close`` prints them: when KIS finalizes a day, and what it changes.
+fields): when KIS finalizes a day, and what it changes.
 
 A candle is stored by the day its period starts (KST): the day itself, the week's Monday,
 the month's 1st, the year's 1 January, whatever day KIS labels it with. Only finished
