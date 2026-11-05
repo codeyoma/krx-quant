@@ -260,6 +260,29 @@ async def test_a_job_cut_by_a_restart_runs_again_the_next_night(tmp_path: Path) 
         await until(lambda: state.jobs["job"].outcome == OK)
 
 
+async def test_each_run_s_end_and_a_cut_run_are_told_to_the_readiness_line(tmp_path: Path) -> None:
+    """#614: the state keeps a job's last run alone; ``ran`` hears of each run as it is kept, the one a
+    restart cut included, so the readiness line can tell every one."""
+    heard: list[tuple[str, str, date]] = []
+
+    def ran(name: str, record: JobRecord) -> None:
+        heard.append((name, record.outcome, record.day))
+
+    clock = FakeClock(at(FRIDAY, "22:00"))
+    stuck = Runs(clock)
+    stuck.hold()
+    async with scheduling(tmp_path, at(FRIDAY, "22:00"), [job()], runs=stuck, clock=clock, ran=ran):
+        clock.set(at(FRIDAY, "22:30"))
+        await until(lambda: len(stuck.started) == 1)
+    assert heard == [], "running: nothing ended yet"
+    async with scheduling(tmp_path, at(FRIDAY, "23:00"), [job()], ran=ran) as (clock, _, _, state):
+        await until(lambda: heard == [("job", INTERRUPTED, FRIDAY)])
+        clock.set(at(SATURDAY, "22:30"))
+        await until(lambda: len(heard) == 2)
+        assert list(state.jobs) == ["job"] and state.jobs["job"].outcome == OK
+    assert heard == [("job", INTERRUPTED, FRIDAY), ("job", OK, SATURDAY)]
+
+
 async def test_a_collector_started_inside_the_night_runs_its_jobs_at_once(tmp_path: Path) -> None:
     async with scheduling(tmp_path, at(SATURDAY, "01:00"), [job()]) as (_, runs, _, state):
         await until(lambda: runs.started == [("job", at(SATURDAY, "01:00"))])

@@ -7,7 +7,9 @@ server publishes as live, and the training status it shows.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from dataclasses import replace
 from datetime import date, datetime, time
 from pathlib import Path
@@ -16,6 +18,7 @@ from typing import Any
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from krx_quant import swap
 from krx_quant.algorithms import ALGORITHMS, Model, save_model
 from krx_quant.api import create_app
 from krx_quant.cli import main
@@ -28,6 +31,9 @@ from krx_quant.object_store import LocalObjectStore, ObjectStore
 from krx_quant.predictions import PredictionStore
 from krx_quant.prevalidation import admits, refusals
 from krx_quant.swap import (
+    MorningSwap,
+    keep_models,
+    morning_outcome,
     morning_swap,
     night_status,
     night_to_train,
@@ -40,6 +46,7 @@ from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import check
 from tests.prevalidation_doubles import refuse
 from tests.replay_events import api, get_json
+from tests.waiting import until
 
 NIGHT = date(2026, 10, 12)  # a Monday's night
 MORNING = date(2026, 10, 13)
@@ -238,6 +245,48 @@ async def test_the_swap_s_line_leaves_out_the_models_of_algorithms_their_pre_val
         training = (await get_json(client, "/v1/status"))["training"]
     assert "refused" not in training, "the API does not carry the list's refused (#544)"
     check("training", training)
+
+
+async def test_the_morning_swap_hands_its_outcome_to_the_readiness_line_and_sends_nothing(
+    store: ObjectStore,
+    tmp_path: Path,
+    engine: PredictionEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#614: the night's summary told its promotions the night before; at 08:00 the swap's line, every
+    model with its version, is logged, and its outcome (the night, applied, the models changed) goes to
+    the 08:40 readiness line. The model task has no way to Telegram."""
+    caplog.set_level(logging.INFO, logger="krx_quant.swap")
+    monkeypatch.setattr(swap, "WATCH_SECONDS", 0.01)
+    night_list(tmp_path / "store", finalized=at(NIGHT, "21:40"), promoted={"newton": TRAINED})
+    calendar = MarketCalendar({NIGHT: True, MORNING: True})
+    outcomes: list[MorningSwap] = []
+    task = asyncio.create_task(
+        keep_models(
+            store,
+            Shelf(tmp_path / "state"),
+            engine,
+            calendar,
+            outcomes.append,
+            lambda: at(MORNING, "08:00:30"),
+        )
+    )
+    try:
+        await until(lambda: bool(outcomes))
+    finally:
+        task.cancel()
+    assert outcomes == [MorningSwap(MORNING, NIGHT, True, f"newton {TRAINED.version}", ("newton",))]
+    [line] = [r for r in caplog.records if r.getMessage().startswith("the morning swap: ")]
+    assert (line.levelno, line.getMessage()) == (
+        logging.INFO,
+        f"the morning swap: 모델 교체 ({NIGHT} 밤 학습): newton → {TRAINED.version}",
+    )
+    assert not any(r.getMessage().startswith("alert: ") for r in caplog.records)
+
+
+def test_a_swap_without_a_list_changes_nothing() -> None:
+    assert morning_outcome(MORNING, None) == MorningSwap(MORNING, None, False, "no list yet", ())
 
 
 def test_a_model_installed_before_the_history_is_one_rollback_away(tmp_path: Path) -> None:

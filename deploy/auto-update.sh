@@ -22,8 +22,10 @@
 #    commit otherwise), and remembers the commit that failed.
 # 6. It cleans Docker up (#379, #568): every image but the ones containers use,
 #    krx-quant:latest and krx-quant:previous; the build cache no build used for a day; and all
-#    of the build cache when more than 3 GB is left after that. It reports to Telegram
-#    (krx-quant notify) what Docker kept and the disk's free space, before and after.
+#    of the build cache when more than 3 GB is left after that. It reports the commits it deployed
+#    and what Docker kept and the disk's free space, before and after: to the log alone
+#    (krx-quant notify --log-only: Loki keeps it) when the cleanup went through, as the engine's
+#    readiness line tells the commit at 08:40 (#614); to Telegram when it failed.
 #
 # Every run, before all that, it applies the kernel's self-reboot settings and the journal on
 # disk (deploy/kernel-recovery.sh, #385), so they reach the server without anyone running
@@ -59,6 +61,12 @@ send() {
 
 notify() {
   send "$1" || true
+}
+
+# A report for the log alone (#614): krx-quant notify --log-only logs it, and Loki keeps it.
+log_only() {
+  docker compose run --rm --no-deps engine notify --log-only "$1" >/dev/null 2>&1 ||
+    echo "auto-update: could not log the report: $1" >&2
 }
 
 # The ci workflow's result for exactly this commit of main (#541), from the run its push
@@ -326,7 +334,12 @@ if restart; then
   if [[ -n "$unclean" ]]; then
     disk+=$'\n'"Docker 정리 실패: $unclean. 다음 배포가 다시 정리합니다."
   fi
-  notify "자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes"$'\n'"$disk"
+  report="자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes"$'\n'"$disk"
+  if [[ -n "$unclean" ]]; then
+    notify "$report"
+  else
+    log_only "$report" # the engine's readiness line tells the commit at 08:40 (#614)
+  fi
   exit 0
 fi
 

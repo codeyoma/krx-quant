@@ -13,6 +13,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
+from krx_quant.archive import RAW_KEEP_DAYS, RawMissing, archive
 from krx_quant.collector import run_collector
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, night_front_month
@@ -20,6 +21,8 @@ from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST, kst_nearest
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.night_probe import master_lines, report, subscribed_nights
+from krx_quant.object_store import LocalObjectStore
+from krx_quant.raw_days import RawDays
 from krx_quant.scheduled import run_command
 from tests.collector_doubles import TRADE_KEY, Clock, collect, serve_masters, settings_for
 from tests.kis_frames import FUTURES_COLUMNS, frame, master_zips, night_book_frame, night_futures_frame
@@ -272,15 +275,15 @@ async def record_a_night(kis: FakeKis, data_dir: Path) -> None:
 async def test_a_night_subscribed_for_from_its_start_is_found(kis: FakeKis, tmp_path: Path) -> None:
     await record_a_night(kis, tmp_path)
 
-    assert subscribed_nights(tmp_path, CALENDAR, FRIDAY) == [THURSDAY]
-    assert subscribed_nights(tmp_path, CALENDAR, THURSDAY) == [], "only nights before the day asked"
+    assert subscribed_nights(RawDays(tmp_path), CALENDAR, FRIDAY) == [THURSDAY]
+    assert subscribed_nights(RawDays(tmp_path), CALENDAR, THURSDAY) == [], "only nights before the day asked"
 
 
 async def test_a_night_registered_only_after_18_00_is_not_found(kis: FakeKis, tmp_path: Path) -> None:
     kis.script[TRADES] = []
     await collect(kis, settings_for(kis, tmp_path), now=at(THURSDAY, "19:00:00"))
 
-    assert subscribed_nights(tmp_path, CALENDAR, FRIDAY) == []
+    assert subscribed_nights(RawDays(tmp_path), CALENDAR, FRIDAY) == []
 
 
 async def test_the_report_counts_and_times_a_night_without_its_prices(kis: FakeKis, tmp_path: Path) -> None:
@@ -308,6 +311,26 @@ async def test_the_report_counts_and_times_a_night_without_its_prices(kis: FakeK
     assert "6. KIS 마스터\n  마스터 줄" in text
     for price in ("1062.35", "1062.40", "15234", "301122", "820"):
         assert price not in text, price
+
+
+async def test_a_night_pruned_on_the_server_is_read_back_from_the_store(
+    kis: FakeKis, tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """#607: a month on the archive has deleted the night's raw on the server; the report on it
+    (``--day``) reads it back from the store."""
+    await record_a_night(kis, tmp_path)
+    store = LocalObjectStore(tmp_path_factory.mktemp("store"))
+    await archive(tmp_path, store)  # merged, as the server's are by then
+    now = at(FRIDAY, "22:40:00")
+    before = report(tmp_path, CALENDAR, now, ["마스터 줄"])
+    pruned = await archive(tmp_path, store, today=FRIDAY + timedelta(days=RAW_KEEP_DAYS + 10))
+    assert pruned.pruned and not pruned.raw_left
+
+    with pytest.raises(RawMissing):
+        report(tmp_path, CALENDAR, now, ["마스터 줄"])
+    with RawDays(tmp_path, store) as raw:
+        assert report(tmp_path, CALENDAR, now, ["마스터 줄"], raw=raw) == before
+        assert raw.restored
 
 
 def test_the_report_without_a_subscribed_night_says_so(tmp_path: Path) -> None:

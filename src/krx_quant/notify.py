@@ -296,6 +296,13 @@ async def send_notice(settings: Settings, text: str, *, level: int = logging.WAR
             await alerts.close()
 
 
+def log_notice(text: str) -> None:
+    """A notice for the log alone (``krx-quant notify --log-only``, #614): the auto-update's report of a
+    clean update, which the engine's readiness line tells at 08:40. INFO, a report: never ``alert:``
+    nor ``telegram sent:``, which say a message was meant for Telegram or reached it."""
+    log.info("notice, logged only: %s", text)
+
+
 async def send_test_alert(settings: Settings) -> bool:
     """Send a test message to the alert chat; False when Telegram is not configured.
 

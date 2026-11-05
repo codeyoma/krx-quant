@@ -54,6 +54,9 @@ async def _archive(recheck: bool) -> int:
 
     report = await run_archive(Settings.from_env(), recheck=recheck)
     print(f"archived: {report.uploaded} uploaded, {report.unchanged} unchanged, {len(report.failed)} failed")
+    print(report.raw_line())
+    for partition, why in report.not_pruned.items():
+        print(f"not pruned: {partition}: {why}", file=sys.stderr)
     for partition in report.failed:
         print(f"failed: {partition}", file=sys.stderr)
     return 1 if report.failed else 0
@@ -109,7 +112,8 @@ def add(sub: Commands) -> None:
     ).set_defaults(run=lambda args: asyncio.run(_backfill()))
     archive_cmd = sub.add_parser(
         "archive",
-        help="merge recorded part files and upload every day to KRX_OBJECT_STORE (safe to rerun)",
+        help="merge recorded part files and upload every day to KRX_OBJECT_STORE, then delete here the raw"
+        " days past 30 days whose copies there read back the same (#607); safe to rerun",
     )
     archive_cmd.add_argument(
         "--recheck", action="store_true", help="compare every file with the store and upload what it lacks"

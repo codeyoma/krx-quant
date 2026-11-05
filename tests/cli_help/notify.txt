@@ -1,7 +1,9 @@
-usage: krx-quant notify [-h] text
+usage: krx-quant notify [-h] [--log-only] text
 
 positional arguments:
   text
 
 options:
   -h, --help  show this help message and exit
+  --log-only  log the notice (INFO) and send nothing: a report the readiness
+              line tells (#614)

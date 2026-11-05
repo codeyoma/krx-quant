@@ -41,6 +41,7 @@ from krx_quant.feeds import (
     FOREIGN_ESTIMATE,
     INDEX,
     KOSPI200_FUTURES,
+    KRX_BOOK,
     KRX_TRADE,
     KST,
     MEMBER,
@@ -49,6 +50,7 @@ from krx_quant.feeds import (
     NXT_TRADE,
     OPTION,
     PROGRAM,
+    RAW_FEEDS,
     RAW_SCHEMA,
     TRADE,
     US_TRADE,
@@ -56,6 +58,7 @@ from krx_quant.feeds import (
     VI_STATUS,
     WS_FEEDS,
     Feed,
+    RawFeed,
     RestFeed,
     us_daytime_key,
 )
@@ -77,8 +80,9 @@ from krx_quant.poll_outages import PollOutages, PollState
 from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import admits, refusals
-from krx_quant.products import products_of
+from krx_quant.products import INVERSE_PRODUCTS, products_of
 from krx_quant.ratelimit import RateLimiter
+from krx_quant.readiness import Readiness, keep_ready
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.rescore import EngineLock, keep_touches_filled
 from krx_quant.revisions import RevisionGate
@@ -123,6 +127,14 @@ WS_CLOSE_SECONDS = 5.0
 # the [복구] and is counted in a WARNING instead. KIS closed the connection (code 1006) 17 times
 # from 2026-10-27 to 11-03, and data came back 1.7-3.0 s later each time. The gap, ``connected``
 # and the health change at the drop, as before.
+#
+# Out of the session (#614: a trading day before its open or after its close, a holiday) the wait
+# counts from when the drop is noticed, a silent connection's too (#308): the trader buys and sells
+# only in the session, and the collector reconnects by itself, so a drop back within the wait there
+# touches no trade and is logged alone (``KIS WebSocket back …, out of the session: not alerted``).
+# In the session a silent one's wait counts from its last frame, as before: its 60 s without quotes
+# held the trader, so it is alerted at once. On 2026-11-05 the connection went silent at 15:35 and was
+# back in about 3 s after the collector closed it at 15:36, after the close: a [장애] and a [복구].
 WS_ALERT_AFTER_SECONDS = 30.0
 
 # How often buffered partitions whose time limit has passed are flushed.
@@ -147,17 +159,25 @@ GIL_SWITCH_SECONDS = 0.0005
 SHORT_FRAMES_EXPECTED = frozenset({MEMBER.tr_id})
 
 
+# The symbols whose inverse ETF's KRX book is registered (#606): the traded symbol's, 0193L0, for a
+# replay of down calls through it. It takes the last of KIS's 41 slots with the server's three
+# symbols (they use 40), so a smaller limit cuts it first; it has no REST fallback. 000660's 0197X0
+# joins once another slot is free (#606).
+INVERSE_BOOKS = (TRADED_SYMBOL,)
+
+
 def subscription_plan(
     settings: Settings, fronts: FrontMonths | None, night: str | None = None
-) -> list[tuple[Feed, str]]:
+) -> list[tuple[Feed | RawFeed, str]]:
     """WebSocket registrations in priority order; the session limit cuts from the end.
 
     Market-wide context comes first so it survives however many symbols are added,
     then each stock's trades, book and program trading, then the tier-2 feeds. ``night`` is
     the KOSPI200 night futures contract (#264): registered all day like the rest, it
-    delivers from 18:00 to 06:00 only, and has no REST fallback.
+    delivers from 18:00 to 06:00 only, and has no REST fallback. Last, the inverse ETF's KRX
+    book (``INVERSE_BOOKS``), recorded raw only until its probe has read it (#606).
     """
-    plan: list[tuple[Feed, str]] = []
+    plan: list[tuple[Feed | RawFeed, str]] = []
     if fronts is not None:
         plan += [(KOSPI200_FUTURES, fronts.kospi200_futures), (USD_FUTURES, fronts.usd_futures)]
     if night is not None:
@@ -172,6 +192,7 @@ def subscription_plan(
     plan += [(KRX_TRADE, etf) for etf in settings.etf_symbols]
     if settings.venue_trades:
         plan += [(feed, sym) for feed in (KRX_TRADE, NXT_TRADE) for sym in settings.symbols]
+    plan += [(KRX_BOOK, INVERSE_PRODUCTS[sym].code) for sym in INVERSE_BOOKS if sym in settings.symbols]
     return plan
 
 
@@ -319,6 +340,7 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
         # A running bar-close algorithm whose code changed is judged again (#454).
         revisions=RevisionGate(settings.state_dir, settings.target_version),
         commit=settings.commit,
+        signal_rule=settings.signal_thresholds,  # served by the status (#617)
         review_rules=Rules.of(settings),
         target_version=settings.target_version,  # the target learned and forecast (#169)
         climate=load_climate(settings.state_dir) if settings.target_version >= 2 else None,
@@ -396,7 +418,17 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
             for feed, key in plan[:cap]:
                 health.watch((feed.tr_id, key))
             stream = _Stream(
-                session, settings, plan[:cap], recorder, now, stop, poller, health, alerts, on_event
+                session,
+                settings,
+                plan[:cap],
+                recorder,
+                now,
+                stop,
+                poller,
+                health,
+                alerts,
+                on_event,
+                calendar.calendar,
             )
             # The closing flow's days (#305): after the history task's runs and after KRX's net
             # assets come in, one computation at a time (they write the same file).
@@ -486,11 +518,21 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                 if object_store is not None and settings.train_at is not None
                 else None
             )
+            # The trading morning's routine notices as one line at 08:40 (#614): the swap's outcome,
+            # the trader's pick and limits, the night's jobs.
+            readiness = Readiness(
+                settings.state_dir,
+                settings.state_dir / TRADER_DB,
+                settings.commit,
+                partial(alerts.deliver, level=logging.INFO),
+                swaps=object_store is not None,
+            )
             background.append(
                 asyncio.create_task(
-                    keep_models(object_store, shelf, engine, calendar.calendar, alerts.deliver, now, watch)
+                    keep_models(object_store, shelf, engine, calendar.calendar, readiness.swapped, now, watch)
                 )
             )
+            background.append(asyncio.create_task(keep_ready(readiness, calendar.calendar, session_clock)))
             if object_store is not None and settings.train_at is not None:
                 trained_on = object_store
 
@@ -539,7 +581,13 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                 background.append(
                     asyncio.create_task(
                         keep_jobs(
-                            settings, session, calendar.calendar, alerts, session_clock, training, engine
+                            settings,
+                            session,
+                            calendar.calendar,
+                            session_clock,
+                            training,
+                            engine,
+                            ran=readiness.ran,  # kept until the readiness line tells them (#614)
                         )
                     )
                 )
@@ -731,7 +779,8 @@ async def _keep_archived(
     """Archive finished days at start, then every day after the close and at night.
 
     Buffered rows are written first so the archive holds everything recorded so far;
-    rows recorded later go into the next run. A failure (a bad store setting included)
+    rows recorded later go into the next run. Each run prunes the raw days past 30 days on the
+    server whose copies in the store are checked (#607, ``archive``). A failure (a bad store setting included)
     raises one alert, cleared by the next run that archives everything; recording goes on.
     """
     # At start, today is left for later only while none of today's runs is due yet: a
@@ -746,7 +795,7 @@ async def _keep_archived(
             store = open_store(settings)
             assert store is not None
             recorder.flush()
-            report = await archive(settings.data_dir, store, before=before)
+            report = await archive(settings.data_dir, store, before=before, today=kst_day(now()))
         except Exception:
             log.exception("archiving failed")
             alerts.raise_(_ARCHIVE_ALERT, "장 마감 데이터 업로드가 실패했습니다.")
@@ -893,10 +942,10 @@ async def check_fallbacks(settings: Settings, now: Clock | None = None) -> list[
         plan = subscription_plan(settings, fronts, night_contract(clock(), calendar))
         # A derivative left out of the plan (its contract not found) is not checked: a failure.
         planned = {feed.tr_id for feed, _ in plan}
-        for feed in (KOSPI200_FUTURES, USD_FUTURES, OPTION):
-            if feed.tr_id not in planned:
+        for derivative in (KOSPI200_FUTURES, USD_FUTURES, OPTION):
+            if derivative.tr_id not in planned:
                 why = "no contract to ask for: the KIS masters could not be read"
-                checks.append(FallbackCheck(feed.tr_id, "", FALLBACKS[feed.tr_id], {}, [], why))
+                checks.append(FallbackCheck(derivative.tr_id, "", FALLBACKS[derivative.tr_id], {}, [], why))
         for feed, key in plan:
             fallback = fallback_for(settings, feed.tr_id, key)
             if fallback is None:
@@ -958,12 +1007,14 @@ def silence(seconds: float) -> str:
 
 @dataclass(frozen=True)
 class _Drop:
-    """A KIS WebSocket drop not alerted yet (#488): when it began on the loop's clock, why, and the
-    task that alerts it once it is ``WS_ALERT_AFTER_SECONDS`` old."""
+    """A KIS WebSocket drop not alerted yet (#488): when it began on the loop's clock, why, the task
+    that alerts it once it is ``WS_ALERT_AFTER_SECONDS`` old, and whether it is a silent one out of
+    the session, whose wait began when it was noticed (#614)."""
 
     began: float
     detail: str
     alert: asyncio.Task[None]
+    out: bool = False
 
 
 class _Stream:
@@ -973,7 +1024,7 @@ class _Stream:
         self,
         session: aiohttp.ClientSession,
         settings: Settings,
-        subscriptions: list[tuple[Feed, str]],
+        subscriptions: list[tuple[Feed | RawFeed, str]],
         recorder: ParquetRecorder,
         now: Clock,
         stop: asyncio.Event,
@@ -981,9 +1032,12 @@ class _Stream:
         health: FeedHealth,
         alerts: Alerts,
         on_event: Callable[[str, dict[str, Any]], None],
+        calendar: MarketCalendar | None = None,
     ) -> None:
         self._session = session
         self._settings = settings
+        # Whose sessions tell a drop in the session from one out of it (#614); None: always in it.
+        self._calendar = calendar
         # Registered on every (re)connect; keys refused for the session limit leave the list.
         self._subscriptions = list(subscriptions)
         self._recorder = recorder
@@ -1101,8 +1155,9 @@ class _Stream:
         """Mark the subscriptions as in a disconnect gap at once, and alert once the drop is
         ``WS_ALERT_AFTER_SECONDS`` old with the connection not back (#488). The alert goes at any
         hour, in or out of market hours. A ``silent`` connection's drop began at its last sign of
-        life (#308), ``ws_silence_seconds`` ago: its gap starts there, and with the default 60 s
-        its alert goes at once."""
+        life (#308), ``ws_silence_seconds`` ago: its gap starts there, and in the session, with the
+        default 60 s, its alert goes at once. Out of the session its alert waits as any drop's, from
+        now (#614)."""
         self._acknowledged = False
         if self._recovery is not None:
             self._recovery.cancel()  # it did not stay up long enough to count as recovered
@@ -1112,13 +1167,22 @@ class _Stream:
         if self._drop is not None or self._alerts.is_active(_WS_ALERT):
             return  # the same outage: a reconnect failed, or it dropped again before recovering
         loop = asyncio.get_running_loop()
-        began = self._heard_at if silent else loop.time()
+        out = silent and not self._in_session()
+        began = self._heard_at if silent and not out else loop.time()
         text = f"KIS WebSocket 연결이 끊겼습니다 ({detail}). 재연결을 시도합니다."
         left = began + WS_ALERT_AFTER_SECONDS - loop.time()
         if left <= 0:
             self._alerts.raise_(_WS_ALERT, text)
         else:
-            self._drop = _Drop(began, detail, asyncio.create_task(self._alert_drop(left, text)))
+            self._drop = _Drop(began, detail, asyncio.create_task(self._alert_drop(left, text)), out)
+
+    def _in_session(self) -> bool:
+        """Whether it is a trading day's session now, from its open to its close (#614)."""
+        if self._calendar is None:
+            return True
+        now = self._now()
+        session = self._calendar.session(kst_day(now))
+        return session is not None and session.open <= now < session.close
 
     async def _alert_drop(self, seconds: float, text: str) -> None:
         await asyncio.sleep(seconds)
@@ -1130,6 +1194,13 @@ class _Stream:
         [복구], a WARNING with the day's count of such drops instead."""
         drop.alert.cancel()
         self._drop = None
+        if drop.out:  # a silent one out of the session (#614): not one of #488's short drops
+            log.warning(
+                "KIS WebSocket back %.1fs after it dropped (%s), out of the session: not alerted (#614)",
+                asyncio.get_running_loop().time() - drop.began,
+                drop.detail,
+            )
+            return
         day = kst_day(self._now())
         if day != self._short_drops_day:
             self._short_drops, self._short_drops_day = 0, day
@@ -1229,7 +1300,8 @@ class _Stream:
         The raw copy is written before anything can fail, and a message that cannot be
         parsed or normalized is logged and skipped so one bad frame never stops recording. A
         frame short of fields is also counted for its key, and logged as a WARNING for the
-        feeds that send such frames now and then (``SHORT_FRAMES_EXPECTED``, #381).
+        feeds that send such frames now and then (``SHORT_FRAMES_EXPECTED``, #381). A feed recorded
+        raw only (``RAW_FEEDS``, #606) is counted as delivering and goes no further.
         """
         at = self._now()
         day = kst_day(at)
@@ -1256,6 +1328,8 @@ class _Stream:
 
         self._recorder.record("raw", day, message.tr_id, message.symbol, raw_row, RAW_SCHEMA)
         self._health.received((message.tr_id, message.symbol))
+        if message.tr_id in RAW_FEEDS:
+            return  # recorded raw only until its probe has read it (#606)
         feed = WS_FEEDS.get(message.tr_id)
         if feed is None or message.encrypted:
             log.warning(

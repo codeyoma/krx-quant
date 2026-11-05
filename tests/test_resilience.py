@@ -487,7 +487,9 @@ async def test_a_silent_connection_is_marked_lost_before_its_close_is_waited_for
 async def test_the_silence_alert_goes_out_of_market_hours_too(
     kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The incident's silence began at 16:33, after the close, when no stale check runs."""
+    """The incident's silence began at 16:33, after the close, when no stale check runs. Out of the
+    session the wait counts from when the silence is noticed (#614): the close's 0.2 s wait for the
+    dead side alone outlasts it here."""
     monkeypatch.setattr(collector, "WS_CLOSE_SECONDS", 0.2)
     alert_after(monkeypatch, 0.1)
     kis.script[TRADE_KEY] = []
@@ -502,6 +504,73 @@ async def test_the_silence_alert_goes_out_of_market_hours_too(
     await asyncio.wait_for(task, 5)
 
     assert kis.telegram_messages[0]["text"].startswith("[장애] KIS WebSocket 연결이 끊겼습니다 (silent 0.3s)")
+
+
+OUT = "out of the session: not alerted"  # a silent drop out of the session back in time (#614)
+
+
+async def silent_after_the_close(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[asyncio.Event, asyncio.Task[None]]:
+    """A collector at 15:36:13 on a trading day, after the close (the connection went silent so on
+    2026-11-05), whose connection goes silent for 1 s. Its alert waits 0.9 s: in the session the silence
+    alone is past it (alerted at once), and the dead side's close is 0.05 s."""
+    monkeypatch.setattr(collector, "WS_CLOSE_SECONDS", 0.05)
+    alert_after(monkeypatch, 0.9)
+    kis.script[TRADE_KEY] = [fill("81200")]
+    stop = asyncio.Event()
+    settings = replace(with_telegram(kis, fast(settings_for(kis, tmp_path))), ws_silence_seconds=1.0)
+    after_close = FIXED_NOW.replace(hour=15, minute=36, second=13)
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: after_close))
+    await kis.wait_for_subscription_count(TRADE_KEY, 1)
+    await kis.round_trip()
+    return stop, task
+
+
+async def test_a_silent_connection_back_soon_out_of_the_session_is_logged_and_not_alerted(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#614: out of the session the trader trades nothing, so a silent connection the collector has back
+    within the wait, counted from when the silence is noticed, sends neither the [장애] nor the [복구].
+    A WARNING says so; it is not one of #488's short drops (the Grafana rule counts those)."""
+    stop, task = await silent_after_the_close(kis, tmp_path, monkeypatch)
+    kis.go_silent()
+    await kis.wait_for_subscription_count(TRADE_KEY, 2, timeout=5)
+    await until(lambda: len(logged(caplog, OUT)) == 1)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    assert kis.telegram_messages == []
+    [line] = logged(caplog, OUT)
+    assert line.startswith("KIS WebSocket back ") and line.endswith(
+        "after it dropped (silent 1s), out of the session: not alerted (#614)"
+    ), line
+    assert not any("short drop" in m for m in logged(caplog, SHORT))
+    [gap] = read(tmp_path, "gaps", "H0UNCNT0")
+    assert gap["reason"] == "disconnected: silent 1s", "the gap runs from the last frame, as in the session"
+
+
+async def test_a_silent_connection_out_of_the_session_not_back_in_time_is_alerted_after_the_wait(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    stop, task = await silent_after_the_close(kis, tmp_path, monkeypatch)
+    kis.accept_ws = False  # every reconnect refused
+    kis.go_silent()
+    await until(lambda: len(kis.telegram_messages) >= 1)
+    kis.accept_ws = True
+    await until(lambda: len(kis.telegram_messages) >= 2)
+    stop.set()
+    await asyncio.wait_for(task, 5)
+
+    texts = [m["text"] for m in kis.telegram_messages]
+    assert texts[0] == "[장애] KIS WebSocket 연결이 끊겼습니다 (silent 1s). 재연결을 시도합니다.", texts
+    assert texts[1].startswith("[복구]"), texts
+    noticed = next(r.created for r in caplog.records if r.getMessage().startswith("KIS WebSocket silent for"))
+    [alerted] = [
+        r.created for r in caplog.records if r.getMessage().startswith("alert: [장애] KIS WebSocket")
+    ]
+    assert alerted - noticed >= 0.8, "the wait counted from when the silence was noticed"
+    assert logged(caplog, OUT) == []
 
 
 async def test_a_quiet_connection_that_still_gets_pingpong_or_data_is_not_reconnected(

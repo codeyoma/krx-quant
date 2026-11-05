@@ -11,11 +11,13 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from krx_quant.fake_kis import FakeKis
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.signals import SignalRule
 from tests.collector_doubles import FIXED_NOW, KST, collect, read, settings_for
-from tests.kis_frames import book_frame, trade_frame
+from tests.kis_frames import book_frame, krx_book_frame, trade_frame
 
 
 async def test_trade_frame_is_recorded_as_normalized_trade_event(kis: FakeKis, tmp_path: Path) -> None:
@@ -146,6 +148,20 @@ async def test_raw_frames_are_recorded_verbatim(kis: FakeKis, tmp_path: Path) ->
     await collect(kis, settings_for(kis, tmp_path))
 
     assert [r["message"] for r in read(tmp_path, "raw", "H0UNCNT0")] == [sent]
+
+
+async def test_the_inverse_etf_s_krx_book_is_recorded_raw_only(
+    kis: FakeKis, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # No frame of it has been seen live (#606): kept raw for its probe, no event made, no line logged.
+    sent = krx_book_frame({"MKSC_SHRN_ISCD": "0193L0", "BSOP_HOUR": "093015", "ASKP1": "9010"})
+    kis.script[("H0STASP0", "0193L0")] = [sent]
+
+    await collect(kis, settings_for(kis, tmp_path))
+
+    assert [r["message"] for r in read(tmp_path, "raw", "H0STASP0", symbol="0193L0")] == [sent]
+    assert not (tmp_path / "events" / "date=2026-10-08" / "feed=H0STASP0").exists()
+    assert [r.getMessage() for r in caplog.records if "H0STASP0" in r.getMessage()] == []
 
 
 async def test_frame_with_several_records_yields_one_event_per_record(kis: FakeKis, tmp_path: Path) -> None:
