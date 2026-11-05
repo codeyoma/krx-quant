@@ -21,12 +21,31 @@ After the merge, remove the worktree and delete the branch, locally and on the r
   - A test past its time limit ends the pytest run with every thread's stack, and the tests after it do not run (CODING_STANDARDS.md, "Tests wait for conditions"). Fix that test and run again.
   - CI runs the checks once (job `lint`) and pytest in four shards on runners of their own (`pytest 1` to `pytest 4`, `scripts/ci_shard.py`, #486). The check to wait for is `test`: it passes when `lint` and every shard passed and every test ran in exactly one shard. Locally, run the whole suite in one `pytest`; to run one shard's files, `uv run pytest -q $(python3 scripts/ci_shard.py files <shard> 4)`.
   - A push to a PR cancels that PR's run still going; wait for the newest commit's run.
+  - The shards are dealt by `scripts/ci_shard_seconds.json`: each test file's median seconds over the last five green `ci` runs on `main` (their `ci-shard-seconds` artifacts, #590). Refresh it with the command below when a run's shards end more than a minute apart (the `test` job's table) or test files were added or removed. A PR that makes one file much slower or faster also copies that file's seconds from its own run's artifact into the record.
   - `scripts/check_docs_drift.py` (#495) compares three lists with the docs, both ways: the settings `config.py` and `trader/settings.py` read with `.env.example` and docs/operations.md "설정 값 전체"; the commands the family modules of `cli/` add (#578) with README.md's "명령" table; `scheduled.JOBS` with docs/operations.md's "예약 작업 (#215)" table. A name you add goes in each of its docs. A name you remove keeps its place with a 삭제됨 or 바뀜 note that names it (in its section; in `.env.example`, in its block), or its table row begins its second cell with the note. A variable only compose or a deploy script reads goes in the settings section's table with a "읽는 곳" column, naming the files that read it. A setting no doc should list goes in the script's `UNDOCUMENTED` with why. It also fails a table row right after a quote line in README.md or docs/ (Markdown reads it as the quote's text): after a note inside a table, leave a blank line and repeat the table's header row.
 - Fork: a dev build with `CI=1` (`-Werror`) and `ctest -R krx` (`fincept/custom/README.md`).
   - MSVC treats warnings as errors and macOS clang misses some of them: pass `f` literals to Qt float parameters (`setAlphaF(0.3f)`), and avoid narrowing double → float.
   - A fork PR runs the Windows build check by itself (AGENTS.md "Submodule workflow", step 7); merge once it passes.
 
     > **삭제됨** (2026-11-04, #491): "Until fork PRs run checks of their own (#324), run the Windows branch check before merging: `gh workflow run custom-release.yml --repo codeyoma/FinceptTerminal --ref <branch>`." 이유: fork PR이 스스로 검사를 돈다(#324, 2026-10-20 닫힘). 대신: fork PR의 검사가 통과하면 머지한다.
+
+The record's refresh, from the worktree's root. A file no run has (a new one) is left out and counts as the median file; a file deleted since drops out.
+
+```bash
+dir=$(mktemp -d)
+for run in $(gh run list --workflow ci --branch main --status success --limit 5 --json databaseId --jq '.[].databaseId'); do
+  gh run download "$run" --name ci-shard-seconds --dir "$dir/$run"
+done
+python3 - "$dir"/*/ci_shard_seconds.json > scripts/ci_shard_seconds.json <<'EOF'
+import json, statistics, sys
+sys.path.insert(0, "scripts")
+from ci_shard import ROOT, test_files
+
+runs = [json.load(open(path)) for path in sys.argv[1:]]
+seconds = {file: [run[file] for run in runs if file in run] for file in test_files(ROOT)}
+print(json.dumps({f: round(statistics.median(s), 2) for f, s in seconds.items() if s}, indent=1, sort_keys=True))
+EOF
+```
 
 ## Commits
 
