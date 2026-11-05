@@ -25,7 +25,6 @@ FIRST = (
     "probe-sample-keys-565-again",
     "trader-report",
     "recording-quality-570",
-    "fill-notice-layout-403",
     "signal-review-206-1201",
     "probe-live-account-408",
     "error-holdout-447",
@@ -76,6 +75,8 @@ RETIRED = {
     "climate-prior-429": ("climate-prior",),
     "poisson-link-439": ("poisson-link",),
     "turing-prior-448": ("turing-prior",),
+    # #580: it joined a buy, a sell and a cancel on 2026-11-04 and #531 named the 23 columns.
+    "fill-notice-layout-403": ("fill-notice-layout",),
 }
 # The commands removed with their modules once their questions were settled: the probes (#563) and
 # the concluded experiments (#559). The user decided both on 2026-11-05, over #505's "the commands
@@ -138,7 +139,7 @@ def test_every_job_a_family_defines_is_listed_once() -> None:
 def test_the_retired_jobs_are_gone_and_their_commands_stay() -> None:
     """Left in, a lost state file would run them again on closed issues; by hand, each still runs,
     unless its command was removed since."""
-    assert len(RETIRED) == 28
+    assert len(RETIRED) == 29
     assert sorted(set(RETIRED) & {j.name for j in JOBS}) == []
     parser = cli._parser()
     for name, argv in RETIRED.items():

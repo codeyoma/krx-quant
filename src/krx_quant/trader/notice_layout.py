@@ -3,7 +3,8 @@ trader's recorder (``fill_notices.py``, ``state/fill_notices.sqlite3``), measure
 against the orders they tell of, never showing a value: the night job ``fill-notice-layout-403``'s,
 for an agent to name the mock server's 23 columns (``kis_orders.FILL_NOTICE_COLUMNS`` has KIS's
 example's 26, ``docs/kis-feeds.md`` "주문 (#403)"). Its run of 2026-11-04 named them
-(``kis_orders.MOCK_FILL_NOTICE_COLUMNS``); the measure itself reads no name, by position alone.
+(``kis_orders.MOCK_FILL_NOTICE_COLUMNS``), and the job left ``JOBS`` (#580): the command stays for a
+run by hand. The measure itself reads no name, by position alone.
 
 **The orders.** For each trading day a record was kept on, that day's orders: the trader's ledger
 (``state/trader.sqlite3``, mode ``mock``, read-only: each order with KIS's number, ``orders.broker_id``,
