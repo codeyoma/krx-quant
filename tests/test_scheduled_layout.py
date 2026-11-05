@@ -18,8 +18,11 @@ from krx_quant import cli
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS
 from krx_quant.scheduled import JOBS, Job, daily_prevalidation_jobs, prevalidation_jobs, revision_jobs
 
-# The jobs written by hand, in the list's order, before the daily kinds' pre-validations.
+# The jobs written by hand, in the list's order, before the daily kinds' pre-validations: the probe of
+# the sample store's keys (#565) first, a few minutes after the night's training.
 FIRST = (
+    "probe-sample-keys-565",
+    "probe-sample-keys-565-again",
     "trader-report",
     "recording-quality-570",
     "fill-notice-layout-403",

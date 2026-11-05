@@ -85,6 +85,7 @@ from krx_quant.recording_quality import recording_quality
 from krx_quant.redaction import secrets_of
 from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
+from krx_quant.sample_keys_probe import probe_sample_keys
 from krx_quant.sample_profile import LIMIT as SAMPLE_PROFILE_LIMIT
 from krx_quant.sample_profile import PROFILED, sample_profile
 from krx_quant.sample_profile import TOP as SAMPLE_PROFILE_TOP
@@ -294,6 +295,13 @@ async def _archive(recheck: bool) -> int:
     for partition in report.failed:
         print(f"failed: {partition}", file=sys.stderr)
     return 1 if report.failed else 0
+
+
+def _probe_sample_keys(day: date | None) -> int:
+    """What changes the key of a day a night stored (#565)."""
+    report, code = probe_sample_keys(Settings.from_env(require_kis=False), datetime.now(KST), day=day)
+    print(report)
+    return code
 
 
 def _sample_profile(day: date | None, algorithms: list[str], limit: int, top: int) -> int:
@@ -1038,6 +1046,18 @@ def _parser() -> argparse.ArgumentParser:
     sample_profile_cmd.set_defaults(
         run=lambda args: _sample_profile(args.day, args.algorithms, args.limit, args.top)
     )
+    sample_keys_cmd = sub.add_parser(
+        "probe-sample-keys",
+        help="what changed the key of the days the sample store holds since the night stored them (#565):"
+        " their input files in the Object Store, the training cache and the data directory, the latest day's"
+        " parts not merged yet, the keys changed since the last run; writes only its state file, no price",
+    )
+    sample_keys_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the latest day looked at, YYYY-MM-DD (default: the store's latest)",
+    )
+    sample_keys_cmd.set_defaults(run=lambda args: _probe_sample_keys(args.day))
     sub.add_parser(
         "rescore",
         help="label every recorded day's bar closes again with the touch target (stop the engine first)",

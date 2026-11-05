@@ -119,7 +119,12 @@ from krx_quant.scheduled.prevalidations import (
     revision_jobs,
     revision_turn,
 )
-from krx_quant.scheduled.probes import RECORDING_QUALITY, recording_quality_calls
+from krx_quant.scheduled.probes import (
+    RECORDING_QUALITY,
+    SAMPLE_KEYS,
+    SAMPLE_KEYS_AGAIN,
+    recording_quality_calls,
+)
 from krx_quant.scheduled.research import (
     CLIMATE_GATE,
     ERROR_HOLDOUT,
@@ -255,6 +260,8 @@ async def keep_jobs(
 
 
 JOBS: tuple[Job, ...] = (
+    SAMPLE_KEYS,
+    SAMPLE_KEYS_AGAIN,
     TRADER_REPORT,
     RECORDING_QUALITY,
     FILL_NOTICE_LAYOUT,
