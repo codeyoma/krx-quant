@@ -192,9 +192,12 @@ def _union(spans: Iterable[tuple[datetime, datetime]]) -> timedelta:
 
 
 def longest(group: Group) -> timedelta | None:
-    """A disconnect's length: until KIS took its last subscription back; None if none ended."""
-    spans = [g.end - g.start for g in group.gaps if g.end is not None]
-    return max(spans) if spans else None
+    """A disconnect's length: until KIS took its last subscription back; None if one never came back
+    (its gap was written without an end when the collector stopped), however soon the rest did."""
+    ends = [g.end for g in group.gaps]
+    if any(end is None for end in ends):
+        return None
+    return max(end - g.start for g, end in zip(group.gaps, ends, strict=True) if end is not None)
 
 
 def _bucket(span: timedelta | None) -> str:

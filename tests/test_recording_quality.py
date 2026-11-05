@@ -319,6 +319,29 @@ def test_two_short_disconnects_in_the_session_call_no_agent(tmp_path: Path) -> N
     assert not [r for r in reasons(report(tmp_path, CALENDAR, DAY, [], POLLS)) if "끊김" in r]
 
 
+def test_a_disconnect_one_subscription_never_came_back_from_is_unfinished(tmp_path: Path) -> None:
+    """Two keys taken back at once and one still out when the collector stopped (``FeedHealth.close``
+    writes its gap without an end): the disconnect's length is unknown, not the two's 2 seconds."""
+    writer = recorder(tmp_path)
+    clock = Clock()
+    health = FeedHealth(writer, clock, CALENDAR)
+    clock.now = at("10:15:00")
+    health.connection_lost(KEYS, "websocket closed by KIS (code 1006)")
+    clock.now = at("10:15:02")
+    for key in KEYS[:-1]:
+        health.subscribed(key)
+    clock.now = at("10:20:00")
+    health.close()
+    writer.close()
+
+    text = report(tmp_path, CALENDAR, DAY, [], POLLS)
+
+    gaps = section(text, 1)
+    assert "장중 끊김 1번(5초 미만 0, 5–60초 0, 60초 이상 0, 끝 없음 1)" in gaps
+    assert "H0STCNT0: 끊김 1번 0.0초 · stale 0개 0.0초 · 끝 없음(수집기가 멈춤, 길이 모름) 1개" in gaps
+    assert "60초 이상이거나 끝 없는 장중 끊김 1번(10:15:00)" in reasons(text)
+
+
 def test_the_recorded_bars_are_set_against_kis_s_minute_by_minute(recorded: Path) -> None:
     text = report(recorded, CALENDAR, DAY, [STOCK, ETF, UNFILLED], POLLS)
 
