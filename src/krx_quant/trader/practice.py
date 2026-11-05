@@ -21,14 +21,17 @@ never chosen again.
 **Which.** Of the cells the cost map gives that night that may be practised (#427,
 ``Selection.practisable``: a verdict at a market order's round trip, ``pass`` or ``fail``, and a
 sound row), each replayed alone a share at each θ of the re-fit's grid (#470, ``replay.Signals``:
-its rises on its kind's days of the cost map, by the paper trader's rules and fills): the cell and θ
+its rises on its kind's days of the cost map, by the paper trader's rules and fills, none of a day a
+pick would have held it off, #603, ``replay.inactive_days``): the cell and θ
 whose net per signal in ticks has the greatest day-level 95% lower bound (``Signals.per_signal``),
 below 0 too, of those that bought at least ``MIN_TRADES`` times on at least two days; of two alike,
 the greater mean, then the kinds' order, the roles', the lower θ.
 
 **Gone.** A pick that finds the cell's predictor gone (``cells.gone``, as for a policy's cell, #469)
 keeps when (``gone_at``): no practice for the rest of the cycle, even should the predictor come back,
-and no other cell in its place (``GONE``).
+and no other cell in its place (``GONE``). One that finds it not active (#603, ``cells.inactive``, as
+for a policy's cell: on probation, on the bench, retired, a clone) keeps when too (``inactive_at``):
+no practice for the rest of the cycle, even should it be active again (``PREDICTOR_INACTIVE``).
 """
 
 from __future__ import annotations
@@ -57,7 +60,7 @@ from krx_quant.trader.cells import Cell, open_engine_db, special_windows
 from krx_quant.trader.paper import Rules
 from krx_quant.trader.refit import THRESHOLDS, cost_map_days
 from krx_quant.trader.replay import GAPPED, NO_RECORDING, Replayer, Signals, Source
-from krx_quant.trader.selection import CostMapError, Pick, choose, read_cost_map
+from krx_quant.trader.selection import GONE, PREDICTOR_INACTIVE, CostMapError, Pick, choose, read_cost_map
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 
@@ -69,8 +72,8 @@ log = logging.getLogger(__name__)
 MIN_TRADES = 20
 # Why the mock book does not practise at a pick with the practice on (``GET /v1/trader``'s
 # ``practice.why``): a champion cell trades; no cell is kept for the review cycle in force (or the
-# cycle cannot be told); the cell's predictor is gone (``selection.GONE``); or the pick's own reason
-# (``no_cost_map``, ``no_policy``).
+# cycle cannot be told); the cell's predictor is gone (``selection.GONE``) or not active
+# (``selection.PREDICTOR_INACTIVE``, #603); or the pick's own reason (``no_cost_map``, ``no_policy``).
 CHAMPION = "champion"
 NOT_FROZEN = "not_frozen"
 HEAD = "연습 칸 (#474)"
@@ -127,7 +130,7 @@ class Frozen:
     """The practice cell kept for review cycle ``cycle`` of evaluation ``evaluation``: when it was
     chosen, the cell as the cost map gave it that night at its θ (``pick``: one share, practice), every
     cell × θ measured that night, best first (``measured``, each ``Measured.as_json``), and when a pick
-    found its predictor gone (``gone_at``)."""
+    found its predictor gone (``gone_at``) or not active (``inactive_at``, #603)."""
 
     evaluation: int
     cycle: int
@@ -135,10 +138,16 @@ class Frozen:
     pick: Pick
     measured: tuple[Mapping[str, Any], ...]
     gone_at: datetime | None = None
+    inactive_at: datetime | None = None
 
     @property
     def cell(self) -> Cell:
         return self.pick.cell
+
+    @property
+    def rested(self) -> bool:
+        """Whether it rests for the rest of the cycle (module doc "Gone")."""
+        return self.gone_at is not None or self.inactive_at is not None
 
     @property
     def threshold(self) -> float:
@@ -168,6 +177,7 @@ class Frozen:
             "measured": len(self.measured),
             "eligible": sum(1 for m in self.measured if m.get("eligible")),
             "gone_at": None if self.gone_at is None else self.gone_at.astimezone(KST).isoformat(),
+            "inactive_at": None if self.inactive_at is None else self.inactive_at.astimezone(KST).isoformat(),
         }
 
 
@@ -180,14 +190,16 @@ def frozen(db: sqlite3.Connection, evaluation: int, cycle: int) -> Frozen | None
     table = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'practice_cycles'"
     if db.execute(table).fetchone() is None:
         return None
+    have = {r[1] for r in db.execute("PRAGMA table_info(practice_cycles)")}
+    inactive = "inactive_at" if "inactive_at" in have else "NULL"  # a store the trader has not opened since
     row = db.execute(
-        "SELECT chosen_at, threshold, pick, measured, gone_at FROM practice_cycles"
+        f"SELECT chosen_at, threshold, pick, measured, gone_at, {inactive} FROM practice_cycles"
         " WHERE evaluation = ? AND cycle = ?",
         (evaluation, cycle),
     ).fetchone()
     if row is None:
         return None
-    chosen_at, threshold, pick, measured, gone_at = row
+    chosen_at, threshold, pick, measured, gone_at, inactive_at = row
     return Frozen(
         evaluation,
         cycle,
@@ -195,6 +207,7 @@ def frozen(db: sqlite3.Connection, evaluation: int, cycle: int) -> Frozen | None
         replace(pick_of(json.loads(pick)), threshold=float(threshold)),
         tuple(json.loads(measured)),
         None if gone_at is None else datetime.fromisoformat(gone_at),
+        None if inactive_at is None else datetime.fromisoformat(inactive_at),
     )
 
 
@@ -238,11 +251,14 @@ def keep(
     return kept
 
 
-def rest(db: sqlite3.Connection, evaluation: int, cycle: int, at: datetime) -> None:
-    """The cycle's practice cell found gone at ``at`` (module doc "Gone"), once."""
+def rest(db: sqlite3.Connection, evaluation: int, cycle: int, at: datetime, why: str = GONE) -> None:
+    """The cycle's practice cell found gone at ``at`` (module doc "Gone"), or not active (``why``
+    ``PREDICTOR_INACTIVE``, #603), once."""
+    column = {GONE: "gone_at", PREDICTOR_INACTIVE: "inactive_at"}[why]
     with db:
         db.execute(
-            "UPDATE practice_cycles SET gone_at = ? WHERE evaluation = ? AND cycle = ? AND gone_at IS NULL",
+            f"UPDATE practice_cycles SET {column} = ? WHERE evaluation = ? AND cycle = ?"
+            f" AND {column} IS NULL",
             (at.astimezone(KST).isoformat(), evaluation, cycle),
         )
 
@@ -265,11 +281,14 @@ def measure(
     rules: Rules,
     target_version: int,
     thresholds: Sequence[float] = THRESHOLDS,
+    evaluation: review.Evaluation | None = None,
 ) -> tuple[list[Measured], Replayer | None]:
     """Each of ``picks`` replayed alone a share at each of ``thresholds`` (module doc "Which"), on its
     kind's days (``days_of``), from the engine's database (read-only) and the recordings under
     ``data_dir``, by ``rules``: one pass of the replay for them all (#480: ``Replayer.run`` measures
-    several cells alone; a pass a pick before). With the replayer, for its counts."""
+    several cells alone; a pass a pick before), the days a pick would have held a cell off left out
+    (#603: its predictor not active, for the rest of ``evaluation``'s review cycle). With the replayer,
+    for its counts."""
     days = [d for p in picks for d in days_of.get(p.kind, ())]
     if not days:
         return [], None
@@ -285,6 +304,7 @@ def measure(
             rules=rules,
             target_version=target_version,
             thresholds=thresholds,
+            evaluation=evaluation,
         )
         done = replayer.run([], alone=[p.cell for p in picks])
         tried = [
@@ -346,6 +366,7 @@ async def freeze_now(
             sessions,
             rules=Rules.of(trader, settings.fee_rate),
             target_version=settings.target_version,
+            evaluation=evaluation,
         )
         best = ranked(tried)
         if not best:
@@ -407,15 +428,25 @@ def said_chosen(kept: Frozen, cycle: review.Cycle) -> str:
     )
 
 
+def resting(kept: Frozen) -> str:
+    """Why the cycle's practice cell rests, as the job's comment and the report say it (module doc
+    "Gone"): its predictor gone, or not active (#603); empty while it does not."""
+    out = ""
+    if kept.gone_at is not None:
+        out += f" · {kept.gone_at.astimezone(KST):%Y-%m-%d %H:%M}에 예측자가 없어져(gone) 주기 끝까지 쉰다"
+    if kept.inactive_at is not None:
+        out += (
+            f" · {kept.inactive_at.astimezone(KST):%Y-%m-%d %H:%M}에 예측자가 active가 아니어서"
+            f"({PREDICTOR_INACTIVE}) 주기 끝까지 쉰다"
+        )
+    return out
+
+
 def said_kept(kept: Frozen, cycle: review.Cycle) -> str:
-    gone = (
-        ""
-        if kept.gone_at is None
-        else f" · {kept.gone_at.astimezone(KST):%Y-%m-%d %H:%M}에 예측자가 없어져(gone) 주기 끝까지 쉰다"
-    )
     return (
         f"{HEAD}: {_span(cycle)}의 연습 칸은 {_cell(kept.pick.kind, kept.pick.predictor, kept.pick.role)}"
-        f" · θ {kept.threshold:g} 그대로다({kept.chosen_at.astimezone(KST):%Y-%m-%d %H:%M}에 고름){gone}"
+        f" · θ {kept.threshold:g} 그대로다({kept.chosen_at.astimezone(KST):%Y-%m-%d %H:%M}에 고름)"
+        f"{resting(kept)}"
     )
 
 
