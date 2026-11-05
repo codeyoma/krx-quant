@@ -137,7 +137,7 @@ uv run krx-quant rollback granger      # 한 단계(직전 모델로) 되돌리�
 ```
 - 서버에서는 수집기가 매 거래일 21:30에 밤 학습을 돌리고, 다음 거래일 08:00에 이긴 모델로 바꾼다([docs/operations.md](docs/operations.md)).
 - 서버는 매일 밤 22:30부터, 밤 학습이 끝난 뒤 때가 된 예약 작업(자동 매매의 밤 리포트, 녹화 10거래일 뒤의 사전 검증 등)을 하나씩 돌리고 결과를 GitHub 이슈 댓글로 남긴다([docs/operations.md](docs/operations.md#예약-작업-215), #215). **바뀜** (2026-11-04, #506): 예의 "진단" → 밤 리포트. 이유: 진단 작업(`diagnose-203-187`)은 할 일을 마치고 `JOBS`에서 빠졌다(#505).
-- 서버는 매일 06:00(KST)에 main의 새 커밋을 받아 스스로 다시 띄운다. 새 버전이 뜨지 않으면 이전 커밋으로 되돌리고 텔레그램으로 알린다(`deploy/auto-update.sh`).
+- 서버는 매일 06:00(KST)에 main의 새 커밋을 받아 스스로 다시 띄운다. 그 커밋에서 `ci` workflow가 통과했을 때만 받고, 아니면 돌던 버전을 그대로 둔다(#541). 새 버전이 뜨지 않으면 이전 커밋으로 되돌리고 텔레그램으로 알린다(`deploy/auto-update.sh`).
 - 서버의 OS가 멈추면 커널이 스스로 재부팅하고(`deploy/kernel-recovery.sh`), 그래도 Lightsail의 인스턴스 상태 검사가 15분 넘게 실패하면 GitHub Actions의 watchdog(`.github/workflows/server-watchdog.yml`, `scripts/server_watchdog.py`)이 인스턴스를 재부팅하고 이슈로 알린다([docs/operations.md](docs/operations.md#서버가-멈추면-385), #385).
 - 엔진 API는 `http://127.0.0.1:8080/v1/status`처럼 읽는다(`KRX_API_HOST`, `KRX_API_PORT`). 서버에서는 Tailscale 주소로만 열린다. 엔드포인트와 예측·채점 규칙은 [docs/engine-api.md](docs/engine-api.md)에 있다. 그날의 매크로 지표와 국면은 `/v1/macro`다. 예측, 합의, 채점, KIS 상태, 알고리즘 상태 변경은 WebSocket `/v1/stream`으로 바로 받는다.
 - 응답 형식은 JSON 스키마 [schemas/engine-api-v1.json](schemas/engine-api-v1.json)이 정한다. 화면과의 계약이다. 필드를 바꾸면 스키마도 고쳐야 계약 테스트(`tests/test_api_contract.py`)를 지난다.

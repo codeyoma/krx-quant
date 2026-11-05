@@ -10,7 +10,11 @@ The check replays the last ``PREVALIDATION_DAYS`` recorded trading days, one at 
 with every registered algorithm, into a database of its own
 (``state/prevalidation-<name>.sqlite3``): nothing reaches the official record. The
 algorithm is retrained before each day on its own window of the days before it
-(walk-forward), never on the day it predicts; the others run the models the server runs.
+(walk-forward), never on the day it predicts; the others run the models the server runs. One
+the engine does not run because its latest report refused the code, target and inputs it has
+(``left_out``, #544) is not replayed beside it: the live engine predicts nothing of it, and the
+night does not train it either. The candidate itself always runs: a run again by hand judges it
+anew.
 A registry that fails the registration check is not replayed at all (RegistrationError).
 It passes when all of these hold:
 
@@ -119,9 +123,9 @@ from krx_quant.kind_stats import entry_json as kind_entry_json
 from krx_quant.kind_stats import leaderboard as kind_leaderboard
 from krx_quant.kind_stats import split as kind_split
 from krx_quant.kinds import DIRECTION, Kind, table_baselines
-from krx_quant.lifecycle import CLONE_CORRELATION, correlations, most_correlated
+from krx_quant.lifecycle import CLONE_CORRELATION, Standing, Status, correlations, most_correlated
 from krx_quant.market_calendar import MarketCalendar, calendar_store
-from krx_quant.predictions import PredictionStore
+from krx_quant.predictions import DB_NAME, PredictionStore, read_statuses
 from krx_quant.replay import recorded_events, replay_recorded, sqlite_files
 from krx_quant.sample_store import STORE_DIR, NightReads, SampleStore, night_reads, stored_night_day
 from krx_quant.stats import (
@@ -335,17 +339,62 @@ def refusals(
     def refusal(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> Refusal | None:
         if algorithm.name in REGISTERED_BEFORE:
             return None
-        last = last_report(state_dir, algorithm, target_version, kinds)
-        if last is None or not last.judged or last.passed:
-            return None
-        report = _read_report(state_dir, algorithm.name) or {}
-        judged = {
-            "prevalidated_at": report.get("prevalidated_at"),
-            **judging(algorithm, target_version, kinds),
-        }
-        return Refusal(json.dumps(judged, sort_keys=True), failed_checks(report))
+        return _refusal(state_dir, algorithm, target_version, kinds)
 
     return refusal
+
+
+def left_out(
+    state_dir: Path,
+    statuses: Mapping[str, Standing],
+    target_version: int = 1,
+    kinds: Sequence[Kind] = KINDS,
+) -> Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], Refusal | None]:
+    """The refusal that leaves an algorithm out of the night's training and of the replays beside a
+    pre-validation's candidate (#544): its latest report judged the code, target and inputs it has
+    now and refused them (``LastReport.judged``), and the engine does not run it (by ``statuses``,
+    the engine's): not enrolled, retired (a refused revision retires it, #454; so one registered
+    before pre-validation is left out too), or a daily kind's on probation, which runs only while
+    ``admits`` lets it (#264). None for any other: one the engine runs whatever its report says (an
+    enrolled bar-close one, a report run again by hand refused) trains and replays as before. A
+    change of its code, target or inputs makes the report stale: it trains again from that night,
+    and waits for a new pre-validation."""
+
+    def refusal(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> Refusal | None:
+        standing = statuses.get(algorithm.name)
+        if standing is None:
+            if algorithm.name in REGISTERED_BEFORE:
+                return None  # it runs without a report
+        elif standing.status is not Status.RETIRED and not (
+            standing.status is Status.PROBATION and _daily(algorithm)
+        ):
+            return None
+        return _refusal(state_dir, algorithm, target_version, kinds)
+
+    return refusal
+
+
+def _refusal(
+    state_dir: Path,
+    algorithm: Algorithm | KindAlgorithm | DailyAlgorithm,
+    target_version: int,
+    kinds: Sequence[Kind],
+) -> Refusal | None:
+    """The refusal of ``algorithm``'s latest report, if it judged the code, target and inputs it has
+    now and did not pass."""
+    last = last_report(state_dir, algorithm, target_version, kinds)
+    if last is None or not last.judged or last.passed:
+        return None
+    report = _read_report(state_dir, algorithm.name) or {}
+    judged = {
+        "prevalidated_at": report.get("prevalidated_at"),
+        **judging(algorithm, target_version, kinds),
+    }
+    return Refusal(json.dumps(judged, sort_keys=True), failed_checks(report))
+
+
+def _daily(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> bool:
+    return daily_kind_named(str(getattr(algorithm, "kind", DIRECTION))) is not None
 
 
 def judging(
@@ -427,7 +476,7 @@ def inputs_of(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> dict[str
     """The versions a daily kind's algorithm's inputs have now (#264, ``daily_features``),
     feature by feature, which its report must have been on; none for the other kinds' (their
     features have no version)."""
-    if daily_kind_named(str(getattr(algorithm, "kind", DIRECTION))) is None:
+    if not _daily(algorithm):
         return {}
     return input_versions(algorithm.features)
 
@@ -599,7 +648,24 @@ async def prevalidate(
         # horizon ladder alone doubles the kinds' writes). The direction's algorithms all run,
         # as their CPU comes first in the budget.
         own = [k for k in kinds if k.name == DIRECTION or (kind is not None and k.name == kind.name)]
-        own_algorithms = [a for a in kind_algorithms if kind is not None and a.kind == kind.name]
+        # Beside the candidate, the algorithms the engine runs (#544): not those it does not run
+        # for a refusal of the code they have (``left_out``). The candidate runs whatever its own
+        # last report says: a run again by hand judges it anew.
+        out = left_out(
+            settings.state_dir, read_statuses(settings.state_dir / DB_NAME), settings.target_version, kinds
+        )
+        of_kind = [a for a in kind_algorithms if kind is not None and a.kind == kind.name]
+        replayable: list[Algorithm | KindAlgorithm] = [*algorithms, *of_kind]
+        refused = {a.name for a in replayable if a is not candidate and out(a) is not None}
+        beside = [a for a in algorithms if a.name not in refused]
+        own_algorithms = [a for a in of_kind if a.name not in refused]
+        if refused:
+            log.info(
+                "%s: replayed without %s: their pre-validation refused the code they have, and the"
+                " engine does not run them (#544)",
+                name,
+                ", ".join(sorted(refused)),
+            )
         measured = _measured(candidate) if kind is None else None  # a direction algorithm's (#283)
         # The days the nights stored (#370) are keyed by what every registry reads.
         night = night_reads(algorithms, kind_algorithms, kinds)
@@ -607,7 +673,7 @@ async def prevalidate(
             settings,
             candidate,
             kind,
-            algorithms,
+            beside,
             own_algorithms,
             own,
             available,
@@ -620,10 +686,10 @@ async def prevalidate(
         before, on_days = earlier_runs(settings.state_dir, name, replayed)
         tries = on_days + 1  # this run among those on any of these days: the bar it is held to
         if kind is None:
-            others = [a.name for a in algorithms if a is not candidate]
+            others = [a.name for a in beside if a is not candidate]
             result = _judge(settings, candidate, others, replayed, models, db, now, tries)
         else:
-            same = [a.name for a in kind_algorithms if a.kind == kind.name and a is not candidate]
+            same = [a.name for a in own_algorithms if a is not candidate]
             result = _judge_kind(settings, candidate, kind, same, replayed, models, db, now, tries)
         result = replace(result, earlier_runs=before, earlier_on_these_days=on_days)
         if measured is not None:

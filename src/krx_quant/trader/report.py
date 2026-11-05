@@ -31,8 +31,9 @@ period, ``live.ramp``), with a KIS day's comparison of its orders with KIS's; th
 reached that day, a cumulative halt still holding, the pause in force and the pauses, resumes and
 re-arms asked for; the last trading days' ledger. A mock day's practice (#427,
 ``KRX_TRADER_MOCK_PRACTICE``) is apart: its trades, the predictions the book read on its practice
-pick, the practice cell of the day's pick and its pairs with the practice shadow, each said so
-(``연습``); the ledger and the limits count the champion's KIS trades alone, never the practice's
+pick and the practice cell of the day's pick, each said so (``연습``; its pairs with the practice
+shadow are no more since #548, ``gap.py``); the ledger and the limits count the champion's KIS trades
+alone, never the practice's
 (#533): the practice's P&L and the account's (both) are said beside them. The practice cell is the
 one kept for the day's review cycle (#474, ``practice.py``): its θ, when it was chosen and its
 replayed figures; the night's choice of the next cycle's is in the re-fit's output below
@@ -950,8 +951,6 @@ def _gap_section(gap: Mapping[str, Any], mode: str = "mock") -> str:
     ]
     for p in gap["pairs"]:
         cell = f"{_hms(p['bar_close'])[:5]} {p['kind']} {p['predictor']}"
-        if p.get("practice"):  # #427: the practice trade against the practice shadow's
-            cell = f"{cell}(연습)"
         if p["mock"] is None:
             lines.append(f"- {cell}: 그림자만 샀다({_end(p['shadow'])}) · KIS는 사지 않았다")
         elif p["shadow"] is None:
