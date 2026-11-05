@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -132,6 +133,15 @@ WS_ALERT_AFTER_SECONDS = 30.0
 
 # How often buffered partitions whose time limit has passed are flushed.
 _TICK_SECONDS = 1.0
+
+# How long a thread holds the GIL before another that waits for it may take it, in the collector
+# (#538; Python's default is 5 ms). The event loop reads KIS and streams the quotes to the trader
+# while the algorithms compute in worker threads at each bar close: each store call and socket read
+# on the loop lets go of the GIL, and getting it back waited about that long for each thread
+# computing, so a bar close's records held the loop for seconds. Measured with six threads
+# computing in pure Python: the loop's longest stretch without a turn at a bar close went from
+# 2.2 s (median) to 0.5 s; the threads' own work slowed by under 10%.
+GIL_SWITCH_SECONDS = 0.0005
 
 # Feeds whose frames KIS sends short of fields now and then, with no rule to read them by: such
 # a frame is kept raw only, as any frame that cannot be normalized, and counted (``FeedHealth``),
@@ -268,10 +278,20 @@ async def run_collector(
     settings: Settings, *, stop: asyncio.Event, clock: Clock | SessionClock | None = None
 ) -> None:
     """Record the configured feeds and predict from them until ``stop`` is set, then flush
-    and return.
+    and return. Meanwhile the GIL changes hands every ``GIL_SWITCH_SECONDS`` (#538); after, at the
+    interval it had before.
 
     ``clock`` is the Session Clock, or a function giving the time (then sleeping is real).
     """
+    switch = sys.getswitchinterval()
+    sys.setswitchinterval(GIL_SWITCH_SECONDS)
+    try:
+        await _collect(settings, stop=stop, clock=clock)
+    finally:
+        sys.setswitchinterval(switch)
+
+
+async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | SessionClock | None) -> None:
     if isinstance(clock, SessionClock):
         session_clock: SessionClock = clock
     else:
@@ -321,6 +341,8 @@ async def run_collector(
             settings.fee_rate,
         ),
         daily_feature_names=DAILY_FEATURES,
+        # A bar close that holds the event loop over a second says what held it (#538).
+        watch_loop=True,
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
     # Held while it runs: a rescore refuses to run beside it (#168). One running already

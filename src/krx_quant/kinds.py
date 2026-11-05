@@ -147,7 +147,13 @@ class QuoteLog:
     A window reads its minutes of the log by bisection while everything came in receipt order,
     as it does live and in a replay: the log holds the longest kind's window and more (an hour
     with the barrier's horizon ladder, #263), so scanning all of it for each window would cost
-    that hour every time. Anything received out of order falls back to a scan."""
+    that hour every time. Anything received out of order falls back to a scan. Forgetting cuts
+    the head of each list at the same bisection (#538): rebuilding the hour it keeps cost every
+    bar close a pass over it.
+
+    Live, the log is read on the event loop and an answer made off it (#538): ``take`` copies a
+    window's quotes (a slice, at C speed), and ``follow`` makes the window of them anywhere, as
+    ``window`` does in one step."""
 
     def __init__(self) -> None:
         self._quotes: list[Quote] = []
@@ -180,9 +186,33 @@ class QuoteLog:
 
     def forget(self, before: datetime) -> None:
         """Drop what was received before ``before``: no window kept reads it."""
+        if self._ordered:
+            del self._quotes[: bisect_left(self._quotes, before, key=_received)]
+            del self._rests[: bisect_left(self._rests, before)]
+            del self._trades[: bisect_left(self._trades, before, key=_at)]
+            return
         self._quotes = [q for q in self._quotes if q.received_at >= before]
         self._rests = [r for r in self._rests if r >= before]
         self._trades = [t for t in self._trades if t[0] >= before]
+
+    def take(self, start: datetime, end: datetime) -> Taken:
+        """What was received in [``start``, ``end``), copied: the quotes (crossed ones too), the
+        REST snapshots and the trades."""
+        if self._ordered:
+            quotes = self._quotes[
+                bisect_left(self._quotes, start, key=_received) : bisect_left(
+                    self._quotes, end, key=_received
+                )
+            ]
+            rests = self._rests[bisect_left(self._rests, start) : bisect_left(self._rests, end)]
+            trades = self._trades[
+                bisect_left(self._trades, start, key=_at) : bisect_left(self._trades, end, key=_at)
+            ]
+        else:
+            quotes = [q for q in self._quotes if start <= q.received_at < end]
+            rests = [r for r in self._rests if start <= r < end]
+            trades = [t for t in self._trades if start <= t[0] < end]
+        return Taken(quotes, bool(rests), trades)
 
     def window(
         self,
@@ -199,33 +229,10 @@ class QuoteLog:
         crossed: bool = False,
         horizon: timedelta = WINDOW,
     ) -> Followed:
-        """The window from ``bar_close``, by the touch target's rules: the quotes received in
-        [t, t + ``horizon``) (four minutes, or a kind's own, #263), the crossed ones only with
-        ``crossed`` (a kind that counts them, #187); unscorable without a mid-point at t, with a
-        REST snapshot in it, or with sixty seconds or more without one of those quotes (from t,
-        between two, or up to the end). ``cost`` and ``width`` go with it as given (``Followed``).
-        """
-        start, end = bar_close, bar_close + horizon
-        if self._ordered:
-            got = self._quotes[
-                bisect_left(self._quotes, start, key=_received) : bisect_left(
-                    self._quotes, end, key=_received
-                )
-            ]
-            rests = self._rests[bisect_left(self._rests, start) : bisect_left(self._rests, end)]
-            traded = self._trades[
-                bisect_left(self._trades, start, key=_at) : bisect_left(self._trades, end, key=_at)
-            ]
-        else:
-            got = [q for q in self._quotes if start <= q.received_at < end]
-            rests = [r for r in self._rests if start <= r < end]
-            traded = [t for t in self._trades if start <= t[0] < end]
-        quotes = tuple(q for q in got if crossed or not q.crossed)
-        rest = bool(rests)
-        trades = tuple(traded)
-        silent = went_silent(start, end, [q.received_at for q in quotes])
-        unscorable = MISSING_MID if anchor is None else REST_QUOTES if rest else SILENT if silent else None
-        return Followed(
+        """The window from ``bar_close``, by the touch target's rules (``follow``): the quotes
+        received in [t, t + ``horizon``) (four minutes, or a kind's own, #263)."""
+        return follow(
+            self.take(bar_close, bar_close + horizon),
             symbol,
             bar_close,
             anchor,
@@ -233,13 +240,61 @@ class QuoteLog:
             k,
             bid_start,
             ask_start,
-            quotes,
-            trades,
-            unscorable,
-            cost,
-            width,
-            horizon,
+            cost=cost,
+            width=width,
+            crossed=crossed,
+            horizon=horizon,
         )
+
+
+@dataclass(frozen=True)
+class Taken:
+    """A window's minutes of a ``QuoteLog``, copied (``QuoteLog.take``): its quotes in the order
+    received (crossed ones too), whether a REST snapshot came, and its trades."""
+
+    quotes: Sequence[Quote]
+    rest: bool
+    trades: Sequence[tuple[datetime, float]]
+
+
+def follow(
+    taken: Taken,
+    symbol: str,
+    bar_close: datetime,
+    anchor: float | None,
+    tick: float | None,
+    k: int | None,
+    bid_start: float | None,
+    ask_start: float | None,
+    *,
+    cost: float | None = None,
+    width: Width | None = None,
+    crossed: bool = False,
+    horizon: timedelta = WINDOW,
+) -> Followed:
+    """The window from ``bar_close`` of what was ``taken`` in its minutes, by the touch target's
+    rules: the crossed quotes only with ``crossed`` (a kind that counts them, #187); unscorable
+    without a mid-point at t, with a REST snapshot in it, or with sixty seconds or more without
+    one of those quotes (from t, between two, or up to the end). ``cost`` and ``width`` go with it
+    as given (``Followed``)."""
+    quotes = tuple(taken.quotes) if crossed else tuple(q for q in taken.quotes if not q.crossed)
+    silent = went_silent(bar_close, bar_close + horizon, [q.received_at for q in quotes])
+    unscorable = MISSING_MID if anchor is None else REST_QUOTES if taken.rest else SILENT if silent else None
+    return Followed(
+        symbol,
+        bar_close,
+        anchor,
+        tick,
+        k,
+        bid_start,
+        ask_start,
+        quotes,
+        tuple(taken.trades),
+        unscorable,
+        cost,
+        width,
+        horizon,
+    )
 
 
 def _received(q: Quote) -> datetime:

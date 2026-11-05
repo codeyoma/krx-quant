@@ -76,6 +76,30 @@ def test_a_window_reads_its_quotes_by_bisection_or_by_a_scan_when_one_came_late(
         assert len(log.window(SYMBOL, t, 81_250.0, 100, 2, 81_200, 81_300, horizon=TEN).quotes) == 6
 
 
+def test_forgetting_keeps_what_came_from_then_on_whether_the_log_came_in_order_or_not() -> None:
+    """An ordered log cuts its head at the bisection (#538), one with a late quote scans: both
+    keep the quotes, REST snapshots and trades received at or after the time forgotten before."""
+    t = at("09:31:00")
+    ordered, late = QuoteLog(), QuoteLog()
+    for seconds in (0, 30, 60, 90, 240, 300):
+        ordered.quote(t + timedelta(seconds=seconds), 81_200, 81_300, None, None, False)
+    for seconds in (0, 60, 30, 90, 300, 240):
+        late.quote(t + timedelta(seconds=seconds), 81_200, 81_300, None, None, False)
+    for log in (ordered, late):
+        log.quote(t + timedelta(seconds=45), None, None, None, None, True)
+        log.quote(t + timedelta(seconds=95), None, None, None, None, True)
+        log.trade(t + timedelta(seconds=50), 81_300)
+        log.trade(t + timedelta(seconds=100), 81_200)
+        log.forget(t + timedelta(seconds=60))
+        taken = log.take(t, t + TEN)
+        assert sorted(q.received_at for q in taken.quotes) == [
+            t + timedelta(seconds=s) for s in (60, 90, 240, 300)
+        ]
+        assert taken.rest, "the snapshot at 95 s stays"
+        assert taken.trades == [(t + timedelta(seconds=100), 81_200)]
+        assert not log.take(t, t + timedelta(seconds=60)).rest, "the one at 45 s went"
+
+
 async def test_a_longer_kind_is_answered_when_its_own_window_is_over(tmp_path: Path) -> None:
     """Input: the book at 81,200 / 81,300 (mid 81,250), from 09:32:30 at 81,400 / 81,500 (mid
     81,450). Output: ten-minute windows that reach past 09:32:30 end above their bar close's mid

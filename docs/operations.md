@@ -1732,6 +1732,23 @@ mock으로 시작한 날부터 비용 지도에서 시장가 왕복으로 통과
 - 로그(Loki `{service="krx-quant", process="trader"}`): WARNING `trader: the collector's quotes stalled: none for more than 5s (the last at HH:MM:SS): no new entry until they return`, WARNING `trader: the quotes are back at HH:MM:SS, Ns after the last: on the stream again`. mock은 INFO `trader: reading KIS's best quotes over REST every 5s while the quotes stall (trade N)`(live는 `every 2s`, #464), `trader: selling trade N on KIS (<이유>, on KIS's REST quotes: the quotes stalled)`. 읽기 실패는 WARNING `trader: could not read KIS's best quotes over REST (…); read again every 5s`(live는 `every 2s`)를 한 번 남기고(다시 읽히면 INFO `trader: KIS's best quotes read over REST again`) 다음 차례에 다시 읽는다. 주문 실패가 아니라 `failures`에 남지 않고 새 진입을 멈추지 않는다. 끊김 중에 멈췄던 trader가 같은 날 다시 뜨면 WARNING `trader: the quotes had stalled since HH:MM:SS when the trader stopped: no new entry until they return`이고 다시 알리지 않는다.
 - 할 일: 짧은 끊김(수집기의 07:20 재시작은 장 밖이다, 메모리 부족 재시작, 연결 끊김)은 할 일이 없다: 돌아오면 저절로 다시 산다. 몇 분 넘게 이어지면 수집기를 본다: `docker compose ps engine`, `docker compose logs --tail 50 engine`, `curl -s http://krx-quant:8080/v1/status | jq .kis`(6장 "장애 대응"). trader의 연결만 끊겼으면 trader 로그에 `quotes: … ; connecting again`이 있다. 수집기가 호가 리스너를 열지 못했으면 위 `[장애] 자동 매매의 호가 스트림을 열지 못했습니다`가 먼저 온다.
 - 호가 리스너를 끈 서버(`KRX_QUOTES_PORT=off`)에서는 거래일마다 09:00:05쯤 끊김 알림이 한 번 온다(trader가 사지 않는 것은 그대로다).
+- 봉 마감 바로 뒤(마지막 호가가 xx:xx:59)의 끊김은 엔진이 봉 마감에서 이벤트 루프를 쥔 것이다. 같은 분의 엔진 WARNING이 무엇이 얼마나 쥐었는지 말한다(아래 "봉 마감의 이벤트 루프 막힘 (#538)").
+
+#### 봉 마감의 이벤트 루프 막힘 (#538)
+
+수집기의 이벤트 루프 하나가 KIS WebSocket을 읽고, trader에게 호가를 보내고(`/v1/quotes`), 엔진 API에 답하고, 봉 마감마다 예측하고 채점한다. 봉 마감의 일이 루프를 5초 넘게 쥐면 그동안 받은 KIS 프레임이 늦게 읽히고(받은 시각이 그만큼 늦게 찍힌다) trader의 호가가 끊긴다. 2026-11-04에 13번, 11-05에 26번 그랬다(대부분 봉 마감 바로 뒤, 5–6초). 규칙과 잰 값은 [design.md](design.md) 5장 "시간 예산"의 "이벤트 루프(#538)"에 있다.
+
+- 엔진은 봉 마감마다 루프의 heartbeat가 50 ms마다 차례를 받는지 본다(`loop_watch.py`, 장중 엔진만). 차례 없이 1초(`loop_watch.LIMIT_SECONDS`) 넘게 간 봉 마감은 WARNING 한 줄을 남긴다(텔레그램은 보내지 않는다):
+
+  ```
+  bar close 2026-11-06 10:15 held the event loop 5.21s (over 1s): records 3.10s, the kinds' baselines 1.60s, other 0.51s
+  ```
+
+  - `held the event loop N s`: 그 봉 마감에서 루프가 차례 없이 간 가장 긴 시간(50 ms 안쪽으로 잰다). 봉 마감이 아니라 채점·검토만 한 차례면 `run …`이다.
+  - 그 뒤는 그동안 루프에서 돈 봉 마감의 단계와 그 안에서 쓴 초다(긴 것부터, 0.01초 넘는 것만): `scoring`(도달 정답과 채점 저장), `the kinds' answers`(다른 종류의 창 복사와 정답 저장. 정답 계산은 작업 스레드라 들지 않는다), `the inputs`(입장 확인, 스냅숏, 피처, 방향의 기준 예측), `records`(예측 저장과 스트림에 알리기. 기준 예측과 알고리즘마다), `SMT`, `the kinds' baselines`, `consensus`(빠른·최종 합의와 신호). `other`는 그 시간에서 단계들을 뺀 나머지다: 루프의 다른 일(엔진 API 요청, KIS 프레임 처리, 다른 작업), 또는 단계 밖의 봉 마감 일.
+  - 같은 분에 trader의 `quotes stalled`가 있는지 맞춰 본다. 단계가 `records`나 `consensus`이고 알고리즘들이 도는 동안이면 저장소 호출이 GIL을 기다린 것이다(수집기는 GIL을 0.5 ms마다 넘긴다, `collector.GIL_SWITCH_SECONDS`). `other`가 크면 그 시각의 엔진 API 요청(화면)이나 다른 작업을 본다.
+- Loki: `{service="krx-quant", process="engine"} |= "held the event loop"`. 하루 수: `sum(count_over_time({service="krx-quant", process="engine"} |= "held the event loop" [1d]))`. 끊김과 함께 보려면 `{service="krx-quant"} |~ "held the event loop|quotes stalled"`.
+- 할 일: 하루 몇 번이고 1–2초면 없다. 5초 가까운 줄이 잦으면 가장 큰 단계를 이슈로 남긴다(무엇을 루프 밖으로 옮기거나 가볍게 할지). 알림 기준(trader의 5초)은 바꾸지 않는다(#538).
 
 #### 실전 (#408)
 
