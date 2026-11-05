@@ -36,7 +36,9 @@ with its reason:
 - nothing is held, nor waiting to be bought (``holding``): one position at a time;
 - no cell ranked above it buys on the same bar close (``outranked``);
 - the risk rules let the book buy (#471, ``risk_held``, module doc "Risk rules"): ``buy_limit``,
-  ``cooldown``.
+  ``cooldown``;
+- a practice pick's bar close is at least ``Rules.practice_spacing`` after the bar close of the
+  book's last practice buy order that day (#598, ``spaced``, module doc "Practice"): ``spacing``.
 
 **Priority.** Of the rises of one bar close, the cell ranked first (``Selection.picks``: the
 champion policy's order, #399; picks without a policy, the greatest hit rate's lower bound less
@@ -85,6 +87,17 @@ in place of a loss budget, by the same risk rules (#471: the champion's KIS book
 trades they are). No loss limit counts its P&L, realized or open (#533, ``limits.py`` "The
 practice"); the cash does. Its paper shadow is a book of its own (``practice``), as the champion's
 shadow is (``shadow``), so that the champion policy's shadow never holds a practice position.
+
+Its buys are spaced (#598, ``spaced``): a practice rise buys only at a bar close at least
+``Rules.practice_spacing`` (``KRX_TRADER_MOCK_PRACTICE_SPACING_MINUTES``, 15 minutes) after the bar
+close of the book's last practice buy order that day (``store.last_practice_buy``: the KIS book's each
+practice buy it sent or tried to send, as the day's buy orders count them; a paper book's each it
+filled), else it is skipped ``spacing``. A buy given up before its order (``target_reached``,
+``no_quote``) spaces nothing. By the bar closes, on the minute: the read's delay moves nothing, and a
+restart goes on from the store. No champion's, challenger's or shadow's pick is spaced, and the re-fit's
+replay, which replays policies alone, knows nothing of it. On 2026-11-04 and 11-05 the practice cell
+(the direction's ``baseline-persist``, its rise always 1.00) bought its 20 by 13:14 and 11:04, five
+times in a row from 09:11 on 11-05, so that no practice trade reached the afternoon's time exits.
 
 Its reference price is the prediction's ``anchor`` (the bar close's integrated mid-point), the
 target ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k for the direction), the time
@@ -176,6 +189,7 @@ from krx_quant.trader import (
     EXIT_BEFORE_AUCTION,
     LOSS_STREAK,
     PAPER,
+    PRACTICE_SPACING,
     RISK_PER_TRADE_PERCENT,
     SYMBOL,
     THRESHOLD,
@@ -217,6 +231,8 @@ TARGET_REACHED, NO_SHARES, NO_QUOTE, RESTARTED = "target_reached", "no_shares", 
 BAD_STOP = "bad_stop"  # its stop not below the ask, or not a price (#471, ``size``)
 # The risk rules hold new buys (#471, ``risk_held``): the day's buy orders, the losses in a row.
 BUY_LIMIT, COOLING_DOWN = "buy_limit", "cooldown"
+# A practice buy too soon after the day's last (#598, ``spaced``).
+SPACING = "spacing"
 BUY, SKIP = "buy", "skip"
 # The status of a prediction the engine did not make for a VI (``engine._record_not_predicted``).
 VI_STATUS = "vi"
@@ -234,6 +250,8 @@ class Rules:
     loss_streak: int = LOSS_STREAK
     cooldown: timedelta = COOLDOWN
     daily_buys: int = DAILY_BUY_ORDERS
+    # The least time between two practice buys' bar closes (#598, ``spaced``): the practice's alone.
+    practice_spacing: timedelta = PRACTICE_SPACING
     fee_rate: float = 0.00015  # the commission per side, as a fraction
     entry_after_open: timedelta = ENTRY_AFTER_OPEN
     exit_before_auction: timedelta = EXIT_BEFORE_AUCTION
@@ -263,6 +281,7 @@ class Rules:
             loss_streak=trader.loss_streak,
             cooldown=timedelta(minutes=trader.cooldown_minutes),
             daily_buys=trader.daily_buy_orders,
+            practice_spacing=timedelta(minutes=trader.practice_spacing_minutes),
             fee_rate=fee_rate,
         )
 
@@ -512,6 +531,15 @@ def risk_held(rules: Rules, at: datetime, buys: int, exits: Sequence[tuple[datet
         return BUY_LIMIT
     began, _ = cooldowns(rules, exits)
     return COOLING_DOWN if began and at < began[-1][1] else None
+
+
+def spaced(rules: Rules, bar_close: datetime, last: datetime | None) -> str | None:
+    """Why the practice's spacing holds a practice rise of ``bar_close`` (#598, module doc "Practice"):
+    ``spacing`` when it is less than ``rules.practice_spacing`` after ``last``, the bar close of the
+    book's last practice buy order that day; None if it is not, or none was."""
+    if last is None or bar_close >= last + rules.practice_spacing:
+        return None
+    return SPACING
 
 
 def cooldowns(
@@ -1147,14 +1175,23 @@ class PaperTrader:
 
     def _not_now(self, signal: Signal, at: datetime) -> str | None:
         """Why a rise read or decided at ``at`` buys nothing now: paused or stopped (#396, its status),
-        the quotes stalled (#407), something held or bought (``_held_off``); None if it may buy."""
+        the quotes stalled (#407), something held or bought (``_held_off``), the risk rules (#471), a
+        practice buy's spacing (#598); None if it may buy."""
         if self.status != RUNNING:
             return self.status
         if self._stall is not None:
             return STALLED
         if self._busy():
             return self._held_off(signal)
-        return self._risk(at)
+        return self._risk(at) or self._spacing(signal, at)
+
+    def _spacing(self, signal: Signal, at: datetime) -> str | None:
+        """Why the practice's spacing holds ``signal``'s buy (#598, ``spaced``): of a practice pick alone,
+        from the bar close of the book's last practice buy order of ``at``'s day, as the store has it."""
+        picked = self._picks.get(Cell(signal.kind, signal.predictor))
+        if picked is None or not picked[1].practice or self.rules.practice_spacing <= timedelta(0):
+            return None
+        return spaced(self.rules, signal.bar_close, self.store.last_practice_buy(self.mode, midnight(at)))
 
     def _risk(self, at: datetime) -> str | None:
         """Why the risk rules hold a buy at ``at`` (#471, ``risk_held``): the book's buy orders and

@@ -27,7 +27,11 @@ narrow the capital, never widen it (#393).
   trades, the mock book practises one cell, a share at a time (``desk.Desk``), the cell and its θ
   frozen for each review cycle by the nightly job (#474, ``practice.py``; it chooses none while off). For
   ``KRX_TRADER_MODE=mock`` alone: ``on`` with ``paper`` or ``live`` is a configuration error, checked
-  here, before a live trader falls back to paper (``run.py``).
+  here, before a live trader falls back to paper (``run.py``);
+- ``KRX_TRADER_MOCK_PRACTICE_SPACING_MINUTES`` (#598): the least minutes between two practice buys,
+  from the bar close of the day's last practice buy order to the next one's (15 unless set; from 0,
+  which spaces none: ``paper.spaced``). The practice's pace, no risk rule: ``.env`` may set it either
+  way. Read in every mode, used with the practice alone.
 
 ``KRX_TRADER_KIND`` and ``KRX_TRADER_PREDICTOR`` (#394: the one cell traded) are gone: the cost map
 picks the cells (#395). One still set is not read; the trader says so at its start (``ignored``).
@@ -52,6 +56,7 @@ from krx_quant.trader import (
     MOCK,
     MODES,
     PAPER,
+    PRACTICE_SPACING,
     RISK_PER_TRADE_PERCENT,
     THRESHOLD,
 )
@@ -82,8 +87,10 @@ class TraderSettings:
     engine_url: str = DEFAULT_ENGINE_URL
     poll_seconds: float = 0.5  # how often the engine's database is read for new predictions
     ignored: tuple[str, ...] = ()  # the settings found that are no longer read (``GONE``)
-    # The mock book practises a cell on a day no champion cell trades (#427, ``desk.Desk``).
+    # The mock book practises a cell on a day no champion cell trades (#427, ``desk.Desk``), its buys
+    # this many minutes apart at least (#598).
     mock_practice: bool = False
+    practice_spacing_minutes: float = PRACTICE_SPACING.total_seconds() / 60
 
     @classmethod
     def from_env(
@@ -133,6 +140,16 @@ class TraderSettings:
                 f"KRX_TRADER_MOCK_PRACTICE=on is for KRX_TRADER_MODE=mock alone, not {mode} (#427): the"
                 " practice trades order on KIS's mock server only"
             )
+        spacing = float(
+            _number(
+                values,
+                "KRX_TRADER_MOCK_PRACTICE_SPACING_MINUTES",
+                f"{PRACTICE_SPACING.total_seconds() / 60:g}",
+                float,
+                0.0,
+                None,
+            )
+        )
         return cls(
             mode=mode,
             threshold=float(threshold),
@@ -147,6 +164,7 @@ class TraderSettings:
             engine_url=engine_url,
             ignored=tuple(name for name in GONE if values.get(name, "").strip()),
             mock_practice=practice == ON,
+            practice_spacing_minutes=spacing,
         )
 
 
