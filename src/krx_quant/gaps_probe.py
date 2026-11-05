@@ -44,7 +44,9 @@ the files: it is written when it closes, or without an end when the collector st
 
 It prints counts, times, codes, feed names and keys only, no market value, so its output can go on
 the public issue (the scheduled job ``probe-gaps-344``). It reads files only, beside the running
-collector.
+collector. A raw day the archive pruned on the server, older than 30 days (#607), is still listed (its
+folders stay) and its frames are read back from the Object Store (``raw_days.RawDays``), a day at a
+time: a run over every day downloads the WebSocket frames of each pruned one.
 """
 
 from __future__ import annotations
@@ -67,6 +69,8 @@ from krx_quant.feeds import KRX_TRADE, RAW_SCHEMA, TRADE, WS_FEEDS
 from krx_quant.feeds.base import KST
 from krx_quant.health import Gap, GapKind, Unread, read_batches, read_gaps
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
+from krx_quant.object_store import open_store
+from krx_quant.raw_days import RawDays
 
 TITLE = "WebSocket 결측과 종가 단일가 녹화 (#344)"
 # The collector's raw partitions of WebSocket frames that are not a feed's data: KIS's control
@@ -149,7 +153,8 @@ def groups_of(gaps: Sequence[Gap]) -> list[Group]:
 
 
 def recorded_days(data_dir: Path, now: datetime) -> list[date]:
-    """Every day up to ``now`` with a WebSocket feed's raw frames or with gaps, oldest first."""
+    """Every day up to ``now`` with a WebSocket feed's raw frames or with gaps, oldest first (a raw day
+    pruned on the server too: its folders stay)."""
     days: set[date] = set()
     for layer in ("raw", "gaps"):
         for path in (data_dir / layer).glob("date=*"):
@@ -171,14 +176,14 @@ class Frames:
     before: datetime | None  # the day's last frame before the read, of any feed; None: none
 
 
-def frames(data_dir: Path, day: date, start: datetime, end: datetime, unread: Unread) -> Frames:
+def frames(raw: RawDays, day: date, start: datetime, end: datetime, unread: Unread) -> Frames:
     """The receipt times of the day's WebSocket frames from ``start`` to before ``end``, by feed
     (a feed recorded that day without one there has an empty list), and the day's last frame
     before ``start``, so a silence that began before the read shows its start."""
     by_feed: dict[str, list[datetime]] = {}
     before: datetime | None = None
     for feed in WS_RAW:
-        root = data_dir / "raw" / f"date={day.isoformat()}" / f"feed={feed}"
+        root = raw.feed(day, feed)
         if not root.is_dir():
             continue
         times: list[datetime] = []
@@ -356,6 +361,7 @@ def _window(session: Session) -> tuple[datetime, datetime]:
 
 def closing(
     data_dir: Path,
+    raw: RawDays,
     session: Session,
     groups: Sequence[Group],
     stocks: Sequence[str],
@@ -370,7 +376,7 @@ def closing(
     day = session.day
     start, end = _window(session)
     until = min(session.close + PRINT_WITHIN, now)
-    read = frames(data_dir, day, start, until, unread)
+    read = frames(raw, day, start, until, unread)
     every = sorted(t for times in read.by_feed.values() for t in times)
     silence = _silence(longest_silence(every, read.before, start, end, until), until, day)
     within = {feed: [t for t in times if t < end] for feed, times in read.by_feed.items()}
@@ -453,8 +459,11 @@ def report(
     stocks: Sequence[str],
     etfs: Sequence[str],
     now: datetime,
+    raw: RawDays | None = None,
 ) -> str:
-    """The report on every recorded day up to ``now``."""
+    """The report on every recorded day up to ``now``. ``raw`` reads the raw days (by default the data
+    directory's, a pruned one failing)."""
+    raw = RawDays(data_dir) if raw is None else raw
     days = recorded_days(data_dir, now)
     if not days:
         return f"{TITLE}: raw에 WebSocket 프레임이 있거나 gaps가 있는 날이 없다"
@@ -478,7 +487,7 @@ def report(
             if now < end:
                 line += f" · 종가 단일가 {span}: 아직 지나지 않음"
             else:
-                seen = closing(data_dir, session, groups, stocks, etfs, now, unread)
+                seen = closing(data_dir, raw, session, groups, stocks, etfs, now, unread)
                 overlapping = sum(1 for g in groups if g.disconnect and g.overlaps(start, end))
                 line += f" · 종가 단일가 {span}: 가장 긴 침묵 {seen.silence}"
                 line += f", 겹친 끊김 {overlapping}번" if overlapping else ", 겹친 끊김 없음"
@@ -510,4 +519,5 @@ def _gap_lines(groups: Sequence[Group], day: date) -> list[str]:
 
 def probe_gaps(settings: Settings, now: datetime) -> str:
     calendar = calendar_store(settings).calendar
-    return report(settings.data_dir, calendar, settings.symbols, settings.etf_symbols, now)
+    with RawDays(settings.data_dir, open_store(settings)) as raw:
+        return report(settings.data_dir, calendar, settings.symbols, settings.etf_symbols, now, raw)

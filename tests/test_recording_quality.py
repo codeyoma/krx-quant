@@ -9,6 +9,7 @@ or volume in it.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterable, Mapping
 from datetime import UTC, date, datetime, time, timedelta
@@ -20,6 +21,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from krx_quant import recording_quality as quality
+from krx_quant.archive import RAW_KEEP_DAYS, RawMissing, archive
 from krx_quant.backfill import BAR_SCHEMA, stock_bars_path
 from krx_quant.cli import main
 from krx_quant.collector import silence
@@ -38,7 +40,9 @@ from krx_quant.feeds import (
 from krx_quant.feeds.base import KST
 from krx_quant.health import FeedHealth
 from krx_quant.market_calendar import MarketCalendar
+from krx_quant.object_store import LocalObjectStore
 from krx_quant.process_log import Ran
+from krx_quant.raw_days import RawDays
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.recording_quality import Polls, polls_of, report, report_day
 from krx_quant.scheduled import JOBS, RECORDING_QUALITY, Facts, JobRecord, Night, recording_quality_calls
@@ -555,6 +559,43 @@ def test_the_command_reads_the_files_and_says_the_engine_did_not_answer(
     assert "모른다: 엔진 API가 답하지 않았다(이 컨테이너의 엔진 API: " in out
     assert "005930 통합(H0UNCNT0 ↔ FHKST03010230 UN)" in out and "133690 KRX" in out
     assert "\n6. 실행\n  " in out
+
+
+async def test_a_day_pruned_on_the_server_is_read_back_from_the_store(recorded: Path, tmp_path: Path) -> None:
+    """#607: a month on the archive has deleted the day's raw and the nights' on the server; a run for
+    the day (``--day``) reads them back from the store and gives the report it gave before."""
+    store = LocalObjectStore(tmp_path / "store")
+    await archive(recorded, store)  # merged, as the server's are by then
+    before = report(recorded, CALENDAR, DAY, [STOCK], POLLS)
+    pruned = await archive(recorded, store, today=DAY + timedelta(days=RAW_KEEP_DAYS + 10))
+    assert pruned.pruned and not pruned.raw_left
+
+    with pytest.raises(RawMissing, match="no Object Store is set"):
+        report(recorded, CALENDAR, DAY, [STOCK], POLLS)
+    with RawDays(recorded, store) as raw:
+        assert report(recorded, CALENDAR, DAY, [STOCK], POLLS, raw) == before
+        assert raw.restored
+
+
+def test_the_command_reads_a_pruned_day_from_the_object_store(
+    recorded: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = tmp_path / "store"
+    asyncio.run(archive(recorded, LocalObjectStore(store)))
+    frames = section(report(recorded, CALENDAR, DAY, [STOCK], POLLS), 3)
+    asyncio.run(archive(recorded, LocalObjectStore(store), today=DAY + timedelta(days=RAW_KEEP_DAYS + 10)))
+    monkeypatch.chdir(recorded)  # no .env
+    monkeypatch.setenv("KRX_DATA_DIR", str(recorded))
+    monkeypatch.setenv("KRX_STATE_DIR", str(recorded / "state"))
+    monkeypatch.setenv("KRX_OBJECT_STORE", str(store))
+    monkeypatch.setenv("KRX_SYMBOLS", STOCK)
+    monkeypatch.setattr(
+        quality, "api_candidates", lambda settings: [("이 컨테이너의 엔진 API", "http://127.0.0.1:9")]
+    )
+
+    assert main(["recording-quality", "--day", DAY.isoformat()]) == 0
+
+    assert frames in capsys.readouterr().out
 
 
 def night(day: date, record: JobRecord | None = None) -> Night:

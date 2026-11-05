@@ -43,7 +43,8 @@ at once) is not seen: the agent that stops the book checks that in its PR.
 
 **What it prints.** Bytes, rows, times, dates and module names: no price or other market value, so its
 output can go on the public issue. It reads files only, beside the running collector, and writes only
-its state file.
+its state file. A raw night the archive pruned on the server, 30 days on (#607), is read back from the
+Object Store (``raw_days.RawDays``), byte for byte the merged file it was.
 """
 
 from __future__ import annotations
@@ -66,12 +67,14 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 import krx_quant
-from krx_quant.archive import partition_files
+from krx_quant.archive import RAW, check_not_pruned, guarded_files
 from krx_quant.config import Settings
 from krx_quant.contracts import NIGHT_END, NIGHT_OPEN
 from krx_quant.feeds import NIGHT_FUTURES, NIGHT_FUTURES_BOOK, RAW_SCHEMA
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
+from krx_quant.object_store import open_store
+from krx_quant.raw_days import RawDays
 from krx_quant.recorder import PART_PREFIX
 
 log = logging.getLogger(__name__)
@@ -214,23 +217,30 @@ def _layer(
     rows: tuple[datetime, datetime],
     cover: tuple[datetime, datetime] | None,
     received: list[np.ndarray],
+    raw: RawDays | None = None,
 ) -> Layer:
     """The night's rows of ``layer`` in its two days' partitions: in merged files, their bytes; in part
-    files, their count. The times in ``cover`` go to ``received`` from either."""
+    files, their count. The times in ``cover`` go to ``received`` from either. ``raw`` gives the raw
+    layer's partitions (a pruned one read back from the store)."""
     seen = Layer()
     for day in (evening, evening + timedelta(days=1)):
-        root = data_dir / layer / f"date={day.isoformat()}" / f"feed={FEED.tr_id}"
+        if raw is not None and layer == RAW:
+            root = raw.feed(day, FEED.tr_id)
+        else:
+            root = data_dir / layer / f"date={day.isoformat()}" / f"feed={FEED.tr_id}"
+        base = root.parents[2]  # the data directory, or the copy's: ``<base>/<layer>/date=…/feed=…``
         for partition in sorted(root.glob("symbol=*")):
             try:
-                files = partition_files(partition)
+                files = guarded_files(partition)  # a pruned raw night raises (#607): never zero bytes
             except (OSError, ValueError, pa.ArrowInvalid) as e:
-                seen.unread.append(f"{partition.relative_to(data_dir)}: {e}")
+                seen.unread.append(f"{partition.relative_to(base)}: {e}")
                 continue
             for path in files:
                 try:
                     found = _read_file(path, rows, cover)
                 except (OSError, ValueError, pa.ArrowInvalid) as e:
-                    seen.unread.append(f"{path.relative_to(data_dir)}: {e}")
+                    check_not_pruned(partition)  # gone because the archive pruned it
+                    seen.unread.append(f"{path.relative_to(base)}: {e}")
                     continue
                 if path.name.startswith(PART_PREFIX):
                     seen.unmerged += found.rows
@@ -238,6 +248,7 @@ def _layer(
                     seen.bytes += found.bytes
                     seen.rows += found.rows
                 received += found.received
+            check_not_pruned(partition)  # pruned while its files were read
     return seen
 
 
@@ -255,11 +266,12 @@ def night_session(evening: date) -> tuple[datetime, datetime]:
     )
 
 
-def measure_night(data_dir: Path, evening: date) -> NightBytes:
-    """The bytes and rows of the book's night begun on ``evening``, and its longest silence."""
+def measure_night(data_dir: Path, evening: date, raw_days: RawDays | None = None) -> NightBytes:
+    """The bytes and rows of the book's night begun on ``evening``, and its longest silence. ``raw_days``
+    reads the raw layer (by default the data directory's, a pruned night failing)."""
     rows, session = night_rows(evening), night_session(evening)
     received: list[np.ndarray] = []
-    raw = _layer(data_dir, "raw", evening, rows, session, received)
+    raw = _layer(data_dir, "raw", evening, rows, session, received, raw_days or RawDays(data_dir))
     parsed = _layer(data_dir, "events", evening, rows, None, [])
     start, end = (int(at.timestamp() * 1_000_000) for at in session)
     times = np.sort(np.concatenate(received)) if received else np.empty(0, dtype=np.int64)
@@ -281,11 +293,13 @@ def evenings(calendar: MarketCalendar, now: datetime) -> list[date]:
     return out
 
 
-def measure(data_dir: Path, calendar: MarketCalendar, now: datetime) -> list[NightBytes]:
+def measure(
+    data_dir: Path, calendar: MarketCalendar, now: datetime, raw: RawDays | None = None
+) -> list[NightBytes]:
     """Each night from ``FIRST_EVENING`` over by ``now``, up to the one that makes ``NIGHTS`` complete."""
     nights: list[NightBytes] = []
     for evening in evenings(calendar, now):
-        nights.append(measure_night(data_dir, evening))
+        nights.append(measure_night(data_dir, evening, raw))
         if len(counted(nights)) == NIGHTS:
             break
     return nights
@@ -564,7 +578,8 @@ def night_book_bytes(settings: Settings, now: datetime, *, verdict: bool = False
     """The measure (or, with ``verdict``, the rule applied to it); the state file written."""
     started = monotonic()
     calendar = calendar_store(settings).calendar
-    nights = measure(settings.data_dir, calendar, now)
+    with RawDays(settings.data_dir, open_store(settings)) as raw:
+        nights = measure(settings.data_dir, calendar, now, raw)
     save(settings.state_dir, nights, now)
     if not verdict:
         return report(nights, monotonic() - started)

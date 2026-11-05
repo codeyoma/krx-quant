@@ -101,7 +101,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from krx_quant.archive import partition_files
+from krx_quant.archive import guarded_files
 from krx_quant.entry_delay import Quotes, day_quotes
 from krx_quant.feeds import BOOK, TRADE
 from krx_quant.feeds.base import KST, kst_day
@@ -211,7 +211,7 @@ def read_recording(data_dir: Path, day: date) -> Recording | None:
     cannot be read (logged: its signals are counted ``no_recording``)."""
     try:
         events = data_dir / "events" / f"date={day.isoformat()}"
-        if not partition_files(events / f"feed={BOOK.tr_id}" / f"symbol={SYMBOL}"):
+        if not guarded_files(events / f"feed={BOOK.tr_id}" / f"symbol={SYMBOL}"):
             return None
         quotes = day_quotes(data_dir, day, SYMBOL)
         if quotes is None or len(quotes.times) == 0:
