@@ -390,8 +390,8 @@ def test_a_checkpoint_of_another_target_is_trained_again(store_root: Path, tmp_p
     assert report["target_version"] == TARGET_VERSION
 
 
-class Reclaimed(RuntimeError):
-    """The Spot instance went away mid-night."""
+class CutShort(RuntimeError):
+    """The training process went away mid-night."""
 
 
 class CrashingOnce(FrequencyAlgorithm):
@@ -401,14 +401,14 @@ class CrashingOnce(FrequencyAlgorithm):
 
     def fit(self, samples: Sequence[Sample]) -> Model:
         if self.crash:
-            raise Reclaimed
+            raise CutShort
         return super().fit(samples)
 
 
 def test_a_night_cut_short_resumes_after_the_algorithms_it_finished(store_root: Path, tmp_path: Path) -> None:
     learner, second = FrequencyAlgorithm("learner", "velocity"), CrashingOnce("second", "volatility")
 
-    with pytest.raises(Reclaimed):
+    with pytest.raises(CutShort):
         night(store_root, tmp_path, [learner, second])
     assert (store_root / f"reports/{NIGHT}/learner.json").exists()
     assert not (store_root / f"promotions/{NIGHT}.json").exists(), "not final until every algorithm is done"

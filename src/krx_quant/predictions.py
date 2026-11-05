@@ -895,7 +895,7 @@ def current_statuses(db: sqlite3.Connection) -> dict[str, Standing]:
 def read_statuses(db: Path) -> dict[str, Standing]:
     """The current statuses in the engine DB ``db``, read without writing (``read_only``), as a
     process beside the engine reads them (the night's training, a pre-validation, #544); none
-    without a DB (a night trained on Spot)."""
+    without a DB."""
     with read_only(db) as conn:
         return {} if conn is None else current_statuses(conn)
 
