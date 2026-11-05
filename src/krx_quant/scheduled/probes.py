@@ -231,6 +231,49 @@ NIGHT_BOOK_VERDICT = Job(
 )
 
 
+# How long the bar closes took on the first trading day with NumPy's BLAS and OpenMP on the calling
+# thread (#589, ``Dockerfile``), against the five trading days before (``bar_close_times.py``): each bar
+# close's first record, final consensus and last record, each algorithm's time after the first record,
+# the engine's ``loop_held`` runs (from this deploy on; Loki has the days before) and the trader's quote
+# stalls. On the first trading night after the deploy that brings it, of that night's day
+# (``--tonight``): never an earlier day's predictions, which ran before the deploy. A run that fails (that
+# day has no predictions, the engine was down) runs again the next trading night, on the same code too,
+# until one ends ok. It reads the engine's and the trader's databases only, in seconds on a server-sized
+# day; five minutes is a bound. Its output holds dates, counts and seconds, no price.
+BLAS_THREADS_ISSUE = 589
+
+
+def _bar_close_times_due(night: Night) -> bool:
+    """On trading nights until a run ends ok: the first, and after a failure the next (not the night it
+    failed on)."""
+    record = night.record
+    return night.trading_day and (record is None or (record.outcome != OK and record.day != night.day))
+
+
+BAR_CLOSE_TIMES = Job(
+    name="bar-close-times-589",
+    due=_bar_close_times_due,
+    command=("bar-close-times", "--tonight"),
+    timeout=timedelta(minutes=5),
+    targets=(
+        Target(
+            BLAS_THREADS_ISSUE,
+            note=(
+                "BLAS·OpenMP 스레드를 하나로 둔 배포(#589) 뒤 첫 거래일의 봉 마감 시간을 앞 거래일 5일과 "
+                "견준 것이다. 1절: 날마다 봉 마감의 첫 저장(기준 예측), 최종 합의, 마지막 저장의 초와 "
+                "trader의 호가 끊김. 2절: 알고리즘마다 첫 저장 뒤 저장되기까지의 초(ito가 앞 날들보다 "
+                "짧아야 한다). 3절: 그날 이벤트 루프를 1초 넘게 쥔 봉 마감(엔진이 이 배포부터 남긴다. 앞 "
+                '날들은 Loki: `{service="krx-quant", process="engine"} |= "held the event loop"`). '
+                "에이전트가 견준 결과를 이 이슈에 적고, 나아졌으면 닫고 아니면 이슈를 연다. 다시 보기"
+                "(읽기만, 엔진 옆에서 돌아도 된다): "
+                "`docker compose exec engine krx-quant bar-close-times --day <날>`. "
+                "출력에는 시세 값이 없다(날짜, 개수, 초만)."
+            ),
+        ),
+    ),
+)
+
+
 # The inverse ETF's KRX book (#606, ``inverse_book_probe.py``): the collector registers 0193L0's
 # ``H0STASP0`` in the session's last slot and records it raw only. Before the replay of down calls
 # through the ETF is built on it, the frames' layout, times and best quotes, the gaps and what

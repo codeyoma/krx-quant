@@ -1,9 +1,9 @@
 usage: krx-quant [-h]
-                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,probe-inverse-book,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,bar-close-times,probe-inverse-book,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,probe-inverse-book,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,bar-close-times,probe-inverse-book,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
     replay              replay a recorded day through the engine into its own
                         database (no KIS needed)
@@ -122,6 +122,12 @@ positional arguments:
                         data directory, the latest day's parts not merged yet,
                         the keys changed since the last run; writes only its
                         state file, no price
+    bar-close-times     how long a trading day's bar closes took, against the
+                        five trading days before (#589): each bar close's
+                        first record, final consensus and last record, each
+                        algorithm's time after the first record, the bar
+                        closes that held the event loop, the trader's quote
+                        stalls; read-only, no price
     probe-inverse-book  summarize a recorded day of the inverse ETF's KRX book
                         (#606): KIS's answers, the frames' fields and times,
                         the best quotes, the gaps and what recording it costs;

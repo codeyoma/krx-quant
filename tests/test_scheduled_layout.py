@@ -27,6 +27,7 @@ FIRST = (
     "recording-quality-570",
     "night-book-bytes-605",
     "night-book-verdict-605",
+    "bar-close-times-589",
     "probe-inverse-book-606",
     "signal-review-206-1201",
     "probe-live-account-408",

@@ -90,6 +90,16 @@ def test_the_quote_stream_is_not_published_only_the_engine_api_is() -> None:
     assert "network_mode" not in compose
 
 
+def test_the_image_keeps_blas_and_openmp_on_the_thread_that_calls_them() -> None:
+    """#589: every process of the image (the engine, the training and jobs it starts, the trader,
+    the commands) has these before NumPy and LightGBM start; compose does not set them otherwise."""
+    lines = [line for line in (ROOT / "Dockerfile").read_text().splitlines() if line.startswith("ENV ")]
+    threads = dict(re.findall(r"\b((?:OPENBLAS|OMP|MKL)_NUM_THREADS)=(\S+)", "\n".join(lines)))
+
+    assert threads == {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}
+    assert "NUM_THREADS" not in (ROOT / "compose.yaml").read_text()
+
+
 def test_the_smoke_run_keeps_the_trader_off_the_real_env_and_state() -> None:
     smoke = services((ROOT / "deploy" / "compose.smoke.yaml").read_text())
 

@@ -16,7 +16,9 @@ hands the GIL over.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import sqlite3
 import sys
 import threading
 import time as timer
@@ -34,6 +36,7 @@ from krx_quant.collector import GIL_SWITCH_SECONDS, run_collector
 from krx_quant.engine import PredictionEngine
 from krx_quant.fake_kis import FakeKis
 from krx_quant.kinds import Answer, Followed, KindForecast, KindInputs
+from krx_quant.loop_watch import LOOP_HELD
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
 from krx_quant.touch import TARGET_VERSION
@@ -162,7 +165,8 @@ async def test_a_bar_close_that_holds_the_loop_over_a_second_says_what_held_it(
 ) -> None:
     """Input: a kind baseline holding the loop 1.2 s at the 09:10 bar close, the engine watching
     its loop. Output: one WARNING, for 09:10, with how long the loop went without a turn and the
-    kinds' baselines as what took that time; none for the other bar closes."""
+    kinds' baselines as what took that time; none for the other bar closes. The same in the store's
+    runs (#589), for the night's report of the bar closes' times."""
     clock = FakeClock(at("09:00:00"))
     stuck = replace(TEST_KIND, baselines=(Stuck(),))
     engine = engine_on(tmp_path / "engine.db", clock, kinds=(stuck,), watch_loop=True)
@@ -179,6 +183,12 @@ async def test_a_bar_close_that_holds_the_loop_over_a_second_says_what_held_it(
     assert seconds >= 1.2
     named = dict(part.rsplit(" ", 1) for part in line.split(": ", 1)[1].split(", "))
     assert float(named["the kinds' baselines"].rstrip("s")) >= 1.2
+    with sqlite3.connect(tmp_path / "engine.db") as db:
+        runs = db.execute("SELECT at, detail FROM runs WHERE kind = ?", (LOOP_HELD,)).fetchall()
+    assert [when for when, _ in runs] == [at("09:10:00").isoformat()]
+    detail = json.loads(runs[0][1])
+    assert detail["seconds"] == pytest.approx(seconds, abs=0.01)
+    assert detail["parts"]["the kinds' baselines"] >= 1.2
     engine.store.close()
 
 
