@@ -57,9 +57,12 @@ def sized(monkeypatch: pytest.MonkeyPatch, shares: int) -> None:
 def failed_buys(state: Path) -> tuple[list[tuple[str, str, str]], list[str]]:
     """The failures kept (what, outcome, detail) and the statuses of the KIS buys kept."""
     with closing(sqlite3.connect(state / DB_NAME)) as db:
-        failures = [tuple(r) for r in db.execute("SELECT what, outcome, detail FROM failures ORDER BY id")]
-        buys = [r[0] for r in db.execute("SELECT status FROM unfilled_buys ORDER BY id")]
-    return failures, buys  # type: ignore[return-value]
+        failures = [
+            (str(r[0]), str(r[1]), str(r[2]))
+            for r in db.execute("SELECT what, outcome, detail FROM failures ORDER BY id")
+        ]
+        buys = [str(r[0]) for r in db.execute("SELECT status FROM unfilled_buys ORDER BY id")]
+    return failures, buys
 
 
 def warned(caplog: pytest.LogCaptureFixture) -> list[str]:
