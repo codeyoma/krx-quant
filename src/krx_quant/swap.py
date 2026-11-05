@@ -6,7 +6,9 @@ At 08:00 each trading day the latest night's list not applied yet is, if it was 
 07:30 and every model it names is in the store; otherwise yesterday's models run on. The
 running engine notices a model file that changed (the swap, ``krx-quant fit``,
 ``krx-quant rollback``) and switches to it within half a minute; the server then
-publishes what it runs (``live.json`` and the models), the champions of the next night.
+publishes what it runs (``live.json`` and the models), the champions of the next night. Its
+Telegram line names the models it installed, but not those of the algorithms the engine does not
+run because their pre-validation refused the code they have (#544, ``not_run``).
 
 The nightly training runs at ``KRX_TRAIN_AT`` on trading days: here, in its own process
 (``KRX_TRAIN_ON=server``; its whole output and exit code in Loki, ``process="training"``, #358),
@@ -33,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -62,6 +64,7 @@ from krx_quant.nightly import (
 )
 from krx_quant.notify import Alerts
 from krx_quant.object_store import ObjectStore, Stored, file_digest, get_json, put_json
+from krx_quant.prevalidation import left_out
 from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.training_nights import Failure, Outcome, TrainingNights, exit_text, last_step
 
@@ -139,11 +142,14 @@ class NightStatus:
     reason: str
 
     def as_dict(self) -> dict[str, Any]:
+        """``/v1/status``'s ``training``: the list's fields but the algorithms it left out for
+        their refusal (#544), which the API does not carry."""
         reports = [
             {"algorithm": r["algorithm"], "promoted": r["promoted"], "reason": r["reason"]}
             for r in self.night.reports
         ]
-        return {**self.night.as_dict(), "applied": self.applied, "reason": self.reason, "reports": reports}
+        night = {k: v for k, v in self.night.as_dict().items() if k != "refused"}
+        return {**night, "applied": self.applied, "reason": self.reason, "reports": reports}
 
 
 def latest_night(store: ObjectStore, before: date) -> Night | None:
@@ -459,8 +465,9 @@ async def keep_models(
                 today = kst_day(swap_at)
                 swap_at = next_on_trading_day(calendar, SWAP_AT, now())
                 status = await morning_swap(store, shelf, engine, today=today, at=now(), watch=watch)
-                if status is not None and (not status.applied or status.night.promoted):
-                    await notify(_swap_notice(status))
+                notice = None if status is None else swap_notice(status, not_run(engine, shelf.state_dir))
+                if notice is not None:
+                    await notify(notice)
                 if watch is not None:
                     watch.morning()
                 await asyncio.to_thread(
@@ -718,11 +725,36 @@ def _mark_summarized(state_dir: Path, day: date) -> None:
     (state_dir / SUMMARIZED_FILE).write_text(json.dumps({"night": day.isoformat()}))
 
 
-def _swap_notice(status: NightStatus) -> str:
+def swap_notice(status: NightStatus, refused: Collection[str] = ()) -> str | None:
+    """The morning swap's Telegram line: the night's list not used and why, or the models it
+    installed. Not those of the ``refused`` algorithms (#544, ``not_run``): installed, they run
+    nothing, so they are not told as changed. None when nothing is to be told: the list promoted
+    nothing, or only theirs."""
     if not status.applied:
         return f"{status.night.day} 밤 학습 결과를 쓰지 않습니다: {status.reason}"
-    changes = ", ".join(f"{name} → {version}" for name, version in status.night.promoted.items())
-    return f"모델 교체 ({status.night.day} 밤 학습): {changes}"
+    changes = ", ".join(
+        f"{name} → {version}" for name, version in status.night.promoted.items() if name not in refused
+    )
+    return f"모델 교체 ({status.night.day} 밤 학습): {changes}" if changes else None
+
+
+def not_run(engine: PredictionEngine, state_dir: Path) -> frozenset[str]:
+    """The registered algorithms the engine does not run because their pre-validation refused the
+    code they have (#544, ``prevalidation.left_out``), by its statuses and the reports in
+    ``state_dir``. A refusal that came after the night's training (its scheduled pre-validation
+    runs after it) still has its promoted model installed, never told. Empty when they cannot be
+    read (logged): the swap's line then tells every model."""
+    try:
+        out = left_out(state_dir, engine.store.statuses(), engine.target_version, engine.kinds)
+        everyone: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
+            *engine.registered,
+            *engine.kind_registered,
+            *engine.daily_registered,
+        ]
+        return frozenset(a.name for a in everyone if out(a) is not None)
+    except (OSError, ValueError):
+        log.exception("could not read which algorithms their pre-validation refused")
+        return frozenset()
 
 
 def _first_swap(calendar: MarketCalendar, started: datetime) -> datetime:

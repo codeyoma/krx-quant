@@ -1,7 +1,8 @@
 """The mock practice (#427, ``KRX_TRADER_MOCK_PRACTICE``): on a day no champion cell trades, the mock
 book trades the practice cell a share at a time on KIS's mock server, its trades, orders and fills
-kept as practice, its paper shadow a book of its own; the KIS checks and the risk rules count them,
-no record, promotion, live gate nor, since #533, loss limit does. The cell is the one kept for the
+kept as practice, with no paper shadow since #548 (a practice shadow's trade left open from before
+is sold by its barriers); the KIS checks and the risk rules count them, no record, promotion, live
+gate nor, since #533, loss limit does. The cell is the one kept for the
 review cycle (#474, ``tests/test_trader_practice_cycle.py``): here kept as the nightly job keeps it
 (``practise``).
 
@@ -9,10 +10,9 @@ KIS is the fake one (``tests/test_trader_mock.py``). The example: the cost map f
 barrier's breiman (its hit rate's lower bound 0.60 under p* 0.63): no cell passes, and the practice
 cell kept for the cycle is that one, at θ 0.6. The 10:00 barrier prediction (up_first 0.7 ≥ θ 0.6,
 target 70,250, stop 69,850, time barrier 10:04) read at 10:00:02.3; the first quote after it asks
-70,100: KIS fills the practice's one share at 70,050 and its take-profit rests at 70,300; the
-practice shadow fills its share at 70,100 in paper. The bid reaches 70,300 at 10:02: the shadow takes
-profit at the target (70,250), KIS fills the take-profit at its limit (70,300) at 10:02:30. Every
-value is made up.
+70,100: KIS fills the practice's one share at 70,050 and its take-profit rests at 70,300. The bid
+reaches 70,300 at 10:02: KIS fills the take-profit at its limit (70,300) at 10:02:30. Every value is
+made up.
 """
 
 from __future__ import annotations
@@ -109,7 +109,8 @@ def frozen_here(state: Path, threshold: float = 0.6) -> practice.Frozen:
 
 
 def shadows(state: Path) -> list[dict[str, Any]]:
-    """The paper shadows' trades, oldest first: the champion policy's and the practice one's."""
+    """The paper shadows' trades, oldest first: the champion policy's (and a practice one's left from
+    before #548)."""
     return [r for r in rows(state, "trades") if r["shadow"]]
 
 
@@ -245,7 +246,7 @@ async def test_the_practice_is_picked_only_on_a_cost_map_and_a_champion_read_wit
             cell = Cell("barrier", "breiman")
             on.select(practised(), at("09:00:00"))  # before the first champion: no_pass
             assert on.champion.cells == [cell] and on.shadow is not None and on.shadow.cells == []
-            assert on.practice_shadow is not None and on.practice_shadow.cells == [cell]
+            assert on.practice_shadow is None, "the practice has no shadow (#548)"
             state = on.champion.practice_state
             assert state is not None and state["active"] and state["why"] is None
             assert (state["cell"]["quantity"], state["cell"]["threshold"]) == (1, 0.7), "the cycle's θ"
@@ -253,7 +254,7 @@ async def test_the_practice_is_picked_only_on_a_cost_map_and_a_champion_read_wit
             assert (state["frozen"]["cycle"], state["frozen"]["threshold"]) == (1, 0.7)
             no_map = Selection((), reason=NO_COST_MAP, detail="starting")
             on.select(no_map, at("09:01:00"))
-            assert on.champion.cells == [] and on.practice_shadow.cells == []
+            assert on.champion.cells == []
             assert on.champion.practice_state == {
                 "enabled": True,
                 "active": False,
@@ -344,40 +345,27 @@ async def test_a_day_without_a_champion_cell_practises_a_share_on_kis_kept_as_pr
     ], "the one KIS book's orders, every one in the ledger"
     assert account.holdings[SYMBOL] == 0 and desk.status == RUNNING
     check("trader_trades", {"trades": desk.trades()})
-    # Its paper shadow: the practice shadow's, never the champion policy's shadow.
-    [shadow] = shadows(tmp_path)
-    assert (shadow["mode"], shadow["practice"], shadow["champion"], shadow["policy_id"]) == (
-        PAPER,
-        1,
-        0,
-        None,
-    )
-    assert (shadow["entry_price"], shadow["quantity"], shadow["exit_price"]) == (70_100, 1, 70_250)
+    # No paper shadow (#548): neither a practice one nor the champion policy's.
+    assert shadows(tmp_path) == []
     assert desk.trades(policy=1) == [], "no trade of the champion policy"
-    # The pairs: the practice trade against the practice shadow's.
+    # No pair: the practice is left out of the KIS book against the shadow (#548).
     with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
         db.row_factory = sqlite3.Row
         gap = day_gap(db, DAY)
         kept = promotion.records(db)
-    assert gap is not None and (gap["mock"]["trades"], gap["shadow"]["trades"]) == (1, 1)
-    [pair] = gap["pairs"]
-    assert (pair["practice"], pair["entry_ticks"], pair["exit_ticks"]) == (
-        True,
-        pytest.approx(-0.5),
-        pytest.approx(0.5),
-    )
+    assert gap is None
     [day] = [d for d in read_days(tmp_path / DB_NAME, DAY, DAY) if d["mode"] == MOCK]
-    assert day["gap"] == gap
+    assert day["gap"] is None
     check(
         "trader_days",
         {"from": "2026-10-14", "to": "2026-10-14", "days": read_days(tmp_path / DB_NAME, DAY, DAY)},
     )
-    # The picks: the mock book's and the practice shadow's are practice, the champion's shadow's not.
+    # The picks: the mock book's is practice, the champion's shadow's not.
     picks = [
         (s["mode"], s["practice"], s["reason"], s["policy_id"], json.loads(s["picks"]))
         for s in rows(tmp_path, "selections")
     ]
-    assert [p[:4] for p in picks] == [(MOCK, 1, NO_PASS, 1), (PAPER, 0, NO_PASS, 1), (PAPER, 1, NO_PASS, 1)]
+    assert [p[:4] for p in picks] == [(MOCK, 1, NO_PASS, 1), (PAPER, 0, NO_PASS, 1)]
     assert [(p["kind"], p["practice"], p["quantity"]) for p in picks[0][4]] == [("barrier", True, 1)]
     assert picks[1][4] == []
     # The record: the champion ran that day and traded nothing; the practice counts in none.
@@ -390,7 +378,7 @@ async def test_a_day_without_a_champion_cell_practises_a_share_on_kis_kept_as_pr
     )
     store = TraderStore(tmp_path / DB_NAME)
     try:
-        assert store.paper_account() == 0.0, "the practice shadow's net is no paper account's"
+        assert store.paper_account() == 0.0, "the practice is no paper account's"
     finally:
         store.close()
     # GET /v1/trader: the practice on, practising, its cell.
@@ -417,7 +405,7 @@ async def test_a_day_without_a_champion_cell_practises_a_share_on_kis_kept_as_pr
     )
     assert "연습 칸 (#474): 주기 1에 고정 · barrier breiman(top) · θ 0.6(2026-10-13 22:40에 고름)" in text
     assert "매매할 칸 없음: 비용 지도에서 시장가 왕복으로 통과한 칸이 없다(no_pass)" in text
-    assert "- 10:00 barrier breiman(연습): 진입 -0.50틱 · 청산 +0.50틱 · 1주 ↔ 1주" in text
+    assert "KIS 모의와 그림자 장부" not in text, "no pair of the practice (#548)"
     assert "읽은 예측(연습 칸 고르기의 챔피언 장부): 읽은 예측 1 · 산 것 1" in text
     assert "70,050" not in text and "70050" not in text, "no price"
 
@@ -426,8 +414,10 @@ async def test_the_kis_checks_count_the_practice_and_the_records_and_the_gate_do
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
     """After the session the day's orders, the practice's, are compared with KIS's: the same. The live
-    mode's execution checks count the day, its round trip and its legs against the practice shadow;
-    the champion's record, its paper account and the live gate hold nothing of it."""
+    mode's execution checks count the day, its round trip and its legs against the paper rules' price
+    at their decision quotes (#548: a quote of 70,000 / 70,100 before the prediction is read, its ask
+    the buy's, and the target the take-profit's); the champion's record, its paper account and the
+    live gate hold nothing of it."""
     fake, account = kis_mock
     keep(tmp_path, at("2026-10-12 22:31:00"))  # an empty champion
     frozen_here(tmp_path)
@@ -440,7 +430,9 @@ async def test_the_kis_checks_count_the_practice_and_the_records_and_the_gate_do
         stop_when=lambda: bool(order_checks(tmp_path)),
     )
 
-    await desk.run([TEN, BOUGHT, TAKEN, Fill("10:02:30"), Tick("15:31:00")])
+    await desk.run(
+        [quote("10:00:01", 70_000, 70_100), TEN, BOUGHT, TAKEN, Fill("10:02:30"), Tick("15:31:00")]
+    )
 
     assert order_checks(tmp_path) == [(MOCK, "2026-10-14", "same")]
     with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
@@ -452,8 +444,8 @@ async def test_the_kis_checks_count_the_practice_and_the_records_and_the_gate_do
         assert found["unresolved"].passed and found["flat"].passed and found["reconcile"].passed
         legs = live.legs(db, MOCK, ready.period, live.MOCK_CORRECTION)
         assert legs.values == pytest.approx((0.0, 0.0)), "its two legs, corrected"
-        assert legs.alone == 0
-        assert found["gap"].passed and "다리 2개" in found["gap"].said
+        assert legs.total == 2
+        assert found["gap"].passed and "KIS 다리 2개 가운데 결정 호가로 잰 2개(100%" in found["gap"].said
         gate = promotion.gate_of(db, 1)
         [champion_day] = promotion.records(db)[1].days
     assert (champion_day.net, champion_day.trades, champion_day.ticks) == (0.0, 0, 0.0)
@@ -469,8 +461,8 @@ async def test_a_restart_with_a_practice_position_sells_it_and_the_reconcile_hol
 ) -> None:
     """The trader stops holding the practice's share (its take-profit resting on KIS) and starts again
     at 10:05, past its time barrier, with a champion cell back, the practice on or off: the account is
-    as the ledger has it (the share is the ledger's), and the share is sold at the first quote's bid,
-    as is the practice shadow's in paper. The champion's cell then buys as ever."""
+    as the ledger has it (the share is the ledger's), and the share is sold at the first quote's bid.
+    The champion's cell then buys as ever, and its shadow beside it."""
     fake, account = kis_mock
     keep(tmp_path, at("2026-10-12 22:31:00"))  # an empty champion: no champion cell (#472)
     kept = frozen_here(tmp_path)
@@ -505,8 +497,8 @@ async def test_a_restart_with_a_practice_position_sells_it_and_the_reconcile_hol
         TIME,
     )
     assert (champion["practice"], champion["policy"], champion["entry"]["quantity"]) == (False, 2, 14)
-    [shadowed, _] = shadows(tmp_path)
-    assert (shadowed["practice"], shadowed["exit_reason"]) == (1, TIME), "the practice shadow sold it"
+    [shadowed] = shadows(tmp_path)
+    assert (shadowed["practice"], shadowed["policy_id"]) == (0, 2), "the champion's shadow alone (#548)"
     assert again.state_now is not None
     assert again.state_now["practice"] == {
         "enabled": practice,
@@ -515,6 +507,58 @@ async def test_a_restart_with_a_practice_position_sells_it_and_the_reconcile_hol
         "frozen": kept.as_json() if practice else None,
         "why": "champion" if practice else None,
     }
+
+
+async def test_a_practice_shadow_s_trade_left_open_from_before_is_sold_by_its_barriers(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """A practice shadow's share bought at 10:00 before #548, open when the trader starts at 10:01 with
+    the practice on: a book of it that picks nothing sells it at its time barrier (10:04), at the bid
+    of the last quote before it; no new practice shadow buys nor picks."""
+    fake, account = kis_mock
+    frozen_here(tmp_path)
+    store = TraderStore(tmp_path / DB_NAME)
+    try:
+        store.enter(
+            0,
+            Entry(
+                mode=PAPER,
+                symbol=SYMBOL,
+                kind="barrier",
+                predictor="breiman",
+                prediction_id=1,
+                bar_close=at("10:00:00"),
+                probability=0.7,
+                threshold=0.6,
+                anchor=70_050,
+                tick=100,
+                width_ticks=2,
+                target=70_250,
+                stop=69_850,
+                time_barrier=at("10:04:00"),
+                decided_at=at("10:00:02.3"),
+                entry_at=at("10:00:02.5"),
+                entry_price=70_100,
+                quantity=1,
+                buy_fee=0.0,
+                quote_at=at("10:00:02.5"),
+                champion=False,
+                shadow=True,
+                practice=True,
+            ),
+        )
+    finally:
+        store.close()
+    desk = MockDesk(tmp_path, fake, account, started_at=at("10:01:00"), selection=practised(), practice=True)
+
+    await desk.run([quote("10:03:59", 70_000, 70_100), quote("10:04:00.5", 70_100, 70_200)])
+
+    [left] = shadows(tmp_path)
+    assert (left["practice"], left["exit_reason"], left["exit_price"]) == (1, TIME, 70_000)
+    assert [s["mode"] for s in rows(tmp_path, "selections") if s["practice"]] == [MOCK], (
+        "the mock book's pick alone: no practice shadow picks"
+    )
+    assert desk.status == RUNNING
 
 
 async def test_a_champion_cell_back_stops_new_practice_and_the_practice_position_sells_by_its_rules(
@@ -580,7 +624,7 @@ async def test_a_champion_cell_back_stops_new_practice_and_the_practice_position
     ]
     assert skipped == ["holding"], "one position at a time, account-wide"
     paper = [(t["practice"], t["kind"], t["quantity"]) for t in shadows(tmp_path)]
-    assert paper == [(1, "direction", 1), (0, "barrier", 14), (0, "barrier", 14)]
+    assert paper == [(0, "barrier", 14), (0, "barrier", 14)], "the practice has no shadow (#548)"
     assert desk.status == RUNNING
 
 
@@ -689,8 +733,7 @@ async def test_a_practice_loss_alone_reaches_neither_loss_limit(
     the buy's commission (10.5075) and the sale's commission and tax at the bid (68,000 × 0.215% =
     146.2): −2,206.7 won, past both limits, and its stop sells it. Before #533 that reached both; now
     no limit counts a practice trade: no halt, the trader runs on, and the 10:08 rise buys the
-    practice's next share (as does the practice shadow, its simulated limits counting nothing). The
-    state, the day's ledger and the report give the three P&Ls apart."""
+    practice's next share. The state, the day's ledger and the report give the three P&Ls apart."""
     fake, account = kis_mock
     rules = whole_rules(capital=80_000, daily_loss_percent=1.0, cumulative_loss_percent=2.0)
     frozen_here(tmp_path)
@@ -717,7 +760,7 @@ async def test_a_practice_loss_alone_reaches_neither_loss_limit(
         None,
     )
     assert first["net"] < -1_600, "past both limits"
-    assert [(t["practice"], t["entry_price"]) for t in shadows(tmp_path)] == [(1, 70_100), (1, 70_100)]
+    assert shadows(tmp_path) == [], "the practice has no shadow (#548)"
     # GET /v1/trader: the limits' count holds none of it; the practice's and the account's hold it all.
     state = desk.state_now
     assert state is not None
@@ -982,10 +1025,11 @@ async def test_a_cumulative_halt_the_practice_reached_before_533_holds_until_re_
 # The pairs
 
 
-def test_a_pair_is_of_one_book_and_every_trade_is_in_exactly_one(tmp_path: Path) -> None:
-    """A practice trade pairs with the practice shadow's trade of its prediction, never with the
-    champion policy's shadow; two KIS trades of one prediction pair with none, each listed alone, and
-    the live gap check says the KIS trades no leg measures."""
+def test_the_pairs_leave_the_practice_out_and_hold_every_other_trade_once(tmp_path: Path) -> None:
+    """A practice trade and a practice shadow's trade from before #548 pair with nothing and are left
+    out of the pairs; the champion policy's shadow trade of the same prediction has no KIS trade of
+    its book; two KIS trades of one prediction pair with none, each listed alone. The live gap measures
+    every KIS leg, the practice's among them, against its decision quote (#548): none has one here."""
     store = TraderStore(tmp_path / DB_NAME)
 
     def made(
@@ -1022,7 +1066,7 @@ def test_a_pair_is_of_one_book_and_every_trade_is_in_exactly_one(tmp_path: Path)
     try:
         made(1, MOCK, champion=True, shadow=False, practice=True, price=70_050)
         made(1, PAPER, champion=False, shadow=True, practice=False, price=70_300)  # the champion's shadow
-        made(1, PAPER, champion=False, shadow=True, practice=True, price=70_100)
+        made(1, PAPER, champion=False, shadow=True, practice=True, price=70_100)  # from before #548
         made(2, MOCK, champion=True, shadow=False, practice=False, price=70_050)
         made(2, MOCK, champion=True, shadow=False, practice=False, price=70_050)  # twice: pairs none
         made(2, PAPER, champion=False, shadow=True, practice=False, price=70_100)
@@ -1033,22 +1077,16 @@ def test_a_pair_is_of_one_book_and_every_trade_is_in_exactly_one(tmp_path: Path)
     finally:
         store.close()
 
-    [(kis, paper)] = found.pairs
-    assert (kis["practice"], paper["practice"], kis["prediction_id"], paper["entry_price"]) == (
-        1,
-        1,
-        1,
-        70_100,
-    )
-    assert len(found.alone) == 4 and found.kis_alone == 2
+    assert found.pairs == ()
     assert [(m is None, s is None) for m, s in found.alone] == [
         (True, False),  # the champion's shadow of prediction 1: no KIS trade of its book
         (False, True),
         (False, True),
         (True, False),
     ]
-    assert legs.alone == 2 and legs.values == pytest.approx((-0.5, 0.5))
+    assert legs.values == () and legs.total == 6, "three KIS trades, the practice's among them"
     said = live.gap_check("gap", legs, corrected=False).said
-    assert "그림자와 짝이 없어 재지 않은 KIS 매매 2건" in said
-    assert gap is not None and len(gap["pairs"]) == 5, "every trade in exactly one pair"
-    assert sum((p["mock"] is not None) + (p["shadow"] is not None) for p in gap["pairs"]) == 6
+    assert said == "KIS 다리 6개 가운데 결정 호가로 잰 다리가 없어 체결 차이를 재지 못했다"
+    assert gap is not None and len(gap["pairs"]) == 4, "every trade but the practice's in exactly one"
+    assert (gap["mock"]["trades"], gap["shadow"]["trades"]) == (2, 2)
+    assert all("practice" not in p for p in gap["pairs"])

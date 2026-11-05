@@ -49,12 +49,19 @@ same cells' predictions and the same quotes, in one process.
   the one owner of the account's orders: no second book orders on KIS, and one position or buy waits
   at a time whichever cell it is of. Once a pick finds a champion cell again, the practice cell is
   picked no more (a rise of it waiting is ``not_picked``); a practice position is sold by its own
-  barriers, and holds the champion's cells off (``holding``) until it is. Its paper shadow is a book
-  of its own (``practice_shadow``, held by no pause, as the shadow is), so that the champion policy's
-  shadow and record never hold a practice trade; a practice shadow's trade left open is sold by its
-  barriers whatever the mode or the setting. The practice trades are of no policy and no record
-  counts them (``store.PRACTICE_TRADE``); the KIS checks, the risk rules and the cash do (#427). No
-  loss limit counts them since #533 (``limits.py`` "The practice"), nor the practice shadow's.
+  barriers, and holds the champion's cells off (``holding``) until it is. It has no paper shadow
+  (#548): the live mode's execution checks measure its legs against the paper rules' price at their
+  decision quotes (``live.legs``), and the champion policy's shadow never holds a practice trade. A
+  practice shadow's trade left open from before (``practice_shadow``: a book that picks nothing, held
+  by no pause) is sold by its barriers whatever the mode or the setting. The practice trades are of
+  no policy and no record counts them (``store.PRACTICE_TRADE``); the KIS checks, the risk rules and
+  the cash do (#427). No loss limit counts them since #533 (``limits.py`` "The practice").
+
+  > **바뀜** (2026-11-05, #557): the practice had a paper shadow of its own (``practice_shadow``, on
+  > the practice cell's picks), which the live mode's gap paired the practice trades with → none; a
+  > shadow's trade of it left open is sold. 이유: a shadow keeps its own cooldown and buy count and
+  > drifts from the KIS book: on 2026-11-04, 13 of the 20 practice round trips had no shadow trade to
+  > pair with.
 
   > **바뀜** (2026-11-03, #479): the practice cell was the cost map's at each pick
   > (``Selection.practice``: the greatest lower bound less p* of the cells with a verdict), at
@@ -225,10 +232,10 @@ class Desk:
                 account=self._paper_account,
                 since=self.simulated_since(),
             )
-        # The practice cell's paper shadow (#427): practising, or a trade of it left open (the practice
-        # turned off, or the mode changed), which it sells by its barriers, picking nothing.
+        # The practice cell's paper shadow's trade left open from before #548 (#427): a book of it sells
+        # it by its barriers, picking nothing. No new practice shadow is made (module doc).
         self.practice_shadow: PaperTrader | None = None
-        if practice or store.open_trade(PAPER, shadow=True, practice=True) is not None:
+        if store.open_trade(PAPER, shadow=True, practice=True) is not None:
             self.practice_shadow = PaperTrader(
                 store,
                 rules,
@@ -299,7 +306,8 @@ class Desk:
 
     @property
     def _shadows(self) -> list[PaperTrader]:
-        """The champion policy's shadow and the practice shadow (#427), those there are."""
+        """The champion policy's shadow and the practice shadow selling its trade left open (#427,
+        #548), those there are."""
         return [b for b in (self.shadow, self.practice_shadow) if b is not None]
 
     @property
@@ -336,11 +344,6 @@ class Desk:
         self.champion.select(chosen, at)
         if self.mode in KIS_MODES and self.shadow is not None:
             self.shadow.select(under, at)
-        if self.practice_shadow is not None:
-            if chosen.practising:
-                self.practice_shadow.select(chosen, at)
-            else:  # no new practice entry; a practice position is sold by its barriers (#427)
-                self.practice_shadow.retire(at)
         running: dict[int, policy.Policy] = {}
         try:
             versions = self.store.running_challengers(kst_day(at), self._sessions)
@@ -560,11 +563,11 @@ class Desk:
 
     def _prune(self) -> None:
         """Let a retired challenger's book go once it holds nothing, outside mock mode the shadow book
-        that sold the shadow's trade left open (#405), and without the practice the practice shadow's
-        book once it sold its trade left open (#427)."""
+        that sold the shadow's trade left open (#405), and the practice shadow's book once it sold its
+        trade left open (#427, #548)."""
         if self.mode not in KIS_MODES and self.shadow is not None and not self.shadow.busy:
             self.shadow = None
-        if not self.practice and self.practice_shadow is not None and not self.practice_shadow.busy:
+        if self.practice_shadow is not None and not self.practice_shadow.busy:
             self.practice_shadow = None
         for version in [
             v for v, book in self.challengers.items() if v not in self._running and not book.busy

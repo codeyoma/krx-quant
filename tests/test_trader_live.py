@@ -9,9 +9,11 @@ their paper shadow's, the day comparisons), the policy days and the gate's check
 account, price and P&L is made up; no test calls KIS.
 
 The mock days of the examples: the twenty weekdays from 2026-09-16 to 2026-10-13, two round trips a
-day on the first ten and one on the others (thirty). Each shadow trade buys at 70,100 and sells at
-70,300 (tick 100, 10 shares, net +5,000 won); its mock twin fills half a tick better on both legs
-(70,050 and 70,350), as the mock server does: a leg's adverse gap is −0.5 tick, 0 once corrected.
+day on the first ten and one on the others (thirty). Each is decided on a quote of 70,000 / 70,100
+(the store keeps its mid-point, 70,050): its shadow trade buys at the ask, 70,100, and takes profit at
+the target, 70,300 (tick 100, 10 shares, net +5,000 won); its mock twin fills half a tick better on
+both legs (70,050 and 70,350), as the mock server does: a leg's adverse gap against the paper rules'
+price at the decision quote (#548) is −0.5 tick, 0 once corrected.
 """
 
 from __future__ import annotations
@@ -96,8 +98,10 @@ _TRADE = (
     *("mode", "symbol", "kind", "predictor", "prediction_id", "bar_close", "probability", "threshold"),
     *("anchor", "tick", "width_ticks", "target", "stop", "time_barrier", "decided_at", "entry_at"),
     *("entry_price", "quantity", "buy_fee", "exit_at", "exit_price", "exit_reason", "sell_fee", "tax"),
-    *("cost", "gross", "net", "policy_id", "champion", "shadow"),
+    *("cost", "gross", "net", "policy_id", "champion", "shadow", "decided_mid", "sale_at", "sale_mid"),
 )
+TARGET = 70_300.0
+DECIDED_MID = 70_050.0  # the decision quote's, 70,000 / 70,100 (#475)
 
 
 def trade(
@@ -107,22 +111,34 @@ def trade(
     n: int,
     *,
     entry: float,
-    exit_: float,
+    exit_: float | None,
     shadow: bool,
     quantity: int = 10,
     exit_at: datetime | None = None,
+    decided_mid: float | None = DECIDED_MID,
+    reason: str = "take_profit",
+    sale_mid: float | None = None,
+    sells: tuple[tuple[str, float, int], ...] | None = None,
 ) -> int:
-    """A trade of the champion policy 1 on ``day``, the ``n``-th of its bar closes (10:00, 10:10):
-    the champion's own (``mode`` mock or live) or its paper shadow's; a KIS trade with its buy and its
-    take-profit sell, each KIS's order."""
+    """A trade of the champion policy 1 on ``day``, the ``n``-th of its bar closes (10:00, 10:10),
+    decided on a quote of mid-point ``decided_mid``: the champion's own (``mode`` mock or live) or its
+    paper shadow's; a KIS trade with its buy and its sells (by default the take-profit's at
+    ``exit_``; each its purpose, price and shares), each KIS's order filled whole at its limit. A
+    ``reason`` other than the take-profit's was decided at a quote of mid-point ``sale_mid``. With no
+    ``exit_`` it is open."""
     close = datetime.combine(day, time(10, 10 * n), KST)
     entered = close + timedelta(seconds=2)
     out = exit_at or close + timedelta(minutes=2)
+    exited = exit_ is not None
+    sold = sells if sells is not None else ((("take_profit", exit_, quantity),) if exit_ is not None else ())
+    sale_at = None if reason == "take_profit" or not exited else (out - timedelta(seconds=5)).isoformat()
     row = (
         *(mode, "005930", "barrier", "breiman", day.toordinal() * 10 + n, close.isoformat(), 0.7, 0.6),
-        *(70_050, 100, 2, 70_250, 69_850, (close + timedelta(minutes=4)).isoformat(), entered.isoformat()),
-        *(entered.isoformat(), entry, quantity, 10.0, out.isoformat(), exit_, "take_profit", 10.0, 0.0),
-        *(20.0, 5_020.0, 5_000.0, 1, 0 if shadow else 1, int(shadow)),
+        *(70_100, 100, 2, TARGET, 69_900, (close + timedelta(minutes=4)).isoformat(), entered.isoformat()),
+        *(entered.isoformat(), entry, quantity, 10.0, out.isoformat() if exited else None, exit_),
+        *(reason if exited else None, 10.0 if exited else None, 0.0 if exited else None),
+        *((20.0, 5_020.0, 5_000.0) if exited else (None, None, None)),
+        *(1, 0 if shadow else 1, int(shadow), decided_mid, sale_at, sale_mid if exited else None),
     )
     with db:
         cursor = db.execute(
@@ -130,10 +146,12 @@ def trade(
         )
         trade_id = int(cursor.lastrowid or 0)
         if mode != PAPER:
-            for side, purpose, price, placed in (
-                ("buy", "entry", entry, entered),
-                ("sell", "take_profit", exit_, entered + timedelta(seconds=1)),
-            ):
+            placed = [("buy", "entry", entry, quantity, entered)]
+            placed += [
+                ("sell", p, price, q, entered + timedelta(seconds=1 + i))
+                for i, (p, price, q) in enumerate(sold)
+            ]
+            for i, (side, purpose, price, shares, at_) in enumerate(placed):
                 kept = db.execute(
                     "INSERT INTO orders (trade_id, mode, side, purpose, price, quantity, placed_at, status,"
                     " closed_at, broker_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'filled', ?, ?)",
@@ -143,15 +161,15 @@ def trade(
                         side,
                         purpose,
                         price,
-                        quantity,
-                        placed.isoformat(),
+                        shares,
+                        at_.isoformat(),
                         out.isoformat(),
-                        f"{trade_id}{side}",
+                        f"{trade_id}{side}{i}",
                     ),
                 )
                 db.execute(  # filled whole at its limit, as KIS's inquiry shows it
                     "INSERT INTO fills (order_id, at, price, quantity) VALUES (?, ?, ?, ?)",
-                    (kept.lastrowid, placed.isoformat(), price, quantity),
+                    (kept.lastrowid, at_.isoformat(), price, shares),
                 )
     return trade_id
 
@@ -365,6 +383,105 @@ def test_each_execution_check_keeps_the_live_mode_locked(
 
     assert not found.unlocked and missing in found.missing
     assert found.gate.passed, "the gate alone does not unlock it"
+
+
+def test_a_kis_leg_its_shadow_did_not_take_is_measured_all_the_same(tmp_path: Path) -> None:
+    """The ten second round trips of the first ten days have no shadow trade (its cooldown and buy count
+    kept it out), and KIS filled each three ticks worse on both legs: measured against the paper rules'
+    price at their decision quotes, every leg counts (#548). The pairing with the shadow measured only
+    the forty legs it could pair, every one 0 once corrected, and passed."""
+    ready(tmp_path)
+    second = "substr(t.bar_close, 12, 5) = '10:10'"  # the second round trips
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db, db:
+        db.execute(f"DELETE FROM trades AS t WHERE t.shadow = 1 AND {second}")
+        db.execute(
+            "UPDATE trades AS t SET entry_price = entry_price + 300, exit_price = exit_price - 300"
+            f" WHERE t.mode = ? AND {second}",
+            (MOCK,),
+        )
+        for side, worse in (("buy", 300), ("sell", -300)):
+            db.execute(
+                "UPDATE fills SET price = price + ? WHERE order_id IN (SELECT o.id FROM orders o"
+                f" JOIN trades t ON t.id = o.trade_id WHERE t.mode = ? AND o.side = ? AND {second})",
+                (worse, MOCK, side),
+            )
+
+    found = readiness(tmp_path)
+
+    gap = {c.name: c for c in found.checks}["gap"]
+    assert not gap.passed and found.missing == ["gap"]
+    assert gap.value == pytest.approx(1.0), "20 legs of 60 at +3 ticks"
+    assert gap.said == (
+        "KIS 다리 60개 가운데 결정 호가로 잰 60개(100%, ≥ 90%)의 불리한 체결 차이 평균 +1.00틱(≤ 1),"
+        " 95% +3.00틱(≤ 2), 모의 서버의 반 틱 보정 +0.5틱 포함"
+    )
+
+
+@pytest.mark.parametrize(("unknown", "passed", "said"), [(6, True, "54개(90%"), (7, False, "53개(88.3%")])
+def test_the_gap_needs_ninety_percent_of_the_kis_legs_measured(
+    tmp_path: Path, unknown: int, passed: bool, said: str
+) -> None:
+    """Of the period's sixty legs, ``unknown`` buys have no decision quote (decided before the book had a
+    quote, or before #475): six leave 90% measured, seven fewer, and the gap is no pass however small
+    it is."""
+    ready(tmp_path)
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db, db:
+        db.execute(
+            "UPDATE trades SET decided_mid = NULL WHERE id IN (SELECT id FROM trades WHERE mode = ?"
+            " ORDER BY id LIMIT ?)",
+            (MOCK, unknown),
+        )
+
+    found = readiness(tmp_path)
+
+    gap = {c.name: c for c in found.checks}["gap"]
+    assert (gap.passed, found.unlocked) == (passed, passed)
+    assert gap.value == pytest.approx(0.0)
+    assert f"KIS 다리 60개 가운데 결정 호가로 잰 {said}, ≥ 90%)" in gap.said
+
+
+def test_each_leg_is_measured_against_the_paper_rules_price_at_its_decision_quote(tmp_path: Path) -> None:
+    """Live legs (no correction), in ticks of 100 won, each decided on a quote whose mid-point the store
+    keeps: a buy against its ask (mid + half a tick), a stop's sale against its bid (mid − half a
+    tick), a take-profit against its target, a sale of both by its shares; a trade from before #475
+    measures its take-profit alone, and an open one has its buy alone."""
+    store = TraderStore(tmp_path / DB_NAME)
+    day = DAYS[0]
+    try:
+        db = store.db
+        trade(db, LIVE, day, 0, entry=70_100, exit_=TARGET, shadow=False)  # 0, 0
+        trade(  # bought a tick over the ask; stopped on a quote of 69,800 / 69,900, sold at 69,700
+            db,
+            LIVE,
+            day,
+            1,
+            entry=70_200,
+            exit_=69_700,
+            shadow=False,
+            reason="stop_loss",
+            sale_mid=69_850,
+            sells=(("stop_loss", 69_700, 10),),
+        )
+        trade(  # 4 shares taken at the target, then a stop sold 6 a tick under its bid (69,900)
+            db,
+            LIVE,
+            day,
+            2,
+            entry=70_100,
+            exit_=69_980,
+            shadow=False,
+            reason="stop_loss",
+            sale_mid=69_950,
+            sells=(("take_profit", TARGET, 4), ("stop_loss", 69_800, 6)),
+        )
+        trade(db, LIVE, day, 3, entry=70_100, exit_=TARGET, shadow=False, decided_mid=None)  # before #475
+        trade(db, LIVE, day, 4, entry=70_000, exit_=None, shadow=False)  # open: half a tick under the ask
+        found = live.legs(db, LIVE, [day], 0.0)
+    finally:
+        store.close()
+
+    assert found.values == pytest.approx((0.0, 0.0, 1.0, 1.0, 0.0, 0.6, 0.0, -1.0))
+    assert found.total == 9 and found.coverage == pytest.approx(8 / 9)
 
 
 def test_the_gate_charged_one_more_adverse_tick_a_leg_must_pass_too(tmp_path: Path) -> None:
@@ -724,8 +841,8 @@ def test_the_first_period_holds_the_cap_until_twenty_days_and_thirty_round_trips
 def test_a_live_gap_beyond_the_bounds_at_the_period_s_end_breaches_and_pauses_new_entries(
     tmp_path: Path,
 ) -> None:
-    """Each live leg 3 ticks worse than its shadow's (no correction on live): a breach, a pause of new
-    entries from the ramp, the cap kept."""
+    """Each live leg 3 ticks worse than the paper rules' price at its decision quote (no correction on
+    live): a breach, a pause of new entries from the ramp, the cap kept."""
     notices: list[str] = []
     live_history(tmp_path, DAYS, worse=300.0)
 
@@ -741,10 +858,33 @@ def test_a_live_gap_beyond_the_bounds_at_the_period_s_end_breaches_and_pauses_ne
     finally:
         store.close()
     assert notices[0].startswith(
-        "자동 매매(live): 실전 첫 단계의 점검을 벗어나 새 진입을 멈췄습니다: 다리 60개"
+        "자동 매매(live): 실전 첫 단계의 점검을 벗어나 새 진입을 멈췄습니다: KIS 다리 60개 가운데 결정 호가로"
+        " 잰 60개(100%, ≥ 90%)의 불리한 체결 차이 평균 +3.00틱(≤ 1), 95% +3.00틱(≤ 2)"
     )
     assert "krx-quant trade resume" in notices[0]
     assert stepped(tmp_path, at("2026-10-15 08:30:00"), notices).outcome is None, "once, until reviewed"
+
+
+def test_a_first_period_with_too_few_live_legs_measured_breaches_at_its_end(tmp_path: Path) -> None:
+    """Seven of the period's thirty live buys have no decision quote: 53 legs of 60 measured, under 90%
+    (#548). The legs measured are as the paper rules would have filled them, yet the live gap is no
+    pass once the period is long enough: a breach, not a lift."""
+    notices: list[str] = []
+    live_history(tmp_path, DAYS)
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db, db:
+        db.execute(
+            "UPDATE trades SET decided_mid = NULL WHERE id IN (SELECT id FROM trades WHERE mode = ?"
+            " ORDER BY id LIMIT 7)",
+            (LIVE,),
+        )
+
+    found = stepped(tmp_path, at("08:30:00"), notices)
+
+    assert (found.cap, found.lifted_at, found.breached_at) == (250_000, None, at("08:30:00"))
+    gap = next(c for c in found.checks if c.name == "live_gap")
+    assert not gap.passed and gap.value == pytest.approx(0.0)
+    assert "KIS 다리 60개 가운데 결정 호가로 잰 53개(88.3%, ≥ 90%)" in gap.said
+    assert ramp_rows(tmp_path)[0][0] == BREACH
 
 
 def test_a_failed_order_in_the_first_period_breaches_at_the_next_pick_and_a_resume_begins_it_again(
