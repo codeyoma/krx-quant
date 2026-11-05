@@ -55,7 +55,9 @@ same cells' predictions and the same quotes, in one process.
   practice shadow's trade left open from before (``practice_shadow``: a book that picks nothing, held
   by no pause) is sold by its barriers whatever the mode or the setting. The practice trades are of
   no policy and no record counts them (``store.PRACTICE_TRADE``); the KIS checks, the risk rules and
-  the cash do (#427). No loss limit counts them since #533 (``limits.py`` "The practice").
+  the cash do (#427). No loss limit counts them since #533 (``limits.py`` "The practice"). Its buys
+  are spaced, 15 minutes between two practice buy orders' bar closes unless set (#598,
+  ``paper.spaced``), so that they reach the afternoon and the time exits by 15:15.
 
   > **바뀜** (2026-11-05, #557): the practice had a paper shadow of its own (``practice_shadow``, on
   > the practice cell's picks), which the live mode's gap paired the practice trades with → none; a
