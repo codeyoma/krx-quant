@@ -2750,7 +2750,7 @@ docker compose stop engine trader
 docker compose run --rm --no-deps engine restore-state --replace
 docker compose up -d
 ```
-`--replace` 없이는 있는 파일을 바꾸지 않고 거부한다. `--replace`는 바꿀 DB(곁 파일 `-wal`, `-shm`, `-journal`과 함께: 남은 WAL이 되살린 DB에 적용되지 않게), 파일, 폴더(통째로)를 `state/before-restore-<시각>/`로 옮긴다. 지우지 않는다. 엔진이 돌고 있으면(`state/.engine.lock`을 잡고 있으면) 거부한다. trader에는 잠금이 없으니 먼저 멈춘다. 백업이 검사를 통과하지 못하면 아무것도 바꾸지 않는다. `fill_notices.sqlite3`는 그대로 둔다.
+`--replace` 없이는 있는 파일을 바꾸지 않고 거부한다. `--replace`는 바꿀 DB(곁 파일 `-wal`, `-shm`, `-journal`과 함께: 남은 WAL이 되살린 DB에 적용되지 않게), 파일, 폴더(통째로)를 `state/before-restore-<시각>/`로 옮긴다. 지우지 않는다. 엔진(수집기)이나 trader가 돌고 있으면 아무것도 바꾸기 전에 `not restored: the engine or the trader is running (it holds state/.state-restore.lock): stop both first (docker compose stop engine trader)`로 거부한다(종료 코드 1). 둘은 시작할 때 DB를 열기 전부터 끝날 때까지 `state/.state-restore.lock`을 함께 잡고, 복원은 그것을 혼자 잡는다. 그래서 복원하는 동안 06:00 배포 등으로 엔진이나 trader가 시작하면 복원이 끝날 때까지 기다렸다가 되살린 DB를 연다(로그 WARNING `a restore of the server state runs: the collector waits for it to end`, 끝나면 INFO `the restore of the server state is over: the collector starts`, trader는 `the trader`). 손으로 돌린 `rescore`가 `state/.engine.lock`을 잡고 있어도 거부한다. 백업이 검사를 통과하지 못하면 아무것도 바꾸지 않는다. `fill_notices.sqlite3`는 그대로 둔다.
 
 **더 오래된 밤에서.** 엔진의 IAM 사용자는 이전 버전을 읽을 권한(`s3:GetObjectVersion`)이 없으므로 맥에서 관리자 자격 증명으로 받는다.
 ```bash
@@ -3062,6 +3062,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `scheduled.json` | 예약 작업의 상태(#215): 작업마다 마지막으로 돈 것(`day`, `outcome`, `started_at`, `commit`, `exit_code`, `seconds`, `timed_out`, `comments`)과 아직 올리지 못한 결과(`unposted`), 수습 시뮬레이션이 사전 검증에 자리를 내준 밤(`gave_way`, #376). 형식은 3장 "예약 작업 (#215)". `.scheduled.json.tmp`는 쓰는 중인 임시 파일, `scheduled.json.bad`는 읽지 못해 옮겨 둔 것이다 |
 | `state_backup.json` | 이 서버가 마지막으로 만든 서버 상태 백업(#576): `made_at`, `files`, `size`, `seconds`, `key`. 백업이 될 때마다 통째로 바꿔 쓴다(`.state_backup.json.<임의>.tmp`). 복원 시험(`restore-drill-577`)의 조건이 읽는다. 잃으면 다음 백업까지 복원 시험이 기다린다 |
 | `.state-backup.lock` | 서버 상태 백업을 한 번에 하나만 돌리는 잠금 파일(`flock`, #576) |
+| `.state-restore.lock` | 서버 상태 복원의 잠금 파일(`flock`, #576, `state_lock.py`). 수집기와 trader가 DB를 열기 전부터 끝날 때까지 함께(공유) 잡고, `restore-state`가 혼자(배타) 잡는다. 복원은 둘이 돌면 거부하고, 복원하는 동안 시작한 둘은 끝날 때까지 기다린다. 프로세스가 끝나면 커널이 푼다. 파일은 남아도 된다 |
 | `.state-backup-work/` | 서버 상태 백업, 복원, 복원 시험의 임시 폴더(`backup-…`, `restore-…`, `drill-…`, #576). 실행이 끝나면 지운다. 죽은 실행이 남긴 것은 2시간 뒤 다음 실행이 지운다 |
 | `before-restore-<시각>/` | `restore-state --replace`가 옮겨 둔, 되살리기 전에 있던 DB(곁 파일과 함께), 파일, 폴더(#576). 저절로 지우지 않는다 |
 | `snapshots.json` | 서버 요약(#322): 지난 1시간에 요약을 올린 이슈와 시각(`posted`: `issue`, `at`), 댓글은 올렸는데 `needs-server-snapshot` 라벨을 떼지 못한 이슈(`unlabel`). 재시작해도 한도가 이어지게 둔다. 통째로 바꿔 쓴다(`.snapshots.json.tmp`). 잃으면 한도가 처음부터 다시 센다(6장 "서버 상태 보기 (#322)") |

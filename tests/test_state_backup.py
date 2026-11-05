@@ -19,9 +19,12 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from krx_quant import state_backup
+from krx_quant import state_backup, state_lock
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
+from krx_quant.collector import run_collector
+from krx_quant.config import Settings
+from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.notify import Alerts
 from krx_quant.object_store import LocalObjectStore, ObjectStore, S3ObjectStore, file_digest
@@ -42,6 +45,12 @@ from krx_quant.state_backup import (
     next_backup,
     restore,
 )
+from krx_quant.trader.run import run_trader
+from krx_quant.trader.settings import TraderSettings
+from krx_quant.trader.store import DB_NAME as TRADER_DB
+from tests.collector_doubles import FIXED_NOW, settings_for
+from tests.server_doubles import free_port
+from tests.trader_doubles import FEE, at
 from tests.waiting import until
 
 NOW = datetime(2026, 11, 7, 5, 35, tzinfo=KST)
@@ -414,15 +423,13 @@ def test_a_restore_over_files_there_is_refused_unless_it_moves_them_aside(
     assert (other / "fill_notices.sqlite3").read_bytes() == b"kept as it is"
 
 
-def test_a_restore_beside_the_running_engine_is_refused(
-    state: Path, store: ObjectStore, tmp_path: Path
-) -> None:
+def test_a_restore_beside_a_rescore_is_refused(state: Path, store: ObjectStore, tmp_path: Path) -> None:
     back_up(state, store, NOW)
     new = tmp_path / "new-state"
     engine = EngineLock(new)
     assert engine.acquire()
     try:
-        with pytest.raises(RestoreRefused, match="the engine is running"):
+        with pytest.raises(RestoreRefused, match="a rescore is running"):
             restore(new, store, NOW, say=lambda line: None)
     finally:
         engine.release()
@@ -441,7 +448,7 @@ def test_a_backup_that_does_not_check_out_restores_nothing(
     assert not restore(new, None, NOW, source=pack, say=lines.append)
 
     assert lines[-1] == "복원하지 않았다: 백업이 검사를 통과하지 못했다. 상태 폴더는 그대로다."
-    assert sorted(p.name for p in new.iterdir()) == [".engine.lock", state_backup.WORK]
+    assert sorted(p.name for p in new.iterdir()) == [".engine.lock", state_backup.WORK, state_lock.LOCK]
     assert list((new / state_backup.WORK).iterdir()) == []
 
 
@@ -588,3 +595,84 @@ def test_the_commands_back_up_drill_and_restore(
 
     assert json.loads((state / "scheduled.json").read_text()) == {"jobs": {}, "unposted": []}
     assert file_digest(state / "fill_notices.sqlite3")  # left where it was
+
+
+@pytest.mark.parametrize("who", ["the collector", "the trader"])
+async def test_a_restore_beside_the_running_collector_or_trader_is_refused_and_changes_nothing(
+    state: Path, store: ObjectStore, tmp_path: Path, who: str
+) -> None:
+    """Codex on #581: a restore with --replace must not swap the databases under a running engine."""
+    back_up(state, store, NOW)
+    other = tmp_path / "other-state"
+    other.mkdir()
+    database(other / "engine.sqlite3", {"predictions": 2})
+    before = file_digest(other / "engine.sqlite3")
+
+    async with state_lock.in_use(other, who):
+        with pytest.raises(RestoreRefused, match="the engine or the trader is running"):
+            restore(other, store, NOW, replace=True, say=lambda line: None)
+
+    assert file_digest(other / "engine.sqlite3") == before
+    assert not [p for p in other.iterdir() if p.name.startswith(state_backup.ASIDE)]
+    assert restore(other, store, NOW, replace=True, say=lambda line: None)  # once it has stopped
+
+
+async def test_a_collector_started_during_a_restore_waits_for_it_before_opening_its_database(
+    kis: FakeKis, tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    caplog.set_level(logging.INFO, "krx_quant.state_lock")
+    monkeypatch.setattr(state_lock, "POLL_SECONDS", 0.02)
+    settings = settings_for(kis, tmp_path / "data")
+    stop = asyncio.Event()
+    with state_lock.restoring(settings.state_dir) as held:
+        assert held
+        task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: FIXED_NOW))
+        try:
+            await until(
+                lambda: (
+                    "a restore of the server state runs: the collector waits for it to end" in caplog.messages
+                )
+            )
+            assert not (settings.state_dir / "engine.sqlite3").exists()
+        except BaseException:
+            stop.set()
+            raise
+    try:
+        await until(lambda: (settings.state_dir / "engine.sqlite3").exists())
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+    assert "the restore of the server state is over: the collector starts" in caplog.messages
+
+
+async def test_a_trader_started_during_a_restore_waits_for_it_before_opening_its_store(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    caplog.set_level(logging.INFO, "krx_quant.state_lock")
+    monkeypatch.setattr(state_lock, "POLL_SECONDS", 0.02)
+    state = tmp_path / "state"
+    settings = Settings(kis_app_key="", kis_app_secret="", state_dir=state, fee_rate=FEE)
+    trader = TraderSettings(
+        quotes_url=f"ws://127.0.0.1:{free_port()}/v1/quotes",
+        engine_url=f"http://127.0.0.1:{free_port()}",
+        poll_seconds=0.01,
+    )
+    stop = asyncio.Event()
+    with state_lock.restoring(state) as held:
+        assert held
+        task = asyncio.create_task(run_trader(settings, trader, stop=stop, now=lambda: at("10:00:00")))
+        try:
+            await until(
+                lambda: (
+                    "a restore of the server state runs: the trader waits for it to end" in caplog.messages
+                )
+            )
+            assert not (state / TRADER_DB).exists()
+        except BaseException:
+            stop.set()
+            raise
+    try:
+        await until(lambda: (state / TRADER_DB).exists())
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)

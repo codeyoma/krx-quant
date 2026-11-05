@@ -38,8 +38,10 @@ older version fetched from S3) is downloaded into a scratch folder and checked a
 it, and only then moved into the state folder. What it would replace is refused, or with ``replace``
 moved aside into ``state/before-restore-<time>/`` (never deleted): each database with its ``-wal``,
 ``-shm`` and ``-journal`` (a write-ahead log left beside a restored database would be applied to it),
-each folder whole. It holds the engine's lock (``rescore.EngineLock``): an engine started meanwhile
-waits for it.
+each folder whole. It runs with the engine and the trader stopped: it holds the restore lock
+exclusively (``state_lock``), which they hold shared from before they open a database, so a restore
+beside either is refused before it changes anything, and either started meanwhile waits for it. A
+rescore's engine lock refuses it too.
 
 **Drill** (``drill``, ``krx-quant restore-drill``, the monthly scheduled job ``restore-drill-577``):
 the latest backup downloaded and unpacked into a scratch folder and checked: the object's SHA-256
@@ -80,6 +82,8 @@ from krx_quant.notify import Alerts
 from krx_quant.object_store import ObjectStore, file_digest
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.rescore import EngineLock
+from krx_quant.state_lock import LOCK as RESTORE_LOCK
+from krx_quant.state_lock import restoring
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 
 log = logging.getLogger(__name__)
@@ -333,12 +337,32 @@ def restore(
     say: Callable[[str], None] = print,
 ) -> bool:
     """Put the latest backup (or ``source``) back into the state folder once it checks out. Refused
-    (``RestoreRefused``) beside the running engine, and when it would replace what is there, unless
-    ``replace``: that goes aside into ``before-restore-<time>/`` then. Whether it put the backup back;
-    one that does not check out changes nothing."""
+    (``RestoreRefused``) before anything changes while the collector or the trader runs (they hold the
+    restore lock, ``state_lock``) or a rescore does (the engine lock), and when it would replace what is
+    there, unless ``replace``: that goes aside into ``before-restore-<time>/`` then. A collector or a
+    trader started meanwhile waits for it to end. Whether it put the backup back; one that does not
+    check out changes nothing."""
+    with restoring(state_dir) as held:
+        if not held:
+            raise RestoreRefused(
+                f"the engine or the trader is running (it holds state/{RESTORE_LOCK}): "
+                "stop both first (docker compose stop engine trader)"
+            )
+        return _restore(state_dir, store, now, source=source, replace=replace, say=say)
+
+
+def _restore(
+    state_dir: Path,
+    store: ObjectStore | None,
+    now: datetime,
+    *,
+    source: Path | None,
+    replace: bool,
+    say: Callable[[str], None],
+) -> bool:
     lock = EngineLock(state_dir)
     if not lock.acquire():
-        raise RestoreRefused("the engine is running (it holds state/.engine.lock): stop it first")
+        raise RestoreRefused("a rescore is running (it holds state/.engine.lock): wait for it to end")
     try:
         with _scratch(state_dir, "restore") as work:
             checked = check(store, work, source=source)

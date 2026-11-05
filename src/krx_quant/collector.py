@@ -86,6 +86,7 @@ from krx_quant.scheduled import keep_jobs
 from krx_quant.signals import Signals
 from krx_quant.snapshot import keep_snapshots
 from krx_quant.state_backup import keep_backed_up
+from krx_quant.state_lock import in_use
 from krx_quant.stream import LiveStatus
 from krx_quant.supply import toss_client_maker
 from krx_quant.swap import NightTraining, TrainingWatch, keep_models, keep_training, show_night
@@ -279,7 +280,9 @@ async def run_collector(
     switch = sys.getswitchinterval()
     sys.setswitchinterval(GIL_SWITCH_SECONDS)
     try:
-        await _collect(settings, stop=stop, clock=clock)
+        # Before any database is opened: a restore of the state backup (#576) is not run under it.
+        async with in_use(settings.state_dir, "the collector"):
+            await _collect(settings, stop=stop, clock=clock)
     finally:
         sys.setswitchinterval(switch)
 
