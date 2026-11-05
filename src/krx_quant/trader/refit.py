@@ -26,8 +26,10 @@ grid; the fit keeps a cell at one θ, or leaves it out with why.
 (``replay.py``): each cell's predictions of 005930 on the cost map's days for its kind (the row's
 ``days``: the latest 20 with predictions), read from the engine's database read-only as the trader
 reads them (an algorithm's by models trained on the answers they are scored on,
-``stats.on_target``), and each day's quotes as the collector recorded them and streamed them to the
-trader. Nothing is predicted again, and no answer is read.
+``stats.on_target``; none of a day a pick would have held its cell off, its predictor's status as the
+engine kept it then not active, for the rest of the trader's review cycle: ``predictor_inactive``,
+#603), and each day's quotes as the collector recorded them and streamed them to the trader. Nothing
+is predicted again, and no answer is read.
 
 **The entry** (#472, spec #468 3 "진입", ``judge``): each cell's rises, each measured alone a share by
 the paper trader's rules (``replay.Signals``: decided at its read as if nothing were held, bought at
@@ -119,6 +121,7 @@ from krx_quant.stats import Interval, day_mean
 from krx_quant.trader import ROLES, SYMBOL, TRADED_KINDS, cohort, promotion, review
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, open_engine_db, special_windows
+from krx_quant.trader.db import reading
 from krx_quant.trader.paper import NO_QUOTE, Rules
 from krx_quant.trader.replay import (
     GAP,
@@ -393,6 +396,8 @@ def refit_from(
     result = Result(Tally(), {}, {})  # no cell kept: no trade
     policy_days: list[date] = []
     if picks:
+        with reading(trader_db) as store:  # #603: its review cycles hold a cell off not active
+            evaluation = None if store is None else review.current(store)
         db = open_engine_db(engine_db)
         try:
             first = min((min(d) for d in days_of.values() if d), default=kst_day(now))
@@ -408,6 +413,7 @@ def refit_from(
                 target_version=target_version,
                 thresholds=grid.thresholds,
                 meter=meter,
+                evaluation=evaluation,
             )
             measured = replayer.run([], alone=[p.cell for p in picks])
             alone, counts, calibration = measured.signals, measured.counts, measured.calibration

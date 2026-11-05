@@ -35,6 +35,7 @@ from krx_quant.kind_registry import DAILY_KINDS
 from krx_quant.market_calendar import MarketCalendar, first_whole_day
 from krx_quant.neyman_variants import Progress as NeymanVariants
 from krx_quant.neyman_variants import progress as neyman_variants_progress
+from krx_quant.night_book import complete_nights as night_book_nights
 from krx_quant.nightly_hit_rates import nights_with_hit_rates
 from krx_quant.predictions import DB_NAME, Revision
 from krx_quant.prevalidation import LastReport, last_report, revision_report
@@ -300,6 +301,9 @@ class Facts:
     # The day of the last backup of the server's state this server made (#576, ``state_backup.MARK``):
     # the restore drill waits for one.
     state_backup: date | None = None
+    # How many complete nights the night futures' book's measure found (#605, ``night_book.complete_nights``,
+    # read from its state file): the measure stops at ``night_book.NIGHTS``.
+    night_book_nights: int = 0
 
 
 @dataclass(frozen=True)
@@ -1076,6 +1080,7 @@ async def read_facts(
         ),
         smt_holdout_days=await asyncio.to_thread(smt_days_in_holdout, settings, calendar, clock.now()),
         state_backup=await asyncio.to_thread(last_backup, settings.state_dir),
+        night_book_nights=await asyncio.to_thread(night_book_nights, settings.state_dir),
     )
 
 

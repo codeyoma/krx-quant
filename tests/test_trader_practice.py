@@ -744,8 +744,9 @@ async def test_a_practice_loss_alone_reaches_neither_loss_limit(
     (1,600). The practice's share bought at 70,050 is marked at a bid of 68,000: (68,000 − 70,050) less
     the buy's commission (10.5075) and the sale's commission and tax at the bid (68,000 × 0.215% =
     146.2): −2,206.7 won, past both limits, and its stop sells it. Before #533 that reached both; now
-    no limit counts a practice trade: no halt, the trader runs on, and the 10:08 rise buys the
-    practice's next share. The state, the day's ledger and the report give the three P&Ls apart."""
+    no limit counts a practice trade: no halt, the trader runs on, and the 10:15 rise (15 minutes on,
+    #598's spacing) buys the practice's next share. The state, the day's ledger and the report give the
+    three P&Ls apart."""
     fake, account = kis_mock
     rules = whole_rules(capital=80_000, daily_loss_percent=1.0, cumulative_loss_percent=2.0)
     frozen_here(tmp_path)
@@ -756,9 +757,9 @@ async def test_a_practice_loss_alone_reaches_neither_loss_limit(
             TEN,
             BOUGHT,
             quote("10:01:00", 68_000, 68_100),
-            Read("10:08:02.3", [Barrier("10:08:00")]),
-            quote("10:08:02.5", 70_000, 70_100),
-            quote("10:09:00", 70_000, 70_100),
+            Read("10:15:02.3", [Barrier("10:15:00")]),
+            quote("10:15:02.5", 70_000, 70_100),
+            quote("10:16:00", 70_000, 70_100),
         ]
     )
 

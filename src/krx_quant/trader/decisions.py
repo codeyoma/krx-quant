@@ -1,7 +1,9 @@
 """The trader's decisions of a day (#584): ``GET /v1/trader/decisions``.
 
 Each prediction of a picked cell a book read is a decision (``store.py``'s ``decisions``): it bought,
-or why not (``paper.py``'s reasons). Each is given with when it was decided, its prediction (the cell,
+or why not (``paper.py``'s reasons; a policy's cell whose predictor is not active is read and skipped
+``predictor_inactive``, #603, its θ and p* null as a cell not in the pick). Each is given with when it
+was decided, its prediction (the cell,
 the bar close, when the engine displayed it), the rise's probability, the cell's θ and p* in force
 then (``_Pick``: of the book's pick it was decided under, ``selections.picks``; a pick without a θ,
 the trader's ``Rules.threshold`` of its start then, ``runs``), whether it bought (``trade_id``), and

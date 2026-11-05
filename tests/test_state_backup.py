@@ -4,15 +4,19 @@ object store: a local folder, and S3 by moto. Every value is made up."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import importlib
 import io
 import json
 import logging
 import os
+import re
 import sqlite3
 import tarfile
 from collections.abc import Iterator
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
+from fnmatch import fnmatchcase
+from pathlib import Path, PurePosixPath
 
 import aiohttp
 import boto3
@@ -55,6 +59,16 @@ from tests.waiting import until
 
 NOW = datetime(2026, 11, 7, 5, 35, tzinfo=KST)
 BUCKET = "krx-quant-test"
+# The experiments' reports the state below holds, as their writers name them (#604), made up.
+EXPERIMENT_REPORTS = {
+    "experiments/climate-prior-429.json": {"experiment": "climate-prior-429", "arms": {"a": {"n": 3}}},
+    "experiments/normal-order-529.json": {
+        "experiment": "normal-order-529",
+        "comparisons": {"newton": {"ordered_over_independent": {"hit_rate": 0.01}, "label_order": True}},
+    },
+    "experiments/neyman-variants-283.json": {"experiment": "neyman-variants-283", "discovery": {"n": 56}},
+    "experiments/neyman-backfill-532.json": {"experiment": "neyman-backfill-532", "listed": {"days": []}},
+}
 # What a backup of the state below holds, and what it must never hold.
 HELD = {
     "engine.sqlite3",
@@ -65,6 +79,7 @@ HELD = {
     "models/kalman.json",
     "models/history.json",
     "models/versions/kalman/kalman-1.json",
+    *EXPERIMENT_REPORTS,
 }
 NEVER_HELD = (
     "fill_notices.sqlite3",
@@ -73,6 +88,15 @@ NEVER_HELD = (
     "kis_token.json",
     "trader_kis_token.json",
     "market_calendar.json",
+)
+# Under experiments/ but named by no pattern: the reports of the experiments #566 removed, a report
+# being written, a file no writer names, a report in a folder below.
+NOT_NAMED = (
+    "experiments/poisson-link-439.json",
+    "experiments/turing-prior-448.json",
+    "experiments/.neyman-variants-283.json.tmp",
+    "experiments/notes.json",
+    "experiments/old/climate-prior-429.json",
 )
 
 
@@ -115,6 +139,12 @@ def state(tmp_path: Path) -> Path:
     for name in NEVER_HELD[1:]:
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text("made up")
+    for name, report in EXPERIMENT_REPORTS.items():
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(json.dumps(report, indent=2))
+    for name in NOT_NAMED:
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text('{"made": "up"}')
     return root
 
 
@@ -202,6 +232,148 @@ def test_a_backup_that_would_hold_the_fill_notices_is_refused_and_stores_nothing
     assert last_backup(state) is None
 
 
+def test_a_backup_holds_the_experiment_reports_their_writers_name_and_no_other_file_there(
+    state: Path, store: ObjectStore, tmp_path: Path
+) -> None:
+    made = back_up(state, store, NOW)
+
+    held = members(store, tmp_path)
+    assert {name for name in held if name.startswith("experiments/")} == set(EXPERIMENT_REPORTS)
+    for name, report in EXPERIMENT_REPORTS.items():
+        assert json.loads(held[name]) == report
+    assert not set(NOT_NAMED) & set(held)
+    assert json.loads(held[MANIFEST])["refused"] == {}
+    assert made.experiments == len(EXPERIMENT_REPORTS)
+    assert made.experiment_bytes == sum((state / name).stat().st_size for name in EXPERIMENT_REPORTS)
+
+
+def test_an_experiment_report_that_is_a_symbolic_link_is_not_followed(
+    state: Path, store: ObjectStore, tmp_path: Path
+) -> None:
+    (state / "experiments/climate-prior-429.json").unlink()
+    (state / "experiments/climate-prior-429.json").symlink_to(state / "trader.sqlite3")
+
+    back_up(state, store, NOW)
+
+    assert "experiments/climate-prior-429.json" not in members(store, tmp_path)
+
+
+def writers() -> set[str]:
+    """The modules whose code names a file under ``experiments/``."""
+    src = Path(state_backup.__file__).parent
+    return {
+        ".".join(("krx_quant", *path.relative_to(src).with_suffix("").parts))
+        for path in src.rglob("*.py")
+        if re.search(r"""["']experiments/""", path.read_text())
+    }
+
+
+def test_each_module_that_writes_under_experiments_has_the_pattern_of_its_report() -> None:
+    assert writers() == set(state_backup.EXPERIMENT_REPORTS)
+    for module, pattern in state_backup.EXPERIMENT_REPORTS.items():
+        report = PurePosixPath(importlib.import_module(module).REPORT)
+        assert report.parent.as_posix() == state_backup.EXPERIMENTS
+        assert fnmatchcase(report.name, pattern), module
+        assert not state_backup.has_refused_word(pattern), pattern
+
+
+@pytest.fixture
+def any_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pattern that names any JSON file under experiments/: the refusals stand without one."""
+    monkeypatch.setattr(
+        state_backup, "EXPERIMENT_REPORTS", {**state_backup.EXPERIMENT_REPORTS, "tests.any": "*.json"}
+    )
+
+
+@pytest.mark.usefixtures("any_report")
+@pytest.mark.parametrize(
+    "name",
+    [
+        "kis-account-balance.json",
+        "accounts.json",
+        "trader-orders.json",
+        "fill_notices.json",
+        "fillNotice.json",
+        "mock-fills-403.json",
+        "cntg-probe.json",
+        "trader_kis_token.json",
+        "주문-기록.json",
+    ],
+)
+def test_a_report_with_a_word_of_an_account_order_or_fill_notice_in_its_name_is_refused(
+    state: Path, store: ObjectStore, tmp_path: Path, name: str
+) -> None:
+    (state / "experiments" / name).write_text('{"n": 3}')
+
+    made = back_up(state, store, NOW)
+
+    held = members(store, tmp_path)
+    assert f"experiments/{name}" not in held
+    assert json.loads(held[MANIFEST])["refused"] == {f"experiments/{name}": "name"}
+    assert "experiments/notes.json" in held  # what the pattern names besides is taken
+    assert made.refused == 1
+
+
+@pytest.mark.usefixtures("any_report")
+def test_a_pack_holding_an_experiment_report_with_a_refused_name_is_not_unpacked(
+    state: Path, store: ObjectStore, tmp_path: Path
+) -> None:
+    back_up(state, store, NOW)
+    pack = repack(store, tmp_path, {"experiments/trader-orders.json": b"{}"})
+    root = tmp_path / "checked"
+    root.mkdir()
+
+    checked = check(None, root, source=pack)
+
+    assert "백업에 백업이 담지 않는 파일이 있어 풀지 않았다" in checked.problems
+    assert not list(root.rglob("trader-orders*"))
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["CANO", "ACNT_PRDT_CD", "account", "accountNo", "ODNO", "order_id", "orderNo", "broker_id"]
+    + ["fills", "fill_notice", "CNTG_QTY", "token", "app_secret", "체결"],
+)
+def test_a_report_with_a_key_of_an_account_order_or_fill_notice_is_refused(
+    state: Path, store: ObjectStore, tmp_path: Path, caplog: pytest.LogCaptureFixture, key: str
+) -> None:
+    """Even under the name its writer gives it, and however deep the key."""
+    caplog.set_level(logging.WARNING, "krx_quant.state_backup")
+    report = {"experiment": "neyman-variants-283", "evaluation": {"by_day": [{"day": "2026-11-02"}]}}
+    report["evaluation"]["by_day"][0][key] = "made up"  # type: ignore[index]
+    (state / "experiments/neyman-variants-283.json").write_text(json.dumps(report))
+
+    back_up(state, store, NOW)
+
+    held = members(store, tmp_path)
+    assert "experiments/neyman-variants-283.json" not in held
+    assert json.loads(held[MANIFEST])["refused"] == {"experiments/neyman-variants-283.json": "key"}
+    assert (
+        "left experiments/neyman-variants-283.json out of the backup of the server state: refused (key)"
+        in caplog.messages
+    )
+
+
+def test_an_experiment_report_that_is_not_json_is_refused(
+    state: Path, store: ObjectStore, tmp_path: Path
+) -> None:
+    (state / "experiments/normal-order-529.json").write_text('{"experiment": "normal-order-529", ')
+
+    back_up(state, store, NOW)
+
+    held = members(store, tmp_path)
+    assert "experiments/normal-order-529.json" not in held
+    assert json.loads(held[MANIFEST])["refused"] == {"experiments/normal-order-529.json": "not json"}
+
+
+@pytest.mark.parametrize(
+    "words",
+    ["normal-order-529.json", "label_order", "ordered_over_independent", "filled_days", "notes", "keys"],
+)
+def test_the_words_of_the_experiments_as_they_write_are_not_refused(words: str) -> None:
+    assert not state_backup.has_refused_word(words)
+
+
 def test_the_database_copy_is_its_last_commit_while_a_writer_goes_on(
     state: Path, store: ObjectStore, tmp_path: Path
 ) -> None:
@@ -251,6 +423,64 @@ def test_the_drill_passes_on_the_latest_backup_and_leaves_the_state_as_it_is(
     assert "  orders | 6 | 6 | 6" in lines
     assert not [line for line in lines if line.startswith("문제")]
     assert sorted(p.relative_to(state).as_posix() for p in state.rglob("*")) == before
+
+
+def experiments_line(held: int, size: int, ok: int, now: int | None = None) -> str:
+    line = f"실험 파일 {held}개({size / 1024:,.1f} KB): JSON 파싱 ok {ok}개, fail {held - ok}개"
+    return line if now is None else f"{line}. 지금 서버에 허용 목록의 실험 파일 {now}개"
+
+
+def test_the_drill_counts_the_experiment_reports_and_reads_each_as_json(
+    state: Path, store: ObjectStore
+) -> None:
+    back_up(state, store, NOW)
+    size = sum((state / name).stat().st_size for name in EXPERIMENT_REPORTS)
+    (state / "experiments/neyman-backfill-532.json").unlink()  # since the backup
+    lines: list[str] = []
+
+    assert drill(state, store, NOW + timedelta(hours=17), lines.append)
+
+    assert experiments_line(4, size, 4, now=3) in lines
+
+
+def test_a_backup_whose_experiment_report_does_not_read_as_json_fails_the_check(
+    state: Path, store: ObjectStore, tmp_path: Path
+) -> None:
+    back_up(state, store, NOW)
+    broken = b'{"experiment": "climate-prior-429", '
+    manifest = json.loads(members(store, tmp_path)[MANIFEST])
+    manifest["files"]["experiments/climate-prior-429.json"] = {
+        "sha256": hashlib.sha256(broken).hexdigest(),
+        "size": len(broken),
+    }
+    pack = repack(
+        store,
+        tmp_path,
+        {"experiments/climate-prior-429.json": broken, MANIFEST: json.dumps(manifest).encode()},
+    )
+    (tmp_path / "checked").mkdir()
+
+    checked = check(None, tmp_path / "checked", source=pack)
+
+    assert checked.problems == ["실험 파일 1개를 JSON으로 읽지 못했다"]  # its SHA-256 is as listed
+    assert checked.experiments["experiments/climate-prior-429.json"] is False
+    assert sum(checked.experiments.values()) == 3
+
+
+def test_the_drill_fails_when_the_backup_refused_an_experiment_report(
+    state: Path, store: ObjectStore
+) -> None:
+    (state / "experiments/neyman-variants-283.json").write_text('{"discovery": {"CANO": "made up"}}')
+    back_up(state, store, NOW)
+    lines: list[str] = []
+
+    assert not drill(state, store, NOW + timedelta(hours=17), lines.append)
+
+    assert lines[0] == "복원 시험 (#576): fail"
+    assert (
+        "- 백업이 실험 파일 1개를 넣지 않았다(이름이나 JSON 키에 계좌·주문·체결 통보·비밀값의 말이 있거나 "
+        "JSON이 아니다): experiments/neyman-variants-283.json(JSON 키)"
+    ) in lines
 
 
 def test_the_drill_shows_the_live_counts_now_beside_those_backed_up(state: Path, store: ObjectStore) -> None:
@@ -337,7 +567,13 @@ def test_a_pack_reaching_out_of_its_folder_or_holding_the_fill_notices_is_not_un
     pack = repack(
         store,
         tmp_path,
-        {"../outside.json": b"{}", "fill_notices.sqlite3": b"made up", "kis_token.json": b"{}"},
+        {
+            "../outside.json": b"{}",
+            "fill_notices.sqlite3": b"made up",
+            "kis_token.json": b"{}",
+            "experiments/kis-orders.json": b"{}",
+            "experiments/poisson-link-439.json": b"{}",
+        },
     )
     root = tmp_path / "checked"
     root.mkdir()
@@ -348,6 +584,8 @@ def test_a_pack_reaching_out_of_its_folder_or_holding_the_fill_notices_is_not_un
     assert not (tmp_path / "outside.json").exists()
     assert not list(root.rglob("fill_notices*"))
     assert not list(root.rglob("kis_token*"))
+    assert not list(root.rglob("kis-orders*"))
+    assert not list(root.rglob("poisson-link*"))
     assert "백업에 서버 밖으로 내보내지 않는 체결 통보 기록이 있어 풀지 않았다" in checked.problems
     assert "백업에 백업이 담지 않는 파일이 있어 풀지 않았다" in checked.problems
 
@@ -388,6 +626,9 @@ def test_a_restore_puts_the_backup_back_into_a_new_servers_state_folder(
     assert db.execute("PRAGMA user_version").fetchone()[0] == 7
     db.close()
     assert (new / "models/versions/kalman/kalman-1.json").read_text() == '{"version": "kalman-1"}'
+    neyman = "experiments/neyman-variants-283.json"
+    assert json.loads((new / neyman).read_text()) == EXPERIMENT_REPORTS[neyman]
+    assert not [name for name in NOT_NAMED if (new / name).exists()]
     assert not list(new.rglob("fill_notices*"))
     assert ((new / "trader.sqlite3").stat().st_mode & 0o777) == 0o600
 
@@ -402,11 +643,13 @@ def test_a_restore_over_files_there_is_refused_unless_it_moves_them_aside(
     (other / "engine.sqlite3-wal").write_bytes(b"a log of another database")
     (other / "models").mkdir()
     (other / "models/turing.json").write_text("{}")
+    (other / "experiments").mkdir()
+    (other / "experiments/poisson-link-439.json").write_text("{}")
     (other / "fill_notices.sqlite3").write_bytes(b"kept as it is")
 
     before = file_digest(other / "engine.sqlite3")
 
-    with pytest.raises(RestoreRefused, match="engine.sqlite3, engine.sqlite3-wal, models"):
+    with pytest.raises(RestoreRefused, match="engine.sqlite3, engine.sqlite3-wal, experiments, models"):
         restore(other, store, NOW, say=lambda line: None)
     assert file_digest(other / "engine.sqlite3") == before
     assert (other / "engine.sqlite3-wal").exists()
@@ -417,6 +660,8 @@ def test_a_restore_over_files_there_is_refused_unless_it_moves_them_aside(
     assert (aside / "engine.sqlite3-wal").read_bytes() == b"a log of another database"
     assert file_digest(aside / "engine.sqlite3") == before
     assert (aside / "models/turing.json").exists()
+    assert (aside / "experiments/poisson-link-439.json").exists()  # the backup does not hold it
+    assert (other / "experiments/neyman-variants-283.json").exists()
     assert not (other / "engine.sqlite3-wal").exists()
     assert not (other / "models/turing.json").exists()  # the restored folder holds what was backed up
     assert counts(other / "engine.sqlite3")["predictions"] == 500
