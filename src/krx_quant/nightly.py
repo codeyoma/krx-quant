@@ -21,8 +21,7 @@ closes (``training``). For each algorithm, in registration order:
    the two models' hit rates on the same bar closes, with what a hit-rate-first rule would have
    chosen and whether the log loss promoted a model whose hit rate fell (#437,
    ``nightly_hit_rates``). The rule stays the mean loss alone. The report is the algorithm's
-   checkpoint: a night run again (after a crash, or a reclaimed Spot instance) skips the
-   algorithms it has.
+   checkpoint: a night run again (after a crash) skips the algorithms it has.
 
 Once every algorithm is done the promotion list is stored, final: the algorithms whose
 challenger won, by version, and every report. The server applies it at 08:00 (``swap``).
@@ -49,9 +48,9 @@ latest ``days`` days, with a report of its own (naming the kind), and always pro
 the direction's climate table is.
 
 The daily kinds' algorithms (#264, ``daily_training``) come last, given the server's own files
-(``daily``: the KRX day candles, the US daily closes, KIS's supply; a night without them, as on
-another machine, does not train them): each refitted on its latest days up to the night and
-always promoted, its report naming the kind and ``cadence`` ``daily``.
+(``daily``: the KRX day candles, the US daily closes, KIS's supply; a night given none does not
+train them): each refitted on its latest days up to the night and always promoted, its report
+naming the kind and ``cadence`` ``daily``.
 
 An algorithm the engine does not run because its latest pre-validation refused the code, target
 and inputs it has (#544, ``prevalidation.left_out``: not enrolled, retired, or a daily one on
@@ -82,7 +81,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import os
 import shutil
 import time
 from collections import Counter
@@ -154,42 +152,6 @@ def report_key(day: date, name: str) -> str:
 
 def promotions_key(day: date) -> str:
     return f"promotions/{day.isoformat()}.json"
-
-
-# What a night trained on another machine (EC2 Spot, #23) needs from the server: the
-# settings training reads, as the server's environment has them, and its market calendar.
-TRAINING_SETTINGS_KEY = "training/settings.json"
-TRAINING_CALENDAR_KEY = "training/market_calendar.json"
-
-
-def training_settings(settings: Settings) -> dict[str, str]:
-    """The settings a night's training reads, as environment values (none of them secret)."""
-    return {
-        "KRX_SYMBOLS": ",".join(settings.symbols),
-        "KRX_ETF_SYMBOLS": ",".join(settings.etf_symbols),
-        "KRX_US_SYMBOLS": ",".join(settings.us_symbols),
-        "KRX_INDEX_CODES": ",".join(settings.index_codes),
-        "KRX_FEE_PERCENT": f"{settings.fee_rate * 100:.10g}",
-        "KRX_TARGET_VERSION": str(settings.target_version),
-    }
-
-
-def from_the_server(settings: Settings) -> Settings:
-    """``settings`` with what the server published for the night's training: its
-    settings, over this machine's, and its market calendar, into this state directory."""
-    store = open_store(settings)
-    if store is None:
-        raise SettingsError("KRX_OBJECT_STORE is not set: nightly training reads and writes it")
-    published = get_json(store, TRAINING_SETTINGS_KEY)
-    if published is None:
-        raise SettingsError(
-            f"no {TRAINING_SETTINGS_KEY} in {store.name}: the server publishes it (KRX_TRAIN_ON=spot)"
-        )
-    if store.digest(TRAINING_CALENDAR_KEY) is not None:
-        settings.state_dir.mkdir(parents=True, exist_ok=True)
-        store.get(TRAINING_CALENDAR_KEY, settings.state_dir / "market_calendar.json")
-    # Over the environment and this machine's .env, as the settings were read.
-    return Settings.from_env({**os.environ, **published}, require_kis=False)
 
 
 @dataclass(frozen=True)
@@ -516,7 +478,7 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
     finished_before = day is not None and store.digest(promotions_key(day)) is not None
     calendar = calendar_store(settings).calendar
     # Those the engine does not run for their pre-validation's refusal (#544): read from this
-    # server's state folder and engine DB (on Spot there are none, and every algorithm trains).
+    # server's state folder and engine DB.
     statuses = read_statuses(settings.state_dir / DB_NAME)
     # The daily kinds' algorithms (#264) train on this server's files, where it has them.
     daily = DailyTrainer(
@@ -534,7 +496,7 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
         calendar=calendar,
         commit=settings.commit,
         target_version=settings.target_version,
-        daily=daily if settings.train_on == "server" else None,
+        daily=daily,
         samples=settings.state_dir / STORE_DIR,
         left_out=refused_by(settings.state_dir, statuses, settings.target_version),
     )

@@ -33,7 +33,9 @@ the days before them. The morning's 08:50 predictions are in too, waiting for th
 The five-session kind ``open_to_close_5d`` (#310) has its three baselines' predictions of the
 windows begun on those 20 days and the answers of those ended by the 8th, each at its end day's
 20:35; the four begun on the 5th to the 8th and the morning's wait for their end. Its algorithm
-``cox-5d`` makes none: its pre-validation was refused on the server, so neither engine runs it.
+``cox-5d`` makes none: its pre-validation was refused on the server, so neither engine runs it, and
+the API shows it refused, with a made-up report (#561). The 60-minute barrier's Breiman waits for its
+pre-validation, as on the server: no engine runs it either.
 The KRX day candles carry KIS's 락 구분 as the collector keeps it (``ex_code``): 00 every day but a
 made-up interim ex-dividend day (05) of 005930 on 2026-09-29, so the windows begun the four sessions
 before it are marked ``ex_dividend``.
@@ -84,7 +86,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from aiohttp import web
 
-from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, Model
+from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, Algorithm, KindAlgorithm, Model
 from krx_quant.api import create_app
 from krx_quant.auctions import KEEP_DAYS, MINUTE_BAR, write_auctions
 from krx_quant.backfill import (
@@ -109,7 +111,7 @@ from krx_quant.closing_flow import (
     write_demand,
 )
 from krx_quant.contracts import KOSPI200
-from krx_quant.daily import ANSWER_FROM, NO_EX_CODE, StoredDays
+from krx_quant.daily import ANSWER_FROM, NO_EX_CODE, DailyAlgorithm, StoredDays
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import (
@@ -149,6 +151,7 @@ from krx_quant.nightly import Night
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
+from krx_quant.prevalidation import Refusal, judging
 from krx_quant.products import PRODUCTS
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
@@ -194,8 +197,34 @@ _PACED_FROM = time(10, 0)  # a paced demo opens here and goes on a minute at a t
 _STEPS = 6  # …in steps of 10 seconds
 _FEE = 0.00015
 # The algorithms the server's pre-validation refused, which the engine does not run: cox-5d
-# (2026-10-23, #310; kept refused by the user's decision of 2026-10-24). The demo runs every other.
-_REFUSED = frozenset({"cox-5d"})
+# (2026-10-23, #310; kept refused by the user's decision of 2026-10-24), with a made-up report's
+# failed check (#561). The demo runs every other but one waiting for its pre-validation (#561): the
+# 60-minute barrier's Breiman, as on the server since before 2026-10-23. Neither the earlier
+# afternoons' engines nor the morning's run them, so neither has a status.
+_REFUSED = {
+    "cox-5d": (
+        "2026-10-23T23:41:07+09:00",
+        "stats",
+        "weakest lift 0.0204; by trading day low -0.0072 at 95.00%",
+    )
+}
+_WAITING = frozenset({"breiman-60m"})
+
+
+def _admitted(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> bool:
+    return algorithm.name not in _REFUSED and algorithm.name not in _WAITING
+
+
+def _refusal(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> Refusal | None:
+    """The demo's refusal of ``algorithm`` (#561), as ``prevalidation.refusals`` reads a report: of
+    the code, target and inputs it has now."""
+    if algorithm.name not in _REFUSED:
+        return None
+    at, check, detail = _REFUSED[algorithm.name]
+    judged = {"prevalidated_at": at, **judging(algorithm, TARGET_VERSION)}
+    return Refusal(json.dumps(judged, sort_keys=True), f"{check}: {detail}", (check,))
+
+
 # Each symbol's mid-point at the open and its tick.
 _OPENS = {"005930": (81_250, 100), "000660": (201_000, 500), "009150": (150_050, 100)}
 # The overnight before the demo morning, each indicator's (day before, last day) values: SOX
@@ -931,6 +960,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
             start=datetime.combine(day, _PAST_FROM, KST) - timedelta(minutes=1),
             until=datetime.combine(day, time(15, 30), KST),
             target_version=TARGET_VERSION,
+            admits=_admitted,  # the morning's waiting one never ran (#561)
             previous=PreviousDay(data_dir, _CALENDAR),  # range_prev_day, slot returns (#181, #265)
         )  # no macro read those mornings: no regime
         engine.store.close()
@@ -952,7 +982,8 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         models={cox.version.split("-")[0]: cox},
         daily=StoredDays(data_dir),  # the morning's 08:50 predictions (#264)
         daily_algorithms=DAILY_ALGORITHMS,
-        admits=lambda a: a.name not in _REFUSED,  # as the server's pre-validations (#310)
+        admits=_admitted,  # as the server's pre-validations (#310, #561)
+        refused=_refusal,
         daily_features=LiveFeatures(
             OPEN_TO_CLOSE, data_dir, data_dir / "state", _CALENDAR, DEMO_SYMBOLS, _FEE
         ),

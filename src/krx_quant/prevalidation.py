@@ -326,6 +326,7 @@ class Refusal:
     # key (told once each: a run again by hand is told too).
     judged: str
     why: str  # the checks it failed, a line
+    checks: tuple[str, ...] = ()  # the names of the checks it failed, in the report's order (#561)
 
 
 def refusals(
@@ -390,7 +391,7 @@ def _refusal(
         "prevalidated_at": report.get("prevalidated_at"),
         **judging(algorithm, target_version, kinds),
     }
-    return Refusal(json.dumps(judged, sort_keys=True), failed_checks(report))
+    return Refusal(json.dumps(judged, sort_keys=True), failed_checks(report), failed_names(report))
 
 
 def _daily(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> bool:
@@ -414,13 +415,22 @@ def judging(
 
 def failed_checks(report: Mapping[str, Any]) -> str:
     """The checks a report failed, as ``check: detail`` joined by ``; ``."""
+    failed = [f"{c.get('check')}: {c.get('detail')}" for c in _failed(report)]
+    return "; ".join(failed) or "no failed check recorded"
+
+
+def failed_names(report: Mapping[str, Any]) -> tuple[str, ...]:
+    """The names of the checks a report failed, in its order (#561: ``GET /v1/algorithms``)."""
+    return tuple(str(c.get("check")) for c in _failed(report))
+
+
+def _failed(report: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     checks = report.get("checks")
-    failed = [
-        f"{c.get('check')}: {c.get('detail')}"
+    return [
+        c
         for c in (checks if isinstance(checks, list) else [])
         if isinstance(c, Mapping) and c.get("passed") is not True
     ]
-    return "; ".join(failed) or "no failed check recorded"
 
 
 def revision_report(

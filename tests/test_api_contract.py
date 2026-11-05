@@ -92,6 +92,8 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/leaderboard{query}", "leaderboard")
     for query in ("", "?period=5d&special=include", f"?symbol={symbols[0]}&period=20d"):
         await ask(f"/v1/cost-map{query}", "cost_map")  # #307
+    for query in ("", "?limit=1", "?kind=direction&limit=60"):
+        await ask(f"/v1/leaderboard/days{query}", "leaderboard_days")  # #561
     for name in algorithms:
         await ask(f"/v1/algorithms/{name}", "algorithm_detail")
     for name in [*algorithms, "baseline-flat", "consensus-final"]:
@@ -123,6 +125,7 @@ async def walk(get: Get) -> dict[str, int]:
             )
         for query in ("", "&period=5d&special=include", f"&symbol={symbols[0]}&period=20d"):
             check("kind_leaderboard", await ask(f"/v1/leaderboard?kind={name}{query}", "leaderboard"))
+        await ask(f"/v1/leaderboard/days?kind={name}", "leaderboard_days")  # #561
         for baseline in kind["baselines"]:
             check(
                 "kind_algorithm_stats",
@@ -143,6 +146,9 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/005930/kinds/direction/latest", 404),
         ("/v1/symbols/005930/kinds/nothing/predictions", 404),
         ("/v1/leaderboard?kind=nothing", 400),
+        ("/v1/leaderboard/days?kind=nothing", 400),  # #561
+        ("/v1/leaderboard/days?limit=0", 400),
+        ("/v1/leaderboard/days?limit=61", 400),
     ):
         await ask(path, "error", status)
     for path, status in (

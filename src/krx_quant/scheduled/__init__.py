@@ -35,8 +35,8 @@ A run the collector's stop cut (a deploy, a restart, a crash) is ``interrupted``
 count as run, and runs again the next night (a session job, the next trading day). A result
 is masked (``redaction.py``) and posted on each issue, which then gets ``ready-for-agent`` in
 place of ``ready-for-human`` and ``needs-triage``; a job with ``Job.label_if`` (#402: the trader's
-nightly report) changes the labels only on the runs it says call an agent. Without
-``KRX_GITHUB_TOKEN``, or when
+nightly report; #570: the recording's quality) changes the labels only on the runs it says call
+an agent. Without ``KRX_GITHUB_TOKEN``, or when
 GitHub fails, the result waits in the state and is posted at the next night or start. Telegram
 gets a line per run, with the comments' addresses. The line and the comment's first line say what
 came of it (``_what``, #440): 성공 (a pre-validation's 통과), 거부, 실패 (a pre-validation's 예외), 시간
@@ -119,6 +119,12 @@ from krx_quant.scheduled.prevalidations import (
     revision_jobs,
     revision_turn,
 )
+from krx_quant.scheduled.probes import (
+    RECORDING_QUALITY,
+    SAMPLE_KEYS,
+    SAMPLE_KEYS_AGAIN,
+    recording_quality_calls,
+)
 from krx_quant.scheduled.research import (
     CLIMATE_GATE,
     ERROR_HOLDOUT,
@@ -162,6 +168,7 @@ __all__ = [
     "OK",
     "PASSED",
     "PREVALIDATION_ISSUE",
+    "RECORDING_QUALITY",
     "REFUSED",
     "RUNNING",
     "SAMPLE_PROFILE",
@@ -196,6 +203,7 @@ __all__ = [
     "prevalidation_tonight",
     "prevalidation_turn",
     "read_facts",
+    "recording_quality_calls",
     "revising_facts",
     "revision_job_name",
     "revision_jobs",
@@ -252,7 +260,10 @@ async def keep_jobs(
 
 
 JOBS: tuple[Job, ...] = (
+    SAMPLE_KEYS,
+    SAMPLE_KEYS_AGAIN,
     TRADER_REPORT,
+    RECORDING_QUALITY,
     FILL_NOTICE_LAYOUT,
     SIGNAL_REVIEW_FIXED,
     LIVE_PROBE,
