@@ -537,6 +537,12 @@ def scored_rows(
     return select_predictions(db, where, params)
 
 
+# The ``runs`` that rewrite past days' scores (``PredictionStore.refill_mark``, #561): the touch labels
+# and the kinds' answers filled at a start or rescored by command (#168, #180), the special windows
+# decided from a day's recording (#236).
+REFILLS = ("touch_fill", "rescore", "kind_fill", "special_fill")
+
+
 # What a status review (``lifecycle.review``, ``stages``) and the consensus refit read of a scored
 # prediction (#487): the fields their stats, clone check and weights go by
 # (``stats.scored_by_algorithm``, ``stats.on_target``, the lean), no more.
@@ -889,7 +895,7 @@ def current_statuses(db: sqlite3.Connection) -> dict[str, Standing]:
 def read_statuses(db: Path) -> dict[str, Standing]:
     """The current statuses in the engine DB ``db``, read without writing (``read_only``), as a
     process beside the engine reads them (the night's training, a pre-validation, #544); none
-    without a DB (a night trained on Spot)."""
+    without a DB."""
     with read_only(db) as conn:
         return {} if conn is None else current_statuses(conn)
 
@@ -2174,6 +2180,23 @@ class PredictionStore:
         """What changes whenever a simulation is kept: what the stages are cached for."""
         row = self._db.execute("SELECT COUNT(*), MAX(made_at) FROM simulations").fetchone()
         return int(row[0]), row[1]
+
+    def refill_mark(self, kind: str | None = None, answer_version: int | None = None) -> tuple[Any, ...]:
+        """What changes whenever past days' scores may: a fill or a rescore of their answers or their
+        special windows (``REFILLS``, by this engine or by a command beside it), and, for ``kind``'s
+        (a daily kind's: its answers come in after the day's review, #264), its answers of
+        ``answer_version`` written. The day series keep each day computed until it changes (#561)."""
+        marks = ", ".join("?" for _ in REFILLS)
+        row = self._db.execute(
+            f"SELECT COUNT(*), MAX(at) FROM runs WHERE kind IN ({marks})", REFILLS
+        ).fetchone()
+        if kind is None:
+            return int(row[0]), row[1]
+        answers = self._db.execute(
+            "SELECT COUNT(*), MAX(scored_at) FROM kind_answers WHERE kind = ? AND answer_version = ?",
+            (kind, answer_version),
+        ).fetchone()
+        return int(row[0]), row[1], int(answers[0]), answers[1]
 
     def to_simulate(self, names: Sequence[str]) -> list[str]:
         """Of ``names``, in order, the algorithms on a probation that waits for its simulation

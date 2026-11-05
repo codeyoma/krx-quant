@@ -59,6 +59,7 @@ from krx_quant.scheduled import (
 )
 from krx_quant.scheduled.core import _first_night, _first_trading_night
 from krx_quant.swap import TRAINING_TIMEOUT, NightTraining, keep_training
+from krx_quant.training_nights import Failure
 from tests.collector_doubles import settings_for
 from tests.fake_github import REPO, TOKEN, fake_github
 from tests.scheduled_doubles import (
@@ -167,7 +168,7 @@ async def test_a_training_due_at_a_start_inside_the_night_is_waited_for(tmp_path
 
 
 async def test_a_training_still_going_after_its_time_limit_holds_the_jobs_no_longer(tmp_path: Path) -> None:
-    # A night on Spot whose result never comes (the Cost Guard turned it off, the run failed).
+    # A night whose end is never told: the jobs wait no longer than the training's time limit.
     training = NightTraining()
     training.started(at(FRIDAY, "21:30"), at(MONDAY, "21:30"))
     async with scheduling(tmp_path, at(FRIDAY, "22:30"), [job()], training=training) as (clock, runs, _, _):
@@ -374,7 +375,7 @@ async def test_keep_training_tells_the_jobs_when_the_night_trains() -> None:
     done = asyncio.Event()
     clock = [at(FRIDAY, "21:30")]
 
-    async def night(day: date) -> str | None:
+    async def night(day: date) -> Failure | None:
         running.set()
         await done.wait()
         return None
@@ -390,9 +391,8 @@ async def test_keep_training_tells_the_jobs_when_the_night_trains() -> None:
             Alerts(session, None, None, "http://127.0.0.1:9"),
             lambda: clock[0],
             refresh,
-            night,
-            lambda calendar, train_at, started: at(FRIDAY, "21:30"),
             training,
+            train=night,
         )
     )
     try:

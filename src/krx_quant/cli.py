@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import itertools
 import json
 import logging
@@ -17,9 +16,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import boto3
 from aiohttp import web
-from botocore.exceptions import BotoCoreError, ClientError
 
 from krx_quant import loki
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, RegistrationError
@@ -58,7 +55,7 @@ from krx_quant.nav_probe import probe_nav
 from krx_quant.neyman_backfill import neyman_backfill
 from krx_quant.neyman_variants import neyman_variants
 from krx_quant.night_probe import probe_night
-from krx_quant.nightly import from_the_server, run_training
+from krx_quant.nightly import run_training
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS, compared_nights
 from krx_quant.nightly_hit_rates import lines as hit_rate_lines
 from krx_quant.normal_order import REPORT as NORMAL_ORDER_REPORT
@@ -87,6 +84,7 @@ from krx_quant.process_log import open_process_log
 from krx_quant.redaction import secrets_of
 from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
+from krx_quant.sample_keys_probe import probe_sample_keys
 from krx_quant.sample_profile import LIMIT as SAMPLE_PROFILE_LIMIT
 from krx_quant.sample_profile import PROFILED, sample_profile
 from krx_quant.sample_profile import TOP as SAMPLE_PROFILE_TOP
@@ -235,20 +233,6 @@ async def _check_fallbacks() -> int:
     return 1 if failed else 0
 
 
-def _registry_password() -> int:
-    """The password of this AWS account's ECR registry, for ``docker login --username AWS
-    --password-stdin`` (deploy/push-image.sh), from the server's own keys."""
-    region = Settings.from_env(require_kis=False).aws_region
-    try:
-        token = boto3.client("ecr", region_name=region).get_authorization_token()
-    except (BotoCoreError, ClientError) as e:
-        print(f"AWS error: {e}", file=sys.stderr)
-        return 1
-    _, password = base64.b64decode(token["authorizationData"][0]["authorizationToken"]).decode().split(":", 1)
-    print(password)
-    return 0
-
-
 async def _probe_night(day: date | None) -> int:
     print(await probe_night(Settings.from_env(require_kis=False), datetime.now(KST), day))
     return 0
@@ -352,6 +336,13 @@ def _restore_drill() -> int:
     """The monthly restore drill (#576): the latest backup checked, the state folder left as it is."""
     settings = Settings.from_env(require_kis=False)
     return 0 if drill(settings.state_dir, _state_store(settings), datetime.now(KST)) else 1
+
+
+def _probe_sample_keys(day: date | None) -> int:
+    """What changes the key of a day a night stored (#565)."""
+    report, code = probe_sample_keys(Settings.from_env(require_kis=False), datetime.now(KST), day=day)
+    print(report)
+    return code
 
 
 def _sample_profile(day: date | None, algorithms: list[str], limit: int, top: int) -> int:
@@ -520,11 +511,9 @@ def _overlap_lines(overlap: dict[str, Any], kind: DailyKind | None = None) -> st
     return "\n".join(lines)
 
 
-def _train(day: date | None, from_store: bool) -> int:
+def _train(day: date | None) -> int:
     try:
         settings = Settings.from_env(require_kis=False)
-        if from_store:
-            settings = from_the_server(settings)
         night = asyncio.run(run_training(settings, day))
     except SettingsError:
         raise  # a configuration error, reported as one (exit 2)
@@ -1026,10 +1015,6 @@ def _parser() -> argparse.ArgumentParser:
         " only, prints no value",
     ).set_defaults(run=lambda args: _check_krx_net_assets())
     sub.add_parser(
-        "registry-password",
-        help="print the ECR registry's docker login password (deploy/push-image.sh, EC2 Spot training)",
-    ).set_defaults(run=lambda args: _registry_password())
-    sub.add_parser(
         "backfill",
         help="fill missing one-minute bars for the past year and exit (stop the collector first)",
     ).set_defaults(run=lambda args: asyncio.run(_backfill()))
@@ -1088,6 +1073,18 @@ def _parser() -> argparse.ArgumentParser:
     sample_profile_cmd.set_defaults(
         run=lambda args: _sample_profile(args.day, args.algorithms, args.limit, args.top)
     )
+    sample_keys_cmd = sub.add_parser(
+        "probe-sample-keys",
+        help="what changed the key of the days the sample store holds since the night stored them (#565):"
+        " their input files in the Object Store, the training cache and the data directory, the latest day's"
+        " parts not merged yet, the keys changed since the last run; writes only its state file, no price",
+    )
+    sample_keys_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the latest day looked at, YYYY-MM-DD (default: the store's latest)",
+    )
+    sample_keys_cmd.set_defaults(run=lambda args: _probe_sample_keys(args.day))
     sub.add_parser(
         "backup-state",
         help="back the server's state up to KRX_OBJECT_STORE now, as the collector does each night (#576)",
@@ -1187,12 +1184,7 @@ def _parser() -> argparse.ArgumentParser:
     train_cmd.add_argument(
         "--day", type=date.fromisoformat, help="the night to train, YYYY-MM-DD (default: latest)"
     )
-    train_cmd.add_argument(
-        "--from-store",
-        action="store_true",
-        help="train with the settings and market calendar the server published (EC2 Spot)",
-    )
-    train_cmd.set_defaults(run=lambda args: _train(args.day, args.from_store))
+    train_cmd.set_defaults(run=lambda args: _train(args.day))
     simulate_cmd = sub.add_parser(
         "simulate",
         help="replay the latest trading days as the probation of each algorithm that waits for it (#298),"
