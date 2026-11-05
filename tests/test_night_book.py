@@ -201,7 +201,8 @@ def test_a_night_pruned_as_it_is_measured_fails_rather_than_measuring_zero_bytes
     monday = date(2026, 11, 9)
     record_night(data, monday)
     merge(data, tmp_path)
-    listing, ran = archiving.partition_files, []
+    listing = archiving.partition_files
+    ran: list[bool] = []
 
     def pruned_first(partition: Path) -> list[Path]:
         if not ran and "raw" in partition.parts:
