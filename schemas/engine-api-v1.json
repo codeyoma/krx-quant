@@ -305,7 +305,7 @@
     "outcome": {
       "type": "object",
       "required": [
-        "mid_close", "mid_display", "mid_target", "flat_ticks", "class_a", "class_b",
+        "mid_close", "mid_display", "mid_target", "flat_ticks",
         "special", "unscorable", "scored_at", "touch"],
       "additionalProperties": false,
       "properties": {
@@ -313,14 +313,6 @@
         "mid_display": {"$ref": "#/$defs/price"},
         "mid_target": {"$ref": "#/$defs/price"},
         "flat_ticks": {"type": ["integer", "null"], "minimum": 1},
-        "class_a": {
-          "description": "For one release (#170): the bar close's touch label, as touch.class (no longer basis A's class, which stays in the DB).",
-          "$ref": "#/$defs/class"
-        },
-        "class_b": {
-          "description": "For one release (#170): the touch label too, as class_a.",
-          "$ref": "#/$defs/class"
-        },
         "special": {"type": "boolean"},
         "unscorable": {
           "description": "Why the touch label is missing (#170): touch.unscorable, or 'no touch label' where the bar close has none; null when it is there.",
@@ -1184,10 +1176,6 @@
         "symbol": {"type": "string"},
         "period": {"enum": ["today", "5d", "20d"]},
         "days": {"type": "array", "items": {"$ref": "#/$defs/day"}},
-        "basis": {
-          "description": "Gone with #170 (every prediction is scored on its touch label): for one release the basis a screen from before sent, echoed back as sent; absent when none was sent.",
-          "enum": ["a", "b"]
-        },
         "special": {"enum": ["exclude", "include"]},
         "min_sample": {"type": "integer", "minimum": 1}
       }

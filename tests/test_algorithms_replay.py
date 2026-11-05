@@ -50,7 +50,7 @@ async def test_newton_predicts_and_is_scored_under_its_model_version(tmp_path: P
     assert {p["model_version"] for p in newton} == {"newton-default"}
     scored = [p for p in newton if p["outcome"] is not None]
     assert len(scored) == 56  # 09:57–10:00 wait for their targets
-    assert all(p["outcome"]["class_a"] for p in scored[:-20])
+    assert all(p["outcome"]["touch"]["class"] for p in scored[:-20])
     # Once there are enough bars to see a trend, Newton commits to a move.
     assert any(p["expected_ticks"] != 0 for p in newton)
 

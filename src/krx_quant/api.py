@@ -108,10 +108,9 @@ algorithms against its baselines (the direction's by default, as before); an alg
 ``symbol`` is a symbol or ``all`` (default), ``period`` is ``today`` (default), ``5d`` or
 ``20d`` (the latest days with predictions), and ``special`` is ``exclude`` (default) or
 ``include`` (predictions with a VI or circuit breaker in their window). Every prediction is
-scored on its bar close's touch label (#170). For one release a screen from before still
-sends ``basis`` (``a`` or ``b``): it is accepted, ignored and echoed back as sent, so that
-screen, which asks again until the answer's ``basis`` is its own, is answered once
-(``LEGACY_BASES``). Without it the answer has no ``basis``.
+scored on its bar close's touch label (#170). ``basis``, which a screen from before #170
+sent, is refused (#592): it was echoed back for one release, so that screen, which asked
+again until the answer's ``basis`` was its own, was answered once; an answer has none.
 
 Times are ISO 8601 in KST. On the server, compose publishes it on the Tailscale address only;
 it has no authentication, so the trader's pause is its one write.
@@ -248,8 +247,6 @@ BRIEFING_SECONDS = 20.0
 BRIEFING_CACHE_KEY = web.AppKey("briefing_cache", dict)
 STATS_CACHE_KEY = web.AppKey("stats_cache", dict)
 PERIODS = {"today": 1, "5d": 5, "20d": 20}  # days with predictions
-# The scoring bases a screen from before #170 still sends, accepted and echoed back for one release.
-LEGACY_BASES = ("a", "b")
 # Results kept per question until the store changes (the screen asks the same often).
 _CACHED_QUESTIONS = 64
 
@@ -1259,8 +1256,8 @@ def _query(request: web.Request, engine: PredictionEngine, kind: PredictionKind 
         raise _error(web.HTTPBadRequest, f"symbol must be all or one of {', '.join(engine.symbols)}")
     if period not in PERIODS:
         raise _error(web.HTTPBadRequest, f"period must be one of {', '.join(PERIODS)}")
-    if "basis" in q and q["basis"] not in LEGACY_BASES:
-        raise _error(web.HTTPBadRequest, "basis is gone (#170): leave it out (a or b is still accepted)")
+    if "basis" in q:  # refused rather than ignored: a screen from before #170 would ask again and again
+        raise _error(web.HTTPBadRequest, "basis is gone (#170): leave it out")
     if special not in ("exclude", "include"):
         raise _error(web.HTTPBadRequest, "special must be exclude or include")
     today = kst_day(engine.clock.now())
@@ -1282,20 +1279,6 @@ def _kind_query(request: web.Request, engine: PredictionEngine) -> PredictionKin
         names = ", ".join([DIRECTION, *(k.name for k in engine.kinds), *(k.name for k in engine.daily_kinds)])
         raise _error(web.HTTPBadRequest, f"kind must be one of {names}, got {name!r}")
     return None if kind is DIRECTION_KIND else kind
-
-
-def _echo_basis(request: web.Request, body: dict[str, Any]) -> dict[str, Any]:
-    """``body`` with the ``basis`` a screen from before #170 sent, as it sent it (``LEGACY_BASES``):
-    the order of the query's fields kept, after ``days``."""
-    basis = request.query.get("basis")
-    if basis is None:
-        return body
-    out: dict[str, Any] = {}
-    for key, value in body.items():
-        out[key] = value
-        if key == "days":
-            out["basis"] = basis
-    return out
 
 
 async def _leaderboard(request: web.Request) -> web.Response:
@@ -1330,7 +1313,7 @@ async def _leaderboard(request: web.Request) -> web.Response:
         return [{**e, "status": statuses.get(e["algorithm"])} for e in entries]
 
     body = {**body, "ranked": with_status(body["ranked"]), "unranked": with_status(body["unranked"])}
-    return _json(_echo_basis(request, body))
+    return _json(body)
 
 
 async def _leaderboard_days(request: web.Request) -> web.Response:
@@ -1494,7 +1477,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
             "volatility_cuts": cuts,
         }
 
-    return _json(_echo_basis(request, await _stats(request, ("algorithm", name), query, build)))
+    return _json(await _stats(request, ("algorithm", name), query, build))
 
 
 Build = Callable[[dict[str, list[Scored]], dict[str, list[Scored]], dict[str, Excluded]], dict[str, Any]]
@@ -1676,7 +1659,7 @@ async def _kind_leaderboard(request: web.Request, kind: PredictionKind) -> web.R
         return [{**e, "status": statuses.get(e["algorithm"])} for e in entries]
 
     body = {**body, "ranked": with_status(body["ranked"]), "unranked": with_status(body["unranked"])}
-    return _json(_echo_basis(request, body))
+    return _json(body)
 
 
 async def _kind_algorithm_stats(request: web.Request, name: str, kind: PredictionKind) -> web.Response:
@@ -1727,7 +1710,7 @@ async def _kind_algorithm_stats(request: web.Request, name: str, kind: Predictio
         }
 
     body = await _kind_stats(request, kind, ("algorithm", name), query, build)
-    return _json(_echo_basis(request, body))
+    return _json(body)
 
 
 async def _cost_map(request: web.Request) -> web.Response:
