@@ -20,6 +20,7 @@ from krx_quant.scheduled import JOBS, Job, daily_prevalidation_jobs, prevalidati
 # The jobs written by hand, in the list's order, before the daily kinds' pre-validations.
 FIRST = (
     "trader-report",
+    "recording-quality-570",
     "fill-notice-layout-403",
     "signal-review-206-1201",
     "probe-live-account-408",

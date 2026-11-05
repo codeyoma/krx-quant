@@ -55,6 +55,9 @@ _UPLOADED = ".uploaded.json"
 _STALE_TMP_SECONDS = 600.0
 # Rows per row group in a merged file; the recorder's parts hold a few thousand at most.
 _ROW_GROUP_ROWS = 256_000
+# Rows per batch read from a partition (``partition_batches``), as arrow's default; a reader of
+# wide rows over a whole day asks for fewer (#570).
+BATCH_ROWS = 65_536
 
 
 @dataclass
@@ -187,22 +190,24 @@ def partition_files(partition: Path) -> list[Path]:
 
 
 def partition_batches(
-    partition: Path, columns: Sequence[str] | Callable[[Path, pa.Schema], Sequence[str] | None]
+    partition: Path,
+    columns: Sequence[str] | Callable[[Path, pa.Schema], Sequence[str] | None],
+    batch_rows: int = BATCH_ROWS,
 ) -> Iterator[tuple[Path, pa.RecordBatch]]:
     """A partition's rows, a batch at a time, each row once (``partition_files``), with the file
     each batch is from: for reading beside the collector, whose archive runs merge the parts.
 
     ``columns`` are the columns read; or, called with each file and its schema, it gives the
-    columns read from that file, None to leave the file out. A file merged away while the
-    partition is read, or read as it was written, is left out and the rest still counts; the
-    batches it gave before stay given.
+    columns read from that file, None to leave the file out. A batch holds ``batch_rows`` rows at
+    most. A file merged away while the partition is read, or read as it was written, is left out
+    and the rest still counts; the batches it gave before stay given.
     """
     for path in partition_files(partition):
         try:
             chosen = columns(path, pq.read_schema(path)) if callable(columns) else columns
             if chosen is None:
                 continue
-            for batch in pq.ParquetFile(path).iter_batches(columns=list(chosen)):
+            for batch in pq.ParquetFile(path).iter_batches(batch_size=batch_rows, columns=list(chosen)):
                 yield path, batch
         except (FileNotFoundError, pa.ArrowInvalid, OSError):
             continue  # merged away in between, or written as it was read: the rest still counts
