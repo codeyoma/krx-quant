@@ -982,19 +982,24 @@ def promote_now(trader_db: Path, sessions: Callable[[date], Session | None], now
 
 
 async def run_refit(
-    settings: Settings, trader: TraderSettings, now: datetime, engine_url: str | None = None
+    settings: Settings,
+    trader: TraderSettings,
+    now: datetime,
+    engine_url: str | None = None,
+    fitted: list[Refitted] | None = None,
 ) -> int:
     """``krx-quant refit-policy``: first the challengers' cohort judged on a review night and one
     promoted if it beat the champion (#400, #473, ``promotion.promote``), then tonight's cost map from
     the Engine API (``engine_url``, else the trader's ``KRX_TRADER_ENGINE_URL``), the fit, the policy
     kept, and at the end the next cycle's cohort formed on a review night (``form_now``); each printed.
     0 when a policy is kept, ``NO_POLICY_KEPT`` when the cost map or the engine's database cannot be
-    read (the promotion is judged and the cohort formed all the same)."""
+    read (the promotion is judged and the cohort formed all the same). The fit, kept or not, goes into
+    ``fitted`` when given (#560: the night's report says what it left out and why)."""
     url = engine_url or trader.engine_url
     calendar = calendar_store(settings).calendar
     promote_now(settings.state_dir / TRADER_DB, calendar.session, now)
     try:
-        return await _refit(settings, trader, url, calendar.session, now)
+        return await _refit(settings, trader, url, calendar.session, now, fitted)
     finally:
         form_now(settings.state_dir / TRADER_DB, calendar.session, now)
 
@@ -1081,6 +1086,7 @@ async def _refit(
     url: str,
     sessions: Callable[[date], Session | None],
     now: datetime,
+    fitted: list[Refitted] | None = None,
 ) -> int:
     try:
         async with aiohttp.ClientSession() as session:
@@ -1138,4 +1144,6 @@ async def _refit(
         run["seconds"],
     )
     print(report(done))
+    if fitted is not None:
+        fitted.append(done)
     return 0
