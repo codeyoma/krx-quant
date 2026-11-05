@@ -1,0 +1,10 @@
+usage: krx-quant demo-engine [-h] [--port PORT] [--host HOST] [--db DB]
+                             [--pace PACE]
+
+options:
+  -h, --help   show this help message and exit
+  --port PORT
+  --host HOST  address to listen on (0.0.0.0: all)
+  --db DB      demo database (replaced)
+  --pace PACE  open at 10:00 and go on to 10:30 a minute every PACE seconds,
+               streaming as it goes

@@ -1,0 +1,11 @@
+usage: krx-quant refit-policy [-h] [--engine-url ENGINE_URL] [--report]
+
+options:
+  -h, --help            show this help message and exit
+  --engine-url ENGINE_URL
+                        the Engine API the cost map is read from (default
+                        KRX_TRADER_ENGINE_URL, which compose sets to the
+                        engine service's, http://engine:8080; else
+                        http://127.0.0.1:8080)
+  --report              then print the day's trader report (#402) above the
+                        re-fit's output: the scheduled job trader-report's
