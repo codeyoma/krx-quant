@@ -877,6 +877,23 @@ def latest_revisions(db: sqlite3.Connection) -> dict[str, Revision]:
     return {r[1]: _revision(r) for r in rows}
 
 
+def current_statuses(db: sqlite3.Connection) -> dict[str, Standing]:
+    """Each algorithm's current status, since when and why."""
+    rows = db.execute(
+        "SELECT algorithm, status, at, reason FROM statuses"
+        " WHERE id IN (SELECT MAX(id) FROM statuses GROUP BY algorithm)"
+    ).fetchall()
+    return {r[0]: Standing(Status(r[1]), datetime.fromisoformat(r[2]), r[3]) for r in rows}
+
+
+def read_statuses(db: Path) -> dict[str, Standing]:
+    """The current statuses in the engine DB ``db``, read without writing (``read_only``), as a
+    process beside the engine reads them (the night's training, a pre-validation, #544); none
+    without a DB (a night trained on Spot)."""
+    with read_only(db) as conn:
+        return {} if conn is None else current_statuses(conn)
+
+
 _SMT_FIELDS = (
     "bar_close",
     "a",
@@ -1265,14 +1282,7 @@ class PredictionStore:
 
     def statuses(self) -> dict[str, Standing]:
         """Each algorithm's current status, since when and why."""
-        rows = self._db.execute(
-            "SELECT algorithm, status, at, reason FROM statuses"
-            " WHERE id IN (SELECT MAX(id) FROM statuses GROUP BY algorithm)"
-        ).fetchall()
-        return {
-            r["algorithm"]: Standing(Status(r["status"]), datetime.fromisoformat(r["at"]), r["reason"])
-            for r in rows
-        }
+        return current_statuses(self._db)
 
     def status_history(self, algorithm: str) -> list[dict[str, Any]]:
         """The algorithm's status changes, oldest first, each with whether its review counted

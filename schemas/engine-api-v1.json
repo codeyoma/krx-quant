@@ -3537,7 +3537,7 @@
         "halt": {"enum": ["daily_limit", "cumulative_limit", null]},
         "updated_at": {"$ref": "#/$defs/time"},
         "gap": {
-          "description": "#405: on a mock day, the champion's KIS mock trades entered that day against its paper shadow's (trades and the net of those exited, the difference mock − shadow, and each prediction's pair: the fill price differences in ticks, mock − shadow, the quantities, the exit reasons, the net difference; a side null when that book did not trade it); null on another mode's day, or a mock day with neither.",
+          "description": "#405: on a mock day, the champion's KIS mock trades entered that day against its paper shadow's (trades and the net of those exited, the difference mock − shadow, and each prediction's pair: the fill price differences in ticks, mock − shadow, the quantities, the exit reasons, the net difference; a side null when that book did not trade it), the practice's left out (#548: it has no shadow); null on another mode's day, or a mock day with neither.",
           "oneOf": [
             {"type": "null"},
             {
@@ -3552,13 +3552,12 @@
                   "type": "array",
                   "items": {
                     "type": "object",
-                    "required": ["kind", "predictor", "bar_close", "practice", "mock", "shadow", "entry_ticks", "exit_ticks", "net_difference"],
+                    "required": ["kind", "predictor", "bar_close", "mock", "shadow", "entry_ticks", "exit_ticks", "net_difference"],
                     "additionalProperties": false,
                     "properties": {
                       "kind": {"type": "string"},
                       "predictor": {"type": "string"},
                       "bar_close": {"$ref": "#/$defs/time"},
-                      "practice": {"type": "boolean", "description": "#427: the mock book's practice trade against the practice shadow's: a pair is of one book (practice or not) and one prediction."},
                       "mock": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_gap_trade"}]},
                       "shadow": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_gap_trade"}]},
                       "entry_ticks": {"type": ["number", "null"]},

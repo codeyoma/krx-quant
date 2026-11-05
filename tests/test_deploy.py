@@ -5,10 +5,16 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import socket
 import stat
 import subprocess
+import threading
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
@@ -149,9 +155,13 @@ def test_the_spot_instance_s_start_script_parses(tmp_path: Path) -> None:
 FAKE_DOCKER = """#!/usr/bin/env bash
 # Stands in for docker: logs each call; the engine answers unless the checkout's
 # BROKEN file exists (a commit that does not start), a push fails while PUSH_FAILS does,
-# and a prune and `system df` fail while DOCKER_FAILS does.
+# a prune and `system df` fail while DOCKER_FAILS does, and a notice while NOTIFY_FAILS does.
 echo "$*" >>"$DOCKER_LOG"
 if [[ ( "$2" == prune || "$*" == "system df"* ) && -f DOCKER_FAILS ]]; then
+  exit 1
+fi
+# A notice does not go while NOTIFY_FAILS does (Telegram does not answer).
+if [[ "$*" == *" engine notify "* && -f NOTIFY_FAILS ]]; then
   exit 1
 fi
 if [[ "$*" == "system df"* ]]; then
@@ -186,9 +196,101 @@ def git(cwd: Path, *args: str) -> str:
     return done.stdout.strip()
 
 
+REPO = "codeyoma/krx-quant"
+RUNS_PATH = f"/repos/{REPO}/actions/workflows/ci.yml/runs"
+
+
+def ci_run(
+    sha: str,
+    status: str = "completed",
+    conclusion: str | None = "success",
+    *,
+    event: str = "push",
+    number: int = 1,
+) -> dict[str, Any]:
+    """One run of the ci workflow as GitHub lists it (the fields probed on 2026-11-05, #541)."""
+    return {
+        "id": 42000000000 + number,
+        "name": "ci",
+        "run_number": number,
+        "run_attempt": 1,
+        "event": event,
+        "status": status,
+        "conclusion": conclusion if status == "completed" else None,
+        "head_branch": "main",
+        "head_sha": sha,
+        "html_url": f"https://github.com/{REPO}/actions/runs/{42000000000 + number}",
+        "path": ".github/workflows/ci.yml",
+    }
+
+
+@dataclass
+class FakeActions:
+    """GitHub's list of the ci workflow's runs of a commit (``GET {RUNS_PATH}?head_sha=…``), as
+    deploy/auto-update.sh asks it, on a local port. A commit not in ``runs`` has one push run that
+    passed. ``stray`` runs are listed for every commit, as an answer that ignored the filters
+    would. ``fail`` answers that HTTP status instead, as GitHub out of requests (403) or down
+    (503) does; ``body`` answers 200 with that body."""
+
+    api: str = ""
+    runs: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    stray: list[dict[str, Any]] = field(default_factory=list)
+    fail: int | None = None
+    body: bytes | None = None
+    asked: list[dict[str, str]] = field(default_factory=list)  # each request's query, in order
+
+    def asked_for(self) -> list[str]:
+        return [query.get("head_sha", "") for query in self.asked]
+
+
 @pytest.fixture
-def server(tmp_path: Path) -> Path:
-    """A checkout of a bare origin, with the deploy scripts and a fake docker on PATH."""
+def github() -> Iterator[FakeActions]:
+    fake = FakeActions()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            url = urlsplit(self.path)
+            query = dict(parse_qsl(url.query))
+            fake.asked.append(query)
+            if url.path != RUNS_PATH:
+                self.answer(404, b'{"message": "Not Found"}')
+            elif fake.fail is not None:
+                remaining = "0" if fake.fail == 403 else None
+                self.answer(fake.fail, b'{"message": "API rate limit exceeded"}', remaining)
+            elif fake.body is not None:
+                self.answer(200, fake.body)
+            else:
+                sha = query.get("head_sha", "")
+                listed = fake.runs.get(sha, [ci_run(sha)]) + fake.stray
+                self.answer(200, json.dumps({"total_count": len(listed), "workflow_runs": listed}).encode())
+
+        def answer(self, status: int, body: bytes, remaining: str | None = None) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            if remaining is not None:
+                self.send_header("x-ratelimit-remaining", remaining)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    # Listening once made: a request sent before serve_forever runs waits in the backlog.
+    http = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=http.serve_forever, daemon=True)
+    thread.start()
+    fake.api = f"http://127.0.0.1:{http.server_port}/repos/{REPO}"
+    yield fake
+    http.shutdown()
+    http.server_close()
+    thread.join()
+
+
+@pytest.fixture
+def server(tmp_path: Path, github: FakeActions) -> Path:
+    """A checkout of a bare origin, with the deploy scripts and a fake docker on PATH, and a fake
+    GitHub API whose ci passed on every commit unless a test says otherwise."""
     origin = tmp_path / "origin.git"
     git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
     work = tmp_path / "work"
@@ -207,6 +309,7 @@ def server(tmp_path: Path) -> Path:
     (bin_dir / "docker").chmod(0o755)
     (bin_dir / "sudo").write_text(FAKE_SUDO)
     (bin_dir / "sudo").chmod(0o755)
+    (tmp_path / "github-api").write_text(github.api)
     return checkout
 
 
@@ -225,7 +328,18 @@ def push(server: Path, message: str, broken: bool = False) -> str:
     return git(work, "rev-parse", "HEAD")
 
 
-def update(server: Path, now: str = "6 0600") -> subprocess.CompletedProcess[str]:
+def move_fincept(server: Path, pointer: str) -> str:
+    """A commit on origin's main that only moves the fincept pointer, as the fincept-pointer
+    workflow pushes it (#186)."""
+    work = server.parent / "work"
+    (work / "fincept").mkdir(exist_ok=True)  # an uninitialised submodule: git leaves it alone
+    git(work, "update-index", "--add", "--cacheinfo", f"160000,{pointer},fincept")
+    git(work, "commit", "-q", "-m", f"fincept: follow custom to {pointer[:7]}")
+    git(work, "push", "-q", "origin", "main")
+    return git(work, "rev-parse", "HEAD")
+
+
+def update(server: Path, now: str = "6 0600", api: str | None = None) -> subprocess.CompletedProcess[str]:
     env = {
         "PATH": f"{server.parent / 'bin'}:/usr/bin:/bin",
         "HOME": str(server.parent),
@@ -234,6 +348,7 @@ def update(server: Path, now: str = "6 0600") -> subprocess.CompletedProcess[str
         "KRX_UPDATE_NOW": now,
         "KRX_UPDATE_TRIES": "2",
         "KRX_UPDATE_PAUSE": "0",
+        "KRX_UPDATE_GITHUB_API": api if api is not None else (server.parent / "github-api").read_text(),
     }
     return subprocess.run([server / "deploy" / "auto-update.sh"], env=env, capture_output=True, text=True)
 
@@ -462,6 +577,246 @@ def test_a_run_cut_short_after_moving_the_checkout_is_done_again(server: Path) -
     assert result.returncode == 0, result.stderr
     assert "compose up -d --build" in docker_calls(server)
     assert (server / ".auto-update-deployed").read_text().strip() == new
+
+
+def deployed(server: Path) -> str:
+    return (server / ".auto-update-deployed").read_text().strip()
+
+
+def notices(server: Path) -> list[str]:
+    """The first line of each notice the script sent or tried to send, in order."""
+    return [c.split(" engine notify ", 1)[1] for c in docker_calls(server) if " engine notify " in c]
+
+
+def assert_kept(server: Path, running: str) -> None:
+    """The engine runs what it ran: the checkout and the record of it did not move, and nothing
+    was built."""
+    assert git(server, "rev-parse", "HEAD") == running
+    assert deployed(server) == running
+    assert "compose up -d --build" not in docker_calls(server)
+
+
+def test_a_main_whose_ci_passed_is_deployed_and_github_is_asked_for_that_very_commit(
+    server: Path, github: FakeActions
+) -> None:
+    """#541: the ci workflow's run that the push of exactly this commit to main started."""
+    assert update(server).returncode == 0
+    assert github.asked == [], "nothing new on main: GitHub's API is not asked"
+
+    new = push(server, "Granger learns")
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert git(server, "rev-parse", "HEAD") == new and deployed(server) == new
+    assert github.asked == [{"event": "push", "head_sha": new}]
+
+
+def test_a_main_whose_ci_failed_keeps_the_running_engine_and_is_told_once(
+    server: Path, github: FakeActions
+) -> None:
+    assert update(server).returncode == 0
+    running = deployed(server)
+    bad = push(server, "a red main")
+    github.runs[bad] = [ci_run(bad, conclusion="failure", number=7)]
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert_kept(server, running)
+    assert f"auto-update: keeping {running[:7]}: the ci of {bad} failed (failure)" in result.stdout
+    assert ci_run(bad, number=7)["html_url"] in result.stdout
+    [notice] = notices(server)
+    assert notice.startswith(f"자동 업데이트 보류: main {bad[:7]}의 CI가 실패했습니다(failure).")
+    assert f"엔진은 {running[:7]} 그대로" in notice
+    assert ci_run(bad, number=7)["html_url"] in (server.parent / "docker.log").read_text()
+
+    again = update(server)  # the next morning, main as it was
+
+    assert again.returncode == 0, again.stderr
+    assert_kept(server, running)
+    assert len(notices(server)) == 1, "the same failure is not told every day"
+    assert f"the ci of {bad} failed (failure)" in again.stdout and "told on Telegram before" in again.stdout
+
+    fixed = push(server, "the fix")
+    assert update(server).returncode == 0
+    assert git(server, "rev-parse", "HEAD") == fixed and deployed(server) == fixed
+    assert not (server / ".auto-update-ci-failed").exists()
+
+
+@pytest.mark.parametrize("conclusion", ["cancelled", "timed_out", "startup_failure", "action_required"])
+def test_any_conclusion_but_success_keeps_the_running_engine(
+    server: Path, github: FakeActions, conclusion: str
+) -> None:
+    assert update(server).returncode == 0
+    running = deployed(server)
+    new = push(server, "anything")
+    github.runs[new] = [ci_run(new, conclusion=conclusion)]
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert_kept(server, running)
+    assert f"the ci of {new} failed ({conclusion})" in result.stdout
+    assert len(notices(server)) == 1
+
+
+@pytest.mark.parametrize(
+    ("runs", "said"),
+    [
+        ([], "no run yet"),
+        ([("queued", None)], "queued"),
+        ([("in_progress", None)], "in_progress"),
+        # Pushed twice: the newer run counts, though the answer lists it last.
+        ([("completed", "failure"), ("in_progress", None)], "in_progress"),
+    ],
+)
+def test_a_main_whose_ci_is_not_done_keeps_the_running_engine_until_it_passes(
+    server: Path, github: FakeActions, runs: list[tuple[str, str | None]], said: str
+) -> None:
+    assert update(server).returncode == 0
+    running = deployed(server)
+    new = push(server, "Granger learns")
+    github.runs[new] = [
+        ci_run(new, status, conclusion, number=i + 1) for i, (status, conclusion) in enumerate(runs)
+    ]
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert_kept(server, running)
+    assert f"auto-update: keeping {running[:7]}: the ci of {new} is not done ({said})" in result.stdout
+    assert notices(server) == [], "the next run decides"
+
+    github.runs[new] = [ci_run(new, number=9)]
+    assert update(server).returncode == 0
+    assert git(server, "rev-parse", "HEAD") == new and deployed(server) == new
+
+
+def test_a_run_of_another_commit_or_of_a_pull_request_does_not_let_main_through(
+    server: Path, github: FakeActions
+) -> None:
+    assert update(server).returncode == 0
+    running = deployed(server)
+    new = push(server, "Granger learns")
+    # A pull request's run tests its merge with the base, not this commit; the commit before
+    # passed, in an answer that ignored the filter.
+    github.runs[new] = [ci_run(new, event="pull_request", number=2)]
+    github.stray = [ci_run(running, number=1)]
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert_kept(server, running)
+    assert f"the ci of {new} is not done (no run yet)" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("fail", "body", "said"),
+    [
+        (403, None, "HTTP 403, 0 requests left this hour"),
+        (503, None, "HTTP 503"),
+        (None, b"<html>a proxy's page</html>", "JSONDecodeError"),
+        (None, b'{"message": "Moved Permanently"}', "KeyError"),
+    ],
+)
+def test_when_github_cannot_be_read_the_running_engine_stays_and_it_is_told(
+    server: Path, github: FakeActions, fail: int | None, body: bytes | None, said: str
+) -> None:
+    assert update(server).returncode == 0
+    running = deployed(server)
+    new = push(server, "Granger learns")
+    github.fail, github.body = fail, body
+
+    result = update(server)
+
+    assert result.returncode != 0
+    assert_kept(server, running)
+    said_why = f"auto-update: keeping {running[:7]}: could not read the ci of {new} from GitHub ({said})"
+    assert said_why in result.stderr
+    [notice] = notices(server)
+    assert notice == (
+        f"자동 업데이트 보류: GitHub에서 main {new[:7]}의 CI 결과를 읽지 못했습니다({said})."
+        f" 엔진은 {running[:7]} 그대로입니다."
+    )
+    assert "자동 업데이트 오류" not in notice
+
+    github.fail = github.body = None
+    assert update(server).returncode == 0
+    assert git(server, "rev-parse", "HEAD") == new
+
+
+def test_when_github_does_not_answer_at_all_the_running_engine_stays(server: Path) -> None:
+    assert update(server).returncode == 0
+    running = deployed(server)
+    new = push(server, "Granger learns")
+    with socket.socket() as closed:  # a port nothing listens on
+        closed.bind(("127.0.0.1", 0))
+        port = closed.getsockname()[1]
+
+    result = update(server, api=f"http://127.0.0.1:{port}/repos/{REPO}")
+
+    assert result.returncode != 0
+    assert_kept(server, running)
+    assert f"could not read the ci of {new} from GitHub (URLError(ConnectionRefusedError))" in result.stderr
+
+
+def test_a_commit_that_only_moves_fincept_is_vouched_for_by_the_commit_it_was_made_on(
+    server: Path, github: FakeActions
+) -> None:
+    """The fincept-pointer workflow pushes with GITHUB_TOKEN, which starts no workflow: GitHub
+    lists no ci run for such a commit (63e4cdc, probed 2026-11-05). The image and CI read nothing
+    of fincept/."""
+    assert update(server).returncode == 0
+    code = push(server, "Granger learns")
+    first, second = move_fincept(server, "a" * 40), move_fincept(server, "b" * 40)
+    github.runs[first] = github.runs[second] = []
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert git(server, "rev-parse", "HEAD") == second and deployed(server) == second
+    assert github.asked_for() == [code]
+    said = f"main {second[:7]} only moves the fincept pointer since {code[:7]}; its ci answers"
+    assert said in result.stdout
+
+
+def test_fincept_pointer_moves_on_a_red_main_keep_it_held_and_tell_nothing_new(
+    server: Path, github: FakeActions
+) -> None:
+    assert update(server).returncode == 0
+    running = deployed(server)
+    bad = push(server, "a red main")
+    github.runs[bad] = [ci_run(bad, conclusion="failure")]
+    assert update(server).returncode == 0
+    pointer = move_fincept(server, "a" * 40)
+    github.runs[pointer] = []
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert_kept(server, running)
+    assert github.asked_for() == [bad, bad]
+    assert len(notices(server)) == 1 and "told on Telegram before" in result.stdout
+
+
+def test_a_failure_notice_that_did_not_go_is_sent_on_the_next_run(server: Path, github: FakeActions) -> None:
+    assert update(server).returncode == 0
+    (server / "NOTIFY_FAILS").write_text("x")
+    bad = push(server, "a red main")
+    github.runs[bad] = [ci_run(bad, conclusion="failure")]
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    assert "could not send to Telegram" in result.stderr
+    assert not (server / ".auto-update-ci-failed").exists(), "not told: not remembered"
+
+    (server / "NOTIFY_FAILS").unlink()
+    again = update(server)
+
+    assert again.returncode == 0, again.stderr
+    assert len(notices(server)) == 2 and "told on Telegram before" not in again.stdout
+    assert (server / ".auto-update-ci-failed").read_text().strip() == bad
 
 
 # Commands kernel-recovery.sh may call, faked: each records its arguments. docker is here so a

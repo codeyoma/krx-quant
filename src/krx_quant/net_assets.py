@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -60,7 +61,6 @@ import pyarrow.parquet as pq
 from krx_quant.feeds.base import EVENT_TIME, KST, Row
 from krx_quant.kis import KisError, RestClient
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.nav_probe import DAILY, DAILY_DATE, PRICE, one_object, row_list
 from krx_quant.probe_fields import day_of, present, same
 from krx_quant.products import Product
 from krx_quant.ratelimit import RateLimiter
@@ -88,6 +88,22 @@ SCHEMA = pa.schema(
         ("nav", pa.float64()),  # KRX's NAV that day; null for KIS's rows
     ]
 )
+
+
+# KIS's ETF/ETN queries the net assets and their day come from (``probe-nav`` asks them too).
+
+
+@dataclass(frozen=True)
+class Query:
+    tr: str
+    path: str
+    title: str  # KIS's name for it
+
+
+ETFETN = "/uapi/etfetn/v1/quotations"
+PRICE = Query("FHPST02400000", f"{ETFETN}/inquire-price", "ETF/ETN 현재가")
+DAILY = Query("FHPST02440200", f"{ETFETN}/nav-comparison-daily-trend", "NAV 비교추이(일)")
+DAILY_DATE = "stck_bsop_date"
 
 
 def net_assets_path(state_dir: Path) -> Path:
@@ -168,6 +184,28 @@ def demand_day(calendar: MarketCalendar, at: datetime) -> date:
     while not calendar.is_trading_day(day):
         day += timedelta(days=1)
     return day
+
+
+def object_at(body: Mapping[str, Any], key: str) -> dict[str, Any] | None:
+    """The answer's object at ``key``, or the one object of a list there; None if there is none."""
+    value = body.get(key)
+    if isinstance(value, list) and len(value) == 1:  # an object wrapped in a list
+        value = value[0]
+    return value if isinstance(value, dict) else None
+
+
+def one_object(body: Mapping[str, Any]) -> dict[str, Any] | None:
+    """A snapshot's object (``output``, else ``output1``); None if there is none."""
+    return next((o for key in ("output", "output1") if (o := object_at(body, key)) is not None), None)
+
+
+def row_list(body: Mapping[str, Any]) -> list[dict[str, Any]] | None:
+    """The answer's rows with any value (``output``, ``output2`` or ``output1``); None if no list."""
+    for key in ("output", "output2", "output1"):
+        value = body.get(key)
+        if isinstance(value, list):
+            return [r for r in value if isinstance(r, dict) and any(present(v) for v in r.values())]
+    return None
 
 
 def _number(value: Any) -> float | None:

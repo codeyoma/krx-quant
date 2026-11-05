@@ -50,7 +50,7 @@ collector.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -60,13 +60,12 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from krx_quant.archive import partition_batches
 from krx_quant.auctions import PRINT_WITHIN
 from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR, stock_bars_path
 from krx_quant.config import Settings
 from krx_quant.feeds import KRX_TRADE, RAW_SCHEMA, TRADE, WS_FEEDS
 from krx_quant.feeds.base import KST
-from krx_quant.health import GAP_SCHEMA, GapKind
+from krx_quant.health import Gap, GapKind, Unread, read_batches, read_gaps
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 
 TITLE = "WebSocket 결측과 종가 단일가 녹화 (#344)"
@@ -108,17 +107,6 @@ SECTIONS = (
 )
 
 
-@dataclass(frozen=True)
-class Gap:
-    """One row of the ``gaps`` layer."""
-
-    feed: str
-    key: str
-    start: datetime
-    end: datetime | None  # None: still open when the collector stopped
-    reason: str
-
-
 @dataclass
 class Group:
     """The gaps of one day with one start and reason: a disconnect's, one per subscription."""
@@ -133,40 +121,6 @@ class Group:
 
     def overlaps(self, start: datetime, end: datetime) -> bool:
         return any(g.start < end and (g.end is None or g.end > start) for g in self.gaps)
-
-
-@dataclass
-class Unread:
-    """Files unlike the schema the collector writes them in: without a column it names, or with
-    one of another type. Counted, never guessed at."""
-
-    files: Counter[str] = field(default_factory=Counter)  # "<layer> <feed> <column> <what>" -> files
-
-    def lines(self) -> list[str]:
-        return [f"{what}: 파일 {n}개" for what, n in sorted(self.files.items())]
-
-
-def _batches(
-    partition: Path, columns: Sequence[str], unread: Unread, optional: Sequence[str] = ()
-) -> Iterator[Any]:
-    """A partition's rows, a batch at a time, each row once (``archive.partition_batches``), with
-    ``columns`` and those of ``optional`` the file has. A file without one of ``columns`` is not
-    read; it and one without an ``optional`` column are counted in ``unread``."""
-    label = f"{partition.parent.parent.parent.name} {partition.parent.name.removeprefix('feed=')}"
-
-    def present(_: Path, schema: pa.Schema) -> list[str] | None:
-        names = schema.names
-        absent = [c for c in columns if c not in names]
-        for column in absent:
-            unread.files[f"{label} {column} 없음(읽지 않음)"] += 1
-        for column in (c for c in optional if c not in names):
-            unread.files[f"{label} {column} 없음(그 열 없이 읽음)"] += 1
-        if absent:
-            return None
-        return [*columns, *(c for c in optional if c in names)]
-
-    for _, batch in partition_batches(partition, present):
-        yield batch
 
 
 def _timestamps(batch: Any, column: str, unread: Unread, label: str) -> Any | None:
@@ -184,22 +138,6 @@ def _between(values: Any, start: datetime, end: datetime | None) -> Any:
     if end is None:
         return mask
     return pc.and_(mask, pc.less(values, pa.scalar(end, type=values.type)))
-
-
-def read_gaps(data_dir: Path, day: date, unread: Unread) -> list[Gap]:
-    """The gaps that started on ``day`` (the ``gaps`` partition's date is the start's)."""
-    root = data_dir / "gaps" / f"date={day.isoformat()}"
-    names = GAP_SCHEMA.names
-    out = []
-    for partition in sorted(root.glob("feed=*/symbol=*")):
-        for batch in _batches(partition, names, unread):
-            rows = batch.to_pydict()
-            for feed, key, start, end, reason in zip(*(rows[c] for c in names), strict=True):
-                if start is None:
-                    unread.files[f"gaps {feed} start 빈 값(그 행을 읽지 않음)"] += 1
-                    continue
-                out.append(Gap(str(feed), str(key), start, end, str(reason)))
-    return out
 
 
 def groups_of(gaps: Sequence[Gap]) -> list[Group]:
@@ -245,7 +183,7 @@ def frames(data_dir: Path, day: date, start: datetime, end: datetime, unread: Un
             continue
         times: list[datetime] = []
         for partition in sorted(root.glob("symbol=*")):
-            for batch in _batches(partition, (_RECEIVED,), unread):
+            for batch in read_batches(partition, (_RECEIVED,), unread):
                 values = _timestamps(batch, _RECEIVED, unread, f"raw {feed}")
                 if values is None:
                     continue
@@ -302,7 +240,7 @@ def first_trade(
     partition = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}" / f"symbol={symbol}"
     recorded, best = False, None
     exchange, received = _TRADE_TIMES
-    for batch in _batches(partition, _TRADE_TIMES, unread, optional=_TRADE_CODES):
+    for batch in read_batches(partition, _TRADE_TIMES, unread, optional=_TRADE_CODES):
         recorded = recorded or batch.num_rows > 0
         values = _timestamps(batch, exchange, unread, f"events {feed}")
         if values is None or _timestamps(batch, received, unread, f"events {feed}") is None:
