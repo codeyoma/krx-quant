@@ -30,13 +30,23 @@ starts it again in the other mode (``run.py``).
   - ``unresolved``: nothing of the mode left open from before today: an order, a buy or a sell
     (#460) sent whose answer was lost, a trade;
   - ``flat``: every trade of the period sold before its day's closing auction;
-  - ``gap``: the adverse gap of each leg against the paper shadow's fill of the same prediction
-    (``gap.pairing``: of the same book, #427, the practice trades against the practice shadow's), in
-    ticks of the trade's tick: a buy's (fill − shadow), a sale's (shadow − fill), plus
+  - ``gap``: the adverse gap of every leg of the period's KIS trades (#548: a trade's buy, and its
+    sale once it exited) against the price the paper rules make at the quote the leg was decided on
+    (``legs``, from ``store.execution``, #475), in ticks of the trade's tick: a buy against the
+    decision quote's ask (fill − ask), a sale against its bid (bid − fill), a take-profit against its
+    target (target − fill), a sale of both weighed by its shares. The store keeps the decision quote's
+    mid-point alone: its ask and bid are taken half a tick from it (``HALF_SPREAD``). Plus
     ``MOCK_CORRECTION`` (0.5) a leg for the mock server's fill half a tick better than the quote
-    (#403). Its mean at most ``GAP_MEAN`` (1) and its 95th percentile (nearest rank) at most
-    ``GAP_P95`` (2). A KIS trade its shadow did not trade is measured by no leg; how many there are
-    is said with it, so that none is left out unseen;
+    (#403). At least ``COVERAGE`` (90%) of the legs measured (a leg decided with no quote known, or
+    before #475, has no decision quote), their mean at most ``GAP_MEAN`` (1) and their 95th
+    percentile (nearest rank) at most ``GAP_P95`` (2);
+
+    > **바뀜** (2026-11-05, #557): each leg against the paper shadow's fill of the same prediction
+    > (``gap.pairing``, the practice trades against the practice shadow's), a KIS trade its shadow did
+    > not trade measured by no leg and only counted → every KIS leg against the paper rules' price at
+    > its decision quote, and at least 90% of them measured. 이유: the shadows keep their own cooldown
+    > and buy count, and drift from the KIS book: on 2026-11-04, 13 of the period's 25 KIS round
+    > trips had no shadow trade, and the gap judged 24 legs of 50.
   - ``stressed_gate``: the champion passed a checkpoint with one extra adverse tick on each leg too
     (``promotion.Checkpoint.stressed_passed``);
   - ``live_probe``: the last read of the live account by inquiry calls alone passed
@@ -47,7 +57,8 @@ starts it again in the other mode (``run.py``).
 place of the capital, its shares rounded down (an order the cap cannot pay one share of is not
 placed), until the period holds ``RAMP_DAYS`` (20) live trading days and ``RAMP_TRIPS`` (30) completed
 live round trips, all before today. The period begins at the first live start. Then, at a pick, the
-live gap (the live fills against the paper shadow's, ``gap``'s legs without the correction) is
+live gap (``gap``'s measure on the live legs, without the correction: the live fills against the
+paper rules' price at their decision quotes, #548, at least ``COVERAGE`` of them) is
 judged with the same failure, reconcile, open and flat checks over the period: all passing lifts the
 cap to the capital for good (``LIFT``). A live day counts toward the period only once it is
 verified: compared with KIS's day order inquiry (``order_checks`` ``same`` or ``no_orders``; a day
@@ -74,7 +85,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Any
@@ -85,7 +96,7 @@ from krx_quant.pricing import tick_size
 from krx_quant.trader import LIVE, MOCK, promotion
 from krx_quant.trader import policy as policies
 from krx_quant.trader.db import iso
-from krx_quant.trader.gap import pairing
+from krx_quant.trader.paper import TAKE_PROFIT
 from krx_quant.trader.store import (
     BREACH,
     DIFFERENT,
@@ -95,8 +106,10 @@ from krx_quant.trader.store import (
     PAUSE,
     RAMP,
     SAME,
+    SELL,
     TraderStore,
     champion_of,
+    execution,
 )
 
 # The execution checks (#408), on the mock days.
@@ -107,6 +120,18 @@ MOCK_TRIPS = 30
 MOCK_CORRECTION = 0.5
 GAP_MEAN = 1.0  # ticks
 GAP_P95 = 2.0
+# The least share of the KIS legs the gap is measured on (#548): below it the gap is no pass, so that
+# it never judges a part of the legs alone. Every leg since #475 keeps its decision quote; one decided
+# before the book had a quote (a start) has none, and a trade from before #475 none either. 90% leaves
+# room for those, and the pairing with the shadow it replaced measured 24 legs of 50 on the mock
+# period of 2026-11-04 (13 of the 25 KIS round trips had no shadow trade to pair with).
+COVERAGE = 0.9
+# The paper rules buy at a quote's ask and sell at its bid (``paper.py``); the store keeps the decision
+# quote's mid-point alone (#475). A leg is measured from half a tick past it (#548): the ask or the bid
+# of a one-tick spread, inside a wider one's, so that a wider spread makes the leg more adverse, never
+# less. Only a locked or crossed quote (two venues) makes it less: 005930's integrated quote was crossed
+# 0.0-0.1% of the time (#187).
+HALF_SPREAD = 0.5
 # The first live period (#408).
 RAMP_CAP = 250_000
 RAMP_DAYS = 20
@@ -379,37 +404,112 @@ def verified(db: sqlite3.Connection, mode: str, day: date) -> bool:
 
 @dataclass(frozen=True)
 class Legs:
-    """The legs' adverse gaps in ticks, and the KIS trades their shadow did not trade (``alone``: no
-    leg measures them, #427)."""
+    """The adverse gaps in ticks of the legs measured (module doc ``gap``), and how many legs the KIS
+    trades have, measured or not (``total``, #548)."""
 
     values: tuple[float, ...]
-    alone: int = 0
+    total: int = 0
+
+    @property
+    def coverage(self) -> float | None:
+        """The share of the legs measured; None without a leg."""
+        return len(self.values) / self.total if self.total else None
+
+
+# The trades', orders' and fills' columns a leg is measured from (``store.execution``); the trades' that
+# #475 added are null in a store the trader has not opened since.
+_LEG_TRADE = (
+    *("id", "tick", "target", "decided_at", "entry_at", "entry_price", "exit_at", "exit_price"),
+    *("exit_reason", "decided_mid", "sale_at", "sale_mid"),
+)
+_LEG_ORDER = ("id", "trade_id", "side", "purpose", "placed_at")
+_LEG_FILL = ("order_id", "at", "price", "quantity")
+
+Rows = list[dict[str, Any]]
 
 
 def legs(
     db: sqlite3.Connection, mode: str, days: Iterable[date], correction: float, since: datetime | None = None
 ) -> Legs:
-    """Each leg's adverse gap in ticks (module doc): of the champion's ``mode`` trades entered on
-    ``days`` (at or after ``since``) against their book's paper shadow's (``gap.pairing``: the practice
-    trades against the practice shadow's, #427), plus ``correction`` a leg; and how many of those
-    trades their shadow did not trade."""
+    """Each leg of the champion's ``mode`` trades entered on ``days`` (at or after ``since``), the
+    practice ones among them (#427), against the price the paper rules make at the quote the leg was
+    decided on (module doc ``gap``, #548): its adverse gap in ticks plus ``correction``; and how many
+    legs there are, measured or not. A trade's buy is one leg, its sale (all its sells) another once it
+    exited."""
+    trades, orders, fills = _kis_trades(db, mode, days, since)
     out: list[float] = []
-    found = pairing(db, mode, days)
-    alone = sum(
-        1
-        for kis, _ in found.alone
-        if kis is not None and (since is None or datetime.fromisoformat(kis["entry_at"]) >= since)
+    total = 0
+    for trade in trades:
+        mine = orders.get(trade["id"], [])
+        cost = execution(trade, mine, fills, kis=True)
+        total += 1
+        if cost["entry"]["ticks"] is not None:  # the paper buy: at the decision quote's ask
+            out.append(cost["entry"]["ticks"] - HALF_SPREAD + correction)
+        if cost["exit"] is None:
+            continue
+        total += 1
+        if cost["exit"]["ticks"] is not None:  # the paper sale: at its bid, or the target
+            out.append(cost["exit"]["ticks"] - HALF_SPREAD * _sold_at_bid(trade, mine, fills) + correction)
+    return Legs(tuple(out), total)
+
+
+def _kis_trades(
+    db: sqlite3.Connection, mode: str, days: Iterable[date], since: datetime | None
+) -> tuple[Rows, dict[int, Rows], dict[int, Rows]]:
+    """The champion's ``mode`` trades entered on ``days`` (at or after ``since``), oldest first, their
+    orders by trade and those orders' fills by order, each a row of the ``_LEG_*`` columns."""
+    wanted = sorted({d.isoformat() for d in days})
+    if not wanted or not _has(db, "trades"):
+        return [], {}, {}
+    columns = {r[1] for r in db.execute("PRAGMA table_info(trades)")}
+    picked = ", ".join(f"t.{c}" if c in columns else f"NULL AS {c}" for c in _LEG_TRADE)
+    where = (
+        f"t.mode = ? AND {champion_of(db)} AND substr(t.entry_at, 1, 10) IN ({','.join('?' * len(wanted))})"
     )
-    for kis, shadow in found.pairs:
-        if since is not None and datetime.fromisoformat(kis["entry_at"]) < since:
-            continue
-        tick = kis["tick"] or shadow["tick"]
-        if not tick:
-            continue
-        out.append((kis["entry_price"] - shadow["entry_price"]) / tick + correction)
-        if kis["exit_price"] is not None and shadow["exit_price"] is not None:
-            out.append((shadow["exit_price"] - kis["exit_price"]) / tick + correction)
-    return Legs(tuple(out), alone)
+    params: list[Any] = [mode, *wanted]
+    if since is not None:
+        where += " AND t.entry_at >= ?"
+        params.append(iso(since))
+    found = db.execute(f"SELECT {picked} FROM trades t WHERE {where} ORDER BY t.entry_at, t.id", params)
+    trades = [dict(zip(_LEG_TRADE, r, strict=True)) for r in found]
+    orders: dict[int, Rows] = {}
+    fills: dict[int, Rows] = {}
+    if not trades or not _has(db, "orders") or not _has(db, "fills"):
+        return trades, orders, fills
+    of_trades = f"IN (SELECT t.id FROM trades t WHERE {where})"
+    for o in db.execute(
+        f"SELECT {', '.join(f'o.{c}' for c in _LEG_ORDER)} FROM orders o WHERE o.trade_id {of_trades}"
+        " ORDER BY o.id",
+        params,
+    ):
+        row = dict(zip(_LEG_ORDER, o, strict=True))
+        orders.setdefault(row["trade_id"], []).append(row)
+    for f in db.execute(
+        f"SELECT {', '.join(f'f.{c}' for c in _LEG_FILL)} FROM fills f JOIN orders o ON o.id = f.order_id"
+        f" WHERE o.trade_id {of_trades} ORDER BY f.id",
+        params,
+    ):
+        row = dict(zip(_LEG_FILL, f, strict=True))
+        fills.setdefault(row["order_id"], []).append(row)
+    return trades, orders, fills
+
+
+def _sold_at_bid(
+    trade: Mapping[str, Any], orders: Sequence[Mapping[str, Any]], fills: Mapping[int, Rows]
+) -> float:
+    """The share of a trade's shares sold whose paper price is the bid of the quote its sale was decided
+    on, not the target (a take-profit's): its sells' fills weighed as ``store.execution`` weighs them;
+    without them, the exit reason's."""
+    sold = [
+        (o["purpose"] != TAKE_PROFIT, int(f["quantity"]))
+        for o in orders
+        if o["side"] == SELL
+        for f in fills.get(int(o["id"]), ())
+    ]
+    shares = sum(q for _, q in sold)
+    if shares <= 0:
+        return 0.0 if trade["exit_reason"] == TAKE_PROFIT else 1.0
+    return sum(q for at_bid, q in sold if at_bid) / shares
 
 
 def p95(values: Sequence[float]) -> float | None:
@@ -421,27 +521,39 @@ def p95(values: Sequence[float]) -> float | None:
 
 
 def gap_check(name: str, found: Legs, corrected: bool) -> Check:
-    """The legs' gap: its mean at most ``GAP_MEAN`` and its 95th percentile at most ``GAP_P95``; no
-    leg is no pass. The KIS trades no leg measures (their shadow did not trade them) are said (#427)."""
-    values = found.values
-    alone = f", 그림자와 짝이 없어 재지 않은 KIS 매매 {found.alone}건" if found.alone else ""
-    if not values:
+    """The legs' gap (module doc ``gap``): at least ``COVERAGE`` of the KIS legs measured (#548), their
+    mean at most ``GAP_MEAN`` and their 95th percentile at most ``GAP_P95``; no leg measured is no
+    pass."""
+    values, coverage = found.values, found.coverage
+    if coverage is None or not values:
         return Check(
-            name, False, None, GAP_MEAN, f"그림자 장부와 짝지은 매매가 없어 체결 차이를 재지 못했다{alone}"
+            name,
+            False,
+            None,
+            GAP_MEAN,
+            f"KIS 다리 {found.total}개 가운데 결정 호가로 잰 다리가 없어 체결 차이를 재지 못했다"
+            if found.total
+            else "KIS 매매가 없어 체결 차이를 재지 못했다",
         )
     mean = sum(values) / len(values)
     top = p95(values)
     assert top is not None
-    passed = mean <= GAP_MEAN and top <= GAP_P95
+    passed = coverage >= COVERAGE and mean <= GAP_MEAN and top <= GAP_P95
     note = f", 모의 서버의 반 틱 보정 {MOCK_CORRECTION:+g}틱 포함" if corrected else ""
     return Check(
         name,
         passed,
         mean,
         GAP_MEAN,
-        f"다리 {len(values)}개의 불리한 체결 차이 평균 {mean:+.2f}틱(≤ {GAP_MEAN:g}), 95% {top:+.2f}틱"
-        f"(≤ {GAP_P95:g}){note}{alone}",
+        f"KIS 다리 {found.total}개 가운데 결정 호가로 잰 {len(values)}개({_percent(coverage)}, ≥ "
+        f"{_percent(COVERAGE)})의 불리한 체결 차이 평균 {mean:+.2f}틱(≤ {GAP_MEAN:g}), 95% {top:+.2f}틱"
+        f"(≤ {GAP_P95:g}){note}",
     )
+
+
+def _percent(share: float) -> str:
+    """``share`` in percent, rounded down to a tenth: 89.96% is said 89.9%, never 90% (``COVERAGE``)."""
+    return f"{math.floor(share * 1000 + 1e-9) / 10:g}%"
 
 
 @dataclass(frozen=True)
