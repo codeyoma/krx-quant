@@ -333,7 +333,7 @@ curl http://krx-quant:8080/v1/macro
 
 > **바뀜** (2026-10-17, #260): 기본값 `2` → `3`, 고를 수 있는 값 `1`, `2` → `1`, `3`. 이유: 도달 정답이 뒤집힌 호가도 세게 되어 정답 버전이 올랐고(#187), `2`의 규칙(뒤집힌 호가를 버림)은 코드에 남기지 않았다. 서버 `.env`에 이 값을 두지 않았으면 할 일이 없다. `KRX_TARGET_VERSION=2`를 적어 두었으면 지운다(아래 "도달 정답이 뒤집힌 호가도 세는 날").
 
-> **삭제됨** (2026-11-06, #PRNUM): `KRX_TRAIN_ON`(밤 학습을 돌리는 곳: `server`는 이 서버의 별도 프로세스, `spot`은 AWS가 같은 시각에 띄우는 EC2 Spot)과 Cost Guard의 `KRX_COST_BUDGET`(서버가 1시간마다 읽는 AWS Budgets 예산 이름), `KRX_TRAINING_SCHEDULES`(상한에서 끄고 다음 달 1일에 다시 켤 EventBridge Scheduler 스케줄), `KRX_COST_CHECK_SECONDS`(비용을 읽는 간격). 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. 서버 `.env`에 남아 있어도 엔진은 읽지 않고, 밤 학습은 이 서버에서 돈다.
+> **삭제됨** (2026-11-06, #572): `KRX_TRAIN_ON`(밤 학습을 돌리는 곳: `server`는 이 서버의 별도 프로세스, `spot`은 AWS가 같은 시각에 띄우는 EC2 Spot)과 Cost Guard의 `KRX_COST_BUDGET`(서버가 1시간마다 읽는 AWS Budgets 예산 이름), `KRX_TRAINING_SCHEDULES`(상한에서 끄고 다음 달 1일에 다시 켤 EventBridge Scheduler 스케줄), `KRX_COST_CHECK_SECONDS`(비용을 읽는 간격). 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. 서버 `.env`에 남아 있어도 엔진은 읽지 않고, 밤 학습은 이 서버에서 돈다.
 
 | 변수 | 기본값 | 뜻과 범위 |
 |---|---|---|
@@ -405,7 +405,7 @@ compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예
 | `AWS_REGION`, `ZONE`, `INSTANCE`, `BUNDLE`, `BLUEPRINT`, `IAM_USER`, `SNAPSHOT_UTC` | `deploy/create-aws.sh` | 2.1절 | AWS 자원 이름과 위치 |
 | `KEEP`, `SECONDS_TO_RECORD` | `deploy/smoke-local.sh` | 없음, 15 | `KEEP=1`이면 컨테이너와 볼륨을 남긴다. 녹화 시간(초) |
 
-> **삭제됨** (2026-11-06, #PRNUM): `KRX_IMAGE_REPOSITORY`(`deploy/push-image.sh`가 Spot 학습용 엔진 이미지를 올리던 ECR 저장소 URI, 자동 업데이트가 불렀다). 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. `.env`에 남아 있어도 아무것도 읽지 않는다.
+> **삭제됨** (2026-11-06, #572): `KRX_IMAGE_REPOSITORY`(`deploy/push-image.sh`가 Spot 학습용 엔진 이미지를 올리던 ECR 저장소 URI, 자동 업데이트가 불렀다). 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. `.env`에 남아 있어도 아무것도 읽지 않는다.
 
 > **바뀜** (2026-10-15, #219): `KRX_BIND_ADDRESS`는 compose만 읽었다 → 엔진도 읽는다(예약 작업의 댓글에서 가리는 데만 쓴다). 이유: 공개 저장소의 이슈 댓글에 서버 주소가 실리지 않게(#215).
 
@@ -1547,7 +1547,7 @@ Toss: 109 calls, 1 failed; tokens issued: 0
 | 21:00 | 다시 올린다. NXT·애프터마켓의 늦은 데이터와 그날 1분봉, 바뀐 일·주·월·년봉 파일(`candles/period=<기간>/symbol=<종목>/candles.parquet`)이 들어간다 |
 | 21:30 (거래일) | 밤 학습(`KRX_TRAIN_AT`). 알고리즘마다 다시 학습하고, 이긴 모델(또는 지금 모델이 다른 정답 버전이면 성적과 상관없이 새 모델, #170)만 승격 목록에 올린다. 결과를 텔레그램으로 보낸다 |
 | 22:30 (매일) | 예약 작업(`KRX_JOBS_AT`, #215). 밤 학습이 끝난 뒤 때가 된 작업을 하나씩 별도 프로세스로 돌리고 결과를 GitHub 이슈 댓글로 남긴다. 05:30 전에 끝나지 않을 작업은 다음 밤으로 미룬다(아래 "예약 작업 (#215)") |
-| ~~1시간마다 (`KRX_COST_BUDGET`이 있으면)~~ | **삭제됨** (2026-11-06, #PRNUM): 이달 AWS 비용을 읽어 50%·80%에서 알리고, 100%에서 Spot 학습을 그달 동안 껐다(Cost Guard). 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
+| ~~1시간마다 (`KRX_COST_BUDGET`이 있으면)~~ | **삭제됨** (2026-11-06, #572): 이달 AWS 비용을 읽어 50%·80%에서 알리고, 100%에서 Spot 학습을 그달 동안 껐다(Cost Guard). 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
 | 30초마다 | 모델 파일(`state/models/<알고리즘>.json`)이 바뀌었는지 본다(`fit`, `rollback`). 바뀌었으면 엔진이 새 모델로 바꾸고, 지금 도는 모델을 S3(`live.json`, `models/`)에 올린다 |
 
 - 수집기가 시작할 때도 지난날 중 아직 안 올린 날을 올리고 백필과 일봉 갱신, 일별 수급 갱신을 돌린다. ETF 16종의 순자산도 받고(#305, KIS에 상품마다 2번. `KRX_OPENAPI_KEY`가 있으면 KRX Open API에서 상장일부터 빠진 거래일을 하루 한 번씩, 1초 간격: 배포 뒤 처음은 100번쯤, #368), 이력 작업의 끝(단일가 가격 뒤)과 KRX 순자산이 들어온 뒤에 KRX 마감 흐름의 지난날 표도 계산한다. 단일가 가격은 배포 뒤 처음 한 번, 받아 둔 날(최근 1년)의 종가 단일가 봉을 다시 물어 그 거래량을 남긴다(종목마다 245번쯤, `auctions.parquet`의 `close_volume`, #368). 일·주·월·년봉의 첫 전체 수집은 종목마다 수십~수백 번 묻고, 백필과 같은 속도(`KRX_BACKFILL_MAX_PER_SECOND`)로 간다. 일별 수급의 첫 수집(10년)도 같은 속도로 종목마다 KIS 약 210번, 토스 약 60번이다.
@@ -1930,7 +1930,7 @@ mock으로 시작한 날부터 비용 지도에서 시장가 왕복으로 통과
 
   > **바뀜** (2026-11-05, #555): 밤 학습은 거부된 알고리즘도 학습했고, 요약과 08:00 `모델 교체` 알림이 그 모델을 승격으로 적었다 → 거부되어 엔진이 돌리지 않는 알고리즘은 학습하지 않고(목록의 `refused`와 요약 한 줄), 교체 알림에도 적지 않는다. 이유: 2026-11-04 밤 거부된 `cox-5d`, `poisson`, `shannon`, `breiman-30m`이 다시 학습돼(합쳐 약 46초, `cox-5d`는 최고 765 MB) 요약이 "shannon 승격, cox-5d 승격"이라 적었고, 11-05 08:00 교체 알림도 둘을 나열했다. 그 전에 텔레그램으로 "사전 검증 거부 … 돌지 않고"라고 알린 뒤였다(#544).
 
-  > **삭제됨** (2026-11-06, #PRNUM): "Spot에는 둘 다 없어 모두 학습한다"는 예외. 이유: EC2 Spot 학습을 지웠다(아래 "밤 학습을 EC2 Spot으로 옮기기 (#23)"). 대신: 밤 학습은 늘 서버의 상태 폴더와 엔진 DB로 정한다.
+  > **삭제됨** (2026-11-06, #572): "Spot에는 둘 다 없어 모두 학습한다"는 예외. 이유: EC2 Spot 학습을 지웠다(아래 "밤 학습을 EC2 Spot으로 옮기기 (#23)"). 대신: 밤 학습은 늘 서버의 상태 폴더와 엔진 DB로 정한다.
 - **정답 버전이 다르면 강제 승격(#170).** champion이 그 밤의 정답 버전(`KRX_TARGET_VERSION`)과 다른 정답으로 학습한 모델이면(모델의 `target_version`. 기본 모델과 그것이 기록되기 전 모델은 1로 본다) 성적 비교 없이 challenger를 승격한다. 검증할 정답이 없어도 올린다. 리포트에 `forced: true`와 `reason` 끝의 `; <champion 버전> learned target 1, the night target 2: promoted without comparing`(#187 배포 뒤 첫 밤에는 `learned target 2, the night target 3`)이, 텔레그램 요약에 `승격(정답 바뀜, 성적 비교 없이)`이 남는다. 정답이 바뀐 뒤 첫 밤에 모든 알고리즘이 새 정답 모델로 바뀌게 하려고다(그 뒤로는 평소처럼 비교한다). 학습하지 못한 알고리즘(`학습 안 함`)은 올라가지 않고, 그 알고리즘의 수습은 세어지지 않는다(아래 "정답이 바뀌는 날").
 
   > **바뀜** (2026-10-14, #193): "log loss가 더 낮을 때만 승격한다"에 정답 버전이 다른 champion의 강제 승격을 더했다. 이유: 옛 정답 모델이 새 정답 검증에서도 이기면 새 정답 모델이 영영 올라가지 않는다(#160 "강제 승격").
@@ -2043,7 +2043,7 @@ docker compose exec engine krx-quant rollback granger     # 한 단계(직전 �
 
 ### 밤 학습을 EC2 Spot으로 옮기기 (#23)
 
-> **삭제됨** (2026-11-06, #PRNUM): 밤 학습을 상시 서버 대신 EC2 Spot에서 돌리는 경로와 그 절차. EventBridge Scheduler가 평일 21:30에 one-time Spot 인스턴스를 띄워 ECR의 엔진 이미지로 `krx-quant train --from-store`를 돌리고, 서버는 학습 설정과 휴장일 달력을 S3 `training/`에 올리고 결과를 다음 거래일 07:30까지 기다려 요약을 보냈다. 서버의 Cost Guard가 AWS Budgets 예산을 1시간마다 읽어 50%·80%에 알리고 100%에서 그달 Spot 스케줄을 껐다. 지운 것: `deploy/training.yaml`(CloudFormation 스택), `deploy/push-image.sh`, `src/krx_quant/cost_guard.py`, `krx-quant registry-password`, `train --from-store`, 설정 `KRX_TRAIN_ON`, `KRX_COST_BUDGET`, `KRX_TRAINING_SCHEDULES`, `KRX_COST_CHECK_SECONDS`, `KRX_IMAGE_REPOSITORY`. 스택은 2026-10-14에 지웠고(아래), Cost Guard는 그 뒤로 로그를 한 줄도 남기지 않았다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력.
+> **삭제됨** (2026-11-06, #572): 밤 학습을 상시 서버 대신 EC2 Spot에서 돌리는 경로와 그 절차. EventBridge Scheduler가 평일 21:30에 one-time Spot 인스턴스를 띄워 ECR의 엔진 이미지로 `krx-quant train --from-store`를 돌리고, 서버는 학습 설정과 휴장일 달력을 S3 `training/`에 올리고 결과를 다음 거래일 07:30까지 기다려 요약을 보냈다. 서버의 Cost Guard가 AWS Budgets 예산을 1시간마다 읽어 50%·80%에 알리고 100%에서 그달 Spot 스케줄을 껐다. 지운 것: `deploy/training.yaml`(CloudFormation 스택), `deploy/push-image.sh`, `src/krx_quant/cost_guard.py`, `krx-quant registry-password`, `train --from-store`, 설정 `KRX_TRAIN_ON`, `KRX_COST_BUDGET`, `KRX_TRAINING_SCHEDULES`, `KRX_COST_CHECK_SECONDS`, `KRX_IMAGE_REPOSITORY`. 스택은 2026-10-14에 지웠고(아래), Cost Guard는 그 뒤로 로그를 한 줄도 남기지 않았다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력.
 
 > **바뀜** (2026-10-14, #158): Spot 학습을 켜는 절차 → 지금 계정에서는 쓰지 않는다. 밤 학습은 상시 서버에서 돈다(`KRX_TRAIN_ON=server`). 스택은 배포했다가 지웠다. 그래서 Cost Guard, ECR 이미지, 두 스케줄도 없다. 이유: AWS Settings 프로젝트 계정의 서비스 제어 정책이 Spot을 막는다. 2026-10-14 시험 실행(아래 6단계)에서 `RunInstances`가 `explicit deny in a service control policy`로 거부됐다. 거부 메시지를 풀어 보니(`aws sts decode-authorization-message`) 문 `DenySpotMarketType`(`ec2:InstanceMarketType` = `spot`)이었다([design.md](design.md) 8장). 아래 절차는 고급 기능을 활성화해 이 정책을 바꾼 계정에서만 끝까지 된다.
 
@@ -2480,7 +2480,7 @@ docker compose start engine
 - 회원사 프레임의 필드 수 확인(#381)을 담은 엔진은 수집, 저장, 정규화를 바꾸지 않는다(08:00 무렵 필드가 모자란 회원사 프레임은 전처럼 raw에만 남고 ERROR가 난다). 그 밤 예약 작업 `probe-member-frames-381`이 녹화한 모든 날의 회원사 프레임 중 필드 수가 맞지 않는 것을 #381에 남긴다(2장 "회원사 프레임의 필드 수 확인 (#381)"). 서버에서 손으로 할 일은 없다. **삭제됨** (2026-11-04, #506): 예약 작업 `probe-member-frames-381`. 2026-10-29 밤에 돌고 `JOBS`에서 뺐다. 이유: 할 일을 마쳤다.
 - 필드가 모자란 회원사 프레임을 WARNING으로 낮추는 엔진(#419, #381)은 처음 뜰 때부터 그런 프레임을 ERROR 대신 WARNING(`H0UNMBC0 frame short of fields kept raw only (…)`)으로 남기고, 피드·키마다 그날 수를 센다(`/v1/status`의 `kis.feeds[].short_frames`, `krx-quant doctor` 2절). raw에만 남기고 이벤트를 버리는 것은 그대로다. 그래서 08:00에 Grafana 알림 `krx-quant-engine-error`가 울리지 않는다. 서버에서 손으로 할 일은 없다.
 - REST 조회 장애를 세는 엔진(#441)은 처음 뜰 때부터 조회마다 피드·키별로 호출, 실패, 오류 코드, 장애를 센다(`/v1/status`의 `kis.polls`, `krx-quant doctor` 2절). 재시도, 간격, 토큰 재발급, 주문은 바꾸지 않는다. 한 키가 3번 이상 잇달아 10분 이상 실패하면 `[장애] KIS REST 조회 …`가, 그 조회의 모든 키가 다시 답하면 `[복구]`가 온다(6장). 서버에서 손으로 할 일은 없다.
-- EC2 Spot 학습과 Cost Guard를 지운 엔진(#PRNUM)은 밤 학습을 전처럼 이 서버에서 돌린다. 학습, 08:00 교체, 예약 작업의 기다림은 그대로다. 서버 `.env`에 `KRX_TRAIN_ON`, `KRX_COST_BUDGET`, `KRX_TRAINING_SCHEDULES`, `KRX_COST_CHECK_SECONDS`, `KRX_IMAGE_REPOSITORY`가 남아 있어도 읽지 않는다. 이것을 받는 06:00 업데이트는 받기 전의 `deploy/auto-update.sh`로 돌아서, 새 엔진이 뜬 뒤 지운 `deploy/push-image.sh`를 찾지 못한다. 그날 `[알림] 자동 업데이트` 끝에 `Spot 학습용 이미지를 올리지 못했습니다. …`가 한 번 붙고 `.auto-update-push-failed`가 남는다. 다음 날부터의 업데이트는 그 파일을 읽지 않는다. 서버에서 손으로 할 일은 없다.
+- EC2 Spot 학습과 Cost Guard를 지운 엔진(#572)은 밤 학습을 전처럼 이 서버에서 돌린다. 학습, 08:00 교체, 예약 작업의 기다림은 그대로다. 서버 `.env`에 `KRX_TRAIN_ON`, `KRX_COST_BUDGET`, `KRX_TRAINING_SCHEDULES`, `KRX_COST_CHECK_SECONDS`, `KRX_IMAGE_REPOSITORY`가 남아 있어도 읽지 않는다. 이것을 받는 06:00 업데이트는 받기 전의 `deploy/auto-update.sh`로 돌아서, 새 엔진이 뜬 뒤 지운 `deploy/push-image.sh`를 찾지 못한다. 그날 `[알림] 자동 업데이트` 끝에 `Spot 학습용 이미지를 올리지 못했습니다. …`가 한 번 붙고 `.auto-update-push-failed`가 남는다. 다음 날부터의 업데이트는 그 파일을 읽지 않는다. 서버에서 손으로 할 일은 없다.
 - 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), 끝 줄에 디스크 여유와 Docker가 가진 크기(#379, 아래), `[알림] 자동 업데이트 실패: …`, CI 때문에 배포하지 않으면 `[알림] 자동 업데이트 보류: …`(위, #541), 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 보류와 오류일 때 엔진은 그대로 돈다.
 - 업데이트가 끝나면(새 엔진이 API에 답한 뒤) Docker가 3일(72시간) 동안 쓰지 않은 빌드 캐시와, 컨테이너가 쓰지 않는 이미지 중 만든 지 3일이 지난 것을 이름이 있든 없든 지운다(#379): `docker builder prune -af --filter until=72h`, `docker image prune -af --filter until=72h`.
   - 도는 엔진의 이미지는 컨테이너가 쓰고 있어서 지우지 않는다.
@@ -2575,8 +2575,8 @@ docker compose logs --tail 200 engine
 | `[장애] <날짜> 밤 학습이 실패했습니다: exit <코드>, 마지막으로 시작한 단계 <이름>` | `krx-quant doctor` 7절, 로그의 `nightly training of ... failed (exit <코드>)`와 그 아래 학습 출력(마지막 `started step` 줄이 죽은 단계, 그 앞 단계들의 `peak … MB` 줄). `exit -9 (SIGKILL)`는 밖에서 죽인 것으로, 보통 메모리 부족이다(`sudo journalctl -k \| grep -i -E 'oom\|killed process'`). `exit 1`이면 출력 끝의 오류를 본다. 6시간 안에 안 끝나면 `not done in 6:00:00, 마지막으로 시작한 단계 <이름>`이다. 그 밤의 출력 전체와 종료 코드는 배포 뒤에도 Loki에 남는다(`{service="krx-quant", process="training"} \|= "night=<날짜> "`, #358, #360) | `docker compose run --rm --no-deps engine train --day <날짜>`로 다시 돌린다. 끝난 알고리즘은 건너뛴다. 07:30 전에 끝나면 08:00 교체가 쓴다. 다음 밤 학습이 성공하면 `[복구] 밤 학습이 다시 됩니다.`가 온다. 그동안 전날 모델이 계속 돈다. 메모리 부족이면 스왑(2.2의 11단계)이 있는지 보고, 리포트의 `resources`로 어느 단계가 큰지 본다(3장 "밤 학습과 모델 교체"). |
 | `… 밤 학습이 거래일 밤 N번 연속 적용되지 않았습니다(마지막으로 적용된 밤 <날짜>, …)` (#355) | `/v1/status`의 `training.last_applied`, `nights_not_applied`, `failures`, `krx-quant doctor` 7절 | 적용되지 않은 밤이 2번 이상 이어졌다. 새로 그런 밤이 생길 때마다 한 번 온다. 실패한 밤은 위 행처럼, 학습은 끝났는데 쓰지 않은 밤은 아래 `밤 학습 결과를 쓰지 않습니다` 행처럼 한다. 그동안 4분 알고리즘은 마지막으로 적용된 모델로 예측하고, 새 정답의 모델이 아니면 수습 날이 세어지지 않는다(아래 "밤 학습이 적용되지 않은 동안의 수습"). |
 | 밤 학습이 며칠째 적용되지 않는다 (2026-10-14–22, #355) | `curl -s http://krx-quant:8080/v1/status \| jq .training`, `krx-quant doctor` 7절, `free -m`, `sudo journalctl -k \| grep -i oom` | 2026-10-13 밤 뒤로 7밤 동안 목록이 하나도 생기지 않았다(`latest_night`이 10-13). 10-22는 Turing 단계에서 `exit -9`(스왑 없는 2GB에서 메모리 부족으로 본다). 그 전 밤들의 출력은 06:00 배포가 컨테이너를 새로 만들어 남지 않았다. 사용자가 스왑 2GB를 붙이고(2.2의 11단계) 10-22 밤을 손으로 다시 돌렸다. 날 캐시를 줄이는 변경(#355)이 배포된 뒤로는 단계별 메모리가 리포트와 텔레그램 요약에, 실패 이유가 `state/training_nights.json`에 남는다. |
-| ~~`[장애] <날짜> 밤 학습이 실패했습니다: Spot 학습 결과가 <다음 거래일> 07:30까지 오지 않았습니다`~~, ~~`[알림] AWS 비용이 이달 $N로 …`~~, ~~`[장애] AWS 비용을 읽지 못해 상한을 지킬 수 없습니다: <이유>`~~ | **삭제됨** (2026-11-06, #PRNUM): EC2 Spot 학습과 Cost Guard의 알림. 더 오지 않는다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
-| `[알림] 자동 업데이트: ...`에 `Spot 학습용 이미지를 올리지 못했습니다` | 그 알림의 커밋이 #PRNUM을 담았는지 | **바뀜** (2026-11-06, #PRNUM): ECR 권한이나 연결 문제였다 → #PRNUM을 받은 06:00에 한 번만 온다. 그 업데이트는 받기 전의 `deploy/auto-update.sh`로 돌아(4장의 #PRNUM 줄), 새 엔진이 뜬 뒤 지운 `deploy/push-image.sh`를 찾지 못한다. 할 일은 없다. 그 뒤로는 오지 않는다. 이유: Spot 학습용 이미지 올리기를 지웠다(3장 "밤 학습을 EC2 Spot으로 옮기기 (#23)"). |
+| ~~`[장애] <날짜> 밤 학습이 실패했습니다: Spot 학습 결과가 <다음 거래일> 07:30까지 오지 않았습니다`~~, ~~`[알림] AWS 비용이 이달 $N로 …`~~, ~~`[장애] AWS 비용을 읽지 못해 상한을 지킬 수 없습니다: <이유>`~~ | **삭제됨** (2026-11-06, #572): EC2 Spot 학습과 Cost Guard의 알림. 더 오지 않는다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
+| `[알림] 자동 업데이트: ...`에 `Spot 학습용 이미지를 올리지 못했습니다` | 그 알림의 커밋이 #572을 담았는지 | **바뀜** (2026-11-06, #572): ECR 권한이나 연결 문제였다 → #572을 받은 06:00에 한 번만 온다. 그 업데이트는 받기 전의 `deploy/auto-update.sh`로 돌아(4장의 #572 줄), 새 엔진이 뜬 뒤 지운 `deploy/push-image.sh`를 찾지 못한다. 할 일은 없다. 그 뒤로는 오지 않는다. 이유: Spot 학습용 이미지 올리기를 지웠다(3장 "밤 학습을 EC2 Spot으로 옮기기 (#23)"). |
 | AWS 호출이 `... with an explicit deny in a service control policy`로 거부됨 | 서버 `.env`의 `AWS_REGION`, 맥이면 `aws configure get region` | AWS Settings 프로젝트 계정은 시드니(`ap-southeast-2`) 밖의 리전을 막는다(1장). `AWS_REGION=ap-southeast-2`로 고치고 `docker compose up -d`. 리전이 맞는데도 거부되면 계정 정책이 그 동작 자체를 막는 것이다(예: Spot, 8장). 메시지 끝의 `Encoded authorization failure message`를 맥에서 `aws sts decode-authorization-message`로 풀면 막은 문(`Sid`)이 보인다. 2026-10-14에 서버의 `AWS_REGION=ap-northeast-2`(서울)가 이것으로 ECR 로그인을 막았다(#23). |
 | `[신호] <종목> 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지` | `/v1/symbols/<종목>/latest`의 `consensus-final` | `KRX_SIGNAL_ALERT=on`일 때만 온다. 장애가 아니라 예측 신호다. 같은 종목·방향은 4분 안에 다시 오지 않는다(엔진을 다시 시작해도). VI·서킷브레이커에 걸리거나, 기준가가 없거나, 목표 시각이 지난 신호는 오지 않고 로그에 `signal blocked (<이유>)`, DB `runs`에 `signal_blocked`로 남는다. 주문 코드는 없다. |
 | `[알림] <날짜> 밤 학습`과 알고리즘별 `승격`·`유지`·`학습 안 함` | | 매일 밤 학습의 요약이다. 할 일은 없다. 승격된 모델은 다음 거래일 08:00에 바뀐다. `승격(정답 바뀜, 성적 비교 없이)`은 지금 모델이 다른 정답 버전이라 성적과 상관없이 올린 것이다(#170, 3장 "정답이 바뀌는 날"). 줄 끝의 `· 맞힘률 A → B`는 지금 모델과 새 모델의 맞힘률이고, `(불일치: …)`와 `(맞힘률 우선이면 …)`는 보고만 하는 표시다(#437, 3장 "밤 학습과 모델 교체"). 교체는 그대로 log loss로 한다. 끝의 `사전 검증 거부로 학습하지 않음: <이름>, …`은 사전 검증이 지금 코드를 거부해 엔진이 돌리지 않아 학습하지 않은 알고리즘이다(#544). 코드가 바뀌어 배포되면 그 밤부터 다시 학습한다. |
@@ -2896,7 +2896,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 - 서버 watchdog(#385, #387): 없음. 공개 저장소의 GitHub Actions 실행 시간은 무료이고, Lightsail API 호출과 그 지표(상태 검사), IAM 사용자와 접근 키에는 요금이 없다(6장 "서버가 멈추면 (#385)").
 - 상한은 AWS 프로젝트 지출 한도 월 $100이다. 한도에 닿으면 상시 서버까지 멈춘다(1장 참고).
 
-> **삭제됨** (2026-11-06, #PRNUM): 서버의 Cost Guard(AWS Budgets 예산 `krx-quant-monthly`를 1시간마다 읽어 50%·80%에서 알리고 100%에서 그달 Spot 학습을 껐다)와 Spot 학습(월 $1 안팎 예상)·ECR(월 $0.1 안팎) 비용. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력.
+> **삭제됨** (2026-11-06, #572): 서버의 Cost Guard(AWS Budgets 예산 `krx-quant-monthly`를 1시간마다 읽어 50%·80%에서 알리고 100%에서 그달 Spot 학습을 껐다)와 Spot 학습(월 $1 안팎 예상)·ECR(월 $0.1 안팎) 비용. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력.
 
 > **바뀜** (2026-10-11, #67): "Budgets 알림과 Spot 학습 상한은 #23에서 만든다" → 서버의 Cost Guard가 한다. 계획은 AWS Budgets가 텔레그램으로 직접 알리는 것이었다. 이유: 텔레그램 토큰을 서버 `.env` 밖(Lambda, SSM)에 두지 않기 위해 서버가 예산을 읽어 알린다(사용자와 정함).
 
@@ -2964,7 +2964,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `training-samples/date=<날>/<키>.json.gz` | 표본 저장소(#370): 밤 학습이 만든 날마다의 표본(모든 알고리즘의 피처, 정답, 종류의 정답)과 그것을 만든 키. 다음 밤은 키가 같으면 다시 만들지 않고 읽는다. 사전 검증과 수습 시뮬레이션도 읽는다(쓰지 않는다. 백필 날도 #374부터, 그 전에는 녹화한 날만). 학습이 끝나면 그 밤의 어느 단계도 읽지 않는 날과 다른 키의 파일, 반쯤 쓴 `.tmp`를 지운다. 지워도 된다: 다음 밤 하루만 모든 날을 다시 만들어 오래 걸린다. 위 "밤 학습과 모델 교체"의 "날마다의 표본은 표본 저장소에 둔다" |
 | `training-cache/` | 밤 학습이 Object Store에서 받아 둔 백필 1분봉과 녹화 이벤트의 사본. 키 경로가 같다. 학습이 끝나면 그 밤에 쓴 가장 오래된 날보다 오래된 날짜를 지운다  그 날의 표본이 읽는 앞선 날(시간대 수익률이면 20거래일, #274)은 남긴다 |
 | `disk_alert.json` | `{"low": ["data"]}`: 여유가 기준보다 작다고 알린 디스크(#379). 그 디스크를 먼저 읽은 폴더(`data`, `state`)로 적는다. 재시작해도 다시 알리지 않고, 여유가 돌아오면 `[복구]`를 보내고 지운다. 디스크가 가득 차 쓰지 못하면 재시작 뒤 한 번 더 알린다 |
-| ~~`cost_guard.json`~~ | **삭제됨** (2026-11-06, #PRNUM): Cost Guard가 이달 한 일(#23). 남아 있어도 읽지 않는다. 지워도 된다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
+| ~~`cost_guard.json`~~ | **삭제됨** (2026-11-06, #572): Cost Guard가 이달 한 일(#23). 남아 있어도 읽지 않는다. 지워도 된다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
 | `scheduled.json` | 예약 작업의 상태(#215): 작업마다 마지막으로 돈 것(`day`, `outcome`, `started_at`, `commit`, `exit_code`, `seconds`, `timed_out`, `comments`)과 아직 올리지 못한 결과(`unposted`), 수습 시뮬레이션이 사전 검증에 자리를 내준 밤(`gave_way`, #376). 형식은 3장 "예약 작업 (#215)". `.scheduled.json.tmp`는 쓰는 중인 임시 파일, `scheduled.json.bad`는 읽지 못해 옮겨 둔 것이다 |
 | `snapshots.json` | 서버 요약(#322): 지난 1시간에 요약을 올린 이슈와 시각(`posted`: `issue`, `at`), 댓글은 올렸는데 `needs-server-snapshot` 라벨을 떼지 못한 이슈(`unlabel`). 재시작해도 한도가 이어지게 둔다. 통째로 바꿔 쓴다(`.snapshots.json.tmp`). 잃으면 한도가 처음부터 다시 센다(6장 "서버 상태 보기 (#322)") |
 | `supply/symbol=<종목>/kis.parquet`, `…/toss.parquet` | 일별 수급 8종(#226): 출처마다 하루 한 행, 마지막 끝난 거래일부터 10년(형식은 [events.md](events.md#supply-일별-수급-rest-226)). 토스의 값은 사용자 자신의 매매에만 쓰므로 데이터 폴더가 아닌 여기에 두고 S3에 올리지 않는다. 잃으면 다음 시작 때 다시 받는다. `.<이름>.tmp`는 쓰는 중인 임시 파일이다 |
@@ -2972,7 +2972,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `closing_flow/net_assets.parquet` | ETF 16종의 순자산(#305): 상품, 날(순자산의 날), 출처(`krx`, `kis`)마다 한 행, 원, 처음 받은 때, KRX 행은 상장좌수와 NAV도([events.md](events.md#closing_flow-etf-순자산-rest-305)). KRX Open API의 값은 서버 밖으로 내보내지 않으므로 데이터 폴더가 아니라 여기 둔다(21:00 업로드는 데이터 폴더만 올린다). 통째로 바꿔 쓴다(`.net_assets.parquet.tmp`) |
 | `closing_flow/demand.parquet` | KRX 마감 흐름의 15:20 수요(#305): 종목마다 하루 한 행(시각, 기준가, 전일 종가, r, 수요 합과 구조별 합, 센 상품·뺀 상품 수, 순자산 출처, [events.md](events.md#closing_flow-마감-수요와-지난날-305)). KRX 순자산으로 계산한 값이라 여기 둔다. 통째로 바꿔 쓴다(`.demand.parquet.tmp`) |
 | `closing_flow/days.json` | KRX 마감 흐름의 지난날 표(#305): 종목마다 날마다의 15:20 수요·비율·순자산 출처·종가 단일가·다음날과 날마다의 종가 단일가 체결대금과 그 출처. 수집기 시작과 20:30 이력 작업의 끝, KRX 순자산이 들어온 뒤에 다시 계산해 통째로 바꾼다(`.days.json.tmp`). `version`이 2가 아닌 파일(이 배포 전의 것)은 읽지 않는다. 지워도 다음 계산이 다시 만든다 |
-| ~~`spot_summarized.json`~~ | **삭제됨** (2026-11-06, #PRNUM): 요약을 보낸 마지막 Spot 학습 밤(#23). 남아 있어도 읽지 않는다. 지워도 된다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
+| ~~`spot_summarized.json`~~ | **삭제됨** (2026-11-06, #572): 요약을 보낸 마지막 Spot 학습 밤(#23). 남아 있어도 읽지 않는다. 지워도 된다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
 
 > **삭제됨** (2026-10-23, #360): `logs/engine/<날>.log`, `logs/training/<밤>.log`, `logs/jobs/<작업>/<밤>.log`, `logs/commands/<명령>/<날>.log`(프로세스 종류마다 하루 한 파일의 로그, #356)와 `logs/bundles/krx-logs-<KST 시각>.tar.gz`(`krx-quant logs-bundle`의 꾸러미). 이유: 사용자가 로그를 Grafana Cloud Loki로만 남기기로 정했다(2026-10-23). 대신: 아래 "Grafana Cloud Loki". #359가 쓴 파일은 서버에서 `rm -rf ~/krx-quant/state/logs`로 지운다(6장 "로그 파일과 꾸러미 (#356)").
 
@@ -2985,7 +2985,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `.env` | 설정과 비밀값(권한 600). 저장소에 커밋하지 않는다 |
 | `.auto-update-deployed` | 엔진이 마지막으로 정상 기동을 확인한 커밋 |
 | `.auto-update-failed` | 시작하지 못한 커밋. main이 바뀔 때까지 다시 시도하지 않는다 |
-| ~~`.auto-update-push-failed`~~ | **삭제됨** (2026-11-06, #PRNUM): Spot 학습용 이미지를 ECR에 올리지 못했다는 표시(#23). #PRNUM을 받은 06:00 업데이트가 한 번 만들고(위 6장 알림 표의 `Spot 학습용 이미지를 올리지 못했습니다`), 그 뒤로는 읽지 않는다. 지워도 된다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
+| ~~`.auto-update-push-failed`~~ | **삭제됨** (2026-11-06, #572): Spot 학습용 이미지를 ECR에 올리지 못했다는 표시(#23). #572을 받은 06:00 업데이트가 한 번 만들고(위 6장 알림 표의 `Spot 학습용 이미지를 올리지 못했습니다`), 그 뒤로는 읽지 않는다. 지워도 된다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
 | `.auto-update-ci-failed` | `ci`가 실패해 텔레그램으로 알린 커밋(#541). 같은 커밋을 다시 알리지 않는다. CI가 통과한 커밋을 배포하면 지운다 |
 
 **Grafana Cloud Loki** (`KRX_LOKI_URL`, #358): 모든 프로세스의 로그 줄(가린 것)과 엔진의 heartbeat. 레이블 `service`, `process`, `level`. 14일 보관. 로그가 남는 곳은 여기뿐이다(6장 "Grafana Cloud Loki로 보내는 로그 (#358)").
@@ -3002,7 +3002,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `models/baseline-climate/<버전>.json` | 그 표. 형식은 `state/models/baseline-climate.json`과 같다 |
 | `promotions/<날짜>.json` | 그 밤의 승격 목록: `day`, `finalized_at`(확정 시각), `promoted`(알고리즘 → 버전), `reports`(위 리포트 전부), 사전 검증이 거부해 학습하지 않은 알고리즘이 있으면 `refused`(알고리즘 → 실패한 검사, #544). 모든 알고리즘이 끝난 뒤 한 번 쓴다. 엔진은 가장 최근 것을 읽어 메모리에 두고 `/v1/status`의 `training`과 `/v1/algorithms`의 `validation`(#165)으로 보인다(3장 "밤 학습과 모델 교체") |
 | `live.json` | 서버가 지금 돌리는 버전(알고리즘 → 버전, 기본 모델이면 `<이름>-default`). 다음 밤의 champion이다. 사전 검증을 기다리는 알고리즘은 돌기 시작할 때 쓸 모델이다(#24) |
-| ~~`training/settings.json`~~, ~~`training/market_calendar.json`~~, ~~`training/logs/<KST 시각>.log`~~ | **삭제됨** (2026-11-06, #PRNUM): `KRX_TRAIN_ON=spot`일 때 서버가 올린 학습 설정과 휴장일 달력, Spot 인스턴스의 실행 로그(#23). 아무것도 쓰거나 읽지 않는다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
+| ~~`training/settings.json`~~, ~~`training/market_calendar.json`~~, ~~`training/logs/<KST 시각>.log`~~ | **삭제됨** (2026-11-06, #572): `KRX_TRAIN_ON=spot`일 때 서버가 올린 학습 설정과 휴장일 달력, Spot 인스턴스의 실행 로그(#23). 아무것도 쓰거나 읽지 않는다. 이유: #23 계획 없음, 계정 정책이 Spot을 막음(사용자가 2026-11-05에 정했다). 대신: 서버 안 밤 학습, 필요하면 git 이력. |
 
 - 객체마다 내용의 SHA-256을 함께 둔다. S3에서는 객체 메타데이터 `sha256`이고, 로컬 폴더에서는 파일에서 계산한다. 업로드와 밤 학습은 이 값으로 같은 파일인지 본다.
 - 엔진의 IAM 사용자는 `models/` 아래의 객체만 지울 수 있다(#361). 덮어쓰거나 지운 이전 버전은 S3 버전 관리로 30일 남는다(2.1).

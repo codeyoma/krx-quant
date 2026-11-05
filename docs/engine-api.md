@@ -2413,7 +2413,7 @@ docker compose run --rm --no-deps engine prevalidate <이름> --revision  # 코�
 - 밤 학습은 방향과 다른 종류의 알고리즘 다음, 맨 끝에 학습한다. 그 밤의 날까지의 최근 `training_days`로 다시 맞추고 **늘 승격한다**(기후 표처럼). 하루가 종목마다 표본 하나라 검증 3일로는 견줄 수 없고, 하루를 더한 10년 학습은 거의 바뀌지 않는다. 실력은 사전 검증의 walk-forward와 실시간 성적으로 본다. 리포트(`reports/<날짜>/cox.json`)에 `kind`, `cadence`(`daily`), `target_version`(그 종류의 정답 버전, 지금 2), `training_days`(첫날과 마지막 날), `labels.samples.candles`(정답 있는 표본 수), `challenger`, `recent`(최근 60일을 그 전 날로 학습한 모델로 예측한 log loss. 1/3씩이면 ln 3 = 1.0986. 보기만 하고 승격에 쓰지 않는다)가 남는다. 텔레그램 요약에 `open_to_close 정답 표본: KRX 일봉 N개 (첫날 – 마지막 날) · 최근 60일 표본 밖 log loss x`가 한 줄 붙는다.
 - 서버의 파일을 읽는다. 밤 학습은 서버에서만 돈다.
 
-  > **바뀜** (2026-11-06, #PRNUM): "`KRX_TRAIN_ON=server`일 때만 학습한다(Spot은 이 파일이 없다)" → 늘 학습한다. 이유: EC2 Spot 학습과 `KRX_TRAIN_ON`을 지웠다(#23 계획 없음, 계정 정책이 Spot을 막음, 사용자가 2026-11-05에 정했다).
+  > **바뀜** (2026-11-06, #572): "`KRX_TRAIN_ON=server`일 때만 학습한다(Spot은 이 파일이 없다)" → 늘 학습한다. 이유: EC2 Spot 학습과 `KRX_TRAIN_ON`을 지웠다(#23 계획 없음, 계정 정책이 Spot을 막음, 사용자가 2026-11-05에 정했다).
 
 - `krx-quant fit cox`는 마지막 저장된 KRX 일봉까지로 같은 학습을 해 `state/models/cox.json`에 쓴다.
 - **미국 일봉(`us_daily.py`).** 수집기의 이력 작업(시작할 때와 20:30, 매크로 읽기를 켰을 때 `KRX_MACRO_AT`)이 SOX, 엔비디아, 마이크론, VIX의 일 종가를 Yahoo 차트 API(매크로 읽기와 같은 출처)에서 받아 `data/us_daily/symbol=<지표>/closes.parquet`에 둔다. 처음에는 10년(`range=10y`), 그다음은 한 달(`range=1mo`)을 받아 날짜로 합친다(다시 받은 날은 바꾼다). 업로드하지 않는다(잃으면 다시 받는다).

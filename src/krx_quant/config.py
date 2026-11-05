@@ -162,7 +162,7 @@ class Settings:
     # The collector starts the nightly training at this time (KST) on trading days, once the
     # day's bars are archived (KRX_TRAIN_AT: 21:30 unless set; "off": no nightly training).
     # None here, so a collector built in a test never trains. It trains in its own process here.
-    # (삭제됨 2026-11-06, #PRNUM: KRX_TRAIN_ON, the training on EC2 Spot, and the Cost Guard's
+    # (삭제됨 2026-11-06, #572: KRX_TRAIN_ON, the training on EC2 Spot, and the Cost Guard's
     # KRX_COST_BUDGET, KRX_TRAINING_SCHEDULES, KRX_COST_CHECK_SECONDS. 이유: #23 계획 없음, 계정
     # 정책이 Spot을 막음. 대신: 서버 안 밤 학습, 필요하면 git 이력. One still set is not read.)
     train_at: time | None = None
