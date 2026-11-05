@@ -441,6 +441,9 @@ async def _status(request: web.Request) -> web.Response:
         "skipped_today": cpu.skipped_today,
     }
     body["usd_futures"] = await _usd_futures(request)
+    # The rule a signal follows, whether the Telegram alerts are on or off: the screen's default (#617).
+    rule = engine.signal_rule
+    body["signal_rule"] = {"min_probability": rule.min_probability, "min_agree": rule.min_agree}
     live_status = request.app.get(LIVE_STATUS_KEY)
     if live_status is not None:
         body["kis"] = live_status()
