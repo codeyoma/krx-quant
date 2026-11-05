@@ -11,11 +11,12 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
 
-from krx_quant.algorithms import DAILY_ALGORITHMS, KIND_ALGORITHMS
+from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS
 from krx_quant.daily import DailyAlgorithm, DailyKind
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, report_path
-from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, JobRecord, Night, Target
+from krx_quant.queue_screen import QUEUE
+from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, JobRecord, Night, Ran, Target
 
 # The daily kinds' issue (#264), open_to_close's: its pre-validation and simulation post there too.
 # The daily check (``daily-check-264``, ``probes``) named it until that job left ``JOBS`` (#505).
@@ -117,16 +118,24 @@ def _in_turn(turns: Sequence[tuple[str, str | None]]) -> tuple[str, ...]:
     return fresh or tuple(n for n, t in turns if t == AGAIN)
 
 
+def screened_order(screened: Sequence[str], order: Sequence[str]) -> tuple[str, ...]:
+    """``order`` (the registries' turn) as the latest queue screen set it (#599, ``Facts.queue``, the
+    Engine API's ``queue``): those of it ``screened`` orders, in its order, then the others in
+    ``order``'s (none screened: the registries' turn)."""
+    ordered = [n for n in dict.fromkeys(screened) if n in order]
+    return (*ordered, *(n for n in order if n not in ordered))
+
+
 def _prevalidation_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
     def due(night: Night) -> bool:
-        return prevalidation_tonight(night, order) == algorithm
+        return prevalidation_tonight(night, screened_order(night.facts.queue, order)) == algorithm
 
     return due
 
 
 def _prevalidation_quiet(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
     def due(night: Night) -> bool:
-        return algorithm in prevalidations_quiet(night, order)
+        return algorithm in prevalidations_quiet(night, screened_order(night.facts.queue, order))
 
     return due
 
@@ -168,6 +177,7 @@ def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
             targets=(Target(PREVALIDATION_ISSUE, note=_prevalidation_note(name)),),
             attach=(Attachment(f"리포트 state/{_report_of(name)}", _report_of(name)),),
             report=_report_of(name),
+            queued=name,
         )
         for name in order
     )
@@ -537,3 +547,61 @@ _DIAGNOSTICS_NOTES = {
 def _report_of(algorithm: str) -> str:
     """The report's path under the state directory."""
     return report_path(Path(), algorithm).as_posix()
+
+
+# The queue screen (#599, ``queue_screen.py``): each night a pre-validation would run, the bar-close
+# algorithms waiting are screened by their walk-forward folds (minutes each, no replay) and the order
+# of their pre-validations is set from it: a seat by score and a seat by arrival by turns, those passed
+# over on three nights first. It orders only: every one waiting is still pre-validated, and judged by
+# its checks. Due on a night at least two waiting have a turn (``prevalidation_turn``: the order of one
+# is no question), once ``MIN_DAYS`` are recorded; once a night. Before the changed code's and the
+# first pre-validations, which go by its order that night (``Job.refreshes``: the facts are read again
+# after it). It gives way to a pre-validation as the simulations do (#376): run first to its limit, it
+# would carry that one past its last start; it then runs after it, before the quiet night's second,
+# which goes by tonight's order (the quiet turn reads the facts again), and that night's first goes by
+# the order of the last screen. A screen more than four days old is not gone by (``QUEUE_KEPT_DAYS``).
+# The limit: its budget for the candidates' processes (an hour; the issue's estimate was 36 to 54
+# minutes for nine), one candidate's limit (10 minutes) and room. Its result goes to #204, which gets
+# ``ready-for-agent`` only when the screen failed.
+QUEUE_SCREEN_TIMEOUT = timedelta(hours=1, minutes=15)
+
+
+def _queue_screen_due(order: tuple[str, ...]) -> Callable[[Night], bool]:
+    def due(night: Night) -> bool:
+        if night.facts.recorded_days < MIN_DAYS:
+            return False
+        record = night.record
+        if record is not None and record.day == night.day and record.outcome in (OK, FAILED):
+            return False  # once a night
+        return sum(prevalidation_turn(night, name) is not None for name in order) >= 2
+
+    return due
+
+
+def _screen_failed(ran: Ran) -> bool:
+    """The screen calls an agent only when it failed: its order is the night's routine."""
+    return ran.exit_code != 0 or ran.timed_out
+
+
+_QUEUE_SCREEN_NOTE = (
+    "사전 검증 대기열 훑기(#599): 기다리는 봉 마감 알고리즘마다 사전 검증과 같은 날들을 walk-forward로 "
+    "예측해(재생 없이) 기준 예측마다 거래일 단위 lift를 내고, 그 가운데 가장 약한 것을 점수로 그 밤부터의 "
+    "사전 검증 순서를 정했다. 점수 자리와 먼저 온 자리가 번갈아 오고, 세 밤 밀린 알고리즘은 맨 앞이다. "
+    "순서만 정한다: 기다리는 알고리즘은 모두 사전 검증을 받고, 통과·거부는 검사 다섯이 정한다. 점수를 "
+    "모르는 알고리즘(시간·메모리 한도, 오류)은 먼저 온 자리를 지킨다. 밤마다 같은 날로 다시 훑은 점수는 "
+    "서로 독립된 증거가 아니다. 출력에는 시세 값이 없다(lift, 개수, 날짜만)."
+)
+
+QUEUE_SCREEN = Job(
+    name="screen-queue-599",
+    due=_queue_screen_due(
+        prevalidation_order([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)])
+    ),
+    command=("screen-queue",),
+    timeout=QUEUE_SCREEN_TIMEOUT,
+    targets=(Target(PREVALIDATION_ISSUE, note=_QUEUE_SCREEN_NOTE),),
+    attach=(Attachment(f"대기열 state/{QUEUE}", QUEUE),),
+    gives_way_to=_a_prevalidation,
+    label_if=_screen_failed,
+    refreshes=True,
+)

@@ -227,7 +227,7 @@ from krx_quant.lifecycle import (
     target_changed,
 )
 from krx_quant.lifecycle import stages as stages_now
-from krx_quant.loop_watch import LoopWatch, held_text
+from krx_quant.loop_watch import LOOP_HELD, LoopWatch, held_detail, held_text
 from krx_quant.market_calendar import MarketCalendar, first_whole_day
 from krx_quant.market_view import (
     FUTURES_SERIES,
@@ -1055,6 +1055,8 @@ class PredictionEngine:
         if held is not None:
             what = f"{'bar close' if predicted else 'run'} {due.astimezone(KST):%Y-%m-%d %H:%M}"
             log.warning("%s", held_text(what, *held))
+            # For the night's report of the bar closes' times (#589), which cannot read Loki.
+            self.store.add_run(LOOP_HELD, due, None, held_detail(*held))
 
     def bars(self, symbol: str) -> list[Bar]:
         return self._market.bars(symbol, self.clock.now())

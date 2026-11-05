@@ -8,7 +8,8 @@ first imported (#574). With a thread per CPU, the calling thread spins while it 
 others. On a 4-CPU Linux container beside four busy processes, ito's 600 predictions of the
 prediction budget's check (``tests/test_algorithm_contract.py``) took 2.7-3.2 s of the clock and
 1.4-1.6 s of the calling thread's CPU; with BLAS on one thread, 0.8-0.9 s and 0.4 s. That check
-counts the calling thread's CPU.
+counts the calling thread's CPU. The image runs the engine so too (``Dockerfile``, #589);
+``tests/test_blas_threads.py`` checks that the forecasts are the same either way.
 """
 
 import os
