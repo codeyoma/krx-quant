@@ -146,7 +146,7 @@
  "tests/test_signal_review.py": 1.41,
  "tests/test_signals.py": 0.51,
  "tests/test_simulation_api.py": 2.59,
- "tests/test_simulation_bar_close.py": 79.92,
+ "tests/test_simulation_bar_close.py": 99.47,
  "tests/test_simulation_daily.py": 9.58,
  "tests/test_skill.py": 0.01,
  "tests/test_slot_returns.py": 0.01,
