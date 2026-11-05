@@ -65,7 +65,7 @@ from functools import partial
 from pathlib import Path
 from typing import IO, Any, TypeVar
 
-from krx_quant.archive import partition_files
+from krx_quant.archive import guarded_files
 from krx_quant.backfill import PreviousDay
 from krx_quant.config import Settings
 from krx_quant.engine import Event, PredictionEngine
@@ -452,7 +452,7 @@ def _read_day(
 def _recorded(data_dir: Path, day: date, symbol: str) -> bool:
     """Whether ``symbol``'s quotes or trades were recorded on ``day`` under ``data_dir``."""
     root = data_dir / "events" / f"date={day.isoformat()}"
-    return any(partition_files(root / f"feed={feed}" / f"symbol={symbol}") for feed in TOUCH_FEEDS)
+    return any(guarded_files(root / f"feed={feed}" / f"symbol={symbol}") for feed in TOUCH_FEEDS)
 
 
 def _summary(f: Filled) -> dict[str, object]:
@@ -732,7 +732,7 @@ def _special_recorded(data_dir: Path, day: date, symbols: Sequence[str]) -> bool
             partitions += sorted((root / f"feed={feed}").glob("symbol=*"))
         else:
             partitions.append(root / f"feed={feed}" / f"symbol={key}")
-    return any(p.is_dir() and partition_files(p) for p in partitions)
+    return any(p.is_dir() and guarded_files(p) for p in partitions)
 
 
 async def keep_touches_filled(settings: Settings, engine: PredictionEngine, lock: EngineLock) -> None:

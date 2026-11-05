@@ -8,6 +8,7 @@ none.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
@@ -21,7 +22,9 @@ import pyarrow.parquet as pq
 import pytest
 from moto import mock_aws
 
+import krx_quant
 from krx_quant import archive as archiving
+from krx_quant import sample_store
 from krx_quant.archive import PRUNED, RAW_KEEP_DAYS, Pin, RawMissing, archive, partition_batches, pruned_mark
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
@@ -464,3 +467,67 @@ async def test_a_restored_copy_is_the_file_recorded(tmp_path: Path) -> None:
         copy = raw.feed(DAY, "H0UNCNT0") / "symbol=005930" / "data.parquet"
         assert pq.read_table(copy).equals(recorded)
         assert file_digest(copy) == pruned_mark(data / PARTITION).sha256
+
+
+# --- one guard for listing a partition's files ------------------------------------------------------
+
+# The callers of ``archive.partition_files`` besides the guard (``guarded_files``) and the prune, which
+# lists under the archive's own lock: each reads a layer the archive never prunes, and its code is in the
+# sample store's key (``sample_store._WHOLE``, ``_PARTS``), so routing it through the guard would make
+# every stored training day again on the next night.
+UNGUARDED = {
+    ("replay", "recorded_partitions"): "events",
+    ("macro", "_read_partition"): "macro",
+    ("training", "is_recorded"): "events",
+}
+ARCHIVE_OWN = {("archive", "guarded_files"), ("archive", "_prune")}
+
+
+class _Uses(ast.NodeVisitor):
+    """Where a module names ``partition_files`` (but to import it): (module, innermost function)."""
+
+    def __init__(self, module: str) -> None:
+        self.module, self.stack, self.found = module, ["<module>"], set[tuple[str, str]]()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self.stack.append(node.name)
+        self.generic_visit(node)
+        self.stack.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if node.id == "partition_files":
+            self.found.add((self.module, self.stack[-1]))
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if node.attr == "partition_files":
+            self.found.add((self.module, self.stack[-1]))
+        self.generic_visit(node)
+
+
+def test_every_reader_lists_a_partition_s_files_through_the_guard() -> None:
+    """A reader that lists a partition with ``partition_files`` itself would read a raw partition the
+    archive pruned, or prunes as it lists, as one with no rows (#607). So outside the guard and the
+    prune only the sample store's keyed code may, and it reads no raw."""
+    root = Path(krx_quant.__file__).parent
+    found: set[tuple[str, str]] = set()
+    for path in sorted(root.rglob("*.py")):
+        uses = _Uses(path.relative_to(root).with_suffix("").as_posix().replace("/", "."))
+        uses.visit(ast.parse(path.read_text()))
+        found |= uses.found
+
+    assert found == ARCHIVE_OWN | set(UNGUARDED), "list a partition's files with archive.guarded_files"
+    for module, function in UNGUARDED:
+        assert module in sample_store._WHOLE or function in sample_store._PARTS.get(module, ()), (
+            f"{module}.{function} is no longer in the sample store's key: list through archive.guarded_files"
+        )
+
+
+async def test_the_guard_leaves_a_partition_of_another_layer_listed_empty_alone(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    record_other(data, ["n0"])
+    await archive(data, LocalObjectStore(tmp_path / "store"))
+    (data / EVENTS / "data.parquet").unlink()  # an events file gone: no raw is missing
+
+    assert archiving.guarded_files(data / EVENTS) == []

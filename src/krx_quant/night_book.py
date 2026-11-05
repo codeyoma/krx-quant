@@ -67,7 +67,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 import krx_quant
-from krx_quant.archive import RAW, partition_files
+from krx_quant.archive import RAW, check_not_pruned, guarded_files
 from krx_quant.config import Settings
 from krx_quant.contracts import NIGHT_END, NIGHT_OPEN
 from krx_quant.feeds import NIGHT_FUTURES, NIGHT_FUTURES_BOOK, RAW_SCHEMA
@@ -231,7 +231,7 @@ def _layer(
         base = root.parents[2]  # the data directory, or the copy's: ``<base>/<layer>/date=…/feed=…``
         for partition in sorted(root.glob("symbol=*")):
             try:
-                files = partition_files(partition)
+                files = guarded_files(partition)  # a pruned raw night raises (#607): never zero bytes
             except (OSError, ValueError, pa.ArrowInvalid) as e:
                 seen.unread.append(f"{partition.relative_to(base)}: {e}")
                 continue
@@ -239,6 +239,7 @@ def _layer(
                 try:
                     found = _read_file(path, rows, cover)
                 except (OSError, ValueError, pa.ArrowInvalid) as e:
+                    check_not_pruned(partition)  # gone because the archive pruned it
                     seen.unread.append(f"{path.relative_to(base)}: {e}")
                     continue
                 if path.name.startswith(PART_PREFIX):
@@ -247,6 +248,7 @@ def _layer(
                     seen.bytes += found.bytes
                     seen.rows += found.rows
                 received += found.received
+            check_not_pruned(partition)  # pruned while its files were read
     return seen
 
 

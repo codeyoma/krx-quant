@@ -192,6 +192,30 @@ def test_a_night_pruned_on_the_server_is_measured_from_the_store_s_copy(tmp_path
         assert measure_night(data, monday, raw) == before
 
 
+def test_a_night_pruned_as_it_is_measured_fails_rather_than_measuring_zero_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#607: the archive prunes the raw night after ``RawDays`` found it on the server and before its
+    files are listed; the measure fails, it does not count the night as empty."""
+    data, store = tmp_path / "data", LocalObjectStore(tmp_path / "store")
+    monday = date(2026, 11, 9)
+    record_night(data, monday)
+    merge(data, tmp_path)
+    listing, ran = archiving.partition_files, []
+
+    def pruned_first(partition: Path) -> list[Path]:
+        if not ran and "raw" in partition.parts:
+            ran.append(True)
+            asyncio.run(archive(data, store, today=monday + timedelta(days=archiving.RAW_KEEP_DAYS + 2)))
+        return listing(partition)
+
+    monkeypatch.setattr(archiving, "partition_files", pruned_first)
+
+    with RawDays(data, store) as raw, pytest.raises(archiving.RawMissing):
+        measure_night(data, monday, raw)
+    assert ran
+
+
 def test_a_night_with_a_long_silence_or_a_late_start_or_nothing_does_not_count(tmp_path: Path) -> None:
     data = tmp_path / "data"
     record_night(data, date(2026, 11, 9), skip=("23:00", "23:20"))  # 22:56 to 23:20 without a frame

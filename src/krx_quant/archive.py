@@ -437,16 +437,10 @@ def partition_batches(
     columns read from that file, None to leave the file out. A batch holds ``batch_rows`` rows at
     most. A file merged away while the partition is read, or read as it was written, is left out
     and the rest still counts; the batches it gave before stay given. A partition the archive pruned
-    (#607), before or while it is read, raises ``RawMissing``: its rows are not there to count. The
-    mark is written before the file goes, so it is looked for before the files are listed, after (a
-    prune between the two leaves the listing empty), on a file gone and once they are read; and a
-    listing found empty while the upload record (``.uploaded.json``) names the merged file raises too.
+    (#607), before or while it is read, raises ``RawMissing``: its rows are not there to count
+    (``guarded_files``, and the mark looked for again on a file gone and once the files are read).
     """
-    _check_not_pruned(partition)
-    files = partition_files(partition)
-    _check_not_pruned(partition)
-    if not files and _merged_was_stored(partition):
-        raise RawMissing(f"{partition}: its upload record says {MERGED} was stored, and it is not there")
+    files = guarded_files(partition)
     for path in files:
         try:
             chosen = columns(path, pq.read_schema(path)) if callable(columns) else columns
@@ -455,12 +449,29 @@ def partition_batches(
             for batch in pq.ParquetFile(path).iter_batches(batch_size=batch_rows, columns=list(chosen)):
                 yield path, batch
         except (FileNotFoundError, pa.ArrowInvalid, OSError):
-            _check_not_pruned(partition)
+            check_not_pruned(partition)
             continue  # merged away in between, or written as it was read: the rest still counts
-    _check_not_pruned(partition)
+    check_not_pruned(partition)
 
 
-def _check_not_pruned(partition: Path) -> None:
+def guarded_files(partition: Path) -> list[Path]:
+    """``partition_files``, as every reader beside the archive lists a partition (#607): the one place
+    outside the archive that lists its files (``tests/test_raw_retention.py`` checks it). The archive
+    writes a pruned partition's mark before its merged file goes, so the mark is looked for before the
+    files are listed and after (a prune between the two leaves the listing empty), and a raw partition
+    listed empty while its upload record names the merged file is a file gone, not a partition with no
+    rows: each raises ``RawMissing``. A reader of the files then calls ``check_not_pruned`` once they are
+    read, so a prune while they were read raises too."""
+    check_not_pruned(partition)
+    files = partition_files(partition)
+    check_not_pruned(partition)
+    if not files and partition.parent.parent.parent.name == RAW and _merged_was_stored(partition):
+        raise RawMissing(f"{partition}: its upload record says {MERGED} was stored, and it is not there")
+    return files
+
+
+def check_not_pruned(partition: Path) -> None:
+    """``RawMissing`` if the archive pruned ``partition`` (its mark is there)."""
     if (partition / PRUNED).is_file():
         raise _pruned(partition)
 
