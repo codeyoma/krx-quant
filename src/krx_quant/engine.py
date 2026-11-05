@@ -2041,7 +2041,9 @@ class PredictionEngine:
 
         The windows are copied on the event loop and answered in a worker thread (#538): a longer
         kind's window holds up to its horizon's hour of quotes, and the loop also reads KIS and
-        streams the quotes. The answers are kept for the kinds' baselines (``_answered``)."""
+        streams the quotes. Whether one is special is read once they are answered, as they are
+        stored: a situation learned meanwhile marks only the answers stored before it. The answers
+        are kept for the kinds' baselines (``_answered``)."""
         with self._step(ANSWERS):
             # The windows over: the touch windows' for a four-minute kind, a longer kind's own (#263).
             # Each window length handed out once: two kinds of one horizon share its windows.
@@ -2056,6 +2058,21 @@ class PredictionEngine:
                 _, kind_name, symbol, close = heapq.heappop(self._kind_pending)
                 if kind_name in by_kind:
                     by_kind[kind_name][(symbol, close)] = None
+            todo: list[tuple[PredictionKind, list[_ToAnswer]]] = []
+            for kind in self.kinds:
+                keys = list(by_kind[kind.name])
+                if not keys:
+                    continue
+                try:
+                    windows_of = [_ToAnswer(s, c, self._market.kind_window(kind, s, c)) for s, c in keys]
+                except Exception:
+                    log.exception("%s: its answers failed at %s", kind.name, due)
+                    continue
+                todo.append((kind, windows_of))
+        if not todo:
+            return
+        made = await asyncio.to_thread(_answer_windows, todo)
+        with self._step(ANSWERS):
             special: dict[tuple[str, datetime, timedelta], bool] = {}
 
             def touched(symbol: str, close: datetime, horizon: timedelta) -> bool:
@@ -2066,42 +2083,17 @@ class PredictionEngine:
                     ) or touching(self._special.learned_since(close), symbol, close, end)
                 return special[(symbol, close, horizon)]
 
-            todo: list[tuple[PredictionKind, list[_ToAnswer]]] = []
-            for kind in self.kinds:
-                keys = list(by_kind[kind.name])
-                if not keys:
+            for kind, answered in made:
+                if isinstance(answered, BaseException):
+                    log.error("%s: its answers failed at %s", kind.name, due, exc_info=answered)
                     continue
                 try:
-                    todo.append(
-                        (
-                            kind,
-                            [
-                                _ToAnswer(
-                                    symbol,
-                                    close,
-                                    self._market.kind_window(kind, symbol, close),
-                                    touched(symbol, close, kind.horizon),
-                                )
-                                for symbol, close in keys
-                            ],
-                        )
-                    )
-                except Exception:
-                    log.exception("%s: its answers failed at %s", kind.name, due)
-        if not todo:
-            return
-        made = await asyncio.to_thread(_answer_windows, todo)
-        with self._step(ANSWERS):
-            for kind, answers in made:
-                if isinstance(answers, BaseException):
-                    log.error("%s: its answers failed at %s", kind.name, due, exc_info=answers)
-                    continue
-                try:
+                    answers = [(s, c, a, touched(s, c, kind.horizon)) for s, c, a in answered]
                     written = self.store.add_kind_answers(kind.name, kind.answer_version, answers, now)
                 except Exception:
                     log.exception("%s: its answers failed at %s", kind.name, due)
                     continue
-                for symbol, close, answer, _ in answers:
+                for symbol, close, answer in answered:
                     self._answered[(kind.name, symbol, close)] = answer
                 if written:
                     self._tell(KindAnswered(kind.name, written))
@@ -2236,22 +2228,21 @@ def _entries(
 
 @dataclass(frozen=True)
 class _ToAnswer:
-    """A kind's window to answer (#538): copied on the event loop (None: not followed, the engine
-    restarted in it), and whether a special situation touches it."""
+    """A kind's window to answer (#538), copied on the event loop: None for one not followed (the
+    engine restarted in it)."""
 
     symbol: str
     close: datetime
     window: KindWindow | None
-    special: bool
 
 
 def _answer_windows(
     todo: Sequence[tuple[PredictionKind, Sequence[_ToAnswer]]],
-) -> list[tuple[PredictionKind, list[tuple[str, datetime, Answer, bool]] | Exception]]:
-    """Each kind's answers of its windows (``KindWindow.answer``; ``restarted`` for one not
-    followed), as ``PredictionStore.add_kind_answers`` takes them; a kind whose answer function
-    fails gets its exception instead. Pure: run in a worker thread (#538)."""
-    made: list[tuple[PredictionKind, list[tuple[str, datetime, Answer, bool]] | Exception]] = []
+) -> list[tuple[PredictionKind, list[tuple[str, datetime, Answer]] | Exception]]:
+    """Each kind's (symbol, bar close, answer) of its windows (``KindWindow.answer``; ``restarted``
+    for one not followed); a kind whose answer function fails gets its exception instead. Pure:
+    run in a worker thread (#538)."""
+    made: list[tuple[PredictionKind, list[tuple[str, datetime, Answer]] | Exception]] = []
     for kind, windows in todo:
         try:
             made.append(
@@ -2262,7 +2253,6 @@ def _answer_windows(
                             w.symbol,
                             w.close,
                             Answer(None, RESTARTED) if w.window is None else w.window.answer(),
-                            w.special,
                         )
                         for w in windows
                     ],

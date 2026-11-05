@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import threading
 import time as timer
 from collections import Counter
 from collections.abc import Awaitable
@@ -40,7 +41,8 @@ from tests.algorithm_doubles import spend
 from tests.collector_doubles import FIXED_NOW, settings_for
 from tests.kind_doubles import TEST_KIND, AlwaysHeld, drift_of
 from tests.replay_doubles import busy_morning
-from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, at
+from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, at, vi
+from tests.waiting import until
 
 QUARTER = timedelta(minutes=15)
 HEAVY_AT = at("09:15:00")  # the window from here ends at the 09:30 bar close
@@ -107,6 +109,39 @@ async def test_a_bar_close_answers_a_kind_s_window_once_off_the_event_loop(tmp_p
     assert answered[HEAVY_AT] == 1, "the window just over is answered once, its baselines read that answer"
     assert set(answered.values()) == {1}
     assert gap < ANSWER_SECONDS / 2, f"the loop went {gap:.2f}s without a turn"
+    engine.store.close()
+
+
+async def test_a_situation_learned_while_the_answers_are_made_marks_them_special(tmp_path: Path) -> None:
+    """Input: the 15-minute drift's window from 09:15, its answer held in the worker thread at the
+    09:30 bar close until a VI of 09:20:10-09:22:20 is learned on the event loop (the status poll's
+    answer at 09:30). Output: the window's answer, stored after the VI was learned, is special."""
+    started, go = threading.Event(), threading.Event()
+
+    def held(window: Followed) -> Answer:
+        if window.bar_close == HEAVY_AT:
+            started.set()
+            go.wait(5)
+        return drift_of(window)
+
+    clock = FakeClock(at("09:00:00"))
+    engine = engine_on(
+        tmp_path / "engine.db", clock, kinds=(replace(TEST_KIND, answer=held, horizon=QUARTER),)
+    )
+    events = sorted(busy_morning(end="09:29:59"), key=lambda e: e[1]["received_at"])
+    await replay_into(engine, clock, events, until=at("09:29:59"))
+    clock.set(at("09:30:00"))
+
+    closing = asyncio.create_task(engine.run_due())
+    await until(started.is_set)
+    engine.on_event(*vi(at("09:30:00"), "09:20:10", "09:22:20"))
+    go.set()
+    await closing
+
+    [answer] = [
+        a for a in engine.store.kind_answers("drift", SYMBOL) if a["bar_close"] == HEAVY_AT.isoformat()
+    ]
+    assert answer["special"]
     engine.store.close()
 
 
