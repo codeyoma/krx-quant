@@ -82,6 +82,15 @@ def _bar_close_times(day: date | None, night: bool) -> int:
     return code
 
 
+def _probe_inverse_book(day: date | None) -> int:
+    """What the collector recorded of the inverse ETF's KRX book (#606)."""
+    from krx_quant.inverse_book_probe import probe_inverse_book
+
+    report, code = probe_inverse_book(Settings.from_env(require_kis=False), datetime.now(KST), day)
+    print(report)
+    return code
+
+
 def add(sub: Commands) -> None:
     """The probes' commands, each with its handler (``cli._parser``)."""
     sub.add_parser(
@@ -156,3 +165,15 @@ def add(sub: Commands) -> None:
         " job runs it; exit 1 when that day has no predictions",
     )
     times_cmd.set_defaults(run=lambda args: _bar_close_times(args.day, args.tonight))
+    inverse_cmd = sub.add_parser(
+        "probe-inverse-book",
+        help="summarize a recorded day of the inverse ETF's KRX book (#606): KIS's answers, the frames'"
+        " fields and times, the best quotes, the gaps and what recording it costs; read-only, no market"
+        " value",
+    )
+    inverse_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the trading day to read, YYYY-MM-DD (default: the latest whose session is over)",
+    )
+    inverse_cmd.set_defaults(run=lambda args: _probe_inverse_book(args.day))

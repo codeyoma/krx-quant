@@ -41,6 +41,7 @@ from krx_quant.feeds import (
     FOREIGN_ESTIMATE,
     INDEX,
     KOSPI200_FUTURES,
+    KRX_BOOK,
     KRX_TRADE,
     KST,
     MEMBER,
@@ -49,6 +50,7 @@ from krx_quant.feeds import (
     NXT_TRADE,
     OPTION,
     PROGRAM,
+    RAW_FEEDS,
     RAW_SCHEMA,
     TRADE,
     US_TRADE,
@@ -56,6 +58,7 @@ from krx_quant.feeds import (
     VI_STATUS,
     WS_FEEDS,
     Feed,
+    RawFeed,
     RestFeed,
     us_daytime_key,
 )
@@ -77,7 +80,7 @@ from krx_quant.poll_outages import PollOutages, PollState
 from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import admits, refusals
-from krx_quant.products import products_of
+from krx_quant.products import INVERSE_PRODUCTS, products_of
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.readiness import Readiness, keep_ready
 from krx_quant.recorder import ParquetRecorder
@@ -156,17 +159,25 @@ GIL_SWITCH_SECONDS = 0.0005
 SHORT_FRAMES_EXPECTED = frozenset({MEMBER.tr_id})
 
 
+# The symbols whose inverse ETF's KRX book is registered (#606): the traded symbol's, 0193L0, for a
+# replay of down calls through it. It takes the last of KIS's 41 slots with the server's three
+# symbols (they use 40), so a smaller limit cuts it first; it has no REST fallback. 000660's 0197X0
+# joins once another slot is free (#606).
+INVERSE_BOOKS = (TRADED_SYMBOL,)
+
+
 def subscription_plan(
     settings: Settings, fronts: FrontMonths | None, night: str | None = None
-) -> list[tuple[Feed, str]]:
+) -> list[tuple[Feed | RawFeed, str]]:
     """WebSocket registrations in priority order; the session limit cuts from the end.
 
     Market-wide context comes first so it survives however many symbols are added,
     then each stock's trades, book and program trading, then the tier-2 feeds. ``night`` is
     the KOSPI200 night futures contract (#264): registered all day like the rest, it
-    delivers from 18:00 to 06:00 only, and has no REST fallback.
+    delivers from 18:00 to 06:00 only, and has no REST fallback. Last, the inverse ETF's KRX
+    book (``INVERSE_BOOKS``), recorded raw only until its probe has read it (#606).
     """
-    plan: list[tuple[Feed, str]] = []
+    plan: list[tuple[Feed | RawFeed, str]] = []
     if fronts is not None:
         plan += [(KOSPI200_FUTURES, fronts.kospi200_futures), (USD_FUTURES, fronts.usd_futures)]
     if night is not None:
@@ -181,6 +192,7 @@ def subscription_plan(
     plan += [(KRX_TRADE, etf) for etf in settings.etf_symbols]
     if settings.venue_trades:
         plan += [(feed, sym) for feed in (KRX_TRADE, NXT_TRADE) for sym in settings.symbols]
+    plan += [(KRX_BOOK, INVERSE_PRODUCTS[sym].code) for sym in INVERSE_BOOKS if sym in settings.symbols]
     return plan
 
 
@@ -929,10 +941,10 @@ async def check_fallbacks(settings: Settings, now: Clock | None = None) -> list[
         plan = subscription_plan(settings, fronts, night_contract(clock(), calendar))
         # A derivative left out of the plan (its contract not found) is not checked: a failure.
         planned = {feed.tr_id for feed, _ in plan}
-        for feed in (KOSPI200_FUTURES, USD_FUTURES, OPTION):
-            if feed.tr_id not in planned:
+        for derivative in (KOSPI200_FUTURES, USD_FUTURES, OPTION):
+            if derivative.tr_id not in planned:
                 why = "no contract to ask for: the KIS masters could not be read"
-                checks.append(FallbackCheck(feed.tr_id, "", FALLBACKS[feed.tr_id], {}, [], why))
+                checks.append(FallbackCheck(derivative.tr_id, "", FALLBACKS[derivative.tr_id], {}, [], why))
         for feed, key in plan:
             fallback = fallback_for(settings, feed.tr_id, key)
             if fallback is None:
@@ -1011,7 +1023,7 @@ class _Stream:
         self,
         session: aiohttp.ClientSession,
         settings: Settings,
-        subscriptions: list[tuple[Feed, str]],
+        subscriptions: list[tuple[Feed | RawFeed, str]],
         recorder: ParquetRecorder,
         now: Clock,
         stop: asyncio.Event,
@@ -1287,7 +1299,8 @@ class _Stream:
         The raw copy is written before anything can fail, and a message that cannot be
         parsed or normalized is logged and skipped so one bad frame never stops recording. A
         frame short of fields is also counted for its key, and logged as a WARNING for the
-        feeds that send such frames now and then (``SHORT_FRAMES_EXPECTED``, #381).
+        feeds that send such frames now and then (``SHORT_FRAMES_EXPECTED``, #381). A feed recorded
+        raw only (``RAW_FEEDS``, #606) is counted as delivering and goes no further.
         """
         at = self._now()
         day = kst_day(at)
@@ -1314,6 +1327,8 @@ class _Stream:
 
         self._recorder.record("raw", day, message.tr_id, message.symbol, raw_row, RAW_SCHEMA)
         self._health.received((message.tr_id, message.symbol))
+        if message.tr_id in RAW_FEEDS:
+            return  # recorded raw only until its probe has read it (#606)
         feed = WS_FEEDS.get(message.tr_id)
         if feed is None or message.encrypted:
             log.warning(

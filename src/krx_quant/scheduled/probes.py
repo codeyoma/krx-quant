@@ -272,3 +272,42 @@ BAR_CLOSE_TIMES = Job(
         ),
     ),
 )
+
+
+# The inverse ETF's KRX book (#606, ``inverse_book_probe.py``): the collector registers 0193L0's
+# ``H0STASP0`` in the session's last slot and records it raw only. Before the replay of down calls
+# through the ETF is built on it, the frames' layout, times and best quotes, the gaps and what
+# recording them costs (#606's bounds: 32 MiB, 5% of a core) are read on the first trading night
+# after the deploy that brings it. The command reads files and writes only to a temporary directory;
+# a server-sized day of the integrated book (about 100,000 records) is read in seconds, a dozen times.
+# Again after a failure on other code: exit 3 says no frame came, which a PR changing the
+# registration answers.
+INVERSE_BOOK_ISSUE = 606
+
+
+def _first_inverse_book(night: Night) -> bool:
+    """On the first trading night (after a failure, again on other code)."""
+    return night.trading_day and _again_on_other_code(night)
+
+
+INVERSE_BOOK = Job(
+    name="probe-inverse-book-606",
+    due=_first_inverse_book,
+    command=("probe-inverse-book",),
+    timeout=timedelta(minutes=20),
+    targets=(
+        Target(
+            INVERSE_BOOK_ISSUE,
+            note=(
+                "인버스 ETF(0193L0)의 KRX 호가(`H0STASP0`) 확인(#606): 1절 구독 응답과 세션 한도로 "
+                "거절된 구독, 2절 프레임(레코드당 필드 수, KIS 예제는 63개, 2026-09-28 전 59개), 3절 "
+                "필드별 빈 값·0과 코드 값, 4절 시각, 5절 연속매매의 1호가(스프레드 틱, 5초보다 오래된 "
+                "호가), 6절 결측, 7절 기록 부담(디스크, CPU, RSS 증가를 #606의 기준과). 에이전트가 "
+                '이 결과로 이벤트 기록과 재생 보고를 만든다(`docs/operations.md` "인버스 ETF 호가 '
+                '확인 (#606)"). 종료 코드 3은 그날 프레임이 없었다는 뜻이다. 다시 돌리기(읽기만): '
+                "`docker compose run --rm engine probe-inverse-book --day <날>`. 출력에는 시세 값이 "
+                "없다(개수, 비율, 초, 틱, 필드 이름, 코드만)."
+            ),
+        ),
+    ),
+)

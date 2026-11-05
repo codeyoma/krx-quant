@@ -3,7 +3,7 @@
 Event schemas are documented in docs/events.md; keep the two in sync.
 """
 
-from krx_quant.feeds.base import KST, RAW_SCHEMA, Feed, RestFeed
+from krx_quant.feeds.base import KST, RAW_SCHEMA, Feed, RawFeed, RestFeed
 from krx_quant.feeds.market import (
     INDEX,
     INDEX_REST,
@@ -23,6 +23,7 @@ from krx_quant.feeds.stock import (
     BOOK,
     BOOK_SNAPSHOT,
     FOREIGN_ESTIMATE,
+    KRX_BOOK,
     KRX_QUOTE,
     KRX_TRADE,
     MEMBER,
@@ -54,6 +55,10 @@ WS_FEEDS: dict[str, Feed] = {
     )
 }
 
+# Registered and recorded raw only, until a probe has read their frames (``RawFeed``): the inverse
+# ETF's KRX book (#606).
+RAW_FEEDS: dict[str, RawFeed] = {f.tr_id: f for f in (KRX_BOOK,)}
+
 # When a WebSocket registration is refused for the session limit, poll this REST feed instead.
 FALLBACKS: dict[str, RestFeed] = {
     TRADE.tr_id: QUOTE,
@@ -81,6 +86,7 @@ __all__ = [
     "INDEX_REST",
     "KOSPI200_FUTURES",
     "KOSPI200_FUTURES_REST",
+    "KRX_BOOK",
     "KRX_QUOTE",
     "KRX_TRADE",
     "KST",
@@ -94,6 +100,7 @@ __all__ = [
     "PROGRAM",
     "PROGRAM_REST",
     "QUOTE",
+    "RAW_FEEDS",
     "RAW_SCHEMA",
     "TRADE",
     "US_TRADE",
@@ -103,6 +110,7 @@ __all__ = [
     "VI_STATUS",
     "WS_FEEDS",
     "Feed",
+    "RawFeed",
     "RestFeed",
     "us_daytime_key",
 ]
