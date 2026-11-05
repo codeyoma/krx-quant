@@ -126,9 +126,13 @@ def test_deploy_scripts_parse(script: Path) -> None:
 FAKE_DOCKER = """#!/usr/bin/env bash
 # Stands in for docker: logs each call; the engine answers unless the checkout's
 # BROKEN file exists (a commit that does not start), a prune and `system df` fail while
-# DOCKER_FAILS does, and a notice while NOTIFY_FAILS does.
+# DOCKER_FAILS does, and a notice while NOTIFY_FAILS does. An engine runs (`compose ps`) unless
+# NO_ENGINE exists. `images` lists the checkout's IMAGES, a tag a line. `system df` says the
+# build cache is the checkout's CACHE (2.5GB without one): a prune with `until` leaves it, as
+# Docker leaves the cache it made before it last started (#568); one without a filter empties it.
 echo "$*" >>"$DOCKER_LOG"
 if [[ ( "$2" == prune || "$*" == "system df"* ) && -f DOCKER_FAILS ]]; then
+  echo "Error response from daemon: a prune operation is already running" >&2
   exit 1
 fi
 # A notice does not go while NOTIFY_FAILS does (Telegram does not answer).
@@ -136,7 +140,23 @@ if [[ "$*" == *" engine notify "* && -f NOTIFY_FAILS ]]; then
   exit 1
 fi
 if [[ "$*" == "system df"* ]]; then
-  printf 'Images|1.37GB\\nContainers|0B\\nLocal Volumes|0B\\nBuild Cache|2.5GB\\n'
+  cache=$(cat CACHE 2>/dev/null || echo 2.5GB)
+  printf 'Images|1.37GB\\nContainers|0B\\nLocal Volumes|0B\\nBuild Cache|%s\\n' "$cache"
+fi
+if [[ "$*" == "builder prune -af" ]]; then
+  echo 0B >CACHE
+fi
+if [[ "$*" == "compose ps -q engine" && ! -f NO_ENGINE ]]; then
+  echo 5f2c0ffee
+fi
+if [[ "$*" == "inspect --format {{.Image}} 5f2c0ffee" ]]; then
+  echo sha256:4b1d
+fi
+if [[ "$*" == "images --format {{.Repository}}:{{.Tag}}" && -f IMAGES ]]; then
+  cat IMAGES
+fi
+if [[ "$*" == "info --format {{.ServerVersion}} {{.Driver}}" ]]; then
+  echo 29.1.3 overlayfs
 fi
 # The commit a compose build is given (KRX_COMMIT), one per build.
 if [[ "$*" == "compose up -d --build" ]]; then
@@ -336,7 +356,7 @@ def test_the_server_updates_to_a_new_main_and_says_so(server: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert git(server, "rev-parse", "HEAD") == new
     calls = docker_calls(server)
-    assert calls[0] == "compose up -d --build"
+    assert calls.count("compose up -d --build") == 1
     notice = (server.parent / "docker.log").read_text().split(" notify ", 1)[1]
     assert notice.startswith("자동 업데이트") and new[:7] in notice and "- Granger learns" in notice
 
@@ -382,6 +402,8 @@ def built_commits(server: Path) -> list[str]:
 
 
 def test_each_build_is_given_the_commit_it_runs(server: Path) -> None:
+    """With no engine running to keep the image of, a rollback builds the commit before."""
+    (server / "NO_ENGINE").write_text("x")
     before = git(server, "rev-parse", "HEAD")
     new = push(server, "Granger learns")
     assert update(server).returncode == 0
@@ -391,30 +413,109 @@ def test_each_build_is_given_the_commit_it_runs(server: Path) -> None:
     # The new main, then the bad one that did not start and the one it went back to.
     assert built_commits(server) == [new, bad, new]
     assert before != new
+    assert not any(c.startswith("tag ") for c in docker_calls(server)), "no image to keep"
 
 
-PRUNES = ["builder prune -af --filter until=72h", "image prune -af --filter until=72h"]
+def test_an_update_tags_the_image_the_engine_runs_previous_before_it_builds(server: Path) -> None:
+    """#568: the image a rollback starts again; the cleanup keeps it."""
+    push(server, "Granger learns")
+
+    assert update(server).returncode == 0
+
+    calls = docker_calls(server)
+    running = calls.index("inspect --format {{.Image}} 5f2c0ffee")
+    tagged = calls.index("tag sha256:4b1d krx-quant:previous")
+    assert calls.index("compose ps -q engine") < running < tagged < calls.index("compose up -d --build")
 
 
-def test_an_update_prunes_what_docker_kept_for_3_days_and_says_what_is_left(server: Path) -> None:
-    """#379: the build cache and the unused images, all tags, after the new engine started; the
-    notice ends with what Docker keeps and the disk's free space."""
+def test_a_main_that_does_not_start_goes_back_to_the_image_the_engine_ran_without_a_build(
+    server: Path,
+) -> None:
+    """#568: the rollback needs neither the build cache the cleanup removes nor PyPI."""
+    before = git(server, "rev-parse", "HEAD")
+    bad = push(server, "a bug", broken=True)
+
+    result = update(server)
+
+    assert result.returncode != 0
+    assert git(server, "rev-parse", "HEAD") == before
+    assert built_commits(server) == [bad], "only the bad main was built"
+    calls = docker_calls(server)
+    back = calls.index("tag krx-quant:previous krx-quant:latest")
+    assert calls.index("compose up -d --build") < back < calls.index("compose up -d")
+    assert any("자동 업데이트 실패" in c and f"{before[:7]}로 되돌렸습니다" in c for c in calls)
+
+
+def test_an_update_keeps_the_used_latest_and_previous_images_and_a_day_of_build_cache(
+    server: Path,
+) -> None:
+    """#379, #568: after the new engine started, every other tag is taken off and the images left
+    without one go; the build cache no build used for a day goes. The notice says what Docker
+    kept and the disk's free space, before and after, and Docker's version and storage driver."""
+    (server / "IMAGES").write_text(
+        "krx-quant:latest\nkrx-quant:previous\n<none>:<none>\nregistry.example/krx-quant:latest\nbusybox:1.37\n"
+    )
     push(server, "Markov reads the IV")
 
     result = update(server)
 
     assert result.returncode == 0, result.stderr
     calls = docker_calls(server)
-    builder, image = (calls.index(c) for c in PRUNES)
-    notice = next(i for i, c in enumerate(calls) if " notify " in c)
-    assert calls.index("compose up -d --build") < builder
-    assert builder < image < calls.index("system df --format {{.Type}}|{{.Size}}") < notice
-    assert "docker images 1.37GB, build cache 2.5GB; disk free " in result.stdout
+    started = max(i for i, c in enumerate(calls) if "exec -T engine" in c)
+    untagged = [c for c in calls if c.startswith("rmi ")]
+    assert untagged == ["rmi registry.example/krx-quant:latest", "rmi busybox:1.37"]
+    image = calls.index("image prune -f")
+    builder = calls.index("builder prune -af --filter until=24h")
+    assert started < calls.index(untagged[0]) < image < builder
+    assert "builder prune -af" not in calls, "2.5GB is under 3GB: the day's prune is enough"
+    measured = [i for i, c in enumerate(calls) if c == "system df --format {{.Type}}|{{.Size}}"]
+    assert measured[0] < calls.index(untagged[0]) and measured[-1] > builder
+    assert "docker images 1.37GB -> 1.37GB, build cache 2.5GB -> 2.5GB; disk free " in result.stdout
+    assert "(docker 29.1.3 overlayfs)" in result.stdout
     last = (server.parent / "docker.log").read_text().rstrip("\n").splitlines()[-1]
-    assert re.fullmatch(r"디스크 여유 \S+ / \S+ · Docker 이미지 1\.37GB, 빌드 캐시 2\.5GB", last), last
+    assert re.fullmatch(
+        r"디스크 여유 \S+ → \S+ / \S+ · Docker 이미지 1\.37GB → 1\.37GB, 빌드 캐시 2\.5GB → 2\.5GB"
+        r" · Docker 29\.1\.3 overlayfs",
+        last,
+    ), last
 
 
-def test_a_prune_that_fails_leaves_the_update_done(server: Path) -> None:
+@pytest.mark.parametrize(
+    ("left", "swept"),
+    [
+        ("0B", False),
+        ("898.5MB", False),
+        ("2.5GB", False),
+        ("3GB", False),
+        ("3.01GB", True),
+        ("22.27GB", True),
+    ],
+)
+def test_a_build_cache_over_3gb_after_the_day_s_prune_is_removed_whole(
+    server: Path, left: str, swept: bool
+) -> None:
+    """#568: Docker keeps the cache made before it last started past every prune with `until`; the
+    server kept 21.5 GB so from 2026-10-28. More than 3 GB left, one build's cache being about
+    1 GB, is that, and goes whole."""
+    (server / "CACHE").write_text(left)
+    push(server, "Granger learns")
+
+    result = update(server)
+
+    assert result.returncode == 0, result.stderr
+    calls = docker_calls(server)
+    assert ("builder prune -af" in calls) is swept
+    log = (server.parent / "docker.log").read_text()
+    if swept:
+        assert calls.index("builder prune -af --filter until=24h") < calls.index("builder prune -af")
+        assert f"the build cache is {left} after the 24h prune, over 3GB: removing all of it" in result.stdout
+        assert f"빌드 캐시 {left} → 0B" in log
+        assert f"빌드 캐시가 하루 정리 뒤에도 3GB를 넘어({left}) 모두 지웠습니다." in log
+    else:
+        assert f"빌드 캐시 {left} → {left}" in log and "모두 지웠습니다" not in log
+
+
+def test_a_prune_that_fails_leaves_the_update_done_and_the_notice_says_why(server: Path) -> None:
     (server / "DOCKER_FAILS").write_text("x")
     new = push(server, "Granger learns")
 
@@ -422,11 +523,13 @@ def test_a_prune_that_fails_leaves_the_update_done(server: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert (server / ".auto-update-deployed").read_text().strip() == new
-    assert "could not prune the build cache" in result.stderr
-    assert "could not prune the images" in result.stderr
+    error = "Error response from daemon: a prune operation is already running"
+    assert f"could not prune the build cache: {error}" in result.stderr
+    assert f"could not prune the images: {error}" in result.stderr
     log = (server.parent / "docker.log").read_text()
     assert "자동 업데이트 오류" not in log
-    assert "Docker 이미지 ?, 빌드 캐시 ?" in log, "what could not be read is said so"
+    assert "Docker 이미지 ? → ?, 빌드 캐시 ? → ?" in log, "what could not be read is said so"
+    assert f"Docker 정리 실패: 이미지({error}); 빌드 캐시({error}). 다음 배포가 다시 정리합니다." in log
 
 
 def test_a_main_that_does_not_start_is_rolled_back_and_not_tried_again(server: Path) -> None:

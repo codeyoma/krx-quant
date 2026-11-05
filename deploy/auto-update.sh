@@ -15,11 +15,15 @@
 #    it failed, or if GitHub cannot be read, the engine keeps running what it ran and the
 #    journal names the commit and why. A commit whose ci failed is told on Telegram once
 #    (.auto-update-ci-failed); a GitHub that cannot be read, on every run it is so.
-# 4. It fast-forwards, rebuilds and restarts the engine.
-# 5. It waits for the Engine API to answer (3 minutes). If it does not, it goes back to
-#    the commit before, rebuilds, and remembers the commit that failed.
-# 6. It removes Docker's build cache and the images not used for 3 days (#379), and reports
-#    to Telegram (krx-quant notify), with what Docker keeps and the disk's free space.
+# 4. It tags the image the engine runs krx-quant:previous (#568), fast-forwards, rebuilds and
+#    restarts the engine.
+# 5. It waits for the Engine API to answer (3 minutes). If it does not, it goes back to the
+#    commit before on krx-quant:previous (a build of it when no engine ran to tag), and
+#    remembers the commit that failed.
+# 6. It cleans Docker up (#379, #568): every image but the ones containers use,
+#    krx-quant:latest and krx-quant:previous; the build cache no build used for a day; and all
+#    of the build cache when more than 3 GB is left after that. It reports to Telegram
+#    (krx-quant notify) what Docker kept and the disk's free space, before and after.
 #
 # Every run, before all that, it applies the kernel's self-reboot settings and the journal on
 # disk (deploy/kernel-recovery.sh, #385), so they reach the server without anyone running
@@ -33,6 +37,10 @@ pause=${KRX_UPDATE_PAUSE:-5}
 failed_file=.auto-update-failed
 deployed_file=.auto-update-deployed
 ci_failed_file=.auto-update-ci-failed
+# The build cache one build leaves is about 1 GB (the base image, the dependencies' venv, the
+# code's layers): 3 GB is room for two and more (#568). A cache still over it after the day's
+# prune holds what that prune cannot remove, and is removed whole.
+cache_max=3000000000
 github_api=${KRX_UPDATE_GITHUB_API:-https://api.github.com/repos/codeyoma/krx-quant}
 
 read -r weekday hhmm <<<"${KRX_UPDATE_NOW:-$(TZ=Asia/Seoul date '+%u %H%M')}"
@@ -116,15 +124,85 @@ restart() {
   KRX_COMMIT=$(git rev-parse HEAD) docker compose up -d --build && healthy
 }
 
-# The build cache and the images unused for 3 days (#379), after an update that started. The
-# running engine's image is in use, and so kept; a rollback builds the commit before again
-# (from the cache of the last 3 days when it has it), so it needs no old image. A prune that
+# The image the running engine was started from, to go back to without a build (#568); nothing
+# when no engine runs.
+running_image() {
+  local container
+  container=$(docker compose ps -q engine 2>/dev/null) || container=""
+  if [[ -n "$container" ]]; then
+    docker inspect --format '{{.Image}}' "$container" 2>/dev/null || true
+  fi
+}
+
+# Back to the commit before, which the checkout is on again: the image the engine ran before the
+# update, kept as krx-quant:previous, or a build of that commit when none was kept.
+go_back() {
+  if [[ -n "$previous_image" ]] && docker tag krx-quant:previous krx-quant:latest; then
+    docker compose up -d && healthy
+  else
+    restart
+  fi
+}
+
+# Docker's sizes as `docker system df` prints them ("22.27GB", "898.5MB", "0B"), in bytes;
+# nothing for anything else ("?"). Docker counts in thousands.
+bytes() {
+  awk -v size="$1" 'BEGIN {
+    n = split("B kB MB GB TB PB", unit, " ")
+    for (i = 1; i <= n; i++)
+      if (size ~ ("^[0-9]+([.][0-9]+)?" unit[i] "$")) {
+        printf "%.0f\n", (size + 0) * 1000 ^ (i - 1)
+        exit
+      }
+  }'
+}
+
+# One step of the cleanup: docker with the rest of the arguments. When it fails, the journal and
+# the notice (unclean) get its last error line: the prunes' errors went to the journal alone
+# before, and nothing said whether they freed anything (#568).
+clean() {
+  local what=$1 label=$2 err
+  shift 2
+  if ! err=$(docker "$@" 2>&1 >/dev/null); then
+    err=$(tail -n 1 <<<"$err")
+    echo "auto-update: could not $what: ${err:0:200}" >&2
+    unclean+="${unclean:+; }$label(${err:0:200})"
+    return 1
+  fi
+}
+
+# Docker's cleanup after an update that started (#379, #568). A rollback cleans nothing up. What
 # fails leaves the update as it is.
-prune() {
-  docker builder prune -af --filter until=72h >/dev/null ||
-    echo "auto-update: could not prune the build cache" >&2
-  docker image prune -af --filter until=72h >/dev/null ||
-    echo "auto-update: could not prune the images" >&2
+#
+# Images: all but the ones containers use, krx-quant:latest and krx-quant:previous (what a
+# rollback starts). Other tags are taken off first, so the images they name go too.
+#
+# The build cache: what no build used for a day goes. What the day's build used stays, so the
+# next build makes only the code's layers again: the old engine stopped 15-35 s after 06:00 on
+# such days, and about 85 s after on 2026-10-29, when every layer was made again (Loki). That
+# prune leaves whatever Docker made before it last started: on the server the 21.5 GB counted on
+# 2026-10-27, before the reboot of 10-28, stayed through every prune with until=72h, and so did
+# the cache made before a restart of Ubuntu 24.04's docker.io 29.1.3 in a reproduction, which a
+# prune without a filter removed (#568). So when more than cache_max is left, all of it goes,
+# and the next build makes every layer again, once.
+cleanup() {
+  local tag left size
+  swept="" unclean=""
+  while read -r tag; do
+    case "$tag" in
+    krx-quant:latest | krx-quant:previous | "<none>:<none>") ;;
+    *) docker rmi "$tag" </dev/null >/dev/null 2>&1 || true ;; # a container uses it: it stays
+    esac
+  done < <(docker images --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
+  clean "prune the images" 이미지 image prune -f || true
+  clean "prune the build cache" "빌드 캐시" builder prune -af --filter until=24h || true
+  read -r _ left _ _ < <(usage)
+  size=$(bytes "$left")
+  if [[ -n "$size" ]] && ((size > cache_max)); then
+    echo "auto-update: the build cache is $left after the 24h prune, over 3GB: removing all of it"
+    swept=$left
+    clean "remove the whole build cache" "빌드 캐시 전체" builder prune -af || true
+  fi
 }
 
 # What Docker keeps and the disk's free space, for the log and the notice: "<images> <build
@@ -207,16 +285,32 @@ pending)
 esac
 
 changes=$(git log -n 10 --format='- %s' "$deployed..$target")
+# The image the engine runs now, for a rollback (#568). The cleanup keeps it until the next
+# update tags the one it replaces.
+previous_image=$(running_image)
+if [[ -n "$previous_image" ]] && ! docker tag "$previous_image" krx-quant:previous; then
+  echo "auto-update: could not tag the running image krx-quant:previous; a rollback builds" >&2
+  previous_image=""
+fi
 git merge -q --ff-only "$target"
 
 if restart; then
   echo "$target" >"$deployed_file"
   rm -f "$failed_file"
-  prune
   read -r images cache free size < <(usage)
+  cleanup
+  read -r images_after cache_after free_after _ < <(usage)
+  docker_version=$(docker info --format '{{.ServerVersion}} {{.Driver}}' 2>/dev/null) || docker_version="?"
   echo "auto-update: ${deployed:0:7} -> ${target:0:7}"
-  echo "auto-update: docker images $images, build cache $cache; disk free $free of $size"
-  disk="디스크 여유 $free / $size · Docker 이미지 $images, 빌드 캐시 $cache"
+  echo "auto-update: docker images $images -> $images_after, build cache $cache -> $cache_after;" \
+    "disk free $free -> $free_after of $size (docker $docker_version)"
+  disk="디스크 여유 $free → $free_after / $size · Docker 이미지 $images → $images_after, 빌드 캐시 $cache → $cache_after · Docker $docker_version"
+  if [[ -n "$swept" ]]; then
+    disk+=$'\n'"빌드 캐시가 하루 정리 뒤에도 3GB를 넘어($swept) 모두 지웠습니다. 다음 빌드는 모든 층을 다시 만듭니다."
+  fi
+  if [[ -n "$unclean" ]]; then
+    disk+=$'\n'"Docker 정리 실패: $unclean. 다음 배포가 다시 정리합니다."
+  fi
   notify "자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes"$'\n'"$disk"
   exit 0
 fi
@@ -224,7 +318,7 @@ fi
 echo "auto-update: ${target:0:7} did not start; going back to ${deployed:0:7}" >&2
 echo "$target" >"$failed_file"
 git reset -q --hard "$deployed"
-if restart; then
+if go_back; then
   state="${deployed:0:7}로 되돌렸습니다"
 else
   state="${deployed:0:7}로 되돌렸지만 엔진이 응답하지 않습니다. 확인이 필요합니다"
