@@ -95,7 +95,8 @@ shadow's (``shadow`` 1) is of no policy either, and the paper account leaves it 
 (``paper_account``). The cell practised is frozen for each review cycle (#474, ``practice.py``):
 ``practice_cycles`` keeps it, one row a cycle, written by the nightly job (its cell, its θ, the cost
 map's figures of it that night, and every cell × θ it measured on the replay, best first) and, once a
-pick finds its predictor gone, by the trader (``gone_at``: no practice for the rest of the cycle).
+pick finds its predictor gone, by the trader (``gone_at``: no practice for the rest of the cycle), or
+not active (``inactive_at``, #603: likewise).
 
 Every row carries its mode (``paper``, ``mock``, ``live``): paper, KIS mock and live trades are told
 apart in the same tables (a pause and a resume hold whatever the mode). The records (``policy_days`` and the
@@ -126,7 +127,7 @@ from krx_quant.trader import KIS_MODES, MOCK, PAPER, policy, promotion, review
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.db import iso, reading
 from krx_quant.trader.gap import day_gap
-from krx_quant.trader.selection import GONE
+from krx_quant.trader.selection import GONE, PREDICTOR_INACTIVE
 
 if TYPE_CHECKING:
     from krx_quant.trader.selection import Selection
@@ -427,6 +428,9 @@ _ADDED = {
         ("practice_trades", "INTEGER"),
         ("practice_cumulative", "REAL"),
     ),
+    # A pick found the practice cell's predictor not active (#603): no practice until the cycle ends.
+    # Null: not found so, and before #603.
+    "practice_cycles": (("inactive_at", "TEXT"),),
 }
 # A day's ledger's columns of the mock book's practice trades (#533), beside the limits' count.
 _PRACTICE_DAY = tuple(name for name, _ in _ADDED["days"])
@@ -800,6 +804,15 @@ class TraderStore:
         """The cells of policy ``policy_id`` a pick of review cycle ``cycle`` (of ``evaluation``) found
         gone (#469, ``selection.GONE``): their predictors stopped predicting, so they trade no more until
         the next review, even should they come back."""
+        return self._rested(policy_id, evaluation, cycle, GONE)
+
+    def inactive(self, policy_id: int, evaluation: int, cycle: int) -> set[Cell]:
+        """The cells of policy ``policy_id`` a pick of review cycle ``cycle`` (of ``evaluation``) found
+        inactive (#603, ``selection.PREDICTOR_INACTIVE``): their predictors were not active, so they buy
+        nothing until the next review, even should they be active again."""
+        return self._rested(policy_id, evaluation, cycle, PREDICTOR_INACTIVE)
+
+    def _rested(self, policy_id: int, evaluation: int, cycle: int, why: str) -> set[Cell]:
         found: set[Cell] = set()
         rows = self._db.execute(
             "SELECT cells FROM selections WHERE policy_id = ? AND evaluation = ? AND cycle = ?"
@@ -808,7 +821,7 @@ class TraderStore:
         )
         for (text,) in rows:
             for cell in json.loads(text):
-                if cell.get("why") == GONE:
+                if cell.get("why") == why:
                     found.add(Cell(cell["kind"], cell["predictor"]))
         return found
 

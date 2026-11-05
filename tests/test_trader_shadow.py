@@ -116,6 +116,9 @@ class MockDesk:
     # that does not wait for it, as ``MockDay``'s): None waits for the order as ever.
     stop_when: Callable[[], bool] | None = None
     timing: Timing = TIMING
+    # The desk reads the engine's database for the policies' predictors gone (#469) and not active
+    # (#603): off unless a test sets it, as ``trader_doubles.Day.gone``.
+    engine: bool = False
 
     async def run(self, events: Sequence[Event]) -> None:
         engine = PredictionStore(self.state / ENGINE_DB)
@@ -145,6 +148,7 @@ class MockDesk:
                     timing=self.timing,
                     stall_after=None,  # the made-up quotes are sparse (``trader_doubles.Day``)
                     practice=self.practice,
+                    engine=self.state / ENGINE_DB if self.engine else None,
                 )
                 await desk.start()
                 desk.select(self.selection or Selection((pick(BARRIER),)), self.started_at)
