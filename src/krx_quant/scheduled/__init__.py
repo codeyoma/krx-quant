@@ -35,8 +35,8 @@ A run the collector's stop cut (a deploy, a restart, a crash) is ``interrupted``
 count as run, and runs again the next night (a session job, the next trading day). A result
 is masked (``redaction.py``) and posted on each issue, which then gets ``ready-for-agent`` in
 place of ``ready-for-human`` and ``needs-triage``; a job with ``Job.label_if`` (#402: the trader's
-nightly report) changes the labels only on the runs it says call an agent. Without
-``KRX_GITHUB_TOKEN``, or when
+nightly report; #570: the recording's quality) changes the labels only on the runs it says call
+an agent. Without ``KRX_GITHUB_TOKEN``, or when
 GitHub fails, the result waits in the state and is posted at the next night or start. Telegram
 gets a line per run, with the comments' addresses. The line and the comment's first line say what
 came of it (``_what``, #440): 성공 (a pre-validation's 통과), 거부, 실패 (a pre-validation's 예외), 시간
@@ -46,9 +46,10 @@ run wrote.
 The package (#500): ``core`` holds what a job is, the facts its condition asks (``Facts``, read by
 ``read_facts``), the state file and the scheduler. The jobs are in a module by family: ``probes``
 (what an outside source's data means), ``research`` (reviews and experiments), ``trader`` (the auto
-trader's) and ``prevalidations`` (the pre-validations and simulated probations, built from the
-registries). ``JOBS``, here, gathers them in the order they run. A new job goes in its family's
-module and on its line in ``JOBS`` (``tests/test_scheduled_layout.py`` pins the order); a condition
+trader's), ``upkeep`` (the server's: the state backup's restore drill, #576) and ``prevalidations``
+(the pre-validations and simulated probations, built from the registries). ``JOBS``, here, gathers
+them in the order they run. A new job goes in its family's module and on its line in ``JOBS``
+(``tests/test_scheduled_layout.py`` pins the order); a condition
 that needs more of what the engine knows adds it to ``Facts`` and ``read_facts``, in ``core``. The
 names other modules import from ``krx_quant.scheduled`` are exported here (``__all__``).
 """
@@ -119,7 +120,12 @@ from krx_quant.scheduled.prevalidations import (
     revision_jobs,
     revision_turn,
 )
-from krx_quant.scheduled.probes import SAMPLE_KEYS, SAMPLE_KEYS_AGAIN
+from krx_quant.scheduled.probes import (
+    RECORDING_QUALITY,
+    SAMPLE_KEYS,
+    SAMPLE_KEYS_AGAIN,
+    recording_quality_calls,
+)
 from krx_quant.scheduled.research import (
     CLIMATE_GATE,
     ERROR_HOLDOUT,
@@ -139,6 +145,7 @@ from krx_quant.scheduled.trader import (
     fill_notice_layout_calls,
     trader_report_calls,
 )
+from krx_quant.scheduled.upkeep import RESTORE_DRILL
 from krx_quant.swap import NightTraining
 
 # Every name other modules import from ``krx_quant.scheduled`` (mypy's strict mode reads only
@@ -163,7 +170,9 @@ __all__ = [
     "OK",
     "PASSED",
     "PREVALIDATION_ISSUE",
+    "RECORDING_QUALITY",
     "REFUSED",
+    "RESTORE_DRILL",
     "RUNNING",
     "SAMPLE_PROFILE",
     "SESSION_UNTIL",
@@ -197,6 +206,7 @@ __all__ = [
     "prevalidation_tonight",
     "prevalidation_turn",
     "read_facts",
+    "recording_quality_calls",
     "revising_facts",
     "revision_job_name",
     "revision_jobs",
@@ -256,12 +266,14 @@ JOBS: tuple[Job, ...] = (
     SAMPLE_KEYS,
     SAMPLE_KEYS_AGAIN,
     TRADER_REPORT,
+    RECORDING_QUALITY,
     FILL_NOTICE_LAYOUT,
     SIGNAL_REVIEW_FIXED,
     LIVE_PROBE,
     ERROR_HOLDOUT,
     CLIMATE_GATE,
     NIGHTLY_HIT_RATES,
+    RESTORE_DRILL,
     *daily_prevalidation_jobs(
         [a.name for a in DAILY_ALGORITHMS],
         {a.name: a.features for a in DAILY_ALGORITHMS},
