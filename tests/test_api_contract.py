@@ -436,8 +436,12 @@ async def test_the_live_engine_keeps_the_contract(kis: FakeKis, tmp_path: Path) 
         base = f"http://127.0.0.1:{port}"
         await poll(f"{base}/v1/status", lambda b: True)
         async with aiohttp.ClientSession(base) as http, http.ws_connect("/v1/stream") as ws:
+            # The KIS status first: the stream queues it as it counts the client, so the bar
+            # close after it reaches this client (#574). Not listening() (#540): the collector
+            # builds the live app, and the test cannot reach its stream to count.
+            events: list[dict[str, Any]] = [await asyncio.wait_for(ws.receive_json(), 5)]
+            check("event", events[0])
             clock.set(at("09:31:00.2"))
-            events: list[dict[str, Any]] = []
             async with asyncio.timeout(5):
                 while not events or events[-1].get("kind") != "final":
                     events.append(await ws.receive_json())

@@ -124,6 +124,15 @@ echo "== start"
 if [[ -n "$(docker compose ps -q --status running engine 2>/dev/null || true)" ]]; then
   echo "the engine is running: left as it is"
 else
+  # A new server (no engine database yet) first gets back the state the last one backed up to the
+  # bucket each night (#576): the engine's and the trader's databases, the pre-validations, the
+  # scheduled jobs' state and the models. Without a backup nothing is restored; one that does not
+  # check out stops the script here, the engine not started (docs/operations.md 6장, #576).
+  if [[ ! -e state/engine.sqlite3 ]]; then
+    echo "== state from the last backup (#576)"
+    docker compose build
+    docker compose run --rm --no-deps engine restore-state --if-backed-up
+  fi
   docker compose up -d --build
 fi
 docker compose ps
