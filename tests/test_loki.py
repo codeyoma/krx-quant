@@ -295,7 +295,8 @@ def test_a_long_line_is_cut_at_a_space_before_it_waits_and_is_masked() -> None:
 async def test_an_oversized_record_waits_cut_counted_in_bytes_and_within_the_cap(
     fake: FakeLoki, shippers: Callable[..., Shipper]
 ) -> None:
-    # A training's whole output logged as one record (swap._train), in Korean: three bytes a letter.
+    # A long record in Korean (a training's whole output, as swap._train logged it before #580):
+    # three bytes a letter.
     shipper = shippers(fake.url, every=60.0, max_bytes=LINE_BYTES * 5 // 2)  # two cut lines fit
     shipper.put(loki.ENGINE, "info", "학습 " * 200_000)  # 1.4 MB
     status = shipper.status()

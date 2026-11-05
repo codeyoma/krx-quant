@@ -12,7 +12,7 @@ Few and fixed (Loki indexes each set):
 |---|---|
 | `service` | `krx-quant` |
 | `process` | `engine` (the collector, `krx-quant collect`), `training` (the nightly training the engine starts), `job` (a scheduled job, #215), `trader` (the trader, `krx-quant trade`, compose service `trader`, #394), `command` (a command run by hand: `docker compose run --rm engine <command>`, `docker compose exec engine krx-quant <command>`) |
-| `level` | `debug`, `info`, `warning`, `error`, `critical`. A training's or job's line with no level of its own (a traceback, a printed report) has the level of the line before it |
+| `level` | `debug`, `info`, `warning`, `error`, `critical`. A training's or job's line with no level of its own (a traceback, a printed report) has the level of the line before it. The nightly training's summary is INFO, its `alert:` line too (#580): a training WARNING is a real one |
 
 Everything else is in the line, which is the server's stdout line with fields in front:
 
@@ -66,7 +66,7 @@ scripts/loki-query.sh '{service="krx-quant", process="training"} |= "night=2026-
 
 - Its steps (#355): `{service="krx-quant", process="training"} |= "night=2026-10-22 " |= "started step"`.
 - How it ended: `{service="krx-quant", process="training"} |= "night=2026-10-22 " |~ "krx-quant train .* (ended|stopped|could not be started)"`. `exit -9 (SIGKILL)` is the out-of-memory kill.
-- The engine's side (its summary and alert): `{service="krx-quant", process="engine"} |~ "nightly training of 2026-10-22|밤 학습"`.
+- The engine's side (its line and alert): `{service="krx-quant", process="engine"} |~ "nightly training of 2026-10-22|밤 학습"`. Since #580 the engine says how the training ended in one line (`nightly training of <night> finished after <time> (<N> lines of output)`, or the ERROR `… failed: exit <code> after <time>; last step started: <step>` / `… stopped at its time limit (6:00:00); last step started: <step>`), and after a failure the output's last 20 lines in an INFO record of their own (`nightly training of <night>, the last 20 of its <N> lines:`). It no longer logs the whole output again: that is the training's own lines above.
 
 **A pre-validation's or simulated probation's memory, day by day** (#383): one INFO line a replayed day, `<name>: memory on <day> (day <i> of <N>): <MB> MB at the start; training <MB> MB (peak <MB>); replay <MB> MB (peak <MB>); peaks since each phase began` (`simulation: memory on …` for `simulate-bar-close-298`). A start figure that rises day after day is memory piling up; operations.md "새 알고리즘 사전 검증 (#24)" says what each figure is.
 

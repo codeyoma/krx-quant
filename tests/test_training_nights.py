@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import re
 import signal
 import sys
 from dataclasses import replace
@@ -103,6 +105,87 @@ async def test_a_training_that_ends_well_is_no_failure_and_one_with_an_error_say
     assert await _train(APPLIED, script(STEPS)) is None
     failure = await _train(APPLIED, script("print('no archived bars', file=sys.stderr); sys.exit(1)"))
     assert failure == Failure("exit 1, 마지막으로 시작한 단계 없음", 1, None)
+
+
+# The engine's own lines of a night (#580): the training's output is in Loki line by line as it comes
+# (``process="training"``, #358), so the engine no longer logs it again whole.
+
+# 32 lines on stdout, in the order written: a step, 30 report lines, the step it was in at the end.
+OUTPUT = (
+    "logging.basicConfig(level=logging.INFO, stream=sys.stdout)\n"
+    "log = logging.getLogger('krx_quant.nightly')\n"
+    "log.info('started step newton')\n"
+    "for i in range(1, 31): print(f'line {i}')\n"
+    "log.warning('started step turing')\n"
+)
+
+
+def said(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str]]:
+    return [(r.levelno, r.getMessage()) for r in caplog.records if r.name == "krx_quant.swap"]
+
+
+async def test_the_engine_says_a_training_that_ended_well_in_one_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="krx_quant.swap")
+    assert await _train(APPLIED, script(OUTPUT)) is None
+    [(level, line)] = said(caplog)
+    assert level == logging.INFO
+    assert re.fullmatch(r"nightly training of 2026-10-13 finished after \S+ \(32 lines of output\)", line), (
+        line
+    )
+
+
+async def test_the_engine_says_a_failed_training_in_one_error_and_its_last_lines_apart(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The ERROR is one line (the one the Grafana rule leaves out, "nightly training of"); the last
+    ``TAIL_LINES`` lines follow at INFO, so the training's own WARNING and ERROR lines in them do not
+    count again as the engine's."""
+    caplog.set_level(logging.INFO, logger="krx_quant.swap")
+    failure = await _train(APPLIED, script(OUTPUT + "sys.exit(3)"))
+    assert failure == Failure("exit 3, 마지막으로 시작한 단계 turing", 3, "turing")
+    (level, error), (tail_level, tail) = said(caplog)
+    assert level == logging.ERROR and "\n" not in error
+    assert re.fullmatch(
+        r"nightly training of 2026-10-13 failed: exit 3 after \S+; last step started: turing", error
+    ), error
+    head, *lines = tail.split("\n")
+    assert tail_level == logging.INFO and swap.TAIL_LINES == 20
+    assert head == "nightly training of 2026-10-13, the last 20 of its 32 lines:"
+    assert lines == [*(f"line {i}" for i in range(12, 31)), "WARNING:krx_quant.nightly:started step turing"]
+
+
+async def test_the_engine_says_a_training_stopped_at_its_limit_and_its_lines(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="krx_quant.swap")
+    body = STEPS.replace("logging.basicConfig(level=logging.INFO)", OUTPUT.split("\n")[0])
+    failure = await _train(
+        APPLIED, script(body + "sys.stdout.flush(); time.sleep(60)"), timeout=timedelta(seconds=2)
+    )
+    assert failure is not None and failure.step == "turing"
+    (level, error), (tail_level, tail) = said(caplog)
+    assert (level, tail_level) == (logging.ERROR, logging.INFO)
+    assert (
+        error
+        == "nightly training of 2026-10-13 stopped at its time limit (0:00:02); last step started: turing"
+    )
+    assert tail.split("\n") == [
+        "nightly training of 2026-10-13, the last 3 of its 3 lines:",
+        "INFO:krx_quant.nightly:started step newton",
+        "INFO:krx_quant.nightly:newton: 0.9 < 1.0",
+        "INFO:krx_quant.nightly:started step turing",
+    ]
+
+
+async def test_a_failed_training_that_wrote_nothing_is_one_line(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="krx_quant.swap")
+    assert await _train(APPLIED, script("sys.exit(1)")) == Failure(
+        "exit 1, 마지막으로 시작한 단계 없음", 1, None
+    )
+    [(level, line)] = said(caplog)
+    assert level == logging.ERROR and line.endswith("; last step started: none")
 
 
 async def test_the_collector_trains_the_night_in_its_own_process_here_and_keeps_its_outcome(

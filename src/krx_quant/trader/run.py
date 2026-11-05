@@ -50,8 +50,9 @@ sent (``mock.py``'s failed order). Sells are never checked.
 In mock mode the trader also records its mock account's fill notices (#484, ``fill_notices.py``:
 with ``KRX_TRADER_KIS_HTS_ID``, on each trading day from 08:20 to 15:40, in
 ``state/fill_notices.sqlite3``), beside the loops and never in their set: its failures stop neither
-the start nor the trading, and no book reads it (the fills are the order inquiry's, #404). The night
-job ``fill-notice-layout-403`` measures them (``notice_layout.py``). Paper and live record none.
+the start nor the trading, and no book reads it (the fills are the order inquiry's, #404).
+``krx-quant fill-notice-layout`` measures them (``notice_layout.py``; its night job left ``JOBS`` once
+it had, #580). Paper and live record none.
 
 In live mode (#408, ``KRX_TRADER_MODE=live``) the trader makes the live broker as it starts
 (``kis_orders.trader_live_broker``: the live key, ``KRX_TRADER_LIVE_KIS_*``, on KIS's live servers; it

@@ -158,6 +158,75 @@ async def test_the_training_s_steps_and_the_kill_that_ended_it_reach_loki(fake_l
     assert last[0] == "error" and "ended: exit -9 (SIGKILL) after" in last[1]
 
 
+# The real ``krx-quant train`` but for the training itself, which logs a warning of its own and
+# returns a night (#580). Telegram is set but unreachable, its tries cut short: the summary's notice
+# is dropped (``telegram send failed``, ERROR) right before the command's own report of the night.
+SUMMARY_CHILD = (
+    "import logging, sys\n"
+    "from datetime import date\n"
+    "from krx_quant import cli, nightly, notify\n"
+    "notify.RETRY_SECONDS, notify.RETRY_DELAYS = 0.2, (0.05,)\n"
+    "def train_night(*args, **kwargs):\n"
+    "    logging.getLogger('krx_quant.nightly').warning('a warning of the night')\n"
+    "    return nightly.Night(date(2026, 10, 22), '', {'newton': 'newton-1'}, [], {'cox-5d': 'stats'})\n"
+    "nightly.train_night = train_night\n"
+    "sys.exit(cli.main(sys.argv[1:]))\n"
+)
+
+
+@pytest.mark.timeout(60)  # the real command's imports (pyarrow, lightgbm) take a few seconds
+async def test_the_night_s_summary_lines_keep_their_own_level_whatever_the_line_before(
+    fake_loki: FakeLoki, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#580: the summary's lines were the training's "warnings" in Loki, taking the level of the
+    ``alert:`` line (WARNING) they came in, and the printed report the level of whatever line came
+    before it. A real warning stays one; the engine says the night in one line of its own."""
+    caplog.set_level(logging.INFO)  # the engine's own lines, as the engine logs them
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "store").mkdir()
+    for name, value in {
+        "KRX_OBJECT_STORE": str(tmp_path / "store"),
+        "KRX_STATE_DIR": str(tmp_path / "state"),
+        "TELEGRAM_BOT_TOKEN": "123:fake",
+        "TELEGRAM_CHAT_ID": "42",
+        "TELEGRAM_API_URL": "http://127.0.0.1:9",  # nothing listens there
+    }.items():
+        monkeypatch.setenv(name, value)
+    as_the_engine(fake_loki)
+    assert await _train(NIGHT, [sys.executable, "-c", SUMMARY_CHILD, "train"]) is None
+    await ended(fake_loki)
+    lines = of(fake_loki, "training", "night=2026-10-22")
+    texts = [text for _, text in lines]
+    refused = "사전 검증 거부로 학습하지 않음: cox-5d"
+
+    warned = [text for level, text in lines if level == "warning"]
+    assert warned[0].endswith(" WARNING krx_quant.nightly: a warning of the night")
+    assert all(" WARNING krx_quant.notify: telegram send retry in " in text for text in warned[1:])
+    alert = next(i for i, text in enumerate(texts) if " krx_quant.notify: alert: " in text)
+    assert lines[alert][0] == "info" and texts[alert].endswith(
+        " INFO krx_quant.notify: alert: 2026-10-22 밤 학습"
+    )
+    assert lines[alert + 1] == ("info", refused)
+    dropped = next(i for i, text in enumerate(texts) if "telegram send failed: " in text)
+    assert lines[dropped][0] == "error" and texts[dropped].endswith("dropped: [알림] 2026-10-22 밤 학습")
+    assert lines[dropped + 1] == ("error", refused), "the dropped notice's own lines, at its level"
+    report, end = lines[dropped + 2 : -1], lines[-1]
+    assert [level for level, _ in report] == ["info"] * 3, "after the ERROR, at their own level"
+    assert report[0][1].endswith(" INFO krx_quant.nightly: 2026-10-22 밤 학습")
+    assert [text for _, text in report[1:]] == [
+        refused,
+        "promoted: {'newton': 'newton-1'}; the server applies it at 08:00",
+    ]
+    assert end[0] == "info" and " train --day 2026-10-22 ended: exit 0 after " in end[1]
+
+    assert await asyncio.to_thread(loki.stop) == 0  # and the engine's own lines after it
+    engine = [line for labels, line in fake_loki.lines() if labels["process"] == "engine"]
+    [said] = [line for line in engine if "nightly training of" in line]
+    assert " INFO krx_quant.swap: nightly training of 2026-10-22 finished after " in said
+    assert said.endswith(f"({len(lines) - 2} lines of output)"), "all but its start and end lines"
+    assert not [line for line in engine if "밤 학습" in line], "not the training's lines again"
+
+
 TRACEBACK = (
     "import logging, sys\n"
     f"logging.basicConfig(level=logging.INFO, format={FORMAT!r})\n"

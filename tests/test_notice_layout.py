@@ -1,5 +1,6 @@
-"""The fill notice layout's night (#484, #403): the recorded records joined to the one order of their
-day they name, and measured column by column without a value; the job ``fill-notice-layout-403``.
+"""The fill notice layout (#484, #403): the recorded records joined to the one order of their day
+they name, and measured column by column without a value (``krx-quant fill-notice-layout``; its night
+job ``fill-notice-layout-403`` left ``JOBS`` in #580, ``tests/test_scheduled_layout.py``).
 
 The records are the fake KIS account's (``fake_kis.FakeAccount``, in a made-up 23-column layout that
 is not the example's first 23), recorded by the trader's recorder while the mock book trades
@@ -10,30 +11,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import aiohttp
 import pytest
 
 from krx_quant import kis
-from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeAccount, FakeKis
-from krx_quant.feeds.base import KST
 from krx_quant.kis_orders import FILL_NOTICE_COLUMNS, SIDE_BUY, SIDE_SELL, Servers
-from krx_quant.process_log import Ran
-from krx_quant.scheduled import (
-    FAILED,
-    FILL_NOTICE_LAYOUT,
-    INTERRUPTED,
-    JOBS,
-    OK,
-    Facts,
-    JobRecord,
-    Night,
-    fill_notice_layout_calls,
-)
 from krx_quant.trader import fill_notices
 from krx_quant.trader.fill_notices import (
     TR_ID,
@@ -374,63 +361,3 @@ async def test_without_the_records_or_the_trader_s_key_it_cannot_read(
     text = capsys.readouterr().out
     assert "조회를 읽지 못한 날(장부로만 묶었다): 2026-10-14 (KRX_TRADER_KIS_APP_KEY" in text
     assert "묶이지 않음 1개" in text
-
-
-# The job
-
-
-def night(when: date, record: JobRecord | None = None, days: tuple[date, ...] = (DAY,)) -> Night:
-    return Night(when, CALENDAR.is_trading_day(when), "c" * 40, record, {}, Facts(fill_notice_days=days))
-
-
-def ran(day: date, code: int) -> JobRecord:
-    started = datetime.combine(day, time(22, 30), KST)
-    return JobRecord(day, OK if code == 0 else FAILED, started, "c" * 40, code, 9.0)
-
-
-def test_the_job_posts_to_403_and_calls_an_agent_on_its_last_run_or_a_failure() -> None:
-    assert FILL_NOTICE_LAYOUT in JOBS and FILL_NOTICE_LAYOUT.session is None
-    assert FILL_NOTICE_LAYOUT.name == "fill-notice-layout-403"
-    assert FILL_NOTICE_LAYOUT.command == ("fill-notice-layout",)
-    assert [t.issue for t in FILL_NOTICE_LAYOUT.targets] == [403]
-    assert FILL_NOTICE_LAYOUT.label == ("ready-for-agent",)
-    assert FILL_NOTICE_LAYOUT.timeout == timedelta(minutes=10)
-    note = FILL_NOTICE_LAYOUT.targets[0].note
-    assert "출력에는 값, 주문번호, 계좌번호, HTS ID, 가격이 없다" in note
-    calls = [fill_notice_layout_calls(Ran(code, "", "")) for code in (DONE, PARTIAL, UNREADABLE, 1)]
-    assert calls == [True, False, True, True]
-    assert fill_notice_layout_calls(Ran(PARTIAL, "", "", timed_out=True)), "timed out"
-
-
-def test_the_job_runs_on_a_trading_night_with_records_not_judged_until_every_kind_is_joined() -> None:
-    due = FILL_NOTICE_LAYOUT.due
-    thursday, friday, saturday, monday = (date(2026, 10, d) for d in (15, 16, 17, 19))
-    assert due(night(DAY)) and not due(night(DAY, days=())), "records first"
-    assert not due(night(saturday, days=(DAY, friday))), "trading nights only"
-    assert not due(night(thursday, ran(DAY, DONE), (DAY, thursday))), "done: every kind joined"
-    assert not due(night(thursday, ran(DAY, PARTIAL))), "no record after the last run"
-    assert due(night(thursday, ran(DAY, PARTIAL), (DAY, thursday))), "a new day's records"
-    assert not due(night(DAY, ran(DAY, PARTIAL), (DAY,))), "once a night"
-    for code in (UNREADABLE, 1):
-        assert due(night(friday, ran(thursday, code), (DAY,))), f"after {code}: the next trading night"
-    assert due(night(monday, replace(ran(friday, PARTIAL), outcome=INTERRUPTED), (DAY,))), "cut: again"
-
-
-async def test_the_night_s_facts_read_the_days_recorded(tmp_path: Path) -> None:
-    from krx_quant.scheduled import read_facts
-    from tests.daily_doubles import CALENDAR as DAILY_CALENDAR
-    from tests.daily_doubles import NIGHT as DAILY_NIGHT
-    from tests.daily_doubles import engine_on
-    from tests.daily_doubles import settings as daily_settings
-
-    s = daily_settings(tmp_path, signal=0.0, days=30)
-    store = fill_notices.FillNoticeStore(s.state_dir / fill_notices.DB_NAME, fill_notices.Limits(), DAY)
-    store.apply([fill_notices.Frame(1, 1, at("10:00:02"), TR_ID, 1, 9, why=fill_notices.NO_KEY)])
-    store.close()
-    clock = FakeClock(DAILY_NIGHT)
-    e = engine_on(s, clock, [])
-    try:
-        facts = await read_facts(s, DAILY_CALENDAR, clock, e)
-    finally:
-        e.store.close()
-    assert facts.fill_notice_days == (DAY,)

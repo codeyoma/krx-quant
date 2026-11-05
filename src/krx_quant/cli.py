@@ -55,7 +55,7 @@ from krx_quant.nav_probe import probe_nav
 from krx_quant.neyman_backfill import neyman_backfill
 from krx_quant.neyman_variants import neyman_variants
 from krx_quant.night_probe import probe_night
-from krx_quant.nightly import run_training
+from krx_quant.nightly import log_summary, run_training
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS, compared_nights
 from krx_quant.nightly_hit_rates import lines as hit_rate_lines
 from krx_quant.normal_order import REPORT as NORMAL_ORDER_REPORT
@@ -473,8 +473,7 @@ def _train(day: date | None) -> int:
     except (FileNotFoundError, ValueError) as e:
         print(e, file=sys.stderr)
         return 1
-    print(night.summary())
-    print(f"promoted: {night.promoted or 'nothing'}; the server applies it at 08:00")
+    log_summary(night)
     return 0
 
 
