@@ -638,3 +638,20 @@ def test_the_reboot_issue_and_the_burst_issue_are_apart() -> None:
     assert world.tick() == 0
     assert [i["labels"] for i in world.issues.values()] == [["server-burst"]]
     assert world.issues[401]["state"] == "open" and world.issues[401]["comments"] == []
+
+
+def test_without_its_issue_the_burst_alert_is_not_sent_but_tried_again_next_run() -> None:
+    """The open issue keeps the next runs quiet: a Telegram line sent without it would come again
+    every 10 minutes while GitHub refuses."""
+    world = World(
+        datetime(2026, 11, 6, 2, 14, tzinfo=KST),
+        instance=lambda at: 0,
+        burst=lambda at: 47.5,
+        fail="issue create",
+    )
+    assert world.tick() == 1
+    assert world.issues == {} and world.telegram == []
+    world.fail = ""
+    world.now += timedelta(minutes=10)
+    assert world.tick() == 0
+    assert len(world.issues) == 1 and len(world.telegram) == 1

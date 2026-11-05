@@ -731,8 +731,9 @@ def act(
 def act_burst(
     run: Run, send: Send, burst: Burst, now: datetime, env: Mapping[str, str], repo: str, instance: str
 ) -> list[str]:
-    """Open the ``server-burst`` issue (low) or comment on it and close it (back), and say it on
-    Telegram: the problems in doing so."""
+    """Open the ``server-burst`` issue (low) or comment on it and close it (back), then say it on
+    Telegram: the problems in doing so. The open issue is what keeps the next runs from saying it
+    again, so without it nothing goes to Telegram either: the next run tries both again."""
     problems: list[str] = []
     body = burst_report(burst, now, env.get("RUN_URL", ""), instance)
     url = ""
@@ -754,7 +755,7 @@ def act_burst(
             run(["gh", "issue", "close", number, "--repo", repo, "--reason", "completed"])
         print(f"reported the burst capacity: {url}")
     except RuntimeError as e:
-        problems.append(f"GitHub: {e}")
+        return [f"GitHub: {e}"]
     token, chat = env.get("TELEGRAM_BOT_TOKEN", ""), env.get("TELEGRAM_CHAT_ID", "")
     if token and chat:
         try:
