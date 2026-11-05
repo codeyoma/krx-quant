@@ -16,6 +16,7 @@ hands the GIL over.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -169,8 +170,9 @@ async def test_a_bar_close_that_holds_the_loop_over_a_second_says_what_held_it(
 ) -> None:
     """Input: a kind baseline holding the loop 1.2 s at the 09:10 bar close, the engine watching
     its loop. Output: one WARNING, for 09:10, with how long the loop went without a turn and the
-    kinds' baselines as what took that time; none for the other bar closes. The same in the store's
-    runs (#589), for the night's report of the bar closes' times."""
+    kinds' baselines as what took that time, and the garbage collection in it (#621); none for the
+    other bar closes. The same in the store's runs (#589), for the night's report of the bar closes'
+    times."""
     clock = FakeClock(at("09:00:00"))
     stuck = replace(TEST_KIND, baselines=(Stuck(),))
     engine = engine_on(tmp_path / "engine.db", clock, kinds=(stuck,), watch_loop=True)
@@ -185,14 +187,70 @@ async def test_a_bar_close_that_holds_the_loop_over_a_second_says_what_held_it(
     assert line.startswith(f"bar close {DAY} 09:10 held the event loop ")
     seconds = float(line.split("held the event loop ")[1].split("s")[0])
     assert seconds >= 1.2
-    named = dict(part.rsplit(" ", 1) for part in line.split(": ", 1)[1].split(", "))
+    steps, collected = line.split(": ", 1)[1].split("; ")
+    named = dict(part.rsplit(" ", 1) for part in steps.split(", "))
     assert float(named["the kinds' baselines"].rstrip("s")) >= 1.2
+    assert collected == "no garbage collection" or re.fullmatch(
+        r"garbage collection \d+\.\d\ds \(generation [012]\)", collected
+    ), collected
     with sqlite3.connect(tmp_path / "engine.db") as db:
         runs = db.execute("SELECT at, detail FROM runs WHERE kind = ?", (LOOP_HELD,)).fetchall()
     assert [when for when, _ in runs] == [at("09:10:00").isoformat()]
     detail = json.loads(runs[0][1])
     assert detail["seconds"] == pytest.approx(seconds, abs=0.01)
     assert detail["parts"]["the kinds' baselines"] >= 1.2
+    assert (detail["gc"] is None) == (collected == "no garbage collection")
+    engine.store.close()
+
+
+class Collecting(AlwaysHeld):
+    """A kind baseline that runs a full garbage collection on the event loop at the 09:10 bar
+    close; ``slow`` makes that collection's end wait 1.2 s (a stand-in for a pass over the session's
+    quote logs on a slow server, #621)."""
+
+    name = "drift-collecting"
+    collecting = False
+
+    def predict(self, inputs: KindInputs) -> KindForecast:
+        if inputs.bar_close == at("09:10:00"):
+            Collecting.collecting = True
+            try:
+                gc.collect()
+            finally:
+                Collecting.collecting = False
+        return super().predict(inputs)
+
+    @staticmethod
+    def slow(phase: str, info: dict[str, Any]) -> None:
+        if phase == "stop" and Collecting.collecting and info["generation"] == 2:
+            timer.sleep(1.2)  # within the pass, on the loop's thread
+
+
+async def test_a_bar_close_held_by_a_garbage_collection_says_how_long_it_took(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Input: a kind baseline whose full garbage collection at the 09:10 bar close takes 1.2 s, the
+    engine watching its loop. Output: one WARNING, for 09:10, ending with the collection's seconds
+    and its generation (2); the same in the store's run (``gc``), for the night's report (#621)."""
+    clock = FakeClock(at("09:00:00"))
+    kind = replace(TEST_KIND, baselines=(Collecting(),))
+    engine = engine_on(tmp_path / "engine.db", clock, kinds=(kind,), watch_loop=True)
+    events = sorted(busy_morning(end="09:12:00"), key=lambda e: e[1]["received_at"])
+    gc.callbacks.insert(0, Collecting.slow)  # before the engine's watch: its stop waits for this
+    try:
+        with caplog.at_level(logging.WARNING, logger="krx_quant.engine"):
+            await replay_into(engine, clock, events, until=at("09:12:00"))
+    finally:
+        gc.callbacks.remove(Collecting.slow)
+
+    [line] = [r.getMessage() for r in caplog.records if "event loop" in r.getMessage()]
+    assert line.startswith(f"bar close {DAY} 09:10 held the event loop ")
+    collected = re.fullmatch(r".*; garbage collection (\d+\.\d\d)s \(generation (\d)\)", line)
+    assert collected is not None, line
+    assert float(collected[1]) >= 1.2 and collected[2] == "2"
+    with sqlite3.connect(tmp_path / "engine.db") as db:
+        [(detail,)] = db.execute("SELECT detail FROM runs WHERE kind = ?", (LOOP_HELD,)).fetchall()
+    assert json.loads(detail)["gc"] == {"seconds": float(collected[1]), "generation": 2}
     engine.store.close()
 
 
@@ -235,8 +293,10 @@ ATTEMPTS = 2
 # again runs on the same one) and the peak RSS 1.01. #538's double answering (12 mornings) took the
 # median gap to 35-64 times, the time on the loop to 10-19 times and the gaps' p95 to 1.3-2.4 s. The
 # gaps' p95 is held to the engine's own WARNING limit (``loop_watch.LIMIT_SECONDS``) instead: a full
-# garbage collection holds the loop 0.5-0.7 s, and where the few in a morning land moved the p95 of its
-# 32 bar closes from 0.04 s to 0.52 s.
+# garbage collection held the loop 0.5-0.7 s, and where the few in a morning land moved the p95 of its
+# 32 bar closes from 0.04 s to 0.52 s. Since #621 the engine freezes what it keeps after each bar close
+# (``garbage.py``) and those passes take milliseconds (p95 0.040-0.049 s in 6 mornings), but a store
+# write waiting for the runner's disk moves the p95 the same way (0.35-0.57 s, a few times in 30).
 FACTORS = {
     ("longest_gap_s", "median"): 3.0,
     ("on_loop_s", "median"): 3.0,

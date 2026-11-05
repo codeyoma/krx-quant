@@ -14,9 +14,9 @@ and kind algorithm active, each with a model fitted on a made-up day before (the
 samples and answers of it, at 4 book updates a second), and every kind of every horizon. The hour
 from 09:00 fills the quote log the 60-minute barrier's windows read; the bar closes from 10:00 are
 measured. As on the server's two vCPUs: the collector's GIL switch interval (#538), asyncio's
-default pool as Python sizes it there (min(32, 2 + 4) = 6 threads), and the live engine's watch of
-its loop (``watch_loop``). ``--busy N`` spins N processes beside it on the same CPUs (the trader,
-KIS frames, API requests).
+default pool as Python sizes it there (min(32, 2 + 4) = 6 threads), the live engine's watch of its
+loop (``watch_loop``) and its garbage collection after each bar close (``garbage``, #621). ``--busy
+N`` spins N processes beside it on the same CPUs (the trader, KIS frames, API requests).
 
 Each measured bar close: the longest the event loop went without a turn (a heartbeat asking for one
 every 10 ms, counted from when it was due), its time on the clock, the process's CPU, and the time
@@ -66,6 +66,7 @@ from krx_quant.collector import GIL_SWITCH_SECONDS
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.features import Leaders
 from krx_quant.feeds.base import KST
+from krx_quant.garbage import Garbage
 from krx_quant.kind_registry import KINDS, kind_named
 from krx_quant.kinds import DIRECTION
 from krx_quant.lifecycle import Status
@@ -374,6 +375,7 @@ async def replay_morning(state: Path) -> dict[str, Any]:
         models=loaded,
         target_version=TARGET_VERSION,
         watch_loop=True,
+        garbage=Garbage(),
     )
     events = Counter[str]()
 

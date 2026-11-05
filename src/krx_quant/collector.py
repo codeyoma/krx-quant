@@ -63,6 +63,7 @@ from krx_quant.feeds import (
     us_daytime_key,
 )
 from krx_quant.feeds.base import kst_day
+from krx_quant.garbage import Garbage
 from krx_quant.health import FeedHealth, FeedState
 from krx_quant.kind_registry import KINDS
 from krx_quant.krx_net_assets import KrxClient, KrxNetAssetKeeper, keep_krx_net_assets
@@ -318,6 +319,9 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
     calendar = calendar_store(settings)
     health = FeedHealth(recorder, now, calendar.calendar)
     store = PredictionStore(settings.state_dir / DB_NAME)
+    # A garbage collection and a freeze after each bar close, let go when idle and here at the end
+    # (#621): Python's full collections no longer walk the session's quote logs.
+    garbage = Garbage()
     engine = PredictionEngine(
         store,
         calendar.calendar,
@@ -361,6 +365,7 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
         daily_feature_names=DAILY_FEATURES,
         # A bar close that holds the event loop over a second says what held it (#538).
         watch_loop=True,
+        garbage=garbage,
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
     # Held while it runs: a rescore refuses to run beside it (#168). One running already
@@ -645,6 +650,7 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
         recorder.close()
         store.close()
         lock.release()
+        garbage.release()
 
 
 async def restart_each_day(
