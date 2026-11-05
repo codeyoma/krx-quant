@@ -1,0 +1,5 @@
+usage: krx-quant diagnose [-h] [--days DAYS]
+
+options:
+  -h, --help   show this help message and exit
+  --days DAYS  the latest N trading days with data (default 20)

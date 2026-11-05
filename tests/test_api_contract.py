@@ -88,7 +88,7 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(
             f"/v1/symbols/{symbol}/closing-flow/days?from=2026-09-01&to=2026-10-12", "closing_flow_days"
         )
-    for query in ("", "?period=5d&basis=a&special=include", f"?symbol={symbols[0]}&period=20d"):
+    for query in ("", "?period=5d&special=include", f"?symbol={symbols[0]}&period=20d"):
         await ask(f"/v1/leaderboard{query}", "leaderboard")
     for query in ("", "?period=5d&special=include", f"?symbol={symbols[0]}&period=20d"):
         await ask(f"/v1/cost-map{query}", "cost_map")  # #307
@@ -98,7 +98,7 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/algorithms/{name}", "algorithm_detail")
     for name in [*algorithms, "baseline-flat", "consensus-final"]:
         await ask(f"/v1/algorithms/{name}/stats", "algorithm_stats")
-    await ask(f"/v1/algorithms/{algorithms[0]}/stats?basis=b", "algorithm_stats")  # a screen from before #170
+    await ask(f"/v1/algorithms/{algorithms[0]}/stats?basis=b", "error", 400)  # gone with #592
     await ask("/v1/consensus", "consensus")
     await ask("/v1/macro", "macro")
     await ask("/v1/calendar", "calendar")
@@ -138,6 +138,9 @@ async def walk(get: Get) -> dict[str, int]:
     await ask("/v1/trader/days", "trader_days")
     await ask("/v1/trader/days?from=2026-10-01&to=2026-10-12", "trader_days")
     await ask("/v1/trader/policies?limit=5", "trader_policies")  # #399
+    await ask("/v1/trader/decisions", "trader_decisions")  # #584
+    await ask("/v1/trader/decisions?day=2026-10-12&book=champion&limit=5", "trader_decisions")
+    await ask("/v1/trader/decisions?day=2026-10-08&before=2026-10-08T14:00:00%2B09:00", "trader_decisions")
     for symbol in symbols:  # #398
         await ask(f"/v1/symbols/{symbol}/trader-marks", "trader_marks")
         query = "?limit=5&before=2026-10-12T10:00:00%2B09:00"
@@ -175,6 +178,7 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/005930/supply?from=2026-10-12&to=2026-10-11", 400),
         ("/v1/symbols/005930/supply?from=2015-01-01&to=2026-10-12", 400),
         ("/v1/leaderboard?period=week", 400),
+        ("/v1/leaderboard?basis=a", 400),  # gone with #592
         ("/v1/cost-map?period=week", 400),
         ("/v1/cost-map?symbol=999999", 400),
         ("/v1/algorithms/nobody/stats", 404),
@@ -197,6 +201,10 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/trader/days?from=2026-10-12&to=2026-10-11", 400),
         ("/v1/trader/days?from=2015-01-01&to=2026-10-12", 400),
         ("/v1/trader/policies?limit=0", 400),
+        ("/v1/trader/decisions?day=2026-10-1", 400),  # #584
+        ("/v1/trader/decisions?book=everyone", 400),
+        ("/v1/trader/decisions?limit=0", 400),
+        ("/v1/trader/decisions?before=10:00", 400),
         ("/v1/symbols/999999/trader-marks", 404),
         ("/v1/symbols/005930/trader-marks?limit=0", 400),
         ("/v1/symbols/005930/trader-marks?before=10:00", 400),
@@ -353,11 +361,12 @@ async def test_a_morning_with_the_range_and_the_barrier_keeps_the_contract(tmp_p
             check(f"{family}_stats", e["extra"])
 
 
-async def test_a_screen_from_before_reads_the_touch_label_where_it_read_the_bases(tmp_path: Path) -> None:
-    """For one release (#170). Input: a replayed morning on the touch target, read as the
-    screen before #170 reads it. Output: every scored outcome's ``class_a`` and ``class_b`` are
-    its bar close's touch label, ``unscorable`` why there is none; the leaderboard and the
-    stats echo the basis asked for; every answer within the contract."""
+async def test_the_compatibility_fields_of_170_are_gone(tmp_path: Path) -> None:
+    """Input (#592): a replayed morning on the touch target, and a leaderboard and stats asked
+    with ``basis`` as the screen before #170 asked them. Output: no outcome has ``class_a`` or
+    ``class_b``, the touch label in ``touch`` and ``unscorable`` why there is none; no
+    leaderboard or stats answer has ``basis``; asking with one is refused, its two old values
+    too; every answer within the contract, which no longer holds those fields."""
     engine = await run(
         tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=TARGET_VERSION
     )
@@ -366,8 +375,18 @@ async def test_a_screen_from_before_reads_the_touch_label_where_it_read_the_base
         predictions = (await (await client.get("/v1/symbols/005930/predictions?limit=1000")).json())[
             "predictions"
         ]
-        board = await (await client.get("/v1/leaderboard?basis=b")).json()
-        stats = await (await client.get("/v1/algorithms/newton/stats?basis=a")).json()
+        board = await (await client.get("/v1/leaderboard")).json()
+        stats = await (await client.get("/v1/algorithms/newton/stats")).json()
+        refused = []
+        for path in (
+            "/v1/leaderboard?basis=a",
+            "/v1/leaderboard?basis=b",
+            "/v1/algorithms/newton/stats?basis=a",
+            "/v1/algorithms/newton/stats?basis=b",
+            "/v1/cost-map?basis=a",
+        ):
+            response = await client.get(path)
+            refused.append((path, response.status, await response.json()))
 
     check("predictions", {"symbol": "005930", "predictions": predictions})
     check("leaderboard", board)
@@ -375,11 +394,23 @@ async def test_a_screen_from_before_reads_the_touch_label_where_it_read_the_base
     outcomes = [p["outcome"] for p in predictions if p["outcome"] is not None]
     assert outcomes, "the morning's predictions are scored"
     for o in outcomes:
+        assert "class_a" not in o and "class_b" not in o
         label = o["touch"]["class"] if o["touch"] else None
-        assert o["class_a"] == o["class_b"] == label
         assert o["unscorable"] == (None if label else (o["touch"] or {}).get("unscorable", "no touch label"))
-    assert {o["class_a"] for o in outcomes} - {None}, "labelled"
-    assert (board["basis"], stats["basis"]) == ("b", "a")
+    assert {o["touch"]["class"] for o in outcomes if o["touch"]} - {None}, "labelled"
+    assert "basis" not in board and "basis" not in stats
+    for path, status, body in refused:
+        assert status == 400, path
+        check("error", body)
+        assert "basis" in body["error"], path
+    # The contract refuses them too: a screen reading them would be reading what is not sent.
+    outcome = next(o for o in outcomes if o["touch"] and o["touch"]["class"])
+    with pytest.raises(AssertionError, match="'class_a' was unexpected"):
+        check("outcome", {**outcome, "class_a": outcome["touch"]["class"]})
+    with pytest.raises(AssertionError, match="'basis' was unexpected"):
+        check("direction_leaderboard", {**board, "basis": "a"})
+    with pytest.raises(AssertionError, match="'basis' was unexpected"):
+        check("direction_algorithm_stats", {**stats, "basis": "a"})
 
 
 async def test_the_touch_label_served_is_of_version_3_and_the_contract_holds_it_there(tmp_path: Path) -> None:

@@ -1,0 +1,7 @@
+usage: krx-quant notify [-h] text
+
+positional arguments:
+  text
+
+options:
+  -h, --help  show this help message and exit

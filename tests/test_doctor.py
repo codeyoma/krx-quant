@@ -27,14 +27,13 @@ from krx_quant import kis, loki
 from krx_quant.algorithms import Model, save_model
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
-from krx_quant.config import Settings
+from krx_quant.config import Settings, lenient_settings
 from krx_quant.doctor import (
     COMPOSE_API,
     RecentLog,
     Status,
     api_candidates,
     doctor,
-    doctor_settings,
     engine_status,
     fetch_status,
     report,
@@ -575,14 +574,14 @@ def test_the_lenient_settings_mask_what_the_full_ones_do(tmp_path: Path) -> None
         "KRX_DATA_DIR": str(tmp_path / "data"),
         "KRX_API_PORT": "8081",
     }
-    full, error = doctor_settings(env, None)
+    full, error = lenient_settings(env, None)
     assert error is None
-    lenient, error = doctor_settings({**env, "KRX_TARGET_VERSION": "2"}, None)
+    lenient, error = lenient_settings({**env, "KRX_TARGET_VERSION": "2"}, None)
     assert error is not None and error.startswith("KRX_TARGET_VERSION 2")
     # 19, and the trader's key, secret, account (written, its digits, its 8) and HTS ID (#403).
     assert secrets_of(lenient) == secrets_of(full) and len(secrets_of(full)) == 25
     assert (lenient.data_dir, lenient.state_dir, lenient.api_port) == (tmp_path / "data", Path("state"), 8081)
-    bad_port, _ = doctor_settings({**env, "KRX_API_PORT": "soon"}, None)
+    bad_port, _ = lenient_settings({**env, "KRX_API_PORT": "soon"}, None)
     assert bad_port.api_port == 8080
 
 

@@ -151,7 +151,7 @@ def test_the_pre_validation_measures_the_overlap_and_the_review_days_it_gives(tm
     assert [p["phase"] for p in overlap["phases"]] == [0, 1, 2, 3, 4]
     assert sum(p["days"] for p in overlap["phases"]) == overlap["days"], "every day in one phase"
     assert saved["stats"]["overlap_sessions"] == 5, "its gate on the overlap-corrected bound"
-    from krx_quant.cli import _overlap_lines
+    from krx_quant.cli.engine import _overlap_lines
 
     lines = _overlap_lines(overlap).splitlines()
     assert lines[0].startswith("  overlap: 5 sessions, Newey-West lag 8,")
@@ -386,7 +386,7 @@ def test_cox_5d_refused_is_not_on_probation_and_nothing_starts_it(tmp_path: Path
 def test_the_pre_validation_says_when_the_rule_gives_longer_days_than_the_kind_s() -> None:
     """#310 "다음 알고리즘": a later algorithm's report measures the ratio again; the command prints
     the kind's fixed days under the rule's and says when the rule's are longer."""
-    from krx_quant.cli import _overlap_lines
+    from krx_quant.cli.engine import _overlap_lines
 
     def overlap(first: int) -> dict[str, object]:
         review = overlap_review({60: 2.22, 80: 3.0}[first], 5)

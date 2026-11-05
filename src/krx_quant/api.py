@@ -108,10 +108,9 @@ algorithms against its baselines (the direction's by default, as before); an alg
 ``symbol`` is a symbol or ``all`` (default), ``period`` is ``today`` (default), ``5d`` or
 ``20d`` (the latest days with predictions), and ``special`` is ``exclude`` (default) or
 ``include`` (predictions with a VI or circuit breaker in their window). Every prediction is
-scored on its bar close's touch label (#170). For one release a screen from before still
-sends ``basis`` (``a`` or ``b``): it is accepted, ignored and echoed back as sent, so that
-screen, which asks again until the answer's ``basis`` is its own, is answered once
-(``LEGACY_BASES``). Without it the answer has no ``basis``.
+scored on its bar close's touch label (#170). ``basis``, which a screen from before #170
+sent, is refused (#592): it was echoed back for one release, so that screen, which asked
+again until the answer's ``basis`` was its own, was answered once; an answer has none.
 
 Times are ISO 8601 in KST. On the server, compose publishes it on the Tailscale address only;
 it has no authentication, so the trader's pause is its one write.
@@ -181,6 +180,7 @@ from krx_quant.model_shelf import Shelf
 from krx_quant.names import logo_url
 from krx_quant.net_assets import read_net_assets
 from krx_quant.open_to_close import OPEN_TO_CLOSE
+from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import Excluded, SimulationRecord, iso
 from krx_quant.prevalidation import REGISTERED_BEFORE, Refusal
 from krx_quant.pricing import flat_ticks, tick_size
@@ -204,6 +204,7 @@ from krx_quant.stats import (
 from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, kind_target, prediction_json
 from krx_quant.supply import FIELDS as SUPPLY_FIELDS
 from krx_quant.supply import stored_supply
+from krx_quant.trader.decisions import BOOKS, read_decisions
 from krx_quant.trader.marks import read_marks
 from krx_quant.trader.policy import read_policies
 from krx_quant.trader.store import DB_NAME as TRADER_DB
@@ -248,8 +249,6 @@ BRIEFING_SECONDS = 20.0
 BRIEFING_CACHE_KEY = web.AppKey("briefing_cache", dict)
 STATS_CACHE_KEY = web.AppKey("stats_cache", dict)
 PERIODS = {"today": 1, "5d": 5, "20d": 20}  # days with predictions
-# The scoring bases a screen from before #170 still sends, accepted and echoed back for one release.
-LEGACY_BASES = ("a", "b")
 # Results kept per question until the store changes (the screen asks the same often).
 _CACHED_QUESTIONS = 64
 
@@ -401,6 +400,7 @@ def create_app(
     app.router.add_get("/v1/trader/days", _trader_days)
     app.router.add_post("/v1/trader/pause", _trader_pause)
     app.router.add_get("/v1/trader/policies", _trader_policies)
+    app.router.add_get("/v1/trader/decisions", _trader_decisions)
     app.router.add_get("/v1/symbols/{symbol}/trader-marks", _trader_marks)
     return app
 
@@ -1259,8 +1259,8 @@ def _query(request: web.Request, engine: PredictionEngine, kind: PredictionKind 
         raise _error(web.HTTPBadRequest, f"symbol must be all or one of {', '.join(engine.symbols)}")
     if period not in PERIODS:
         raise _error(web.HTTPBadRequest, f"period must be one of {', '.join(PERIODS)}")
-    if "basis" in q and q["basis"] not in LEGACY_BASES:
-        raise _error(web.HTTPBadRequest, "basis is gone (#170): leave it out (a or b is still accepted)")
+    if "basis" in q:  # refused rather than ignored: a screen from before #170 would ask again and again
+        raise _error(web.HTTPBadRequest, "basis is gone (#170): leave it out")
     if special not in ("exclude", "include"):
         raise _error(web.HTTPBadRequest, "special must be exclude or include")
     today = kst_day(engine.clock.now())
@@ -1282,20 +1282,6 @@ def _kind_query(request: web.Request, engine: PredictionEngine) -> PredictionKin
         names = ", ".join([DIRECTION, *(k.name for k in engine.kinds), *(k.name for k in engine.daily_kinds)])
         raise _error(web.HTTPBadRequest, f"kind must be one of {names}, got {name!r}")
     return None if kind is DIRECTION_KIND else kind
-
-
-def _echo_basis(request: web.Request, body: dict[str, Any]) -> dict[str, Any]:
-    """``body`` with the ``basis`` a screen from before #170 sent, as it sent it (``LEGACY_BASES``):
-    the order of the query's fields kept, after ``days``."""
-    basis = request.query.get("basis")
-    if basis is None:
-        return body
-    out: dict[str, Any] = {}
-    for key, value in body.items():
-        out[key] = value
-        if key == "days":
-            out["basis"] = basis
-    return out
 
 
 async def _leaderboard(request: web.Request) -> web.Response:
@@ -1330,7 +1316,7 @@ async def _leaderboard(request: web.Request) -> web.Response:
         return [{**e, "status": statuses.get(e["algorithm"])} for e in entries]
 
     body = {**body, "ranked": with_status(body["ranked"]), "unranked": with_status(body["unranked"])}
-    return _json(_echo_basis(request, body))
+    return _json(body)
 
 
 async def _leaderboard_days(request: web.Request) -> web.Response:
@@ -1494,7 +1480,7 @@ async def _algorithm_stats(request: web.Request) -> web.Response:
             "volatility_cuts": cuts,
         }
 
-    return _json(_echo_basis(request, await _stats(request, ("algorithm", name), query, build)))
+    return _json(await _stats(request, ("algorithm", name), query, build))
 
 
 Build = Callable[[dict[str, list[Scored]], dict[str, list[Scored]], dict[str, Excluded]], dict[str, Any]]
@@ -1676,7 +1662,7 @@ async def _kind_leaderboard(request: web.Request, kind: PredictionKind) -> web.R
         return [{**e, "status": statuses.get(e["algorithm"])} for e in entries]
 
     body = {**body, "ranked": with_status(body["ranked"]), "unranked": with_status(body["unranked"])}
-    return _json(_echo_basis(request, body))
+    return _json(body)
 
 
 async def _kind_algorithm_stats(request: web.Request, name: str, kind: PredictionKind) -> web.Response:
@@ -1727,26 +1713,34 @@ async def _kind_algorithm_stats(request: web.Request, name: str, kind: Predictio
         }
 
     body = await _kind_stats(request, kind, ("algorithm", name), query, build)
-    return _json(_echo_basis(request, body))
+    return _json(body)
 
 
 async def _cost_map(request: web.Request) -> web.Response:
     """``/v1/cost-map`` (#307, ``cost_map.py``): the symbols' cost cards, a row each kind with
     a direction, from its leaderboard's statistics for the query (each kind's days its own,
-    computed and kept as the leaderboard's), and the period base rates kept
-    (``base_rates.py``)."""
+    computed and kept as the leaderboard's) and the algorithms' statuses (#594), and the period
+    base rates kept (``base_rates.py``)."""
     engine = request.app[ENGINE_KEY]
     query = _query(request, engine)
     min_sample = request.app[MIN_SAMPLE_KEY]
     fee = engine.fee_rate
 
+    # The algorithms active now, the only ones a row's ``top`` may name (#594), read at each request on
+    # the event loop (the store's own connection). They are part of each row's question: a status set
+    # by another process (``krx-quant retire``) does not change this store's version, which alone keeps
+    # a row computed.
+    active = tuple(sorted(name for name, s in engine.store.statuses().items() if s.status is Status.ACTIVE))
+    question = ("cost-map", *active)
+
     def direction(
         algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]], excluded: dict[str, Excluded]
     ) -> dict[str, Any]:
         board = leaderboard(algorithms, baselines, min_sample, fee)
-        return direction_row(DIRECTION_KIND, board, {**algorithms, **baselines}, fee, min_sample, query.days)
+        records = {**algorithms, **baselines}
+        return direction_row(DIRECTION_KIND, board, records, fee, min_sample, query.days, active=active)
 
-    rows = [await _stats(request, ("cost-map",), query, direction)]
+    rows = [await _stats(request, question, query, direction)]
     for kind in [*engine.kinds, *engine.daily_kinds]:
         if kind.sides is None:
             continue  # no direction: no long nor short to cost (the range)
@@ -1760,9 +1754,9 @@ async def _cost_map(request: web.Request) -> web.Response:
             days: tuple[date, ...] = of_kind.days,
         ) -> dict[str, Any]:
             board = kind_leaderboard(algorithms, baselines, min_sample, kind, engine.calendar)
-            return kind_row(kind, board, {**algorithms, **baselines}, fee, min_sample, days)
+            return kind_row(kind, board, {**algorithms, **baselines}, fee, min_sample, days, active=active)
 
-        rows.append(await _kind_stats(request, kind, ("cost-map",), of_kind, build))
+        rows.append(await _kind_stats(request, kind, question, of_kind, build))
     names = request.app[NAMES_KEY]
     symbols = []
     for symbol in [query.symbol] if query.symbol is not None else engine.symbols:
@@ -1958,6 +1952,28 @@ async def _trader_policies(request: web.Request) -> web.Response:
     # The cohorts' days (#473) counted on the engine's market calendar.
     calendar = request.app[ENGINE_KEY].calendar.session
     return _json(await asyncio.to_thread(read_policies, state_dir / TRADER_DB, limit, None, calendar))
+
+
+async def _trader_decisions(request: web.Request) -> web.Response:
+    """The trader's decisions of ``day`` (#584, today by default): each book apart, or ``book``'s alone,
+    a page of each newest first with its totals of the day by reason, the calls answered from the
+    engine's database; read from its store (read-only, off the event loop). None without the store."""
+    engine = request.app[ENGINE_KEY]
+    day = _day_query(request, "day") or kst_day(engine.clock.now())
+    book = request.query.get("book")
+    if book is not None and book not in BOOKS:
+        raise _error(web.HTTPBadRequest, f"book must be one of {', '.join(BOOKS)}, got {book!r}")
+    before = _time_query(request, "before")
+    limit = _limit_query(request, DEFAULT_LIMIT, MAX_LIMIT)
+    state_dir = request.app[STATE_DIR_KEY]
+    books = (
+        []
+        if state_dir is None
+        else await asyncio.to_thread(
+            read_decisions, state_dir / TRADER_DB, state_dir / ENGINE_DB, day, book, before, limit
+        )
+    )
+    return _json({"day": day.isoformat(), "book": book, "books": books})
 
 
 async def _trader_marks(request: web.Request) -> web.Response:

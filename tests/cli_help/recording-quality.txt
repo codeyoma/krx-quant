@@ -1,0 +1,6 @@
+usage: krx-quant recording-quality [-h] [--day DAY]
+
+options:
+  -h, --help  show this help message and exit
+  --day DAY   the trading day, YYYY-MM-DD (default: tonight's once its bars
+              are final at 20:30, else the trading day before)

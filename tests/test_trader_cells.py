@@ -19,6 +19,7 @@ from pathlib import Path
 import aiohttp
 import pytest
 
+from krx_quant.lifecycle import Status
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.paper import (
@@ -30,7 +31,7 @@ from krx_quant.trader.paper import (
 )
 from krx_quant.trader.selection import NO_PASS, CostMapError, choose, kelly, read_cost_map
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trades
-from tests.api_doubles import barrier_board
+from tests.api_doubles import activate, barrier_board, standing
 from tests.api_doubles import cost_map as engine_cost_map
 from tests.api_schema import check
 from tests.trader_doubles import (
@@ -184,6 +185,7 @@ async def test_the_engine_s_own_cost_map_is_read_and_picked_from(tmp_path: Path)
     baseline fails; the direction, without predictions, has no predictor."""
     async with engine_cost_map(tmp_path) as (engine, client):
         barrier_board(engine.store)
+        activate(engine.store, "alpha")
         async with aiohttp.ClientSession() as session:
             body = await read_cost_map(session, str(client.make_url("")).rstrip("/"))
 
@@ -197,6 +199,25 @@ async def test_the_engine_s_own_cost_map_is_read_and_picked_from(tmp_path: Path)
     verdicts = {(c["kind"], c["role"]): c["verdict"] for c in chosen.considered}
     assert verdicts[("barrier", "baseline")] == "fail"
     assert verdicts[("direction", "top")] is None
+
+
+async def test_an_algorithm_not_active_is_no_cell_of_the_engine_s_cost_map(tmp_path: Path) -> None:
+    """#594: the barrier's alpha, on probation, passes the cost but is not its top: the trader names
+    no cell of it, so neither the nightly fit (``Selection.named``) nor the mock practice
+    (``Selection.practisable``) can take it. The baseline's cell is named as before."""
+    async with engine_cost_map(tmp_path) as (engine, client):
+        barrier_board(engine.store)
+        standing(engine.store, Status.PROBATION, "alpha")
+        async with aiohttp.ClientSession() as session:
+            body = await read_cost_map(session, str(client.make_url("")).rstrip("/"))
+
+    chosen = choose(body)
+
+    assert (chosen.picks, chosen.reason) == ((), NO_PASS)
+    assert {p.predictor for p in chosen.named} == {"barrier-persist"}
+    assert {p.predictor for p in chosen.practisable} == {"barrier-persist"}
+    seen = {(c["kind"], c["role"]): c for c in chosen.considered}
+    assert (seen[("barrier", "top")]["predictor"], seen[("barrier", "top")]["why"]) == (None, "no predictor")
 
 
 # No cell passing.

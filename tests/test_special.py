@@ -82,7 +82,7 @@ async def test_special_predictions_are_left_out_of_the_leaderboard_by_default(tm
 
     async def flat_n(engine: Any, query: str = "") -> int:
         async with api(engine) as client:
-            body = await get_json(client, f"/v1/leaderboard?basis=a{query}")
+            body = await get_json(client, f"/v1/leaderboard{query}")
         [flat] = [b for b in body["baselines"] if b["algorithm"] == "baseline-flat"]
         return int(flat["n"])
 
@@ -90,7 +90,7 @@ async def test_special_predictions_are_left_out_of_the_leaderboard_by_default(tm
     # 09:27–09:30 are special.
     assert await flat_n(without) == 41
     assert await flat_n(with_vi) == 41 - 2 - 4
-    assert await flat_n(with_vi, "&special=include") == 41 - 2
+    assert await flat_n(with_vi, "?special=include") == 41 - 2
 
 
 async def test_a_kospi_drop_of_8_percent_held_a_minute_is_a_circuit_breaker(tmp_path: Path) -> None:

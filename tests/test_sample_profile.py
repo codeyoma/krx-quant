@@ -300,9 +300,10 @@ def test_the_job_runs_the_command_inside_the_night_and_gives_way_to_a_prevalidat
 async def test_on_a_night_that_does_not_trade_it_gives_way_to_a_pre_validation_and_runs_after_it(
     tmp_path: Path,
 ) -> None:
-    """A pre-validation (its last start 00:30) and this job (three hours) both due at 22:30 on a
-    Saturday: this job, run first to its limit, would carry the pre-validation past its last start, so
-    it runs after it (by 02:30). The Friday before trades: it was not due."""
+    """A pre-validation of another kind than the direction (its last start 01:00, #546) and this job
+    (three hours) both due at 22:30 on a Saturday: this job, run first to its limit, would carry the
+    pre-validation past its last start, so it runs after it (by 02:30). The Friday before trades: it
+    was not due. A direction algorithm's (02:30) fits after it: it stays first."""
     clock = FakeClock(at_night(FRIDAY, "22:00"))
     runs = Takes(clock, {"prevalidate kalman": timedelta(hours=1, minutes=50)})
     facts = waiting("kalman", simulating=())
@@ -321,9 +322,29 @@ async def test_on_a_night_that_does_not_trade_it_gives_way_to_a_pre_validation_a
 
     # Another collector, a pre-validation due the same Saturday night: it goes first.
     clock = FakeClock(at_night(A_SATURDAY, "22:00"))
-    runs = Takes(clock, {"prevalidate shannon": timedelta(hours=1, minutes=50)})
+    runs = Takes(clock, {"prevalidate breiman": timedelta(hours=1, minutes=50)})
     async with scheduling(
         tmp_path / "again",
+        clock.now(),
+        [SAMPLE_PROFILE, *PREVALIDATIONS],
+        runs=runs,
+        facts=waiting("breiman", simulating=()),
+        clock=clock,
+    ) as (_, _, told, _):
+        clock.set(at_night(A_SATURDAY, "22:30"))
+        await until(lambda: runs.names() == ["prevalidate breiman"])
+        assert told.saying("sample-profile-512") == [
+            gave_way("sample-profile-512", "prevalidate-breiman", A_SATURDAY, "01:00", "3시간", "02:30", 1)
+        ]
+        clock.set(at_night(A_SATURDAY + timedelta(days=1), "00:20"))
+        await until(lambda: runs.ended == ["prevalidate breiman", "sample-profile"])
+        assert runs.started[1] == ("sample-profile", at_night(A_SATURDAY + timedelta(days=1), "00:20"))
+
+    # A direction algorithm's pre-validation (last start 02:30) still starts after it: it stays first.
+    clock = FakeClock(at_night(A_SATURDAY, "22:00"))
+    runs = Takes(clock, {"sample-profile": timedelta(hours=3)})
+    async with scheduling(
+        tmp_path / "fits",
         clock.now(),
         [SAMPLE_PROFILE, *PREVALIDATIONS],
         runs=runs,
@@ -331,10 +352,7 @@ async def test_on_a_night_that_does_not_trade_it_gives_way_to_a_pre_validation_a
         clock=clock,
     ) as (_, _, told, _):
         clock.set(at_night(A_SATURDAY, "22:30"))
-        await until(lambda: runs.names() == ["prevalidate shannon"])
-        assert told.saying("sample-profile-512") == [
-            gave_way("sample-profile-512", "prevalidate-shannon", A_SATURDAY, "00:30", "3시간", "02:30", 1)
-        ]
-        clock.set(at_night(A_SATURDAY + timedelta(days=1), "00:20"))
-        await until(lambda: runs.ended == ["prevalidate shannon", "sample-profile"])
-        assert runs.started[1] == ("sample-profile", at_night(A_SATURDAY + timedelta(days=1), "00:20"))
+        await until(lambda: runs.names() == ["sample-profile"])
+        clock.set(at_night(A_SATURDAY + timedelta(days=1), "01:30"))
+        await until(lambda: runs.ended == ["sample-profile", "prevalidate shannon"])
+        assert not told.saying("자리를 내준")

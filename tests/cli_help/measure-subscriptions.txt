@@ -1,0 +1,4 @@
+usage: krx-quant measure-subscriptions [-h]
+
+options:
+  -h, --help  show this help message and exit

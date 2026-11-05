@@ -367,7 +367,7 @@ def test_the_command_needs_no_kis_key_and_exits_1_when_no_day_had_rows(
         assert settings.krx_openapi_key == KEY and now.tzinfo is not None
         return next(answers)
 
-    monkeypatch.setattr(cli, "probe_krx_etf", stand_in)
+    monkeypatch.setattr(krx_etf_probe, "probe_krx_etf", stand_in)  # the command imports it as it runs (#578)
     assert cli.main(["probe-krx-etf"]) == 0
     assert cli.main(["probe-krx-etf"]) == 1
 

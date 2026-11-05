@@ -10,12 +10,13 @@ trader depends on nothing more.
 
 **Which cells.** A cell is a (kind, predictor) of the traded kinds (``TRADED_KINDS``) and the cost
 map's three predictors (``ROLES``): the final consensus (the direction's only), the kind's
-first-ranked algorithm, its strongest baseline. Every cell the cost map names is kept with its
-figures (``Selection.named``, a figure the cost map lacks None): the champion's cells trade whatever
-their verdict (#472, ``policy.apply``: the nightly fit judged each on its replayed one-share net). A
-cell whose verdict at a market order's round trip (``verdict.market``) is ``pass`` (its hit rate's
-lower bound above the breakeven p*) is also a pick (``Selection.picks``): what the cost map alone
-would trade, kept as a diagnosis (``no_pass`` when none passes) and no longer a condition.
+first-ranked active algorithm (#594: the cost map names no other), its strongest baseline. Every
+cell the cost map names is kept with its figures (``Selection.named``, a figure the cost map lacks
+None): the champion's cells trade whatever their verdict (#472, ``policy.apply``: the nightly fit
+judged each on its replayed one-share net). A cell whose verdict at a market order's round trip
+(``verdict.market``) is ``pass`` (its hit rate's lower bound above the breakeven p*) is also a pick
+(``Selection.picks``): what the cost map alone would trade, kept as a diagnosis (``no_pass`` when
+none passes) and no longer a condition.
 
 > **바뀜** (2026-11-03, #480): a cell traded only when it passed (``fail``, ``few`` and no verdict
 > never traded), and a pass whose f* was not above 0 was not picked → the cost map's verdict is a

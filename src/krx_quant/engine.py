@@ -2138,16 +2138,16 @@ def _waiting_text(
 ) -> str:
     """The alert of the algorithms ``waiting`` for their pre-validation (#508): who pre-validates them
     and when, as the night's scheduled jobs do (``scheduled/prevalidations.py``: the bar-close ones one
-    a night once ``MIN_DAYS`` trading days are recorded, a daily one on the first night its data is
-    in), and where the result goes. Nothing is asked of anyone."""
+    a night, two on a quiet night (#546), once ``MIN_DAYS`` trading days are recorded, a daily one on
+    the first night its data is in), and where the result goes. Nothing is asked of anyone."""
     from krx_quant.prevalidation import MIN_DAYS  # the pre-validation replays through this module
     from krx_quant.scheduled.prevalidations import PREVALIDATION_ISSUE
 
     when = []
     if any(a not in daily for a in waiting):
         when.append(
-            f"봉 마감 알고리즘은 녹화가 {MIN_DAYS}거래일 이상이면 밤 학습 뒤 예약 작업이 한 밤에 하나씩 "
-            "차례로 검증합니다"
+            f"봉 마감 알고리즘은 녹화가 {MIN_DAYS}거래일 이상이면 밤 학습 뒤 예약 작업이 한 밤에 하나씩"
+            "(시간이 남는 밤에는 둘) 차례로 검증합니다"
         )
     if any(a in daily for a in waiting):
         when.append("하루 한 번 예측 알고리즘은 그 입력과 정답이 다 들어온 첫 밤에 예약 작업이 검증합니다")

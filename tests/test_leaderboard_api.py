@@ -160,31 +160,31 @@ async def test_on_version_3_neither_version_2_s_models_nor_its_labels_count(tmp_
         assert (alpha["n"], alpha["accuracy"]["value"]) == (40, 1.0)
 
 
-async def test_a_screen_from_before_still_sends_a_basis_and_reads_it_back(tmp_path: Path) -> None:
+async def test_a_basis_is_refused_now_that_it_is_gone(tmp_path: Path) -> None:
     """Input: a leaderboard and an algorithm's stats asked with basis=a or basis=b, as the
-    screen before #170 asks (it asks again until the answer's basis is its own). Output: the
-    same stats as without it, on the touch label, with ``basis`` echoed as sent, after
-    ``days``; any other basis is refused."""
+    screen before #170 asked (it asked again until the answer's basis was its own), and with
+    another basis. Output (#592): each refused, saying basis is gone; the answers without it
+    have no basis."""
     async with board(tmp_path, min_sample=1) as (engine, client):
         baselines(engine.store)
         store_scored(engine.store, "alpha", OUTCOMES)
 
         plain = await get(client, "/v1/leaderboard")
-        on_a = await get(client, "/v1/leaderboard?basis=a")
-        on_b = await get(client, "/v1/leaderboard?basis=b")
-        stats_plain = await get(client, "/v1/algorithms/alpha/stats")
-        stats_a = await get(client, "/v1/algorithms/alpha/stats?basis=a")
-        refused = await get(client, "/v1/leaderboard?basis=touch", status=400)
+        stats = await get(client, "/v1/algorithms/alpha/stats")
+        refused = [
+            await get(client, path, status=400)
+            for path in (
+                "/v1/leaderboard?basis=a",
+                "/v1/leaderboard?basis=b",
+                "/v1/leaderboard?basis=touch",
+                "/v1/algorithms/alpha/stats?basis=a",
+                "/v1/algorithms/alpha/stats?basis=b",
+            )
+        ]
 
-    for body, basis in ((on_a, "a"), (on_b, "b")):
-        check("leaderboard", body)
-        assert body["basis"] == basis
-        assert list(body)[: list(body).index("basis") + 1][-2:] == ["days", "basis"]
-        assert {k: v for k, v in body.items() if k != "basis"} == plain
-    check("algorithm_stats", stats_a)
-    assert stats_a["basis"] == "a" and "basis" not in stats_plain
-    assert {k: v for k, v in stats_a.items() if k != "basis"} == stats_plain
-    assert "error" in refused
+    assert "basis" not in plain and "basis" not in stats
+    for body in refused:
+        assert body["error"].startswith("basis is gone"), body
 
 
 # Alpha against always-flat, day by day: right throughout (a gain of 0.5), right at the
@@ -424,7 +424,7 @@ async def test_the_stats_count_what_they_leave_out(tmp_path: Path) -> None:
 async def test_bad_choices_and_unknown_algorithms_are_refused(tmp_path: Path) -> None:
     async with board(tmp_path) as (engine, client):
         store_scored(engine.store, "retired", OUTCOMES[:4], day=EARLIER)
-        for query in ("period=week", "basis=c", "symbol=999999", "special=maybe"):  # basis: a or b only
+        for query in ("period=week", "basis=a", "symbol=999999", "special=maybe"):  # basis: gone (#592)
             assert "error" in await get(client, f"/v1/leaderboard?{query}", status=400)
         assert "error" in await get(client, "/v1/algorithms/einstein/stats", status=404)
         # Known from earlier days: today it simply has nothing.

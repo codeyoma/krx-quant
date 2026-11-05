@@ -246,11 +246,12 @@
 - 시각은 KST ISO 8601 문자열이다(예: `2026-10-12T09:31:00+09:00`).
 - 응답은 UTF-8 JSON이다(`Content-Type: application/json; charset=utf-8`). 사람이 읽기 쉽게 두 칸 들여쓰고, 한글을 `\u` 이스케이프 없이 그대로 보낸다.
 - 오류는 `{"error": "..."}`다. 모르는 종목은 404, 잘못된 `limit`은 400이다.
+- 요청마다의 로그(접근 로그)는 없다. 엔진이 경로 패턴별 요청 수, 상태별 수, 응답 시간 p95, 스트림의 연결 수와 연결 시간을 세어 하루 한 줄로 남긴다(#588, [operations.md](operations.md#엔진-api-요청-수-588)). 클라이언트 주소와 쿼리 값은 남기지 않는다.
 - 쓰기는 `POST /v1/trader/pause` 하나다(#396, 아래). 인증이 없어서(Tailscale 안에서만 열린다) 화면이 할 수 있는 쓰기는 자동 매매 trader의 정지뿐이다. 나머지는 모두 `GET`이다.
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `smt`(날은 `smt_day`, 사건은 `smt_event`, #521), `supply`(항목은 `supply_day`, #226), `algorithms`(항목은 `algorithm`, 상태는 `algorithm_state`, #561), `algorithm_detail`, `leaderboard`, `leaderboard_days`(예측자는 `day_series`, #561), `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. 도전 정책 묶음은 `trader_cohort`, 그 판정은 `trader_cohort_verdict`, #473. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `smt`(날은 `smt_day`, 사건은 `smt_event`, #521), `supply`(항목은 `supply_day`, #226), `algorithms`(항목은 `algorithm`, 상태는 `algorithm_state`, #561), `algorithm_detail`, `leaderboard`, `leaderboard_days`(예측자는 `day_series`, #561), `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_decisions`(장부는 `trader_decision_book`, 합계는 `trader_decision_totals`, 결정은 `trader_decision`, #584), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. 도전 정책 묶음은 `trader_cohort`, 그 판정은 `trader_cohort_verdict`, #473. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭"). 장벽의 것은 `barrier_output`, `barrier_path`, `barrier_stats`다(#183, 아래 "장벽").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
@@ -344,8 +345,6 @@
   "mid_display": 81250.0,
   "mid_target": 81550.0,
   "flat_ticks": 2,
-  "class_a": "up",
-  "class_b": "up",
   "special": false,
   "unscorable": null,
   "scored_at": "2026-10-12T09:35:00.003000+09:00",
@@ -364,7 +363,9 @@
 
 `touch`는 그 봉 마감의 도달 정답이고, 예측은 이것으로 채점한다(#160, #167, #170). 그 봉 마감의 모든 예측이 같은 것을 가진다.
 
-한 릴리스 동안의 호환(#170): `class_a`와 `class_b`에는 둘 다 도달 정답(`touch.class`)이 온다. `unscorable`은 도달 정답이 없을 때 그 이유다(`touch.unscorable`. 그 봉 마감에 도달 정답 행이 아예 없으면 `no touch label`). 정답이 있으면 `null`이다. 그래서 #170 전의 화면도 ✓/✗를 새 정답으로 그린다. `mid_close`, `mid_display`, `mid_target`, `flat_ticks`는 DB에 저장된 옛 값 그대로다. 다음 릴리스에서 `class_a`, `class_b`를 없애고 여기에 적는다. 화면은 `touch`를 읽는다.
+`unscorable`은 도달 정답이 없을 때 그 이유다(`touch.unscorable`. 그 봉 마감에 도달 정답 행이 아예 없으면 `no touch label`이고, 이때 `touch`는 `null`이다). 정답이 있으면 `null`이다. `mid_close`, `mid_display`, `mid_target`, `flat_ticks`는 DB에 저장된 옛 값 그대로다. 화면은 `touch`를 읽는다.
+
+> **삭제됨** (2026-11-06, #595): `class_a`·`class_b`. #170부터 둘 다 도달 정답(`touch.class`)이었다. #170 전의 화면도 ✓/✗를 새 정답으로 그리게 한 릴리스 동안 두었다. 옛 기준 A·B의 클래스는 지금도 DB(`outcomes`)에만 쓴다(위 "옛 기준 A·B"). 이유: #170에서 한 릴리스만 두기로 함, fork는 쓰지 않음(도달 정답 `touch`가 없을 때만 `class_a`를 읽었고, 그때 `class_a`도 `null`이었다). 대신: `touch.class`.
 
 > **바뀜** (2026-10-14, #193): `class_a`·`class_b`는 기준 A·B의 옛 정답 클래스, `unscorable`은 빠진 중간가(`missing mid: target` 등)였다 → 둘 다 도달 정답, 도달 정답이 없는 이유. 옛 값은 DB(`outcomes`)에 남는다. 이유: 앱 업데이트가 엔진보다 늦어도 옛 앱이 새 정답을 보이게(#160 "한 릴리스 동안 호환"). 2026-10-12(녹화 시작)부터의 지난 예측은 엔진이 시작할 때 그날 녹화로 채운다(아래 "지난 예측의 도달 정답"). 채우기 전과 2026-10-12 전에 채점된 예측은 `null`이다.
 
@@ -887,7 +888,9 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `period`: `today`(기본), `5d`, `20d`
 - `special`: `exclude`(기본) 또는 `include`
 - `kind`(#179): `direction`(기본) 또는 엔진이 예측하는 다른 종류(`GET /v1/kinds`). 없거나 `direction`이면 아래 형식 그대로다(방향의 순위표, 지금 응답과 같다). 다른 종류면 그 종류의 순위표다(아래 "예측 종류"의 `/v1/leaderboard?kind=`). 모르는 종류는 400이다.
-- `basis`(한 릴리스 동안만, #170): #170 전의 화면이 보내는 값(`a` 또는 `b`)이다. 받기만 하고 쓰지 않는다. 응답에는 보낸 값을 그대로 `basis`로 돌려준다(`days` 바로 뒤). 옛 화면은 응답의 `basis`가 요청과 다르면 다시 요청하므로, 다르게 돌려주면 끝없이 다시 요청한다. 보내지 않으면 응답에 `basis`가 없다. `a`, `b`가 아닌 값은 400이다. 다음 릴리스에서 없애고 여기에 적는다.
+- `basis`는 받지 않는다. 보내면 값과 상관없이 400이다(#595). 응답에도 `basis`가 없다.
+
+  > **삭제됨** (2026-11-06, #595): 질의 값 `basis`(#170 전의 화면이 보내던 `a` 또는 `b`). 한 릴리스 동안 받기만 하고 쓰지 않았고, 응답의 `days` 바로 뒤에 보낸 값을 그대로 돌려줬다. 옛 화면은 응답의 `basis`가 요청과 다르면 다시 요청해서다. `a`, `b`가 아닌 값은 400이었다. 이유: #170에서 한 릴리스만 두기로 함, fork는 쓰지 않음(fork는 `symbol`, `period`, `special`, `kind`만 보낸다). 대신: 없다. 채점 기준은 도달 정답 하나다. 무시하지 않고 400으로 거절한다: 옛 화면이 남아 있으면 무시된 `basis`를 끝없이 다시 요청하기 때문이다.
 
 잘못된 값은 400이다.
 
@@ -1010,8 +1013,8 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 ### `GET /v1/algorithms/{name}/stats?symbol=&period=&special=`
 
-알고리즘 하나(기준 예측도 된다)의 상세 통계다. 질의 값은 순위표와 같다(`basis`도 순위표처럼 받아서 그대로 돌려준다, #170). 모르는 이름은 404다. 다른 종류의 알고리즘이나 기준 예측이면 그 종류의 통계다(#179, 아래 "예측 종류"). 아래는 방향의 것이다.
-- 맨 위에는 `algorithm`(이름)과 질의 값 `symbol`, `period`, `days`(실제로 쓴 날짜 목록), `special`, 그리고 `min_sample`이 온다. 순위표 응답의 맨 위와 같다. 요청에 `basis`가 있으면 `days` 뒤에 그 값이 온다.
+알고리즘 하나(기준 예측도 된다)의 상세 통계다. 질의 값은 순위표와 같다(`basis`를 보내면 순위표처럼 400이다, #595). 모르는 이름은 404다. 다른 종류의 알고리즘이나 기준 예측이면 그 종류의 통계다(#179, 아래 "예측 종류"). 아래는 방향의 것이다.
+- 맨 위에는 `algorithm`(이름)과 질의 값 `symbol`, `period`, `days`(실제로 쓴 날짜 목록), `special`, 그리고 `min_sample`이 온다. 순위표 응답의 맨 위와 같다. **삭제됨** (2026-11-06, #595): "요청에 `basis`가 있으면 `days` 뒤에 그 값이 온다." 이유: #170에서 한 릴리스만 두기로 함, fork는 쓰지 않음(위 순위표의 `basis`). 대신: 없다. `basis`를 보내면 400이다.
 - `overall`: 같은 질의의 순위표 항목(순위, q값, `excluded` 포함)에 `calibration`과 `calibration_by_class`(`up`, `flat`, `down`)를 더한다. 곡선은 10구간이고, 구간마다 `low`, `high`, `count`, `mean_p`와 `observed`(실제 비율과 Wilson 구간)가 있다.
 - `overall.skill`(#262): 기준율 대비 실력. 예측한 클래스 × 일어난 클래스 표(3 × 3)에서 낸다(`skill.py`). 채점된 예측이 없으면 `null`이다. 상태 판정과 순위에는 쓰지 않고 보여 주기만 한다. 화면은 상세 통계 창의 "기준율 대비 실력" 한 줄로 보인다(codeyoma/FinceptTerminal#85).
   - `n`(채점된 예측 수), `accuracy`(맞힘률), `expected_accuracy`: 같은 비율로 결과와 상관없이 클래스를 냈을 때의 맞힘률 Σ P(그 클래스를 냄)·P(그 클래스가 일어남).
@@ -1034,7 +1037,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 비용 지도다. 상승·하락 신호가 왕복 비용을 갚으려면 얼마나 맞혀야 하는지를, 엔진이 예측하는 지평마다 실제 맞힘률 옆에 놓는다(`cost_map.py`). 지평·비용 화면이 읽는다. 자동 매매 trader도 시작할 때와 매일 08:30에 `?symbol=005930&period=20d&special=exclude`로 읽는다(#395, 설계 [14장](design.md#14-자동-매매-393) "칸"): 방향과 4·15·30분 장벽 줄의 세 예측자의 이름과 수치. 밤 정책 맞추기는 그 이름이 있는 칸 모두를 녹화로 재생해 실행 손익의 하한으로 고르고(#472), trader는 챔피언 정책의 칸을 판정과 상관없이 산다. **바뀜** (2026-11-03, #480): trader는 `verdict.market`이 `pass`인 칸만 매매했다 → 판정은 진단이다. 이유: spec #468 3절 "진입". 리서치의 결론(`research/reports/`)이 바탕이다: 대칭 목표 ±W틱, 왕복 비용 C틱이면 P(상승|신호) − P(하락|신호) ≥ C/W여야 본전이고, 맞힘률로 말하면 p* = (W + C) ÷ 2W를 넘어야 한다. W < C면 다 맞혀도 손해다.
 
-질의 값은 순위표와 같다(`symbol`, `period`, `special`. `kind`와 `basis`는 받지 않는다). 잘못된 값은 400이다. `symbol`을 빼면(`all`) 모든 종목이다.
+질의 값은 순위표와 같다(`symbol`, `period`, `special`. `kind`는 받지 않는다. `basis`는 순위표처럼 400이다). 잘못된 값은 400이다. `symbol`을 빼면(`all`) 모든 종목이다. **바뀜** (2026-11-06, #595): `basis`가 `a`, `b`면 받고 쓰지 않았다 → 400. 이유: 순위표의 `basis`를 없앴다.
 
 ```json
 {
@@ -1098,7 +1101,9 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `breakeven`: 대칭 ±W 정답(방향의 도달 정답, 장벽)이면 비용마다 `c_over_w`(C/W)와 `p_star`(p* = (W + C) ÷ 2W)다. 신호가 맞을 확률 p, 반대로 틀릴 확률 q면 평균 총이익이 W(p − q)다. 셋째 결과(보합, 시간 만료)가 없으면 q = 1 − p라 p ≥ p*가 본전이고, 있으면 q < 1 − p라 p ≥ p*면 넉넉히 본전이다. p*가 1을 넘으면 다 맞혀도 손해다. 시가→종가는 `null`이고 이유가 `breakeven_missing`에 온다("대칭 장벽이 아님": 보합 폭은 거래를 닫는 자리가 아니다). 폭이 없으면 "폭을 읽을 정답이 없음"이다.
 - `consensus`, `top`, `baseline`: 세 예측자. 없으면 `null`이다.
   - `consensus`: 최종 합의(`consensus-final`). 방향에만 있다. 다른 종류에는 합의가 없다.
-  - `top`: 그 종류 순위표의 순위가 가장 높은 알고리즘(합의 둘은 뺀다).
+  - `top`: 그 종류 순위표에서 지금 상태가 active인 알고리즘 가운데 순위가 가장 높은 것이다(합의 둘은 뺀다, #594). 순위에 active 알고리즘이 없으면 `null`이다. `rank`는 순위표의 순위 그대로다. 그래서 앞에 active가 아닌 알고리즘이 있으면 1이 아니다. 상태는 물을 때마다 읽는다(`lifecycle.Status`). 다른 프로세스가 바꾼 상태(`krx-quant retire`)도 다음 물음에 든다: 줄은 그때 active인 알고리즘들과 함께 계산해 둔다.
+
+    > **바뀜** (2026-11-06, #596): 상태와 상관없이 순위가 가장 높은 알고리즘이었다 → active 알고리즘 가운데 순위가 가장 높은 것. 이유: trader가 이 이름으로 칸을 만들고, 밤 정책 맞추기가 그 칸을 모두 시험하며, mock 연습 칸도 그 가운데서 고른다. 셋 다 상태를 보지 않아서, 수습·clone·bench·retired 알고리즘이 lifecycle의 판정(기준 예측 대비 lift 하한)을 거치지 않고 매매 후보가 됐다(#594).
   - `baseline`: 그 종류 기준 예측 가운데 상승·하락 신호 맞힘률의 신뢰구간 하한이 가장 높은 것(같으면 이름순 앞). 늘 보합처럼 신호를 내지 않는 기준 예측은 고르지 않는다.
 - 예측자마다:
   - `precision`: 상승·하락 신호의 맞힘률과 Wilson 95% 구간. 순위표·상세 통계의 `precision`과 같은 값이다(같은 통계 함수, 같은 질의).
@@ -1422,7 +1427,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 |---|---|---|
 | `prediction` | 예측이 저장(표시)될 때. 기준 예측(4종, 버전 1은 3종)은 한 번에, 알고리즘은 각자 끝났을 때 | `bar_close`, `predictions`(항목은 `latest`의 예측 항목에 `symbol`을 더한 것) |
 | `consensus` | 합의가 저장될 때 | `kind`(`fast`, `final`), `bar_close`, `predictions`(합의 예측, 종목마다 하나) |
-| `outcome` | 예측이 채점될 때(봉 마감 4분 뒤) | `outcomes`(채점된 예측. 항목 형식은 같고 `outcome`이 찬다. `outcome`의 `class_a`·`class_b`도 REST처럼 도달 정답이다, #170) |
+| `outcome` | 예측이 채점될 때(봉 마감 4분 뒤) | `outcomes`(채점된 예측. 항목 형식은 같고 `outcome`이 찬다). **삭제됨** (2026-11-06, #595): `outcome`의 `class_a`·`class_b`(REST처럼 도달 정답이었다, #170). 이유: REST와 같다. 대신: `outcome.touch.class` |
 | `health` | 연결하자마자 한 번, 그리고 KIS 연결이나 피드의 결측 구간이 바뀔 때 | `kis`(`/v1/status`의 `kis`와 같다). 실시간과 데모만. 지연 초(`seconds_since`, `seconds_since_frame`)나 `last_frame_at`, 필드가 모자란 프레임 수(`short_frames`, #381), REST 조회의 수(`polls`, #441)가 바뀐 것만으로는 보내지 않는다 |
 | `lifecycle` | 알고리즘 상태가 바뀔 때. 일일 점검, 다른 프로세스의 `retire`·`unretire` 명령과 수습 시뮬레이션(#298). 엔진이 시작할 때의 처음 등록은 스트림이 열리기 전이라 오지 않는다 | `algorithm`, `change`(`at`, `from`, `to`, `reason`, `simulated`: `/v1/algorithms`의 상태 이력 항목과 같다). 수습 시뮬레이션(#298)의 판정은 다른 프로세스(`krx-quant simulate`)가 쓰므로 그 상태 변경도 이것으로 온다(`simulated` `true`). 시뮬레이션 예측 자체는 스트림으로 보내지 않는다 |
 | `bar` (#110) | 종목의 지금 만들어지는 1분봉이 바뀌었을 때. 1초마다 살펴 종목마다 많아야 한 번, 그사이 마지막 값으로 보낸다. 바뀌지 않으면 보내지 않는다 | `symbol`, `bar`(`start`, `open`, `high`, `low`, `close`, `volume`, `trades`: `/v1/symbols/{symbol}/bars`의 봉과 같은 형식. 그날 시작한 가장 최근 봉이라, 새 분에 체결이 아직 없으면 끝난 앞 봉이 그대로다) |
@@ -1671,6 +1676,51 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 
   > **바뀜** (2026-10-30, #413): `exit_reason`은 `take_profit`, `stop_loss`, `time`이었다 → 정지와 손실 한도의 매도(`pause`, `daily_limit`, `cumulative_limit`)도 있다. 이유: 한도와 화면의 정지가 열린 포지션을 바로 판다(#396).
 - 데모 엔진(`krx-quant demo-engine`)에는 005930의 지어낸 매매가 있다: 10-07·10-08 오후와 10-12 아침(10:05까지 모의, 그 뒤 실전). 아침의 마지막 매매는 10:30에 아직 들고 있다. 데모의 호가로 모의 체결 규칙대로 채웠다(`demo.write_demo_trader`). 속도를 준 데모(`--pace`)도 처음부터 아침의 모든 매매를 주고, 화면은 그 봉이 온 뒤에 표시한다.
+
+### `GET /v1/trader/decisions?day=YYYY-MM-DD&book=B&before=T&limit=N` (#584)
+
+자동 매매 trader(설계 [14장](design.md#14-자동-매매-393))의 장부들이 그날 읽은 칸의 예측마다 한 일을 trader의 저장소(`state/trader.sqlite3`의 `decisions`)에서 읽기만 해서 준다(`trader/decisions.py`). 산 것과 사지 않았으면 그 이유(설계 14장 "진입"), 그때의 오름 확률과 θ·p*, 엔진이 그 예측에 정답을 냈으면 그 정답이다. 그날의 장부마다 이유별 합계도 준다. 밤 리포트(#402)로만 전해지던 결정과 그 이유를 화면이 낮에도 읽게 하려고 더했다. 가격은 주지 않는다(기준가, 틱, 목표가, 손절가, 호가, 체결가가 없다).
+
+- `day`: 결정한 날(KST, 결정 시각의 날짜). 기본은 엔진의 오늘이다.
+- `book`: 이 장부만 준다. `champion`, `practice`, `shadow`, `challenger`(아래). 없으면 그날 결정한 모든 장부를 따로따로 준다.
+- `limit`(1–1000, 기본 100), `before`: 장부마다 늦게 결정한 것부터 N개, `before`가 있으면 그 시각 전에 결정한 것이다. 쪽의 마지막 결정과 같은 시각의 결정이 더 있으면 `limit`을 넘어도 그 쪽에 모두 넣는다(`trader-marks`와 같다). 그래서 다음 쪽을 그 시각 앞(`before` = 이 쪽 마지막 결정의 `decided_at`)으로 읽으면 빠지는 결정이 없다.
+- 저장소가 없거나 그날 결정이 없으면 `books`가 `[]`다. 저장소가 없으면 만들지 않는다. 잘못된 `day`, `book`, `limit`, `before`는 400이다. 스키마는 `trader_decisions`(장부는 `trader_decision_book`, 합계는 `trader_decision_totals`, 결정은 `trader_decision`)다.
+- 읽기는 이벤트 루프 밖에서 한다. trader 저장소와 엔진 DB(`state/engine.sqlite3`, 정답) 모두 읽기 전용(`mode=ro`)으로 연다.
+
+```json
+{"day": "2026-10-14", "book": null, "books": [
+  {"book": "practice", "mode": "mock", "policy": null,
+   "totals": {"decisions": 300, "bought": 18, "waiting": 0, "unfilled": {"no_quote": 2},
+              "skipped": {"not_up": 230, "buy_limit": 30, "cooldown": 15, "holding": 5}},
+   "decisions": [{"id": 912, "decided_at": "2026-10-14T15:10:02.300000+09:00", "symbol": "005930",
+                  "kind": "barrier", "predictor": "breiman", "prediction_id": 4321,
+                  "bar_close": "2026-10-14T15:10:00+09:00", "displayed_at": "2026-10-14T15:10:02.100000+09:00",
+                  "probability": 0.41, "threshold": 0.6, "p_star": 0.58, "action": "skip", "reason": "not_up",
+                  "trade_id": null, "answer": "flat", "right": false}],
+   "more": true}]}
+```
+
+(값은 지어낸 예다.)
+
+- `books[]`: 장부 하나다. 장부는 섞지 않는다. 밤 리포트의 출처별 표(#560)와 같은 갈래로, 결정의 모드, 정책, 그 결정이 따른 고르기로 가른다.
+  - `champion`: 챔피언의 장부. trader 자신의 장부로, 한도가 세고 차트가 표시하는 매매를 낸다. trader가 돈 모드(`paper`, `mock`, `live`)의 결정이고, 챔피언 정책 아래의 것이다(첫 챔피언 전에는 정책이 없다).
+  - `practice`(#427): mock 장부가 연습 칸을 고른 동안(`selections.practice`) 읽은 예측이다. 정책이 없어 `policy`는 `null`이다(저장소의 결정에는 그때의 챔피언 버전이 남아 있다).
+  - `shadow`(#405): mock·live에서 KIS 장부 옆에서 챔피언 정책을 모의로 체결하는 그림자 장부다(`mode` `paper`). trader가 그때 mock이나 live로 시작해 있던(`runs`) 동안의 paper 결정 가운데 챔피언 정책(첫 챔피언 전에는 정책 없음)의 것이다.
+  - `challenger`(#400): 도전 정책의 모의 장부. 정책마다 따로 나온다. paper 결정 가운데, 그 결정이 따른 고르기를 한 때 챔피언이 아니던 정책(`champions`)의 것이다. 결정한 때가 아니라 고르기의 때로 가른다. 장부는 고르기에서만 챔피언을 읽기 때문이다. 그래서 승격한 밤 뒤 아침 고르기(08:30) 전에 챔피언 장부가 한 결정은 전날 챔피언의 것이고, 승격된 도전 정책이 그 고르기에서 물러나며 남긴 결정(`not_picked`)은 도전 정책의 것이다.
+  - 연습 그림자(#427부터 #548 전까지 연습 칸을 모의로 체결한 장부)의 결정은 어느 장부에도 넣지 않는다.
+  - 한 장부는 한 모드, 한 정책이다. 그날 다른 모드로 다시 시작했으면 둘로 나온다. 순서는 챔피언, 연습, 그림자, 도전 정책(버전 순)이고, 같은 장부는 정책 버전 순, 모드는 `paper`, `mock`, `live` 순이다.
+- `mode`, `policy`: 그 장부의 결정의 모드와 정책 버전(`GET /v1/trader/policies`의 `version`).
+- `totals`: 그 장부의 그날 결정 모두의 합계다(쪽의 것만이 아니다). 결정 수(`decisions`), 체결해 매매가 된 매수(`bought`), 아직 호가를 기다리는 매수(`waiting`), 체결하지 못한 매수의 이유별 수(`unfilled`: `no_quote`, `target_reached`, `no_shares`, `restarted` 등), 건너뛴 결정의 이유별 수(`skipped`: `not_up`, `below_threshold`, `buy_limit`, `cooldown`, `holding` 등). 이유는 많은 것부터다.
+- `more`: 이 쪽보다 앞서 결정한 것이 그날 더 있으면 참이다.
+- `decisions[]`: 결정 하나다.
+  - `id`: 저장소의 결정 id. `decided_at`: 결정한 때(trader가 읽은 때. 같은 봉 마감의 순위가 더 높은 칸을 기다렸으면 정한 때).
+  - `kind`, `predictor`, `prediction_id`, `bar_close`, `displayed_at`: 그 예측. 엔진 DB의 예측 id(방향은 `predictions.id`, 다른 종류는 `kind_predictions.id`), 봉 마감, 엔진이 표시한 때다.
+  - `probability`: 그 예측의 오름 확률(방향 `p_up`, 장벽 `p_up_first`). 예측이 없으면(`not_ok` 등) `null`이다.
+  - `threshold`, `p_star`: 그 결정이 따른 고르기에서 그 칸의 θ와 p*(시장가 왕복의 손익분기 맞힘률)다. 챔피언 정책과 도전 정책의 칸은 그 정책의 θ, 연습 칸은 그 검토 주기에 고정한 θ(#474)다. θ가 없는 고르기(#474 전의 연습 칸)는 trader가 그때 시작하며 남긴 `KRX_TRADER_THRESHOLD`(`runs`)이고, 남기지 않았으면 `null`이다. 고르기에 없는 칸(`not_picked`)과 첫 고르기 전의 결정은 둘 다 `null`이다.
+  - `action`: `buy` 또는 `skip`. `reason`: 건너뛴 이유, 또는 산 것이 체결하지 못한 이유다. 체결했거나 아직 호가를 기다리면 `null`이다. 이유의 뜻은 설계 14장 "진입"에 있다.
+  - `trade_id`: 체결했으면 그 매매(`GET /v1/trader/trades`의 `id`), 아니면 `null`.
+  - `answer`, `right`: 엔진이 그 예측에 낸 정답이다(밤 리포트 #560과 같은 `replay.day_answers`: 방향은 도달 정답, 다른 종류는 그 정답 버전의 것). `answer`는 `up`(그 종류의 오름: 방향 `up`, 장벽 `up_first`), `flat`(가운데: 방향 `flat`, 장벽 `timeout`), `down`(내림)이다. `right`는 오름이 왔는지다. trader는 오름에 걸고 사니, 산 결정이면 맞게 산 것이다(#560 리포트의 "맞음"). 건너뛴 결정이면 놓친 오름인지를 본다. 정답이 아직 없거나 엔진 DB를 읽지 못하면 둘 다 `null`이다.
+- 데모 엔진: 매매마다 그 사기 결정만 있다(건너뛴 결정은 없다). 고르기를 지어내지 않아 `threshold`와 `p_star`가 `null`이고, 데모의 엔진 DB는 `state/engine.sqlite3`가 아니어서 `answer`도 `null`이다. 10-12는 챔피언 장부 둘(10:05까지 `paper`, 그 뒤 `live`)과 도전 정책 2의 장부가 나온다.
 
 ### `GET /v1/trader/policies?limit=N` (#399)
 
@@ -2895,7 +2945,7 @@ docker compose run --rm --no-deps engine normal-order --days 5   # 빨리 훑어
 ### 확률 과정 넷 (#518)
 
 사용자가 2026-11-04 "주식 미분 방정식, 확률 딥러닝, 기하 브라운 운동, 몬테카를로"를 새 인물로 4분 분석에 적용하자고 했다. 방향 알고리즘 넷이다: `samuelson`(기하 브라운 운동), `ito`(확률미분방정식), `ulam`(몬테카를로), `bishop`(혼합 밀도 신경망). 공통점:
-- 등록: `neyman` 뒤에 이 순서로(가벼운 것부터. CPU 예산이 모자라면 `bishop`부터 건너뛴다). 사전 검증이 생긴 뒤에 등록되어, 사전 검증을 통과해야 수습으로 돈다(위 "사전 검증"). 예약 작업이 `neyman` 다음, 지평 사다리의 Breiman 셋 앞에 한 밤에 하나씩 돌린다(#204).
+- 등록: `neyman` 뒤에 이 순서로(가벼운 것부터. CPU 예산이 모자라면 `bishop`부터 건너뛴다). 사전 검증이 생긴 뒤에 등록되어, 사전 검증을 통과해야 수습으로 돈다(위 "사전 검증"). 예약 작업이 `neyman` 다음, 지평 사다리의 Breiman 셋 앞에 한 밤에 하나씩(조용한 밤에는 둘, #546) 돌린다(#204).
 - 고유 피처는 위 "피처" 표의 `session_drift`부터 `minute_volumes`까지 아홉이다(`features.STOCHASTIC_FEATURES`). 모두 그날 1분봉으로 만들어 백필 날에도 있다. Turing, Neyman, Breiman들은 읽지 않는다(위 "Turing").
 - 학습 구간은 넷 다 20거래일이다. 새 열 피처는 최근 30분만 둔다(밤 학습의 메모리).
 - 도달 정답의 세 확률을 정답의 순서대로 낸다(위 "공통 정규분포 함수"의 "정답의 순서대로"). 끝점 정답(버전 1)이면 끝나는 자리의 확률이다.
@@ -2988,7 +3038,7 @@ docker compose run --rm --no-deps engine normal-order --days 5   # 빨리 훑어
 - 학습: 최근 20거래일의 그 종류 정답(H분 창. 녹화된 날은 호가, 1분봉만 있는 날은 H분 봉의 1분봉 규칙)이다. 창이 종가 단일가 시작을 넘는 봉 마감은 정답이 없어 표본도 없다. 모델 버전은 `breiman-15m-<마지막 날>-<해시>`, 기본 모델은 `breiman-15m-default`(1/3씩) 같은 식이고, 모델 파일은 `state/models/breiman-15m.json` 등이다.
 - 카드의 캐릭터는 `트리 앙상블 (장벽 15분)` 같은 식이고, 논리와 학습 설명이 그 분을 말한다.
 - 예(손계산, `tests/test_breiman.py`): 종가가 늘 81,200원이고 09:31 봉만 79,900–82,500원인 1분봉 날에 15분 장벽(w = k)은 09:31이 창에 든 15개 봉 마감(09:17–09:31)이 같은 분에 두 장벽에 닿아 클래스가 없고, 표본은 15:05까지다.
-- 사전 검증과 수습: 사전 검증이 생긴 뒤에 등록되었다. 예약 작업이 기다리는 다섯, `neyman`, 확률 과정 넷(#518) 다음에 `breiman-15m`, `breiman-30m`, `breiman-60m` 순서로 한 밤에 하나씩 돌린다(#204).
+- 사전 검증과 수습: 사전 검증이 생긴 뒤에 등록되었다. 예약 작업이 기다리는 다섯, `neyman`, 확률 과정 넷(#518) 다음에 `breiman-15m`, `breiman-30m`, `breiman-60m` 순서로 한 밤에 하나씩(조용한 밤에는 둘, #546) 돌린다(#204).
 
   > **바뀜** (2026-11-04, #525): "기다리는 다섯과 `neyman` 다음" → 그 뒤 확률 과정 넷(`samuelson`, `ito`, `ulam`, `bishop`)도 먼저다. 이유: 방향 알고리즘이 다른 종류보다 앞에 등록되고, 그 넷이 방향 알고리즘으로 등록되었다(#518). 제한 시간은 `breiman`처럼 6시간이다. lift는 그 종류의 `barrier-climate-<H>m`, `barrier-persist-<H>m` 대비다. 통과하면 다음 봉 마감부터 수습이다.
 

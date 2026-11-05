@@ -803,8 +803,10 @@ def _judge_bar_close(
 
 
 def _live_rows(store: PredictionStore, kind: Kind | None) -> Rows:
-    """The live scored predictions of ``kind`` (None: the direction's), as the reviews read them."""
+    """The live scored predictions of ``kind`` (None: the direction's), as the reviews read them:
+    the fields they judge by (#546, ``PredictionStore.reviewed``, ``kind_reviewed``), as the
+    engine's reviews read them since #487."""
     if kind is None:
-        return lambda chosen, special: store.scored_predictions(chosen, None, special)
+        return lambda chosen, special: store.reviewed(chosen, special)
     name, version = kind.name, kind.answer_version
-    return lambda chosen, special: store.kind_scored(name, version, chosen, None, special)
+    return lambda chosen, special: store.kind_reviewed(name, version, chosen, special)
