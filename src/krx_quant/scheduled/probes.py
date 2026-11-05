@@ -151,21 +151,25 @@ RECORDING_QUALITY = Job(
 # thread (#589, ``Dockerfile``), against the five trading days before (``bar_close_times.py``): each bar
 # close's first record, final consensus and last record, each algorithm's time after the first record,
 # the engine's ``loop_held`` runs (from this deploy on; Loki has the days before) and the trader's quote
-# stalls. Once, on the first trading night after the deploy that brings it; after a failure, again on
-# other code. It reads the engine's and the trader's databases only, in seconds on a server-sized day;
-# five minutes is a bound. Its output holds dates, counts and seconds, no price.
+# stalls. On the first trading night after the deploy that brings it, of that night's day
+# (``--tonight``): never an earlier day's predictions, which ran before the deploy. A run that fails (that
+# day has no predictions, the engine was down) runs again the next trading night, on the same code too,
+# until one ends ok. It reads the engine's and the trader's databases only, in seconds on a server-sized
+# day; five minutes is a bound. Its output holds dates, counts and seconds, no price.
 BLAS_THREADS_ISSUE = 589
 
 
-def _first_bar_close_times(night: Night) -> bool:
-    """On the first trading night (after a failure, again on other code)."""
-    return night.trading_day and _again_on_other_code(night)
+def _bar_close_times_due(night: Night) -> bool:
+    """On trading nights until a run ends ok: the first, and after a failure the next (not the night it
+    failed on)."""
+    record = night.record
+    return night.trading_day and (record is None or (record.outcome != OK and record.day != night.day))
 
 
 BAR_CLOSE_TIMES = Job(
     name="bar-close-times-589",
-    due=_first_bar_close_times,
-    command=("bar-close-times",),
+    due=_bar_close_times_due,
+    command=("bar-close-times", "--tonight"),
     timeout=timedelta(minutes=5),
     targets=(
         Target(

@@ -17,9 +17,14 @@ What it reads:
 - The engine's ``loop_held`` runs (``loop_watch.LOOP_HELD``): each bar close that held the event
   loop over a second, the WARNING's ``held the event loop`` line. The engine keeps them from #589
   on; for the days before, Loki has the lines.
-- The trader's stalls (``stalls``, #407): each time its quotes stopped for more than 5 s.
+- The trader's stalls (``stalls``, #407): each time its quotes stopped for more than 5 s, from the
+  last quote before it to the first after. One not ended yet (the quotes did not come back, or the
+  trader stopped and has not started since) is told apart, with its time up to now.
 
-Its output holds dates, counts and seconds only, no price. Exit 1 when the day has no predictions.
+The job runs it with ``--tonight``: the day is the night's own (the clock's date, or the one before
+it until 06:00), never an earlier day with predictions; a night on which that day has none fails, and
+the job runs again the next trading night. Its output holds dates, counts and seconds only, no price.
+Exit 1 when the day has no predictions.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ from krx_quant.predictions import DB_NAME, read_only
 from krx_quant.trader.store import DB_NAME as TRADER_DB_NAME
 
 DAYS_BEFORE = 5  # the trading days before the day it is compared with
+NIGHT_ENDS = time(6)  # a night's day goes on until then, the next morning (``tonight``)
 VI = "vi"
 LATE = ("timed_out", "error")  # statuses counted apart
 
@@ -87,7 +93,8 @@ class Day:
     last: list[float] = field(default_factory=list)  # its last record, after it
     algorithms: dict[str, list[float]] = field(default_factory=lambda: defaultdict(list))
     late: Counter[str] = field(default_factory=Counter)  # bar closes it timed out or failed at, by name
-    stalls: list[float] = field(default_factory=list)  # the trader's quote gaps, in seconds
+    stalls: list[float] = field(default_factory=list)  # the trader's quote gaps that ended, in seconds
+    open_stalls: list[float] = field(default_factory=list)  # those not ended: seconds up to now
     held: list[Held] = field(default_factory=list)
 
 
@@ -134,8 +141,9 @@ def read_day(
     day: date,
     algorithms: Iterable[str],
     kind_algorithms: Iterable[str],
+    now: datetime,
 ) -> Day:
-    """What the stores hold of ``day``'s bar closes."""
+    """What the stores hold of ``day``'s bar closes; a stall not ended counts up to ``now``."""
     timed = set(algorithms) | set(kind_algorithms)
     found = Day(day)
     by_close: dict[str, list[tuple[str, datetime, str]]] = defaultdict(list)
@@ -172,8 +180,10 @@ def read_day(
             (start, end),
         ):
             since = datetime.fromisoformat(last_quote or began)
-            until = datetime.fromisoformat(ended or began)
-            found.stalls.append((until - since).total_seconds())
+            if ended is None:
+                found.open_stalls.append((now - since).total_seconds())
+            else:
+                found.stalls.append((datetime.fromisoformat(ended) - since).total_seconds())
     return found
 
 
@@ -190,9 +200,10 @@ def _held_text(day: Day) -> str:
 
 
 def _stalls_text(day: Day) -> str:
-    if not day.stalls:
-        return "호가 끊김 0번"
-    return f"호가 끊김 {len(day.stalls)}번(가장 긴 {max(day.stalls):.1f}초)"
+    text = f"호가 끊김 {len(day.stalls)}번" + (f"(가장 긴 {max(day.stalls):.1f}초)" if day.stalls else "")
+    if day.open_stalls:
+        text += f", 끝나지 않은 끊김 {len(day.open_stalls)}번(지금까지 가장 긴 {max(day.open_stalls):.0f}초)"
+    return text
 
 
 def render(day: Day, before: Sequence[Day], algorithms: Sequence[str]) -> str:
@@ -234,6 +245,13 @@ def render(day: Day, before: Sequence[Day], algorithms: Sequence[str]) -> str:
     return "\n".join(lines)
 
 
+def tonight(now: datetime) -> date:
+    """The day of the night ``now`` is in (the scheduled jobs run from 22:30 to 05:30): the clock's
+    date, or the one before it until 06:00."""
+    at = now.astimezone(KST)
+    return at.date() - timedelta(days=1) if at.time() < NIGHT_ENDS else at.date()
+
+
 def bar_close_times(
     settings: Settings,
     now: datetime,
@@ -241,7 +259,7 @@ def bar_close_times(
     days_before: int = DAYS_BEFORE,
 ) -> tuple[str, int]:
     """The report of ``day`` (default: the latest day with predictions, through today), and the exit
-    code: 1 when that day has no predictions."""
+    code: 1 when there are none, or none of ``day`` when it is given."""
     from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS
 
     names = [a.name for a in ALGORITHMS]
@@ -251,8 +269,10 @@ def bar_close_times(
         if db is None:
             return "봉 마감 시간 (#589): 엔진 DB가 없다", 1
         days = _days(db, through, days_before + 1)
-        if not days or (day is not None and days[-1] != day):
+        if day is not None and (not days or days[-1] != day):
+            return f"봉 마감 시간 (#589): {day}의 예측이 없다", 1
+        if not days:
             return f"봉 마감 시간 (#589): {through}까지 예측이 없다", 1
         with read_only(settings.state_dir / TRADER_DB_NAME) as trader:
-            read = [read_day(db, trader, d, names, kind_names) for d in days]
+            read = [read_day(db, trader, d, names, kind_names, now) for d in days]
     return render(read[-1], read[:-1], [*names, *kind_names]), 0

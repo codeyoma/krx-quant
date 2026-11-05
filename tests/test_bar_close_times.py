@@ -5,14 +5,14 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
-from krx_quant.bar_close_times import bar_close_times
+from krx_quant.bar_close_times import bar_close_times, tonight
 from krx_quant.baselines import Forecast
 from krx_quant.config import Settings
 from krx_quant.consensus import FINAL
 from krx_quant.feeds import KST
 from krx_quant.loop_watch import LOOP_HELD, held_detail
 from krx_quant.predictions import DB_NAME, NewKindPrediction, NewPrediction, PredictionStore
-from krx_quant.scheduled import BAR_CLOSE_TIMES, FAILED, OK, Facts, JobRecord, Night
+from krx_quant.scheduled import BAR_CLOSE_TIMES, FAILED, INTERRUPTED, OK, Facts, JobRecord, Night
 from krx_quant.trader.store import DB_NAME as TRADER_DB_NAME
 from krx_quant.trader.store import TraderStore
 
@@ -114,6 +114,26 @@ def test_the_report_compares_the_day_s_bar_closes_with_the_days_before(tmp_path:
     assert lines[-1] == "가장 큰 단계: records 1번"
 
 
+def test_an_open_stall_is_told_apart_with_its_time_up_to_now(tmp_path: Path) -> None:
+    """Input: on the day, a stall that ended after 6 s and one from 10:30 that has not ended, read at
+    13:30. Output: one stall of 6.0 s, and one not ended, three hours up to now: not its 5 s of
+    detection."""
+    store = PredictionStore(tmp_path / DB_NAME)
+    bar_close(store, close(DAY, 0), ito=0.01, last=0.3)
+    store.close()
+    trader = TraderStore(tmp_path / TRADER_DB_NAME)
+    quote = close(DAY, 0) - timedelta(seconds=1)
+    ended = trader.add_stall("mock", quote + timedelta(seconds=5), quote)
+    trader.end_stall(ended.id, quote + timedelta(seconds=6), "quote")
+    last = close(DAY, 30)
+    trader.add_stall("mock", last + timedelta(seconds=5), last)
+
+    report, code = bar_close_times(settings(tmp_path), datetime.combine(DAY, time(13, 30), KST))
+
+    assert code == 0
+    assert "호가 끊김 1번(가장 긴 6.0초), 끝나지 않은 끊김 1번(지금까지 가장 긴 10800초)" in report
+
+
 def test_a_day_without_predictions_fails(tmp_path: Path) -> None:
     """Input: no engine DB, then one with a day before only, asked for the day. Output: exit 1 both
     times, saying why."""
@@ -125,22 +145,49 @@ def test_a_day_without_predictions_fails(tmp_path: Path) -> None:
     report, code = bar_close_times(settings(tmp_path), datetime.combine(DAY, time(22, 40), KST), day=DAY)
 
     assert code == 1
-    assert report == f"봉 마감 시간 (#589): {DAY}까지 예측이 없다"
+    assert report == f"봉 마감 시간 (#589): {DAY}의 예측이 없다"
 
 
-def night(day: date, trading: bool, record: JobRecord | None, commit: str = "c2") -> Night:
+def test_the_job_reads_its_own_night_s_day_never_an_earlier_one(tmp_path: Path) -> None:
+    """Input: predictions on a day before only; the job's run on the day's night, at 22:40 and after
+    midnight. Output: tonight is the day both times, and the run fails: the predictions before the
+    deploy are not its evidence. Once the day has predictions, it reports the day."""
+    late, after_midnight = datetime.combine(DAY, time(22, 40), KST), datetime.combine(DAY, time(23), KST)
+    after_midnight += timedelta(hours=3)
+    assert tonight(late) == tonight(after_midnight) == DAY
+    assert tonight(datetime.combine(DAY, time(6), KST)) == DAY
+    store = PredictionStore(tmp_path / DB_NAME)
+    bar_close(store, close(BEFORE, 0), ito=0.5, last=0.9)
+
+    assert bar_close_times(settings(tmp_path), late, tonight(late)) == (
+        f"봉 마감 시간 (#589): {DAY}의 예측이 없다",
+        1,
+    )
+    bar_close(store, close(DAY, 0), ito=0.01, last=0.3)
+    store.close()
+    report, code = bar_close_times(settings(tmp_path), after_midnight, tonight(after_midnight))
+    assert code == 0 and report.startswith(f"봉 마감 시간 (#589) · {DAY}, 앞 거래일 1일")
+    assert BAR_CLOSE_TIMES.command == ("bar-close-times", "--tonight")
+
+
+def night(day: date, trading: bool, record: JobRecord | None, commit: str = "c1") -> Night:
     return Night(day, trading, commit, record, {}, Facts())
 
 
-def test_the_job_runs_once_on_the_first_trading_night_and_again_on_other_code_after_a_failure() -> None:
+def test_the_job_runs_on_trading_nights_until_a_run_ends_ok() -> None:
+    """The first trading night; after a failure or a cut run, the next trading night on the same code
+    too, not the night it failed on; never after a run that ended ok."""
     started = datetime.combine(DAY, time(22, 40), KST)
     ran = JobRecord(DAY, OK, started, "c1", exit_code=0)
     failed = JobRecord(DAY, FAILED, started, "c1", exit_code=1)
+    cut = JobRecord(DAY, INTERRUPTED, started, "c1")
+    tuesday = DAY + timedelta(days=1)
 
     assert not BAR_CLOSE_TIMES.due(night(date(2026, 11, 7), False, None))
     assert BAR_CLOSE_TIMES.due(night(DAY, True, None))
-    assert not BAR_CLOSE_TIMES.due(night(DAY + timedelta(days=1), True, ran))
-    assert not BAR_CLOSE_TIMES.due(night(DAY + timedelta(days=1), True, failed, commit="c1"))
-    assert BAR_CLOSE_TIMES.due(night(DAY + timedelta(days=1), True, failed))
-    assert BAR_CLOSE_TIMES.command == ("bar-close-times",)
+    assert not BAR_CLOSE_TIMES.due(night(DAY, True, failed))
+    assert BAR_CLOSE_TIMES.due(night(tuesday, True, failed))
+    assert BAR_CLOSE_TIMES.due(night(tuesday, True, cut))
+    assert not BAR_CLOSE_TIMES.due(night(date(2026, 11, 14), False, failed))
+    assert not BAR_CLOSE_TIMES.due(night(tuesday, True, ran))
     assert [t.issue for t in BAR_CLOSE_TIMES.targets] == [589]

@@ -72,11 +72,12 @@ def _probe_sample_keys(day: date | None) -> int:
     return code
 
 
-def _bar_close_times(day: date | None) -> int:
+def _bar_close_times(day: date | None, night: bool) -> int:
     """How long a trading day's bar closes took, against the days before (#589)."""
-    from krx_quant.bar_close_times import bar_close_times
+    from krx_quant.bar_close_times import bar_close_times, tonight
 
-    report, code = bar_close_times(Settings.from_env(require_kis=False), datetime.now(KST), day)
+    now = datetime.now(KST)
+    report, code = bar_close_times(Settings.from_env(require_kis=False), now, tonight(now) if night else day)
     print(report)
     return code
 
@@ -142,9 +143,16 @@ def add(sub: Commands) -> None:
         " bar close's first record, final consensus and last record, each algorithm's time after the first"
         " record, the bar closes that held the event loop, the trader's quote stalls; read-only, no price",
     )
-    times_cmd.add_argument(
+    times_day = times_cmd.add_mutually_exclusive_group()
+    times_day.add_argument(
         "--day",
         type=date.fromisoformat,
         help="the trading day, YYYY-MM-DD (default: the latest day with predictions, through today)",
     )
-    times_cmd.set_defaults(run=lambda args: _bar_close_times(args.day))
+    times_day.add_argument(
+        "--tonight",
+        action="store_true",
+        help="the day of the night it runs in (the date, or the one before until 06:00), as the scheduled"
+        " job runs it; exit 1 when that day has no predictions",
+    )
+    times_cmd.set_defaults(run=lambda args: _bar_close_times(args.day, args.tonight))
