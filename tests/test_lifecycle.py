@@ -22,16 +22,19 @@ import pytest
 from krx_quant.algorithms import Model
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
+from krx_quant.daily import DAILY_RECENT_DAYS, DAILY_RULES, OverlapReview
 from krx_quant.feeds import KST
-from krx_quant.lifecycle import Status, target_changed
+from krx_quant.kinds import DIRECTION
+from krx_quant.lifecycle import REGISTERED, Rules, Status, target_changed
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.pricing import Direction
 from krx_quant.replay import replay_into
+from krx_quant.simulation import BAR_CLOSE
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
-from tests.lifecycle_doubles import OUTCOMES, RIGHT, Outbox, put_days, stored, weekdays_before
+from tests.lifecycle_doubles import BASELINE_CALLS, OUTCOMES, RIGHT, Outbox, put_days, stored, weekdays_before
 from tests.replay_events import DAY, api, at, get_json, run
 
 ALPHA = FixedAlgorithm("alpha", features=("velocity",), unique=("velocity",))
@@ -192,6 +195,108 @@ async def test_an_active_algorithm_no_better_than_a_baseline_is_benched_and_stil
     async with api(engine) as client:
         body = await get_json(client, "/v1/symbols/005930/predictions?algorithm=alpha&limit=5")
     assert len(body["predictions"]) == 5  # a benched algorithm is still run
+
+
+def put_promoted(db: Path, algorithm: str, probation: date, active: date) -> None:
+    """``algorithm`` on probation since the morning of ``probation``, active since that of
+    ``active``, on the touch target already (#170)."""
+    with stored(db) as store:
+        store.add_status(algorithm, morning(probation), None, Status.PROBATION, REGISTERED)
+        store.add_status(algorithm, morning(active), Status.PROBATION, Status.ACTIVE, "set by the test")
+        store.mark_target(TARGET_VERSION, morning(probation))
+
+
+def put_simulation(db: Path, algorithm: str, days: list[date], calls: list[Direction]) -> None:
+    """``algorithm``'s simulated probation (#298): ``days`` replayed with its ``calls`` each day, its
+    and the baselines' predictions kept apart from the live ones, as ``simulate bar-close`` keeps
+    them (the baselines' calls are the live ones')."""
+    replay = db.with_name(f"{algorithm}-replay.db")
+    put_days(replay, days, {algorithm: calls})
+    with stored(replay) as replayed:
+        rows = [r for r in replayed.made_on(days) if r["algorithm"] in {algorithm, *BASELINE_CALLS}]
+    with stored(db) as store:
+        run_id = store.add_simulation_run(morning(days[-1]), BAR_CLOSE, days)
+        store.add_sim_predictions(run_id, rows, TARGET_VERSION)
+        store.add_simulation(algorithm, morning(days[0]), DIRECTION, run_id, morning(days[-1]), {})
+
+
+@pytest.mark.parametrize(("days_active", "status"), [(9, "active"), (10, "bench")])
+async def test_an_active_algorithm_made_active_on_simulated_days_is_judged_without_them_from_its_tenth_day(
+    tmp_path: Path, days_active: int, status: str
+) -> None:
+    """Input: alpha made active on ten simulated days, right on each (its live predictions of those
+    days are wrong: the simulation's are read there), then always-flat's calls on each day active.
+    Output: on its ninth day active its latest days still hold the simulated ones, and it stays
+    active; from its tenth, its days active alone are judged, no better than always-flat, and it
+    is benched (#545)."""
+    db = tmp_path / "engine.db"
+    history = weekdays_before(DAY, 10 + days_active - 1)  # with the replayed day, days_active active
+    simulated, active = history[:10], history[10:]
+    put_promoted(db, "alpha", simulated[0], active[0])
+    put_simulation(db, "alpha", simulated, RIGHT)
+    put_days(db, simulated, {"alpha": WRONG})
+    put_days(db, active, {"alpha": FLAT})
+
+    alpha = (await listed(await review_day(db, [ALPHA])))["alpha"]
+
+    assert alpha["status"]["status"] == status
+    if status == "bench":
+        assert last_change(alpha) == ("active", "bench", "weakest lift 0.0000 over the last 10 days active")
+
+
+@pytest.mark.parametrize(
+    ("probation", "days_active", "status", "reason"),
+    [
+        pytest.param(RIGHT, 9, "active", None, id="ninth day"),
+        pytest.param(RIGHT, 10, "bench", "weakest lift 0.0000 over the last 10 days active", id="tenth day"),
+        # Benched before its tenth day active on its latest days, its days on probation with them.
+        pytest.param(
+            FLAT, 5, "bench", "weakest lift 0.0000 over the last 15 days (5 of them active)", id="fifth day"
+        ),
+    ],
+)
+async def test_an_active_algorithm_made_active_live_is_judged_without_its_probation_from_its_tenth_day(
+    tmp_path: Path, probation: list[Direction], days_active: int, status: str, reason: str | None
+) -> None:
+    """Input: alpha made active on ten live days on probation, then always-flat's calls on each day
+    active. Output: as one made active on simulated days (#545): until its tenth day active its
+    latest days are judged, its days on probation among them; from its tenth, its days active."""
+    db = tmp_path / "engine.db"
+    history = weekdays_before(DAY, 10 + days_active - 1)
+    on_probation, active = history[:10], history[10:]
+    put_promoted(db, "alpha", on_probation[0], active[0])
+    put_days(db, on_probation, {"alpha": probation})
+    put_days(db, active, {"alpha": FLAT})
+
+    alpha = (await listed(await review_day(db, [ALPHA])))["alpha"]
+
+    assert alpha["status"]["status"] == status
+    if reason is not None:
+        assert last_change(alpha) == ("active", "bench", reason)
+
+
+async def test_from_its_tenth_day_active_too_few_predictions_on_them_leave_it_active(tmp_path: Path) -> None:
+    """Input: alpha active ten days after ten simulated days, always-flat's calls on all of them,
+    and a minimum sample of 80 its days active (72 scored) do not reach. Output: it stays active:
+    its latest days, simulated ones among them, are not judged instead (#545)."""
+    db = tmp_path / "engine.db"
+    history = weekdays_before(DAY, 19)
+    simulated, active = history[:10], history[10:]
+    put_promoted(db, "alpha", simulated[0], active[0])
+    put_simulation(db, "alpha", simulated, FLAT)
+    put_days(db, history, {"alpha": FLAT})
+
+    engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA], min_sample=80)
+
+    assert (await listed(engine))["alpha"]["status"]["status"] == "active"
+
+
+def test_a_daily_kind_s_decay_is_judged_on_its_latest_days_as_before() -> None:
+    """Its days active alone are judged once they are as many as its latest days (#545)."""
+    assert DAILY_RULES.min_active_days == DAILY_RECENT_DAYS
+    review = OverlapReview(variance_ratio=1.0, sessions=5, first=40)
+    assert review.rules.min_active_days == review.recent_days
+    assert Rules().min_active_days == 10  # the bar-close kinds': the first probation review day
 
 
 async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_candidate(
