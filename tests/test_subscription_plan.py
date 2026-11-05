@@ -67,8 +67,10 @@ async def test_registers_every_feed_in_priority_order(kis: FakeKis, tmp_path: Pa
             ("H0STCNT0", "381180"),
             *[("H0STCNT0", sym) for sym in SYMBOLS],
             *[("H0NXCNT0", sym) for sym in SYMBOLS],
+            ("H0STASP0", "0193L0"),  # 005930's inverse ETF's KRX book (#606), last
         ]
     )
+    assert len(sent) == 41, "KIS's session limit: the inverse ETF's book takes the last slot"
 
 
 @pytest.mark.parametrize(
@@ -155,3 +157,25 @@ async def test_an_added_symbol_gets_its_feeds_after_restart(kis: FakeKis, tmp_pa
     feeds = {tr for tr, key in kis.subscribed_keys() if key == "035420"}
     assert registered == {"035420"}
     assert feeds == {"H0UNCNT0", "H0UNASP0", "H0UNPGM0", "H0UNMBC0", "H0STCNT0", "H0NXCNT0"}
+
+
+async def test_the_inverse_etf_s_book_is_registered_only_with_the_traded_symbol(
+    kis: FakeKis, tmp_path: Path
+) -> None:
+    # The replay it is for (#606) reads 005930's down calls: without 005930 there are none.
+    kis.script[("H0UNCNT0", "000660")] = []
+
+    await collect(kis, settings_for(kis, tmp_path, symbols=("000660",)))
+
+    assert not any(tr == "H0STASP0" for tr, _ in kis.subscribed_keys())
+
+
+async def test_a_cap_below_the_plan_cuts_the_inverse_etf_s_book_first(kis: FakeKis, tmp_path: Path) -> None:
+    serve_masters(kis)
+    kis.script[("H0NXCNT0", "009150")] = []
+
+    await collect(kis, replace(full_settings(kis, tmp_path), ws_max_subscriptions=40))
+
+    registered = kis.subscribed_keys()
+    assert ("H0NXCNT0", "009150") in registered, "the feed before it keeps its slot"
+    assert ("H0STASP0", "0193L0") not in registered

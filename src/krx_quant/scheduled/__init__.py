@@ -125,6 +125,7 @@ from krx_quant.scheduled.prevalidations import (
 )
 from krx_quant.scheduled.probes import (
     BAR_CLOSE_TIMES,
+    INVERSE_BOOK,
     NIGHT_BOOK_BYTES,
     NIGHT_BOOK_VERDICT,
     RECORDING_QUALITY,
@@ -161,6 +162,7 @@ __all__ = [
     "FRESH",
     "GIVE_WAY_NIGHTS",
     "INTERRUPTED",
+    "INVERSE_BOOK",
     "JOBS",
     "LIVE_PROBE",
     "NEYMAN_BACKFILL",
@@ -274,6 +276,7 @@ JOBS: tuple[Job, ...] = (
     NIGHT_BOOK_BYTES,
     NIGHT_BOOK_VERDICT,
     BAR_CLOSE_TIMES,
+    INVERSE_BOOK,
     SIGNAL_REVIEW_FIXED,
     LIVE_PROBE,
     ERROR_HOLDOUT,
