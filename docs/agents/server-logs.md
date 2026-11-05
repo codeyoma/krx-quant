@@ -20,7 +20,7 @@ Everything else is in the line, which is the server's stdout line with fields in
 - A process's first line says what started (`krx-quant train --day <night> started (pid N)`, with the commit for the engine and commands); its last says how it ended: `ended: exit <code> after <time>`, `exit -9 (SIGKILL)` (the kernel killed it, usually out of memory), `stopped at its time limit (6:00:00)`, or `stopped with the engine`. In a training, the last `started step <name>` before a kill is the step it died in, and the per-step time and memory lines (#355) say what each step used.
 - The line itself: `2026-10-23 09:00:00,123 INFO krx_quant.collector: …` (KST). Filter by text (`|= "job=trader-report "`), not by a label: there is no `job` or `night` label.
 - Secrets and server addresses show as `[가림]`, masked on the server by `doctor`'s rules. Market values from KIS stay. A line that may carry a Toss figure goes as its template with `…` for its values (`loki.TEMPLATE_ONLY`). Lines over 64 KB are cut and say so.
-- The engine also sends `heartbeat: sent N, dropped M, buffered K` every minute (Loki only, not on stdout).
+- The engine also sends a heartbeat every minute (Loki only, not on stdout): `heartbeat: sent N, dropped M, buffered K; memory available <MB> MB, swap used <MB> MB; rss engine <MB> MB, trader <MB> MB[, training <MB> MB][, job <name> <MB> MB]…` (#547). Queries below, under "Memory over time".
 
 What may be missing (gaps the user accepted, #360): the last few seconds of a process killed outright (SIGKILL, the kernel's out-of-memory kill), and lines dropped while Loki was unreachable for long (the buffer keeps the newest 20,000 lines, 16 MB), and anything before #358 was deployed. Only the server's stdout had those: ask the user for `docker compose logs --since <when> engine`, which lasts until the next 06:00 deploy ([server-snapshot.md](server-snapshot.md#reading-the-logs)). Loki keeps 14 days.
 
@@ -89,6 +89,27 @@ scripts/loki-query.sh '{service="krx-quant"} |~ "held the event loop|quotes stal
   --from 2026-11-06T09:00 --to 2026-11-06T15:40 --forward --limit 1000
 ```
 
+**Memory over time** (#547): the engine's heartbeat says, each minute, the server's `MemAvailable` and swap in use, and the resident memory (`VmRSS`) of the engine, the trader (as its snapshot says it: it runs in a container of its own) and each training or job the engine started that runs then, by name, in whole MB. `?` is a figure that could not be read (the trader not running, a process that just ended). operations.md "Grafana Cloud Loki로 보내는 로그 (#358)" says what each figure is.
+
+```bash
+scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "heartbeat: "' --since 30m --limit 30
+```
+
+- The lowest memory available, every 10 minutes (a metric query: the connector's `queryType: "range"`, or the script, which prints one line per point):
+
+  ```bash
+  scripts/loki-query.sh 'min_over_time({service="krx-quant", process="engine"} |= "heartbeat: " |~ `available \d+ MB` | regexp `available (?P<mb>\d+) MB` | unwrap mb [10m])' --since 12h --limit 200
+  ```
+- The same for the other figures, with a `max_over_time` and these two patterns (the line filter keeps out the lines where the figure is `?`, which `unwrap` would fail on): swap `swap used \d+ MB` / `swap used (?P<mb>\d+) MB`; the engine `rss engine \d+ MB` / `rss engine (?P<mb>\d+) MB`; the trader `, trader \d+ MB` / `, trader (?P<mb>\d+) MB`; the training `, training \d+ MB` / `, training (?P<mb>\d+) MB`.
+- Each job's largest, by name (with two jobs on one line it reads the first):
+
+  ```
+  max by (job) (max_over_time({service="krx-quant", process="engine"} |= "heartbeat: " |~ `, job \S+ \d+ MB` | regexp `, job (?P<job>\S+) (?P<mb>\d+) MB` | unwrap mb [10m]))
+  ```
+- Read it beside the job's own memory lines above (`memory on`) and the training's per-step lines (#355): those say peaks within the process; the heartbeat says what the server had left.
+
+**The CPU burst capacity** (#547) is not in Loki. The server watchdog reads Lightsail's `BurstCapacityPercentage` every 10 minutes and writes it on its run's summary and log: `gh run list --workflow server-watchdog --repo codeyoma/krx-quant --limit 6`, then `gh run view <id> --repo codeyoma/krx-quant --log | grep BurstCapacityPercentage`. Below 50% it opens an issue labelled `server-burst` and tells Telegram; it closes it at 60%. Lightsail keeps the series about two weeks: on the user's Mac, `aws lightsail get-instance-metric-data --instance-name krx-quant --region ap-southeast-2 --metric-name BurstCapacityPercentage --period 60 --start-time <UTC> --end-time <UTC> --unit Percent --statistics Minimum` (24 hours at most a call), read-only. operations.md "CPU 버스트 여유 (#547)" has what it measured and why those marks.
+
 **ERRORs in the last 24 hours:**
 
 ```bash
@@ -134,7 +155,7 @@ scripts/loki-query.sh '{service="krx-quant", process="command"} |= "command=doct
 
 **Is the server sending?**
 
-- The heartbeats: `{service="krx-quant", process="engine"} |= "heartbeat: "` (one a minute while the engine runs).
+- The heartbeats: `{service="krx-quant", process="engine"} |= "heartbeat: "` (one a minute while the engine runs; with the memory since #547, above).
 - The shipping's own warnings (dropped lines, failures): `{service="krx-quant"} |= "Loki: "`.
 - Whether an engine alert reached Telegram: `{service="krx-quant", process="engine"} |~ "telegram sent: |telegram send failed"` (each alert is logged as `alert: …` before it is queued; a try followed by another as `telegram send retry in <n>s: …`; `telegram send failed` means it was dropped, after about two minutes of tries, #489). The trader's are under `process="trader"`.
 - No line at all for minutes means the engine (or the server) is down, or cannot reach Grafana Cloud. Then ask for a snapshot ([server-snapshot.md](server-snapshot.md)): `krx-quant doctor` section 8 shows the engine's shipping (on or off, lines sent and dropped, the last success, the last failure's kind).

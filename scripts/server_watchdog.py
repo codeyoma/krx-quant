@@ -33,6 +33,13 @@ What it decides (``decide``, docs/operations.md "서버가 멈추면 (#385)"):
 9. The instance check passes at the last 3 points while its issue is open: it says so and closes
    the issue.
 
+It also reads the instance's CPU burst capacity (#547, ``BurstCapacityPercentage``, the last 40
+minutes, period 60) and writes it on the run's summary page. Lightsail keeps the series itself for
+about two weeks. Below ``BURST_LOW`` (50%) at the newest point it opens an issue labelled
+``server-burst`` and sends Telegram once; at ``BURST_BACK`` (60%) or more it says so there and closes
+it (``decide_burst``). A newest point older than 15 minutes, or none, does neither. The reboot rules
+above do not read it, and a failure to read it does not stop them: the run fails at its end.
+
 Each reboot, give-up, hardware notice and recovery goes to GitHub: the first opens an issue
 labelled ``server-watchdog``, the later ones of the same incident comment on it. With
 TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID (the engine's names, ``notify.py``) it also sends a
@@ -48,6 +55,20 @@ period of 300 seconds counts its windows from the start time asked and returns t
 while still partial, so it is not used. Operations come newest first, a reboot as
 ``operationType`` ``RebootInstance`` with ``createdAt``; a reboot from inside the OS (the kernel's
 own, ``deploy/kernel-recovery.sh``) leaves none.
+
+Probed read-only on 2026-11-05 (#547): the burst capacity is one point every 5 minutes, keyed by
+the 5 minutes' start (:00, :05, ...), with period 60 (period 300 counts its windows from the start
+asked, as above), its newest point about a minute and a half old; ``minimum`` and ``maximum`` alike.
+100% is ``BurstCapacityTime`` 17,280 seconds. From 2026-10-20 23:20 to 2026-11-05 23:25 KST it never
+went below 73.7% (2026-10-23). The night replays use one of the two vCPUs (CPU about 50%; the $12
+plan's baseline is 20%) and took it down by about 5.7 points an hour, to 78-90%; idle (about 1% CPU)
+it came back by about 3.6 points an hour, full by 04:00-08:00. It was 100% through the sessions of
+11-04 and 11-05, whose quote stalls came after night replays of 1.8-3.3 hours: those replays did not
+use it up. Both vCPUs busy would take about 15 points an hour (the two rates, drawn to 100% CPU).
+So ``BURST_LOW`` is 50%: never reached in those two weeks, and about three hours before the CPU is
+held at the baseline with both vCPUs busy (about nine with one). The issue closes at
+``BURST_BACK``, 10 points above, so a value hovering at 50% does not open and close it in turn
+(idle, it climbs them in about three hours).
 
 Usage: python3 scripts/server_watchdog.py [--dry-run]
 
@@ -98,6 +119,17 @@ LABEL = "server-watchdog"
 LABEL_COLOR = "b60205"
 LABEL_DESCRIPTION = "The server watchdog rebooted the server, gave up or saw it recover (#385)"
 DOCS = 'docs/operations.md 6장 "서버가 멈추면 (#385)"'
+
+# The CPU burst capacity (#547): the module's docstring says why these.
+BURST = "BurstCapacityPercentage"
+BURST_LOW = 50.0  # percent: below it at the newest point, alert
+BURST_BACK = 60.0  # percent: at it or above, the alert's issue closes
+BURST_STALE_AFTER = timedelta(minutes=15)  # a point every 5 minutes, the newest about 1.5 minutes old
+BURST_LABEL = "server-burst"
+BURST_LABEL_COLOR = "fbca04"
+BURST_LABEL_DESCRIPTION = "The CPU burst capacity fell below 50%; the watchdog closes it at 60% (#547)"
+BURST_DOCS = 'docs/operations.md 6장 "CPU 버스트 여유 (#547)"'
+BurstAction = Literal["none", "low", "back"]
 
 Event = Literal["reboot", "give-up", "hardware", "recovered"]
 Action = Literal["none", "reboot", "give-up", "hardware", "recovered"]
@@ -164,6 +196,18 @@ class Decision:
     boots: tuple[datetime, ...]  # reboots and starts in the last GIVE_UP_WINDOW, oldest first
     last_boot: datetime | None
     incident: Incident | None
+
+
+@dataclass(frozen=True)
+class Burst:
+    """The CPU burst capacity read over the last minutes (#547), and what to do about it."""
+
+    action: BurstAction
+    why: str
+    newest: Point | None  # its value is ``minimum`` (and ``maximum``: alike)
+    lowest: Point | None  # the lowest of the points read
+    issue: Incident | None  # the open ``server-burst`` issue this workflow opened
+    stale: bool = False  # the newest point is older than BURST_STALE_AFTER
 
 
 def parse_points(data: Mapping[str, Any]) -> list[Point]:
@@ -280,6 +324,31 @@ def decide(
     return decision("reboot", f"{failing}. 재부팅한다")
 
 
+def decide_burst(points: Sequence[Point], issue: Incident | None, now: datetime) -> Burst:
+    """Whether the burst capacity is low now, back, or neither (the module's docstring)."""
+    seen = [p for p in points if p.at <= now]
+    newest = seen[-1] if seen else None
+    lowest = min(seen, key=lambda p: p.minimum, default=None)
+
+    def burst(action: BurstAction, why: str, stale: bool = False) -> Burst:
+        return Burst(action, why, newest, lowest, issue, stale)
+
+    if newest is None:
+        return burst("none", f"지난 {_span(LOOKBACK)} CPU 버스트 여유의 점이 없다")
+    if now - newest.at > BURST_STALE_AFTER:
+        return burst("none", f"CPU 버스트 여유의 가장 새 점이 {_kst(newest.at)}로 늦다", stale=True)
+    value = f"CPU 버스트 여유가 {_percent(newest.minimum)}다({_kst(newest.at)})"
+    if newest.minimum < BURST_LOW:
+        if issue is not None:
+            return burst("none", f"{value}. {_percent(BURST_LOW)} 아래이고 이미 알렸다(#{issue.number})")
+        return burst("low", f"{value}. {_percent(BURST_LOW)} 아래다")
+    if issue is not None:
+        if newest.minimum >= BURST_BACK:
+            return burst("back", f"{value}. {_percent(BURST_BACK)} 이상으로 돌아왔다")
+        return burst("none", f"{value}. {_percent(BURST_BACK)} 이상이 되면 #{issue.number}를 닫는다")
+    return burst("none", value)
+
+
 def events_in(texts: Sequence[str]) -> tuple[Event, ...]:
     found: list[Event] = []
     for text in texts:
@@ -389,6 +458,57 @@ def telegram_text(decision: Decision, issue_url: str) -> str:
     return f"[watchdog] krx-quant {what}. {decision.why.split('. ')[0]}. {issue_url}".strip()
 
 
+def burst_title(burst: Burst, now: datetime) -> str:
+    value = _percent(burst.newest.minimum) if burst.newest else "?"
+    return (
+        f"서버 watchdog: krx-quant CPU 버스트 여유가 {_percent(BURST_LOW)} 아래다"
+        f" ({value}, {now.astimezone(KST):%Y-%m-%d %H:%M} KST)"
+    )
+
+
+def burst_report(burst: Burst, now: datetime, run_url: str, instance: str) -> str:
+    """The ``server-burst`` issue's body (low) or its closing comment (back), Markdown in Korean."""
+    head = {
+        "low": f"**CPU 버스트 여유가 {_percent(BURST_LOW)} 아래다.**",
+        "back": f"**CPU 버스트 여유가 {_percent(BURST_BACK)} 이상으로 돌아왔다.** 이 이슈를 닫는다.",
+        "none": "",
+    }[burst.action]
+    run = f"[실행]({run_url})" if run_url else "실행"
+    lines = [
+        f"<!-- krx-quant-watchdog: burst-{burst.action} -->",
+        f"{head} {now.astimezone(KST):%Y-%m-%d %H:%M:%S} KST, {run}, `{instance}`",
+        "",
+        f"- 판단: {burst.why}.",
+        f"- CPU 버스트 여유(`{BURST}`): {_burst(burst)}",
+        f"- 기준: {_percent(BURST_LOW)} 아래면 알리고 이 이슈를 연다."
+        f" {_percent(BURST_BACK)} 이상이면 닫는다.",
+        "",
+    ]
+    if burst.action == "low":
+        lines.append(
+            "버스트 여유가 0%가 되면 Lightsail이 CPU를 기준선(vCPU 2개를 합쳐 20%)으로 묶어, 봉 마감과"
+            " 수집이 느려진다. vCPU 하나를 다 쓰면(밤 재생) 한 시간에 약 6%p, 둘을 다 쓰면 약 15%p 준다"
+            " (2026-11-05 실측). 그때 돌던 밤 학습·예약 작업은 엔진 heartbeat의 `rss`에 이름이 나온다"
+            " (docs/agents/server-logs.md). 쉬면 한 시간에 약 3.6%p 찬다. 이 이슈를 먼저 닫으면 다음"
+            f" 실행이 여전히 낮을 때 새 이슈를 연다. {BURST_DOCS}."
+        )
+    else:
+        lines.append(f"Lightsail은 이 지표를 2주쯤 남긴다. {BURST_DOCS}.")
+    return "\n".join(lines) + "\n"
+
+
+def burst_telegram(burst: Burst, issue_url: str) -> str:
+    value = _percent(burst.newest.minimum) if burst.newest else "?"
+    if burst.action == "low":
+        what = (
+            f"CPU 버스트 여유가 {value}로 {_percent(BURST_LOW)} 아래입니다."
+            " 바닥나면 CPU가 기준선(20%)으로 느려집니다"
+        )
+    else:
+        what = f"CPU 버스트 여유가 {value}로 돌아왔습니다"
+    return f"[watchdog] krx-quant {what}. {issue_url}".strip()
+
+
 def _check(check: Check) -> str:
     if check.status == "missing":
         return "점 없음"
@@ -401,6 +521,23 @@ def _check(check: Check) -> str:
     return (
         f"{word}{since} · 가장 새 점 {_kst(check.newest)} · 지난 {_span(FAILING_FOR)}의 점 {check.points}개"
     )
+
+
+def _burst(burst: Burst | None) -> str:
+    if burst is None:
+        return "읽지 못함"
+    if burst.newest is None:
+        return "점 없음"
+    late = "(늦음)" if burst.stale else ""
+    lowest = _percent(burst.lowest.minimum) if burst.lowest else "?"
+    return (
+        f"{_percent(burst.newest.minimum)} · 가장 새 점 {_kst(burst.newest.at)}{late}"
+        f" · 지난 {_span(LOOKBACK)}의 가장 낮은 점 {lowest}"
+    )
+
+
+def _percent(value: float) -> str:
+    return f"{value:.1f}%" if value != int(value) else f"{value:.0f}%"
 
 
 def _since(check: Check) -> str:
@@ -472,11 +609,15 @@ class Inputs:
     boots: list[datetime]
 
 
+def _lightsail(run: Run, region: str, *args: str) -> Any:
+    return json.loads(run(["aws", "lightsail", *args, "--region", region, "--output", "json"]))
+
+
 def gather(run: Run, instance: str, region: str, now: datetime) -> Inputs:
     """What Lightsail says, read-only."""
 
     def lightsail(*args: str) -> Any:
-        return json.loads(run(["aws", "lightsail", *args, "--region", region, "--output", "json"]))
+        return _lightsail(run, region, *args)
 
     state = lightsail("get-instance-state", "--instance-name", instance).get("state", {})
     checks: dict[str, list[Point]] = {}
@@ -507,11 +648,26 @@ def gather(run: Run, instance: str, region: str, now: datetime) -> Inputs:
     )
 
 
-def find_incident(run: Run, repo: str) -> Incident | None:
-    """The newest open ``server-watchdog`` issue this workflow opened, with what it wrote there."""
+def read_burst(run: Run, instance: str, region: str, now: datetime) -> list[Point]:
+    """The CPU burst capacity over the last ``LOOKBACK`` (#547), read-only: a point every 5 minutes."""
+    return parse_points(
+        _lightsail(
+            run,
+            region,
+            "get-instance-metric-data",
+            *("--instance-name", instance, "--metric-name", BURST, "--period", "60"),
+            *("--start-time", _iso(now - LOOKBACK), "--end-time", _iso(now)),
+            *("--unit", "Percent", "--statistics", "Minimum", "Maximum"),
+        )
+    )
+
+
+def find_incident(run: Run, repo: str, label: str = LABEL) -> Incident | None:
+    """The newest open ``label`` issue this workflow opened (``server-watchdog``, or ``server-burst``
+    for the burst capacity), with what it wrote there."""
     issues = json.loads(
         run(
-            ["gh", "issue", "list", "--repo", repo, "--label", LABEL, "--state", "open"]
+            ["gh", "issue", "list", "--repo", repo, "--label", label, "--state", "open"]
             + ["--json", "number,url,author,body", "--limit", "50"]
         )
     )
@@ -572,7 +728,45 @@ def act(
     return problems
 
 
-def summary(decision: Decision, now: datetime, instance: str, dry_run: bool) -> str:
+def act_burst(
+    run: Run, send: Send, burst: Burst, now: datetime, env: Mapping[str, str], repo: str, instance: str
+) -> list[str]:
+    """Open the ``server-burst`` issue (low) or comment on it and close it (back), and say it on
+    Telegram: the problems in doing so."""
+    problems: list[str] = []
+    body = burst_report(burst, now, env.get("RUN_URL", ""), instance)
+    url = ""
+    try:
+        if burst.action == "low":
+            run(
+                ["gh", "label", "create", BURST_LABEL, "--repo", repo, "--force"]
+                + ["--color", BURST_LABEL_COLOR, "--description", BURST_LABEL_DESCRIPTION]
+            )
+            url = run(
+                ["gh", "issue", "create", "--repo", repo, "--title", burst_title(burst, now)]
+                + ["--label", BURST_LABEL, "--body-file", "-"],
+                stdin=body,
+            ).strip()
+        elif burst.issue is not None:
+            url = burst.issue.url
+            number = str(burst.issue.number)
+            run(["gh", "issue", "comment", number, "--repo", repo, "--body-file", "-"], stdin=body)
+            run(["gh", "issue", "close", number, "--repo", repo, "--reason", "completed"])
+        print(f"reported the burst capacity: {url}")
+    except RuntimeError as e:
+        problems.append(f"GitHub: {e}")
+    token, chat = env.get("TELEGRAM_BOT_TOKEN", ""), env.get("TELEGRAM_CHAT_ID", "")
+    if token and chat:
+        try:
+            send(token, chat, burst_telegram(burst, url))
+            print("telegram sent")
+        except RuntimeError as e:
+            problems.append(f"Telegram: {e}")
+    return problems
+
+
+def summary(decision: Decision, burst: Burst | None, now: datetime, instance: str, dry_run: bool) -> str:
+    """The run's summary page: the decision, and the CPU burst capacity (#547; None: not read)."""
     lines = [
         f"### server watchdog: {decision.action}{' (dry run)' if dry_run else ''}",
         "",
@@ -583,7 +777,10 @@ def summary(decision: Decision, now: datetime, instance: str, dry_run: bool) -> 
         f"- 지난 {_span(GIVE_UP_WINDOW)}의 재부팅·시작: {_times(decision.boots)}"
         f" (마지막 {_kst(decision.last_boot)})",
         f"- 열린 이슈: {_incident(decision.incident)}",
+        f"- {BURST}: {_burst(burst)}",
     ]
+    if burst is not None:
+        lines.append(f"- 버스트 판단: {burst.action}. {burst.why} (열린 이슈: {_incident(burst.issue)})")
     return "\n".join(lines) + "\n"
 
 
@@ -613,21 +810,38 @@ def main(
         print(f"::error::could not read the server's state: {e}")
         return 2
     decision = decide(inputs.state, inputs.instance, inputs.system, inputs.boots, incident, now)
-    text = summary(decision, now, instance, dry_run)
+    # The burst capacity apart (#547): what fails there holds no reboot.
+    burst: Burst | None = None
+    unread = ""
+    try:
+        burst = decide_burst(
+            read_burst(run, instance, region, now), find_incident(run, repo, BURST_LABEL), now
+        )
+    except (RuntimeError, ValueError, KeyError, TypeError) as e:
+        unread = str(e)
+    text = summary(decision, burst, now, instance, dry_run)
     print(text)
     if env.get("GITHUB_STEP_SUMMARY"):
         with open(env["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as page:
             page.write(text)
-    if dry_run or decision.action == "none":
-        return 0
-    try:
-        problems = act(run, send, decision, now, env, repo, instance)
-    except RuntimeError as e:
-        print(f"::error::could not reboot {instance}: {e}")
-        return 1
-    for problem in problems:
-        print(f"::error::could not report the {decision.action}: {problem}")
-    return 1 if problems else 0
+    code = 0
+    if not dry_run and decision.action != "none":
+        try:
+            problems = act(run, send, decision, now, env, repo, instance)
+        except RuntimeError as e:
+            print(f"::error::could not reboot {instance}: {e}")
+            problems, code = [], 1
+        for problem in problems:
+            print(f"::error::could not report the {decision.action}: {problem}")
+            code = 1
+    if burst is None:
+        print(f"::error::could not read the CPU burst capacity: {unread}")
+        code = 1
+    elif not dry_run and burst.action != "none":
+        for problem in act_burst(run, send, burst, now, env, repo, instance):
+            print(f"::error::could not report the burst capacity ({burst.action}): {problem}")
+            code = 1
+    return code
 
 
 def _iso(at: datetime) -> str:

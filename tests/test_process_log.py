@@ -19,7 +19,7 @@ from pathlib import Path
 import aiohttp
 import pytest
 
-from krx_quant import loki
+from krx_quant import loki, process_log
 from krx_quant.clock import FakeClock
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub
@@ -93,6 +93,42 @@ async def test_a_child_stopped_at_its_time_limit_says_so(fake_loki: FakeLoki) ->
     assert lines[1] == ("info", "started")
     assert lines[-1][0] == "error"
     assert "stopped at its time limit (0:00:01): exit -9 (SIGKILL) after" in lines[-1][1]
+
+
+async def test_a_running_child_is_named_for_the_heartbeat_until_it_ends(tmp_path: Path) -> None:
+    """#547: the engine's heartbeat says the memory of each process it started that runs, by name."""
+    go = tmp_path / "go"
+    script = f"import os, time\nwhile not os.path.exists({str(go)!r}): time.sleep(0.01)\n"
+    command = [sys.executable, "-c", script]
+    job = asyncio.create_task(run_logged(command, timedelta(seconds=20), child=Child.job("probe-x", NIGHT)))
+    training = asyncio.create_task(run_logged(command, timedelta(seconds=20), child=Child.training(NIGHT)))
+    bare = asyncio.create_task(run_logged(command, timedelta(seconds=20)))
+    try:
+        await until(lambda: len(process_log.running()) == 3)
+        assert sorted(process_log.running().values()) == [
+            "job probe-x",
+            os.path.basename(sys.executable),  # no child: the program's name
+            "training",
+        ]
+    finally:
+        go.write_text("")
+    ran = await asyncio.gather(job, training, bare)
+    assert [r.exit_code for r in ran] == [0, 0, 0]
+    assert process_log.running() == {}
+
+
+async def test_a_child_cut_short_with_the_engine_is_not_named_any_more(tmp_path: Path) -> None:
+    started = tmp_path / "started"
+    script = f"import pathlib, time\npathlib.Path({str(started)!r}).write_text('')\ntime.sleep(30)\n"
+    run = asyncio.create_task(
+        run_logged([sys.executable, "-c", script], timedelta(seconds=20), child=Child.training(NIGHT))
+    )
+    await until(lambda: started.exists())
+    assert list(process_log.running().values()) == ["training"]
+    run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run
+    assert process_log.running() == {}
 
 
 async def test_a_child_is_told_the_engine_sends_its_output() -> None:
