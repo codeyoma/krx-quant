@@ -38,7 +38,8 @@ minutes, period 60) and writes it on the run's summary page. Lightsail keeps the
 about two weeks. Below ``BURST_LOW`` (50%) at the newest point it opens an issue labelled
 ``server-burst`` and sends Telegram once; at ``BURST_BACK`` (60%) or more it says so there and closes
 it (``decide_burst``). A newest point older than 15 minutes, or none, does neither. The reboot rules
-above do not read it, and a failure to read it does not stop them: the run fails at its end.
+above do not read it: it is read after the reboot is done, so a read that fails or hangs neither
+holds nor delays one, and the run fails at its end.
 
 Each reboot, give-up, hardware notice and recovery goes to GitHub: the first opens an issue
 labelled ``server-watchdog``, the later ones of the same incident comment on it. With
@@ -766,8 +767,8 @@ def act_burst(
     return problems
 
 
-def summary(decision: Decision, burst: Burst | None, now: datetime, instance: str, dry_run: bool) -> str:
-    """The run's summary page: the decision, and the CPU burst capacity (#547; None: not read)."""
+def summary(decision: Decision, now: datetime, instance: str, dry_run: bool) -> str:
+    """The run's summary page: the decision (the burst capacity follows, ``burst_summary``)."""
     lines = [
         f"### server watchdog: {decision.action}{' (dry run)' if dry_run else ''}",
         "",
@@ -778,8 +779,13 @@ def summary(decision: Decision, burst: Burst | None, now: datetime, instance: st
         f"- 지난 {_span(GIVE_UP_WINDOW)}의 재부팅·시작: {_times(decision.boots)}"
         f" (마지막 {_kst(decision.last_boot)})",
         f"- 열린 이슈: {_incident(decision.incident)}",
-        f"- {BURST}: {_burst(burst)}",
     ]
+    return "\n".join(lines) + "\n"
+
+
+def burst_summary(burst: Burst | None) -> str:
+    """The summary page's lines of the CPU burst capacity (#547; None: not read)."""
+    lines = [f"- {BURST}: {_burst(burst)}"]
     if burst is not None:
         lines.append(f"- 버스트 판단: {burst.action}. {burst.why} (열린 이슈: {_incident(burst.issue)})")
     return "\n".join(lines) + "\n"
@@ -811,20 +817,7 @@ def main(
         print(f"::error::could not read the server's state: {e}")
         return 2
     decision = decide(inputs.state, inputs.instance, inputs.system, inputs.boots, incident, now)
-    # The burst capacity apart (#547): what fails there holds no reboot.
-    burst: Burst | None = None
-    unread = ""
-    try:
-        burst = decide_burst(
-            read_burst(run, instance, region, now), find_incident(run, repo, BURST_LABEL), now
-        )
-    except (RuntimeError, ValueError, KeyError, TypeError) as e:
-        unread = str(e)
-    text = summary(decision, burst, now, instance, dry_run)
-    print(text)
-    if env.get("GITHUB_STEP_SUMMARY"):
-        with open(env["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as page:
-            page.write(text)
+    _show(summary(decision, now, instance, dry_run), env)
     code = 0
     if not dry_run and decision.action != "none":
         try:
@@ -835,6 +828,16 @@ def main(
         for problem in problems:
             print(f"::error::could not report the {decision.action}: {problem}")
             code = 1
+    # The burst capacity after the reboot is done (#547): whatever its reads do (fail, hang until
+    # their time limit), they hold no reboot nor delay it.
+    burst: Burst | None = None
+    try:
+        burst = decide_burst(
+            read_burst(run, instance, region, now), find_incident(run, repo, BURST_LABEL), now
+        )
+    except Exception as e:
+        unread = f"{type(e).__name__}: {e}"
+    _show(burst_summary(burst), env)
     if burst is None:
         print(f"::error::could not read the CPU burst capacity: {unread}")
         code = 1
@@ -843,6 +846,14 @@ def main(
             print(f"::error::could not report the burst capacity ({burst.action}): {problem}")
             code = 1
     return code
+
+
+def _show(text: str, env: Mapping[str, str]) -> None:
+    """``text`` on the run's log and its summary page."""
+    print(text)
+    if env.get("GITHUB_STEP_SUMMARY"):
+        with open(env["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as page:
+            page.write(text)
 
 
 def _iso(at: datetime) -> str:

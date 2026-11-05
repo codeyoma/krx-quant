@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -143,12 +144,15 @@ class World:
     calls: list[list[str]] = field(default_factory=list)
     telegram: list[str] = field(default_factory=list)
     fail: str = ""  # a command that fails
+    hang: str = ""  # a command that runs into ``run_command``'s time limit
 
     def run(self, args: Sequence[str], stdin: str | None = None) -> str:
         args = list(args)
         self.calls.append(args)
         if self.fail and self.fail in " ".join(args):
             raise RuntimeError(f"{self.fail} failed")
+        if self.hang and self.hang in " ".join(args):
+            raise subprocess.TimeoutExpired(args, 120)
         option = dict(zip(args[3::1], args[4::1], strict=False))
         if args[:2] == ["aws", "lightsail"]:
             return json.dumps(self.lightsail(args[2], option))
@@ -622,12 +626,28 @@ def test_between_the_two_marks_it_keeps_what_it_did() -> None:
     assert watchdog.decide_burst(low, None, now).action == "low", "its issue was closed by hand: again"
 
 
-def test_the_burst_capacity_unread_holds_no_reboot_and_fails_the_run() -> None:
-    world = World(datetime(2026, 10, 28, 0, 54, tzinfo=KST), fail=watchdog.BURST)
+@pytest.mark.parametrize(
+    ("fail", "hang"),
+    [
+        (watchdog.BURST, ""),
+        ("", watchdog.BURST),  # Lightsail does not answer: ``run_command``'s time limit
+        ("", "--label server-burst"),  # the burst issue's lookup
+    ],
+)
+def test_the_burst_capacity_unread_holds_no_reboot_and_fails_the_run(fail: str, hang: str) -> None:
+    world = World(datetime(2026, 10, 28, 0, 54, tzinfo=KST), fail=fail, hang=hang)
     assert world.tick() == 1
     assert len(world.reboots()) == 1 and len(world.issues) == 1
     [issue] = world.issues.values()
     assert issue["labels"] == ["server-watchdog"]
+    # The burst capacity is read after the reboot and its report: a read that hangs delays neither.
+    done = [
+        i
+        for i, c in enumerate(world.calls)
+        if c[:3] in (["aws", "lightsail", "reboot-instance"], ["gh", "issue", "create"])
+    ]
+    burst = [i for i, c in enumerate(world.calls) if watchdog.BURST in c or "server-burst" in c]
+    assert len(done) == 2 and burst and max(done) < min(burst)
 
 
 def test_the_reboot_issue_and_the_burst_issue_are_apart() -> None:
