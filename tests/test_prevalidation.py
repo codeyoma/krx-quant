@@ -24,6 +24,7 @@ import pytest
 from krx_quant import engine as engine_module
 from krx_quant import prevalidation, stats
 from krx_quant.algorithms import Algorithm, Model, NothingToLearn, RegistrationError, Sample, save_model
+from krx_quant.algorithms.cox5d import Cox5d
 from krx_quant.baselines import TOUCH_BASELINES
 from krx_quant.cli import main
 from krx_quant.clock import FakeClock
@@ -35,13 +36,14 @@ from krx_quant.footprint import give_back
 from krx_quant.kind_stats import entry as kind_entry
 from krx_quant.kind_stats import kind_scoring, scored_of_kind
 from krx_quant.kind_stats import split as kind_split
-from krx_quant.lifecycle import DIRECTION_SCORING, Status
+from krx_quant.lifecycle import DIRECTION_SCORING, Standing, Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
-from krx_quant.predictions import DB_NAME, KIND_REVIEWED, REVIEWED, PredictionStore
+from krx_quant.predictions import DB_NAME, KIND_REVIEWED, REVIEWED, PredictionStore, read_statuses
 from krx_quant.prevalidation import (
     LastReport,
     PrevalidationRunning,
+    Refusal,
     _checks,
     _held,
     _stats,
@@ -50,6 +52,7 @@ from krx_quant.prevalidation import (
     earlier_runs,
     history_path,
     last_report,
+    left_out,
     prevalidate,
     refusals,
     report_path,
@@ -63,7 +66,7 @@ from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.kind_doubles import DRIFT, TEST_KIND, FixedKindAlgorithm
 from tests.lifecycle_doubles import Outbox
-from tests.prevalidation_doubles import AFTER, ALPHA, DAYS, Contrarian, report, settings, swings
+from tests.prevalidation_doubles import AFTER, ALPHA, DAYS, Contrarian, refuse, report, settings, swings
 from tests.replay_doubles import busy_morning, stored
 from tests.replay_events import FEE, api, at, get_json, run
 
@@ -450,6 +453,79 @@ def test_a_refusal_is_of_a_report_that_judged_the_code_and_target_it_runs(tmp_pa
     assert again is not None and again.judged != refusal.judged, "a run again, told again"
     report_path(state, "newton").write_text(json.dumps(refused))
     assert refused_by(Contrarian("newton")) is None, "registered before pre-validation: it runs"
+
+
+def test_left_out_is_a_refusal_of_the_code_it_has_by_an_algorithm_the_engine_does_not_run(
+    tmp_path: Path,
+) -> None:
+    # #544: what the night does not train and a pre-validation does not replay beside its candidate.
+    state = tmp_path / "state"
+    since = datetime(2026, 10, 1, 9, tzinfo=KST)
+    candidate, newton, daily = Contrarian("contrarian"), Contrarian("newton"), Cox5d()
+    for algorithm in (candidate, newton, daily):
+        refuse(state, algorithm)
+
+    def out(statuses: dict[str, Status]) -> Callable[[Any], Refusal | None]:
+        return left_out(state, {n: Standing(s, since) for n, s in statuses.items()}, TARGET_VERSION)
+
+    assert out({})(candidate) == refusals(state, TARGET_VERSION)(candidate), "not enrolled: refused"
+    assert out({"contrarian": Status.RETIRED})(candidate) is not None, "retired: as a refused revision"
+    for running in (Status.PROBATION, Status.ACTIVE, Status.BENCH, Status.CLONE):
+        assert out({"contrarian": running})(candidate) is None, f"{running.value}: the engine runs it"
+    assert out({})(newton) is None, "registered before pre-validation: it runs without a report"
+    assert out({"newton": Status.RETIRED})(newton) is not None, "retired by its revision's refusal"
+    assert out({"cox-5d": Status.PROBATION})(daily) is not None, "a daily one on probation waits for a pass"
+    assert out({"cox-5d": Status.ACTIVE})(daily) is None, "judged live already: it runs"
+    assert left_out(state, {}, 1)(candidate) is None, "of another target: a new run is due"
+    refuse(state, candidate, code="0123456789abcdef")  # its code changed since
+    assert out({})(candidate) is None, "of other code: it trains again and waits for a new run"
+
+
+def test_the_statuses_are_read_beside_the_engine_without_writing(tmp_path: Path) -> None:
+    # #544: the night's training and a pre-validation read them as the engine keeps them.
+    db = tmp_path / "state" / DB_NAME
+    assert read_statuses(db) == {}, "no engine DB (a night on Spot): none"
+    store = PredictionStore(db)
+    store.add_status("contrarian", at("09:00:00"), None, Status.PROBATION, "registered")
+    store.add_status("contrarian", at("15:40:00"), Status.PROBATION, Status.RETIRED, "refused")
+    assert read_statuses(db) == store.statuses(), "beside the engine, while it writes"
+    store.close()
+    assert read_statuses(db)["contrarian"].status is Status.RETIRED
+    assert not db.with_name(db.name + "-wal").exists(), "nothing written"
+
+
+# Two pre-validations of three recorded days each, about 6 s each on a laptop: past the 30 s default
+# (``pyproject.toml``) on a loaded CI runner (#327).
+@pytest.mark.timeout(120)
+async def test_a_refused_algorithm_the_engine_does_not_run_is_not_replayed_beside_a_candidate(
+    tmp_path: Path,
+) -> None:
+    # #544: copycat calls as contrarian does, a clone of it (above). contrarian's report refused the
+    # code it has, and the engine retired it: copycat is replayed without it, and so is not refused as
+    # its clone. A run of contrarian again by hand replays it all the same, beside copycat.
+    s = settings(tmp_path, DAYS[:3])
+    contrarian, copycat = Contrarian("contrarian"), Contrarian("copycat", own="vwap_gap")
+    registry: list[Algorithm] = [ALPHA, contrarian, copycat]
+    refuse(s.state_dir, contrarian)
+    store = PredictionStore(s.state_dir / DB_NAME)
+    store.add_status("contrarian", at("15:40:00", DAYS[0]), None, Status.RETIRED, "refused")
+    store.close()
+
+    result = await prevalidate(s, "copycat", algorithms=registry, now=AFTER)
+
+    assert {c.name: c.passed for c in result.checks}["correlation"], "no contrarian to copy"
+    assert "contrarian" not in result.correlations
+    replayed = predictors(s, "copycat")
+    assert {"alpha", "copycat"} <= replayed and "contrarian" not in replayed, "neither loaded nor run"
+    again = await prevalidate(s, "contrarian", algorithms=registry, now=AFTER)
+    assert "contrarian" in predictors(s, "contrarian"), "the candidate runs whatever its report says"
+    assert again.correlations["copycat"] == pytest.approx(1.0), "beside the algorithms the engine runs"
+
+
+def predictors(s: Settings, name: str) -> set[str]:
+    """What predicted in ``name``'s pre-validation: the algorithms replayed among them."""
+    with sqlite3.connect(s.state_dir / f"prevalidation-{name}.sqlite3") as db:
+        return {r[0] for r in db.execute("SELECT DISTINCT algorithm FROM predictions")}
 
 
 async def test_an_algorithm_waiting_is_alerted_once_after_the_engine_starts(tmp_path: Path) -> None:
