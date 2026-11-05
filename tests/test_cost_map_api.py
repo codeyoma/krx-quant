@@ -1,10 +1,10 @@
 """The cost map in the Engine API (#307).
 
 Input: scored predictions of the direction, the barrier and the daily kind, stored through the
-prediction store with their answers; the bar closes' mid-points (their touch paths); the period
-base rates the history task keeps, from hand-made one-minute bars. Output: ``GET /v1/cost-map``,
-within the /v1 schema, against the leaderboard and the stats window of the same query and
-against ``structure-check``.
+prediction store with their answers; the algorithms' statuses (#594: the ``top`` is an active
+algorithm); the bar closes' mid-points (their touch paths); the period base rates the history task
+keeps, from hand-made one-minute bars. Output: ``GET /v1/cost-map``, within the /v1 schema, against
+the leaderboard and the stats window of the same query and against ``structure-check``.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from krx_quant.barriers import PERSIST
 from krx_quant.base_rates import NOT_COMPUTED, keep_base_rates
 from krx_quant.cost_map import NOT_SYMMETRIC
 from krx_quant.kinds import Answer
+from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import ANSWER_VERSION as OTC_VERSION
 from krx_quant.open_to_close import OPEN_TO_CLOSE
@@ -27,7 +28,17 @@ from krx_quant.predictions import NewKindPrediction, PredictionStore
 from krx_quant.pricing import Direction
 from krx_quant.structure_check import PERIODS, structure_check
 from krx_quant.touch import TouchResult
-from tests.api_doubles import OUTCOMES, SYMBOLS, barrier_board, baselines, cost_map, get, store_scored
+from tests.api_doubles import (
+    OUTCOMES,
+    SYMBOLS,
+    activate,
+    barrier_board,
+    baselines,
+    cost_map,
+    get,
+    standing,
+    store_scored,
+)
 from tests.api_schema import check
 from tests.replay_events import DAY, at
 from tests.test_structure_check import SYMBOL, bar, flat_bar, write_bars
@@ -145,6 +156,7 @@ async def test_the_direction_s_row_sets_its_hit_rates_against_its_breakeven(tmp_
         baselines(engine.store)
         store_scored(engine.store, "alpha", OUTCOMES)
         store_scored(engine.store, "consensus-final", [FLAT if o is DOWN else o for o in OUTCOMES])
+        activate(engine.store, "alpha")
         body = await ask(client)
         board = await get(client, "/v1/leaderboard")
         stats = await get(client, "/v1/algorithms/alpha/stats")
@@ -187,6 +199,7 @@ async def test_a_predictor_s_rise_calls_are_counted_apart_from_its_rise_and_fall
     async with cost_map(tmp_path) as (engine, client):
         baselines(engine.store)
         store_scored(engine.store, "alpha", calls)
+        activate(engine.store, "alpha")
         body = await ask(client)
         board = await get(client, "/v1/leaderboard")
 
@@ -210,6 +223,7 @@ async def test_a_barrier_row_passes_where_its_hit_rate_s_lower_bound_is_above_p_
     right put the lower bound at 0.84."""
     async with cost_map(tmp_path) as (engine, client):
         barrier_board(engine.store)
+        activate(engine.store, "alpha")
         body = await ask(client)
         board = await get(client, "/v1/leaderboard?kind=barrier")
 
@@ -232,12 +246,52 @@ async def test_fewer_calls_than_the_leaderboard_s_minimum_sample_are_too_few(tmp
     """With 30 a minimum, alpha's 40 predictions rank it, but its 20 calls are too few."""
     async with cost_map(tmp_path, min_sample=30) as (engine, client):
         barrier_board(engine.store)
+        activate(engine.store, "alpha")
         body = await ask(client)
 
     barrier = row(body, "barrier")
     assert barrier["top"]["algorithm"] == "alpha"
     assert barrier["top"]["verdict"] == {"limit": "few", "market": "few"}
     assert barrier["baseline"]["verdict"] == {"limit": "fail", "market": "fail"}
+
+
+@pytest.mark.parametrize("status", [Status.PROBATION, Status.CLONE, Status.BENCH, Status.RETIRED, None])
+async def test_the_top_is_the_first_ranked_active_algorithm(tmp_path: Path, status: Status | None) -> None:
+    """#594: alpha calls every rise and fall right and ranks first, beta calls the falls flat and
+    ranks second. Alpha not active (on probation, a clone, benched, retired or never registered), the
+    top is beta, at its rank on the leaderboard, which ranks both as before."""
+    async with cost_map(tmp_path) as (engine, client):
+        baselines(engine.store)
+        store_scored(engine.store, "alpha", OUTCOMES)
+        store_scored(engine.store, "beta", [FLAT if o is DOWN else o for o in OUTCOMES])
+        standing(engine.store, status, "alpha")
+        activate(engine.store, "beta")
+        body = await ask(client)
+        board = await get(client, "/v1/leaderboard")
+
+    assert [e["algorithm"] for e in board["ranked"]] == ["alpha", "beta"]
+    top = row(body, "direction")["top"]
+    assert (top["algorithm"], top["rank"]) == ("beta", 2)
+    assert top["precision"] == entry(board, "beta")["precision"]
+
+
+async def test_a_kind_without_an_active_algorithm_has_no_top_until_one_is_made_active(
+    tmp_path: Path,
+) -> None:
+    """#594: the barrier's alpha ranks first on probation: no top, the baseline as before. Made
+    active, it is the top at the next read: a status change changes the store, as a prediction does."""
+    async with cost_map(tmp_path) as (engine, client):
+        barrier_board(engine.store)
+        standing(engine.store, Status.PROBATION, "alpha")
+        before = await ask(client)
+        board = await get(client, "/v1/leaderboard?kind=barrier")
+        activate(engine.store, "alpha")
+        after = await ask(client)
+
+    assert [e["algorithm"] for e in board["ranked"]] == ["alpha"]
+    assert row(before, "barrier")["top"] is None
+    assert row(before, "barrier")["baseline"]["algorithm"] == row(after, "barrier")["baseline"]["algorithm"]
+    assert (row(after, "barrier")["top"]["algorithm"], row(after, "barrier")["top"]["rank"]) == ("alpha", 1)
 
 
 async def test_the_daily_kind_s_row_is_in_basis_points_without_a_breakeven(tmp_path: Path) -> None:

@@ -15,7 +15,7 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
 
 - **Cells** (``selection.py``, #395): a cell is a (kind, predictor): the four-minute direction
   (width k) or the 4-, 15- or 30-minute barrier (width w), and the final consensus (the
-  direction's only), the kind's first-ranked algorithm or its strongest baseline. The trader
+  direction's only), the kind's first-ranked active algorithm (#594) or its strongest baseline. The trader
   trades the champion policy's cells (below), whatever their verdict on the engine's cost map
   (``GET /v1/cost-map``, 005930, the last 20 days), read at each start and every day at 08:30 for
   their figures (#472: its pass at a market order's round trip is a diagnosis, no condition); none
@@ -127,7 +127,7 @@ KIS_MODES = (MOCK, LIVE)
 # minutes. The 60-minute barrier and the daily kinds are not traded.
 TRADED_KINDS = ("direction", "barrier", "barrier_15m", "barrier_30m")
 # A cell's predictor, as the cost map names it (#307, #395): the final consensus (the direction's
-# only), the kind's first-ranked algorithm besides the consensus, its strongest baseline.
+# only), the kind's first-ranked active algorithm besides the consensus (#594), its strongest baseline.
 ROLES = ("consensus", "top", "baseline")
 
 # The capital the trader may use, in won (#393): ``.env`` may narrow it, never widen it.

@@ -1733,18 +1733,29 @@ async def _kind_algorithm_stats(request: web.Request, name: str, kind: Predictio
 async def _cost_map(request: web.Request) -> web.Response:
     """``/v1/cost-map`` (#307, ``cost_map.py``): the symbols' cost cards, a row each kind with
     a direction, from its leaderboard's statistics for the query (each kind's days its own,
-    computed and kept as the leaderboard's), and the period base rates kept
-    (``base_rates.py``)."""
+    computed and kept as the leaderboard's) and the algorithms' statuses (#594), and the period
+    base rates kept (``base_rates.py``)."""
     engine = request.app[ENGINE_KEY]
     query = _query(request, engine)
     min_sample = request.app[MIN_SAMPLE_KEY]
     fee = engine.fee_rate
 
+    def active_now() -> frozenset[str]:
+        """The algorithms active now, the only ones a row's ``top`` may name (#594). Read on the event
+        loop (the store's own connection) as each row's statistics are asked for, with nothing awaited
+        between: a row kept for the store's version has that version's statuses (a status change
+        changes the store, and the row is computed again)."""
+        return frozenset(name for name, s in engine.store.statuses().items() if s.status is Status.ACTIVE)
+
     def direction(
-        algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]], excluded: dict[str, Excluded]
+        algorithms: dict[str, list[Scored]],
+        baselines: dict[str, list[Scored]],
+        excluded: dict[str, Excluded],
+        active: frozenset[str] = active_now(),
     ) -> dict[str, Any]:
         board = leaderboard(algorithms, baselines, min_sample, fee)
-        return direction_row(DIRECTION_KIND, board, {**algorithms, **baselines}, fee, min_sample, query.days)
+        records = {**algorithms, **baselines}
+        return direction_row(DIRECTION_KIND, board, records, fee, min_sample, query.days, active=active)
 
     rows = [await _stats(request, ("cost-map",), query, direction)]
     for kind in [*engine.kinds, *engine.daily_kinds]:
@@ -1758,9 +1769,10 @@ async def _cost_map(request: web.Request) -> web.Response:
             excluded: dict[str, Excluded],
             kind: PredictionKind = kind,
             days: tuple[date, ...] = of_kind.days,
+            active: frozenset[str] = active_now(),
         ) -> dict[str, Any]:
             board = kind_leaderboard(algorithms, baselines, min_sample, kind, engine.calendar)
-            return kind_row(kind, board, {**algorithms, **baselines}, fee, min_sample, days)
+            return kind_row(kind, board, {**algorithms, **baselines}, fee, min_sample, days, active=active)
 
         rows.append(await _kind_stats(request, kind, ("cost-map",), of_kind, build))
     names = request.app[NAMES_KEY]

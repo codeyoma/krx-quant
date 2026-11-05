@@ -36,13 +36,14 @@ leaderboard's query (symbol, period, special situations):
   average; with no third outcome q = 1 − p, and p ≥ p* breaks even, as it does with one (then
   q < 1 − p). None for a daily kind: its band is not where a trade exits (``NOT_SYMMETRIC``);
 - three predictors: the final consensus (the direction's only: the kinds have none), the
-  kind's first-ranked algorithm besides the consensus, and its baseline whose hit rate has the
-  highest lower bound. Of each: the hit rate of its rise and fall calls with its Wilson
-  interval (the leaderboard's ``precision``), the edge (the share of its calls right less the
-  share wrong the other way: P(rise | long) − P(fall | long) and the short's alike), its
-  calls, and its research P&L per trade (the kind's own: ticks, a daily kind's basis points;
-  a short of the stock, and through the inverse product). The leaderboard's own statistics,
-  so the same query gives the same numbers there and in the stats window. Beside them its rise
+  kind's first-ranked active algorithm besides the consensus (``top``, #594: the lifecycle's
+  ``Status.ACTIVE`` now, below), and its baseline whose hit rate has the highest lower bound. Of
+  each: the hit rate of its rise and fall calls with its Wilson interval (the leaderboard's
+  ``precision``), the edge (the share of its calls right less the share wrong the other way:
+  P(rise | long) − P(fall | long) and the short's alike), its calls, and its research P&L per
+  trade (the kind's own: ticks, a daily kind's basis points; a short of the stock, and through the
+  inverse product). The leaderboard's own statistics, so the same query gives the same numbers
+  there and in the stats window. Beside them its rise
   calls alone (#472, ``long``: the trader buys on rises only): how many, and the share whose answer
   was the rise, with its Wilson interval. The direction's rise is its touch label's ``up`` (the
   best bid reached the upper target in the four minutes, whether or not the lower one was reached
@@ -54,12 +55,21 @@ leaderboard's query (symbol, period, special situations):
 
 One bar close's W and C stand for the period's: an approximation, as each bar close has its
 own width and price.
+
+**The top is an active algorithm** (#594). The leaderboard ranks every algorithm with enough
+scored predictions, whatever its status. The trader names a cell by the ``top`` (``trader/
+selection.py``), the nightly fit tries every cell named (``trader/refit.py``), and a policy it keeps
+can become the champion that trades (``trader/promotion.py``); the mock practice cell is one of them
+too (``trader/practice.py``). None of them reads the status: an algorithm on probation, a clone,
+benched or retired that ranked first was a cell to trade, its lifecycle review (its lift over the
+baselines) not passed. The ``top`` is therefore the first ranked of the algorithms active now, None
+when none is; its ``rank`` stays the leaderboard's.
 """
 
 from __future__ import annotations
 
 import statistics
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, TypeVar
@@ -146,8 +156,11 @@ def direction_row(
     fee_rate: float,
     min_sample: int,
     days: Sequence[date],
+    *,
+    active: Collection[str],
 ) -> dict[str, Any]:
-    """The direction's row, from its leaderboard and every predictor's ``records``."""
+    """The direction's row, from its leaderboard, every predictor's ``records`` and the algorithms
+    ``active`` now (the ``top`` is one of them, #594)."""
     windows: dict[tuple[str, str], _Window] = {}
     for rs in records.values():
         for r in rs:
@@ -168,7 +181,7 @@ def direction_row(
         min_sample,
         days,
         consensus=next((e for e in entries if e.algorithm == FINAL), None),
-        top=_top(board.ranked),
+        top=_top(board.ranked, active),
         baseline=_strongest(board.baselines),
         records=records,
         sides=sides,
@@ -182,10 +195,13 @@ def kind_row(
     fee_rate: float,
     min_sample: int,
     days: Sequence[date],
+    *,
+    active: Collection[str],
 ) -> dict[str, Any]:
-    """A kind's row (one with ``sides``), from its leaderboard and every predictor's
-    ``records``: a barrier's widths and mid-points at the bar close from its answers' paths
-    (``w``, ``anchor``), a daily kind's bands and opening prices (``band``, its window's start)."""
+    """A kind's row (one with ``sides``), from its leaderboard, every predictor's ``records`` and
+    the algorithms ``active`` now (#594): a barrier's widths and mid-points at the bar close from its
+    answers' paths (``w``, ``anchor``), a daily kind's bands and opening prices (``band``, its
+    window's start)."""
     assert kind.sides is not None
     rise, fall = kind.index(kind.sides[0]), kind.index(kind.sides[1])
     windows: dict[tuple[str, str], _Window] = {}
@@ -218,7 +234,7 @@ def kind_row(
         min_sample,
         days,
         consensus=None,
-        top=_top(board.ranked),
+        top=_top(board.ranked, active),
         baseline=_strongest(board.baselines),
         records=records,
         sides=sides,
@@ -229,9 +245,9 @@ def _direction_side(d: Direction) -> int:
     return 1 if d is Direction.UP else -1 if d is Direction.DOWN else 0
 
 
-def _top(ranked: Sequence[Entry] | Sequence[KindEntry]) -> Entry | KindEntry | None:
-    """The first-ranked algorithm besides the consensus."""
-    return next((e for e in ranked if e.algorithm not in CONSENSUS), None)
+def _top(ranked: Sequence[Entry] | Sequence[KindEntry], active: Collection[str]) -> Entry | KindEntry | None:
+    """The first-ranked algorithm besides the consensus of those ``active`` (#594, module doc)."""
+    return next((e for e in ranked if e.algorithm not in CONSENSUS and e.algorithm in active), None)
 
 
 def _strongest(baselines: Sequence[Entry] | Sequence[KindEntry]) -> Entry | KindEntry | None:
