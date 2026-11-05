@@ -18,10 +18,7 @@
 # 4. It fast-forwards, rebuilds and restarts the engine.
 # 5. It waits for the Engine API to answer (3 minutes). If it does not, it goes back to
 #    the commit before, rebuilds, and remembers the commit that failed.
-# 6. It pushes the new image to ECR for the nightly training on EC2 Spot, if that is set
-#    up (deploy/push-image.sh, #23). A push that failed is tried again on the next run,
-#    even with nothing new on main (.auto-update-push-failed).
-# 7. It removes Docker's build cache and the images not used for 3 days (#379), and reports
+# 6. It removes Docker's build cache and the images not used for 3 days (#379), and reports
 #    to Telegram (krx-quant notify), with what Docker keeps and the disk's free space.
 #
 # Every run, before all that, it applies the kernel's self-reboot settings and the journal on
@@ -35,7 +32,6 @@ tries=${KRX_UPDATE_TRIES:-36}
 pause=${KRX_UPDATE_PAUSE:-5}
 failed_file=.auto-update-failed
 deployed_file=.auto-update-deployed
-push_failed_file=.auto-update-push-failed
 ci_failed_file=.auto-update-ci-failed
 github_api=${KRX_UPDATE_GITHUB_API:-https://api.github.com/repos/codeyoma/krx-quant}
 
@@ -120,16 +116,6 @@ restart() {
   KRX_COMMIT=$(git rev-parse HEAD) docker compose up -d --build && healthy
 }
 
-# The running image to ECR for the Spot training; remembered when it fails, for the next run.
-push_image() {
-  if deploy/push-image.sh; then
-    rm -f "$push_failed_file"
-  else
-    touch "$push_failed_file"
-    return 1
-  fi
-}
-
 # The build cache and the images unused for 3 days (#379), after an update that started. The
 # running engine's image is in use, and so kept; a rollback builds the commit before again
 # (from the cache of the last 3 days when it has it), so it needs no old image. A prune that
@@ -174,9 +160,6 @@ deployed=$(cat "$deployed_file" 2>/dev/null || git rev-parse HEAD)
 if [[ "$deployed" == "$target" ]]; then
   echo "$target" >"$deployed_file"
   echo "auto-update: up to date (${target:0:7})"
-  if [[ -f "$push_failed_file" ]] && push_image; then
-    notify "Spot 학습용 이미지를 올렸습니다 (${target:0:7})."
-  fi
   exit 0
 fi
 if [[ -f "$failed_file" && "$(cat "$failed_file")" == "$target" ]]; then
@@ -229,16 +212,12 @@ git merge -q --ff-only "$target"
 if restart; then
   echo "$target" >"$deployed_file"
   rm -f "$failed_file"
-  pushed=""
-  if ! push_image; then
-    pushed=$'\n'"Spot 학습용 이미지를 올리지 못했습니다. 밤 학습은 이전 이미지로 돌고, 다음 06:00에 다시 올립니다."
-  fi
   prune
   read -r images cache free size < <(usage)
   echo "auto-update: ${deployed:0:7} -> ${target:0:7}"
   echo "auto-update: docker images $images, build cache $cache; disk free $free of $size"
   disk="디스크 여유 $free / $size · Docker 이미지 $images, 빌드 캐시 $cache"
-  notify "자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes$pushed"$'\n'"$disk"
+  notify "자동 업데이트: ${deployed:0:7} → ${target:0:7}"$'\n'"$changes"$'\n'"$disk"
   exit 0
 fi
 

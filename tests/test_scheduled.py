@@ -59,6 +59,7 @@ from krx_quant.scheduled import (
 )
 from krx_quant.scheduled.core import _first_night, _first_trading_night
 from krx_quant.swap import TRAINING_TIMEOUT, NightTraining, keep_training
+from krx_quant.training_nights import Failure
 from tests.collector_doubles import settings_for
 from tests.fake_github import REPO, TOKEN, fake_github
 from tests.scheduled_doubles import (
@@ -167,7 +168,7 @@ async def test_a_training_due_at_a_start_inside_the_night_is_waited_for(tmp_path
 
 
 async def test_a_training_still_going_after_its_time_limit_holds_the_jobs_no_longer(tmp_path: Path) -> None:
-    # A night on Spot whose result never comes (the Cost Guard turned it off, the run failed).
+    # A night whose end is never told: the jobs wait no longer than the training's time limit.
     training = NightTraining()
     training.started(at(FRIDAY, "21:30"), at(MONDAY, "21:30"))
     async with scheduling(tmp_path, at(FRIDAY, "22:30"), [job()], training=training) as (clock, runs, _, _):
@@ -374,7 +375,7 @@ async def test_keep_training_tells_the_jobs_when_the_night_trains() -> None:
     done = asyncio.Event()
     clock = [at(FRIDAY, "21:30")]
 
-    async def night(day: date) -> str | None:
+    async def night(day: date) -> Failure | None:
         running.set()
         await done.wait()
         return None
@@ -390,9 +391,8 @@ async def test_keep_training_tells_the_jobs_when_the_night_trains() -> None:
             Alerts(session, None, None, "http://127.0.0.1:9"),
             lambda: clock[0],
             refresh,
-            night,
-            lambda calendar, train_at, started: at(FRIDAY, "21:30"),
             training,
+            train=night,
         )
     )
     try:
@@ -1091,10 +1091,11 @@ async def test_the_trader_report_job_runs_the_real_command(
 ) -> None:
     """Against an Engine API whose cost map names one cell, never predicting (#472: tried, and left
     out): the first policy, empty, is the champion, crowned in the night, so the report calls an agent
-    and the issue is labelled."""
+    and the issue is labelled. The practice's trades (none) are folded under it (#560), from the state
+    directory, where the server keeps the state file."""
     PredictionStore(empty_server / "state" / ENGINE_DB).close()
     failing = cost_map([cost_row("barrier", top=predictor("breiman", 0.60, "fail"))])
-    state = JobState.load(empty_server / STATE_FILE)
+    state = JobState.load(empty_server / "state" / STATE_FILE)
     async with (
         EngineApi([failing]).serving() as url,
         fake_github() as hub,
@@ -1125,3 +1126,6 @@ async def test_the_trader_report_job_runs_the_real_command(
     assert "매매할 칸: 없음" in refit and "뺀 칸: barrier breiman (top): few_days" in refit
     assert state.jobs["trader-report"].exit_code == 0
     assert hub.labels.get(417) == {"ready-for-agent"}, "a champion crowned in the night calls an agent"
+    fold = body[body.index("<details><summary>연습 매매별 줄</summary>") :].split("</details>")[0]
+    assert fold.endswith(": 그날 연습 매매가 없다.\n```\n\n"), "the report's night, the command's own clock"
+    assert "쓰지 않아" not in body, "written every night"

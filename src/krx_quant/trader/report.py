@@ -18,19 +18,27 @@ are those in force at its pick; the records are read to the day.
 
 **What it holds** (``render``): the day's ledger and the champion's trades (times, cell, probability
 and θ, p* and the hit rate's lower bound, shares, how each ended, the ticks between its fills, the
-costs and the net P&L in won), what the champion's book did with the predictions it read and, when
-no cell traded, why (the day's pick from the cost map: every cell considered and its verdict); each
+costs and the net P&L in won), what the champion's book did with the predictions it read; each
+decision source's trades that day in one table (#560, ``Source``: the champion's book, the mock
+practice, the champion policy's paper shadow, each challenger: their fills' P&L, costs and net in
+ticks and won, how they exited, and the share of the calls they traded that the engine's answers
+proved right, beside those calls' p*); when no cell traded, why, as it held (#560: the champion had no
+cell, and what the fit of the night it was kept left out and why, or its cells were held), then the
+day's pick from the cost map, every cell considered and its verdict (since #480 they decide nothing); each
 policy's paper record to the day and, for a challenger, where it stands against its cohort's
 champion on the days of its cycle to the day (``promotion.judge_cohort``, #473: a figure until its
 review night, which judges it once); what the night changed (the champion, the cohort judged and its
 verdict, the challengers dropped, the cohort formed, the policies fitted and their cells, the
-policies waiting, and whether the re-fit kept none or failed); the live gate (``promotion.gate_of``,
+policies waiting, and whether the re-fit kept none, with why and the cells it left out (#560, the
+night's fit ``run_night`` hands it), or failed); the live gate (``promotion.gate_of``,
 #408: the checkpoints evaluated that night and where the champion stands); what the live mode needs
 (``live.readiness``: the gate and the execution checks on the mock days, and on a live day its first
 period, ``live.ramp``), with a KIS day's comparison of its orders with KIS's; the limits, the halts
 reached that day, a cumulative halt still holding, the pause in force and the pauses, resumes and
 re-arms asked for; the last trading days' ledger. A mock day's practice (#427,
-``KRX_TRADER_MOCK_PRACTICE``) is apart: its trades, the predictions the book read on its practice
+``KRX_TRADER_MOCK_PRACTICE``) is apart: its trades' sum (each trade's line folded apart since #560,
+``practice_trades``: the night's job writes them to ``PRACTICE_TRADES`` and folds them under its
+comment), the predictions the book read on its practice
 pick and the practice cell of the day's pick, each said so (``연습``; its pairs with the practice
 shadow are no more since #548, ``gap.py``); the ledger and the limits count the champion's KIS trades
 alone, never the practice's
@@ -66,7 +74,8 @@ import io
 import json
 import logging
 import sqlite3
-from collections.abc import Iterator, Mapping, Sequence
+from collections import Counter
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -75,6 +84,7 @@ from typing import Any
 from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
+from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.trader import (
     CAPITAL,
     KIS_MODES,
@@ -88,11 +98,23 @@ from krx_quant.trader import (
     review,
 )
 from krx_quant.trader import policy as policies
+from krx_quant.trader.cells import Cell, open_engine_db
 from krx_quant.trader.db import iso
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import Pause, pause_of
 from krx_quant.trader.paper import Rules, cooldowns
-from krx_quant.trader.refit import NO_POLICY_KEPT, run_refit
+from krx_quant.trader.refit import (
+    BOOTSTRAP,
+    FEW_DAYS,
+    FEW_TRADES,
+    MIN_DAYS,
+    MIN_TRADES,
+    NO_POLICY_KEPT,
+    Refitted,
+    run_refit,
+)
+from krx_quant.trader.replay import DOWN, FLAT, UP, day_answers
+from krx_quant.trader.selection import NO_COST_MAP, NO_PASS, NO_POLICY, NOT_IN_POLICY
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import (
     BREACH,
@@ -101,6 +123,7 @@ from krx_quant.trader.store import (
     DB_NAME,
     LIFT,
     MID,
+    SHADOW_TRADE,
     TRADER_CLOCK,
     Control,
     champion_of,
@@ -108,6 +131,7 @@ from krx_quant.trader.store import (
     day_exits,
     day_split,
     execution,
+    practice_of,
 )
 
 log = logging.getLogger(__name__)
@@ -121,6 +145,10 @@ REPORT_FAILED = 2
 RECENT_DAYS = 5
 # The heading of the re-fit's own output, under the report (``run_night``).
 REFIT_HEADING = "밤 정책 맞추기의 출력 (krx-quant refit-policy, #399 #400)"
+# The mock practice's trades a line each (#560, ``practice_trades``), under the state directory: the
+# night's job writes them there and folds them under its comment (``scheduled.trader``'s attachment).
+PRACTICE_TRADES = "trader-report/practice-trades.txt"
+PRACTICE_HEADING = "연습 매매별 줄"
 
 WEEKDAYS = "월화수목금토일"
 MODES = {PAPER: "모의(paper)", "mock": "KIS 모의(mock)", "live": "실전(live)"}
@@ -156,7 +184,10 @@ NO_CELL = {
     "no_cost_map": "비용 지도를 읽지 못했다",
     "not_in_policy": "챔피언 정책의 칸 가운데 사는 칸이 없다",
     "no_policy": "챔피언 정책을 읽지 못했다",
+    "no_champion": "챔피언이 아직 없다(첫 정책 전에는 연습 말고는 사지 않는다, #469)",
 }
+# How the decision sources' table (#560) names how a trade exited, in its order; any other is "기타".
+SOURCE_EXITS = {"take_profit": "목표", "stop_loss": "손절", "time": "시간"}
 POLICY_STATUSES = {
     policies.CHAMPION: "챔피언",
     policies.CHALLENGER: "도전 정책: 묶음으로 주기 동안 모의로 돈다",
@@ -194,6 +225,29 @@ class Trade:
     # Its execution cost (#475, ``store.execution``): each leg's adverse ticks and delays; None from a
     # store the trader has not opened since #475.
     execution: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class Source:
+    """A decision source's trades entered on the day (#560): the champion's book, the mock book's
+    practice, the champion policy's paper shadow (mock, live) or a challenger's paper book. Their P&L,
+    of those exited, in won and in ticks (each trade's in its own tick, times its shares, summed), how
+    they exited, and how the calls they traded were answered; no price."""
+
+    name: str
+    trades: int
+    open: int  # not exited by the night
+    gross_ticks: float  # (sale − buy) × shares, before the costs
+    cost: float  # both commissions and the tax, won
+    cost_ticks: float
+    net: float
+    net_ticks: float
+    exits: Mapping[str, int] = field(default_factory=dict)  # how each exited one ended → how many
+    # The calls traded by their answer's class (``replay.UP``, ``FLAT``, ``DOWN``: the kind's rise,
+    # middle and fall), those with an answer yet; None when the engine's database cannot be read.
+    answers: Mapping[str, int] | None = None
+    unanswered: int = 0
+    p_stars: tuple[float, ...] = ()  # the p* its trades were bought on, each once, the lowest first
 
 
 @dataclass(frozen=True)
@@ -293,6 +347,9 @@ class Report:
     # The mock practice cell kept for the day's review cycle (#474); None: none kept (yet).
     practice: practice.Frozen | None = None
     risk: Risk | None = None  # the risk rules that day (#471, #475); None before #471's trader
+    sources: tuple[Source, ...] = ()  # each decision source's trades that day (#560)
+    champion_policy: policies.Policy | None = None  # the day's champion as kept; None if unreadable
+    tonight: Refitted | None = None  # the night's fit, kept or not (``run_night``); None: not run with it
 
     @property
     def gate_passed(self) -> bool:
@@ -340,13 +397,18 @@ def read(
     *,
     mode: str | None = None,
     refit: int | None = None,
+    tonight: Refitted | None = None,
 ) -> Report:
     """The report of the trading day ``day`` from the trader's store at ``path``, read-only (module
     doc), of ``mode``: by default the mode the trader last started in by the day's close (#405,
-    ``promotion.mode_at``). ``sqlite3.Error`` when it cannot be read."""
+    ``promotion.mode_at``); the calls its trades made answered from the engine's database beside it
+    (#560, read-only). ``tonight`` is the night's fit when the report is made with it (``run_night``).
+    ``sqlite3.Error`` when it cannot be read."""
     week = last_of_week(calendar, day)
     if not path.exists():
-        return Report(day, mode or PAPER, week, promotion.no_gate(), found=False, refit=refit)
+        return Report(
+            day, mode or PAPER, week, promotion.no_gate(), found=False, refit=refit, tonight=tonight
+        )
     start, end = night_of(calendar, day)
     session = calendar.session(day)
     with _reading(path) as db:
@@ -448,7 +510,133 @@ def read(
             cycle=cycle,
             practice=None if cycle is None else practice.frozen(db, cycle.evaluation, cycle.number),
             risk=_risk(db, mode, day, end, ramp) if {"runs", "trades", "unfilled_buys"} <= tables else None,
+            sources=_sources(db, path.parent / ENGINE_DB, mode, day, champion, challengers)
+            if "trades" in tables
+            else (),
+            champion_policy=_policy(db, champion) if has_policies and champion is not None else None,
+            tonight=tonight,
         )
+
+
+def _policy(db: sqlite3.Connection, version: int) -> policies.Policy | None:
+    """Policy ``version`` as kept; None when it cannot be read (the report says why no cell traded
+    without it)."""
+    try:
+        return policies.read(db, version)
+    except policies.PolicyError as e:
+        log.warning("trader report: %s", e)
+        return None
+
+
+def _sources(
+    db: sqlite3.Connection,
+    engine: Path,
+    mode: str,
+    day: date,
+    champion: int | None,
+    challengers: Sequence[int],
+) -> tuple[Source, ...]:
+    """Each decision source's trades entered on ``day`` (#560, ``Source``): the champion's book (of
+    ``mode``) always; the mock book's practice when it traded; the champion policy's paper shadow on a
+    KIS day; each challenger running that day. A store from before a column has none of what it
+    tells apart (a practice, a shadow, a challenger)."""
+    columns = _columns(db, "trades")
+    champions, practised = champion_of(db), practice_of(db)
+    wanted: list[tuple[str, str, str, tuple[Any, ...], bool]] = [
+        (
+            "챔피언 없음" if champion is None else f"챔피언 정책 {champion}",
+            mode,
+            f"{champions} AND NOT {practised}",
+            (),
+            True,
+        ),
+        ("연습(KIS 모의)", mode, f"{champions} AND {practised}", (), False),
+    ]
+    if mode in KIS_MODES and "shadow" in columns:
+        whose = "" if champion is None else f"챔피언 정책 {champion}, "
+        wanted.append((f"그림자({whose}모의 체결)", PAPER, f"{SHADOW_TRADE} AND NOT {practised}", (), True))
+    if {"policy_id", "champion"} <= columns:
+        unshadowed = f" AND NOT {SHADOW_TRADE}" if "shadow" in columns else ""
+        wanted += [
+            (f"도전 정책 {v}", PAPER, f"t.policy_id = ? AND t.champion = 0{unshadowed}", (v,), True)
+            for v in challengers
+        ]
+    found: list[tuple[str, list[dict[str, Any]]]] = []
+    for name, of, where, params, always in wanted:
+        rows = [
+            dict(r)
+            for r in db.execute(
+                f"SELECT t.* FROM trades t WHERE t.mode = ? AND substr(t.entry_at, 1, 10) = ? AND {where}"
+                " ORDER BY t.entry_at, t.id",
+                (of, day.isoformat(), *params),
+            )
+        ]
+        if rows or always:
+            found.append((name, rows))
+    answers = _answers(engine, day, {Cell(r["kind"], r["predictor"]) for _, rows in found for r in rows})
+    return tuple(_tally(name, rows, answers) for name, rows in found)
+
+
+def _answers(engine: Path, day: date, cells: Collection[Cell]) -> dict[tuple[str, str, int], str] | None:
+    """The answers' classes of ``cells``' predictions with bar closes on ``day``, by (kind, predictor,
+    prediction): the engine's own (``replay.day_answers``: the direction's touch label, a kind's answer
+    of its answer version), read-only; None when its database is not there or cannot be read."""
+    if not cells:
+        return {}
+    if not engine.exists():
+        return None
+    try:
+        db = open_engine_db(engine)
+        try:
+            return {
+                (cell.kind, cell.predictor, prediction): answer.outcome
+                for cell in cells
+                for prediction, answer in day_answers(db, cell, day).items()
+            }
+        finally:
+            db.close()
+    except (sqlite3.Error, ValueError) as e:  # ValueError: a kind without a rise (``cells.traded_kind``)
+        log.warning("trader report: cannot read the traded calls' answers (%s)", e)
+        return None
+
+
+def _tally(
+    name: str, rows: Sequence[Mapping[str, Any]], answers: Mapping[tuple[str, str, int], str] | None
+) -> Source:
+    """A decision source's trades (``Source``), each call answered from ``answers`` (None: unknown)."""
+    exited = [r for r in rows if r["exit_at"] is not None]
+
+    def summed(column: str) -> tuple[float, float]:
+        won = [(float(r[column] or 0.0), float(r["tick"] or 0.0)) for r in exited]
+        return sum(w for w, _ in won), sum(w / tick for w, tick in won if tick)
+
+    _, gross_ticks = summed("gross")
+    cost, cost_ticks = summed("cost")
+    net, net_ticks = summed("net")
+    classes: Counter[str] | None = None if answers is None else Counter()
+    unanswered = 0
+    for r in rows:
+        outcome = (
+            None if answers is None else answers.get((r["kind"], r["predictor"], int(r["prediction_id"])))
+        )
+        if classes is not None and outcome is not None:
+            classes[outcome] += 1
+        elif classes is not None:
+            unanswered += 1
+    return Source(
+        name=name,
+        trades=len(rows),
+        open=len(rows) - len(exited),
+        gross_ticks=gross_ticks,
+        cost=cost,
+        cost_ticks=cost_ticks,
+        net=net,
+        net_ticks=net_ticks,
+        exits=dict(Counter(str(r["exit_reason"]) for r in exited)),
+        answers=None if classes is None else dict(classes),
+        unanswered=unanswered,
+        p_stars=tuple(sorted({float(r["p_star"]) for r in rows if r.get("p_star") is not None})),
+    )
 
 
 def _risk(db: sqlite3.Connection, mode: str, day: date, end: datetime, ramp: live.Ramp | None) -> Risk | None:
@@ -528,6 +716,7 @@ def render(report: Report) -> str:
         return "\n".join(lines)
     sections = [
         _day_section(report),
+        *([_sources_section(report)] if report.sources else []),
         *([] if report.gap is None else [_gap_section(report.gap, report.mode)]),
         _pick_section(report),
         _standings_section(report),
@@ -546,20 +735,45 @@ def run_report(
     day: date | None = None,
     refit: int | None = None,
     mode: str | None = None,
+    tonight: Refitted | None = None,
+    fold: Path | None = None,
 ) -> int:
-    """``krx-quant trader-report``: the report of ``day`` (else ``report_day``) printed; 0, or
+    """``krx-quant trader-report``: the report of ``day`` (else ``report_day``) printed, and the mock
+    practice's trades a line each (#560, ``practice_trades``) written to ``fold`` when given (the
+    night's job folds them under its comment), else printed under the report when it traded; 0, or
     ``REPORT_FAILED`` (with a line saying why) when the store cannot be read."""
     calendar = calendar_store(settings).calendar
     day = day or report_day(calendar, now)
     try:
-        made = read(settings.state_dir / DB_NAME, day, calendar, mode=mode, refit=refit)
+        made = read(settings.state_dir / DB_NAME, day, calendar, mode=mode, refit=refit, tonight=tonight)
     except (sqlite3.Error, ValueError, KeyError, TypeError) as e:
         log.error("trader report: cannot read the trader's store (%s)", e)
         print(f"자동 매매 리포트 (#402) · {day}: 저장소를 읽지 못해 만들지 못했다: {type(e).__name__}: {e}")
         print(AGENT + "리포트를 만들지 못함")
         return REPORT_FAILED
     print(render(made))
+    folded = practice_trades(made)
+    if fold is None:
+        if any(t.practice for t in made.trades):
+            print(f"\n{folded}")
+        return 0
+    try:
+        fold.parent.mkdir(parents=True, exist_ok=True)
+        fold.write_text(folded + "\n", encoding="utf-8")
+    except OSError as e:
+        log.error("trader report: cannot write the practice's trades to %s (%s)", fold, e)
     return 0
+
+
+def practice_trades(report: Report) -> str:
+    """The mock practice's trades of the day (#427), a line each with its execution under it (#475), as
+    the report showed them before #560: kept apart from it, the report says their sum alone."""
+    practised = [t for t in report.trades if t.practice]
+    if not practised:
+        return f"{PRACTICE_HEADING} (#560) · {report.day}: 그날 연습 매매가 없다."
+    lines = [f"{PRACTICE_HEADING} (#560) · {report.day} · {len(practised)}건(진입 순, 가격은 싣지 않는다)"]
+    lines += [line for n, t in enumerate(practised, 1) for line in _trade_lines(n, t, report.day)]
+    return "\n".join(lines)
 
 
 async def run_night(
@@ -567,13 +781,14 @@ async def run_night(
 ) -> int:
     """``krx-quant refit-policy --report``, the scheduled job ``trader-report``'s: the night's re-fit
     (``refit.run_refit``) and the mock practice cell chosen for the review cycle in force if none is
-    kept for it (#474, ``practice.freeze_now``), then the day's report printed above their output. The
-    re-fit's exit code (one that raised counts 1), else the report's: the practice's choice changes
-    neither."""
+    kept for it (#474, ``practice.freeze_now``), then the day's report printed above their output (with
+    the fit, kept or not, #560) and the practice's trades written to ``PRACTICE_TRADES``. The re-fit's
+    exit code (one that raised counts 1), else the report's: the practice's choice changes neither."""
     printed = io.StringIO()
+    fitted: list[Refitted] = []
     try:
         with contextlib.redirect_stdout(printed):
-            code = await run_refit(settings, trader, now, engine_url)
+            code = await run_refit(settings, trader, now, engine_url, fitted)
     except Exception:
         log.exception("trader report: the night's re-fit failed")
         code = NO_POLICY_KEPT
@@ -583,7 +798,13 @@ async def run_night(
             await practice.freeze_now(settings, trader, now, engine_url)
     except Exception:
         log.exception("trader report: the night's practice cell could not be chosen")
-    reported = run_report(settings, now, refit=code)
+    reported = run_report(
+        settings,
+        now,
+        refit=code,
+        tonight=fitted[-1] if fitted else None,
+        fold=settings.state_dir / PRACTICE_TRADES,
+    )
     print(f"\n{REFIT_HEADING}\n")
     print(printed.getvalue().rstrip("\n") or "(출력 없음)")
     return code or reported
@@ -860,6 +1081,7 @@ def _pick(
     last = traded[-1]
     last["picks"] = json.loads(last["picks"])
     last["considered"] = json.loads(last["considered"])
+    last["cells"] = json.loads(last["cells"]) if last.get("cells") else []  # #469: the champion's
     return last, len(rows)
 
 
@@ -1042,14 +1264,77 @@ def _day_section(report: Report) -> str:
         net = sum(t.net or 0.0 for t in practised)
         lines.append(
             f"연습 매매 {len(practised)}건(KIS 모의, 챔피언 칸이 없던 때 1주씩: 승격·관문·모의 기록·손실"
-            f" 한도에는 세지 않고, 계좌 손익·위험 규칙·실행 점검에는 센다), 순손익 합 {_won(net)}:"
+            f" 한도에는 세지 않고, 계좌 손익·위험 규칙·실행 점검에는 센다), 순손익 합 {_won(net)} ·"
+            f" 매매별 줄은 맨 아래 `{PRACTICE_HEADING}`에 따로 둔다(#560)"
         )
-        lines += [line for n, t in enumerate(practised, 1) for line in _trade_lines(n, t, report.day)]
     lines += _execution_lines(report)
     lines.append(_decisions_line(report.decisions))
     if report.practice_decisions:
         lines.append(_decisions_line(report.practice_decisions, "연습 칸 고르기의 챔피언 장부"))
     return "\n".join(lines)
+
+
+def _sources_section(report: Report) -> str:
+    """Each decision source's trades that day (#560, ``Source``), a row each: why the day made or lost
+    what it did (the fills' ticks against the costs) and whether the calls it traded were right
+    against the hit rate they had to beat (p*). Ticks, won and shares; no price."""
+    lines = [
+        "출처별 손익 (#560): 그날 진입한 매매, 손익은 그 가운데 청산한 것 · 틱은 매매마다 손익을 그 매매의 "
+        "틱으로 나눠 더한 것(주 수가 곱해져 있다) · 맞음은 매매한 호출 가운데 답이 오름(상승)인 몫, p*는 그 "
+        "호출이 본전인 맞힘률",
+        "출처 | 매매 | 체결 손익 | 비용 | 순손익 | 청산 | 맞음 | p*",
+    ]
+    lines += [_source_row(s) for s in report.sources]
+    return "\n".join(lines)
+
+
+def _source_row(s: Source) -> str:
+    if not s.trades:
+        return f"{s.name} | 0건 | - | - | - | - | - | -"
+    count = f"{s.trades}건" + (f"(열림 {s.open})" if s.open else "")
+    if s.open == s.trades:  # none exited: no P&L yet
+        money = ["-", "-", "-", "-"]
+    else:
+        money = [
+            _tick_sum(s.gross_ticks),
+            f"{s.cost_ticks:.1f}틱 {_amount(s.cost)}",
+            f"{_tick_sum(s.net_ticks)} {_won(s.net)}",
+            _exits(s.exits),
+        ]
+    return " | ".join([s.name, count, *money, _hits(s), _p_stars(s.p_stars)])
+
+
+def _tick_sum(value: float) -> str:
+    return f"{value:+.1f}틱"
+
+
+def _exits(exits: Mapping[str, int]) -> str:
+    """How the exited trades ended, as shares of them: the target, the stop, the time, and the rest
+    (a pause, a limit) together."""
+    total = sum(exits.values())
+    if not total:
+        return "-"
+    shares = [f"{said} {exits.get(reason, 0) / total:.0%}" for reason, said in SOURCE_EXITS.items()]
+    other = total - sum(exits.get(reason, 0) for reason in SOURCE_EXITS)
+    return ", ".join(shares + ([f"기타 {other / total:.0%}"] if other else []))
+
+
+def _hits(s: Source) -> str:
+    """The calls traded that were right: the share whose answer was the rise, and each class's count."""
+    if s.answers is None:
+        return "?(엔진 DB를 읽지 못함)"
+    answered = sum(s.answers.values())
+    unanswered = f", 답 없음 {s.unanswered}" if s.unanswered else ""
+    if not answered:
+        return f"답 없음 {s.unanswered}"
+    up, flat, down = (s.answers.get(c, 0) for c in (UP, FLAT, DOWN))
+    return f"{up / answered:.0%}(상승 {up}·보합 {flat}·하락 {down}{unanswered})"
+
+
+def _p_stars(values: Sequence[float]) -> str:
+    if not values:
+        return "?"
+    return f"{values[0]:.3f}" if len(values) == 1 else f"{values[0]:.3f}–{values[-1]:.3f}"
 
 
 def _split_line(ledger: Mapping[str, Any]) -> list[str]:
@@ -1220,11 +1505,10 @@ def _pick_section(report: Report) -> str:
                 + sized
             )
         return "\n".join(lines)
-    reason = pick["reason"]
-    why = NO_CELL.get(reason, reason or "?")
-    if reason in ("no_cost_map", "no_policy") and pick.get("detail"):
-        why += f": {pick['detail']}"
-    lines.append(f"매매할 칸 없음: {why}({reason})")
+    lines.append(f"매매할 칸 없음: {_no_cell(report, pick)}")
+    lines += _champion_fit(report, pick["reason"])
+    if pick["considered"]:
+        lines.append("비용 지도가 본 칸(그 판정은 #480 뒤로 매매를 정하지 않는다):")
     for c in pick["considered"]:
         verdict = c.get("verdict")
         if verdict is None:
@@ -1236,6 +1520,74 @@ def _pick_section(report: Report) -> str:
         extra = f", {c['why']}" if c.get("why") else ""
         lines.append(f"- {c['kind']} {c['role']} {c.get('predictor') or '-'}: {verdict}({figures}){extra}")
     return "\n".join(lines)
+
+
+def _no_cell(report: Report, pick: Mapping[str, Any]) -> str:
+    """Why no cell traded (#560): what held it, not only the pick's name for it. Since #480 a champion's
+    cells trade whatever the cost map's verdicts (``policy.apply``), so the pick's ``no_pass`` or
+    ``not_in_policy`` means the champion had no cell to trade: it has none, or each was held (a
+    predictor gone, #469)."""
+    reason = pick["reason"]
+    if reason in (NO_COST_MAP, NO_POLICY):
+        detail = f": {pick['detail']}" if pick.get("detail") else ""
+        return f"{NO_CELL[reason]}{detail}({reason})"
+    policy = report.champion_policy
+    if reason not in (NO_PASS, NOT_IN_POLICY) or policy is None:
+        return f"{NO_CELL.get(reason, reason or '?')}({reason})"
+    if not policy.cells:
+        return (
+            f"챔피언 정책 {policy.version}에 칸이 없다(빈 정책 · 고르기의 기록은 {reason}이나, #480 뒤로 "
+            "비용 지도의 판정은 매매를 정하지 않는다)"
+        )
+    held = ", ".join(
+        f"{_cell(c['kind'], c.get('predictor'), c.get('role'))} {c.get('why') or '?'}"
+        for c in pick.get("cells") or []
+        if not c.get("traded")
+    )
+    return f"챔피언 정책 {policy.version}의 칸 {len(policy.cells)}개가 그날 매매하지 않았다" + (
+        f": {held}({reason})" if held else f"({reason})"
+    )
+
+
+def _champion_fit(report: Report, reason: str | None) -> list[str]:
+    """When the champion had no cell (#560): the night it was kept, and what that night's fit left out
+    and why (the re-fit's own ``few_days``, ``few_trades``, ``no_edge``)."""
+    policy = report.champion_policy
+    if policy is None or policy.cells or reason not in (NO_PASS, NOT_IN_POLICY):
+        return []
+    head = f"- 챔피언 정책 {policy.version}: {policy.created_at.astimezone(KST):%Y-%m-%d %H:%M}에"
+    if policy.reason == BOOTSTRAP:
+        return [f"{head} 빈 챔피언으로 두었다({BOOTSTRAP})"]
+    if not policy.left_out:
+        return [f"{head} 맞춘 정책: 비용 지도에 이름이 있는 칸이 없었다"]
+    return [
+        f"{head} 맞춘 정책: 그 밤 맞추기가 칸을 남기지 않았다 · "
+        + _left_out_said(policy.left_out, policy.fit.get("grid"))
+    ]
+
+
+def _left_out_said(left_out: Sequence[Mapping[str, Any]], grid: Mapping[str, Any] | None) -> str:
+    """The cells a fit left out, by why (#560, ``refit.judge``): how many, and what each why fell
+    short of: the recorded days (``few_days``) or the trades bought alone a share (``few_trades``)."""
+    grid = grid or {}
+    by: dict[str, list[Mapping[str, Any]]] = {}
+    for x in left_out:
+        by.setdefault(str(x.get("why")), []).append(x)
+    parts = []
+    for why, found in by.items():
+        part = f"{why} {len(found)}"
+        if why == FEW_DAYS:
+            days = sorted(int(x["recorded_days"]) for x in found if isinstance(x.get("recorded_days"), int))
+            if days:
+                span = f"{days[0]}" if days[0] == days[-1] else f"{days[0]}–{days[-1]}"
+                part += f"(녹화한 날 {span}일, {grid.get('min_days') or MIN_DAYS}일 필요)"
+        elif why == FEW_TRADES:
+            most = [int(x["most_trades"]) for x in found if isinstance(x.get("most_trades"), int)]
+            if most:
+                needed = grid.get("min_trades") or MIN_TRADES
+                part += f"(1주씩 잰 체결이 가장 많을 때 {max(most)}건, {needed}건 필요)"
+        parts.append(part)
+    return f"뺀 칸 {len(left_out)}: " + ", ".join(parts)
 
 
 def _pick_figures(p: Mapping[str, Any]) -> str:
@@ -1365,14 +1717,41 @@ def _night_section(report: Report) -> str:
         if report.refit:
             lines.append(f"- 밤 정책 맞추기: 실패(종료 코드 {report.refit}). 까닭은 아래 출력에 있다")
         elif not report.fitted:
-            lines.append(
-                "- 밤 정책 맞추기: 새 정책을 저장하지 않았다(맞춘 값이 챔피언, 도는 도전 정책이나 기다리는 "
-                "정책과 같거나, "
-                "#472: 정책 전체의 재생이 하한을 넘지 못했다. 까닭은 아래 출력에 있다)"
-            )
+            lines.append(_not_kept(report.tonight))
     if len(lines) == 1:
         lines.append("- 바뀐 것 없음")
     return "\n".join(lines)
+
+
+def _not_kept(tonight: Refitted | None) -> str:
+    """The night's fit that kept no new policy (#560): the policy it equals, or the whole replay that
+    did not pass (#472), with the cells it left out and why; without the fit (a report not made with
+    it), the two causes it may be."""
+    head = "- 밤 정책 맞추기: 새 정책을 저장하지 않았다"
+    if tonight is None:
+        return (
+            f"{head}(맞춘 값이 챔피언, 도는 도전 정책이나 기다리는 정책과 같거나, #472: 정책 전체의 재생이 "
+            "하한을 넘지 못했다. 까닭은 아래 출력에 있다)"
+        )
+    cells = f"넣은 칸 {len(tonight.cells)}개"
+    left = "" if not tonight.left_out else " · " + _left_out_said(tonight.left_out, tonight.fit.get("grid"))
+    if tonight.rejected is not None:
+        why = (
+            f"{cells}로 짠 정책 전체의 재생에서 날마다 순손익의 95% 하한이 0을 넘지 않았다"
+            f"(#472, {tonight.rejected})"
+        )
+    elif tonight.same_as is not None:
+        whose = (
+            "챔피언"
+            if tonight.same_as == tonight.champion_version
+            else "도는 도전 정책"
+            if tonight.same_as in tonight.challengers
+            else "기다리는 정책"
+        )
+        why = f"맞춘 값({cells})이 {whose} 정책 {tonight.same_as}과 같다"
+    else:  # kept, but not in the night's policies (a clock off the night's): said as it is
+        return f"- 밤 정책 맞추기: 정책 {tonight.version}을 저장했다({cells}){left}"
+    return f"{head}: {why}{left}"
 
 
 def _simulated(fitted: Mapping[str, Any], title: str = "") -> str:

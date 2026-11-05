@@ -27,7 +27,6 @@ from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.closing_flow import keep_days, keep_demand, store_closing_demand
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, night_front_month
-from krx_quant.cost_guard import keep_costs
 from krx_quant.daily import StoredDays
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.disk_watch import DiskWatch, keep_disks
@@ -88,16 +87,7 @@ from krx_quant.signals import Signals
 from krx_quant.snapshot import keep_snapshots
 from krx_quant.stream import LiveStatus
 from krx_quant.supply import toss_client_maker
-from krx_quant.swap import (
-    NightTraining,
-    TrainingWatch,
-    await_spot_night,
-    first_spot_wait,
-    keep_models,
-    keep_training,
-    publish_training_inputs,
-    show_night,
-)
+from krx_quant.swap import NightTraining, TrainingWatch, keep_models, keep_training, show_night
 from krx_quant.trader import SYMBOL as TRADED_SYMBOL
 from krx_quant.trader.quotes import QuoteFeed
 from krx_quant.trader.store import DB_NAME as TRADER_DB
@@ -491,47 +481,20 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
             )
             if object_store is not None and settings.train_at is not None:
                 trained_on = object_store
-                spot = settings.train_on == "spot"
-
-                async def publish() -> None:
-                    """What the next Spot night needs from here; a failure waits for the next."""
-                    try:
-                        await asyncio.to_thread(publish_training_inputs, trained_on, settings)
-                    except Exception:
-                        log.exception("could not publish the training inputs")
 
                 async def refresh() -> None:
-                    if spot:  # for the next night, as the calendar stands now
-                        await publish()
                     await show_night(trained_on, shelf, engine, kst_day(now()), watch)
 
-                async def on_spot(day: date) -> str | None:
-                    return await await_spot_night(
-                        trained_on, calendar.calendar, day, alerts, now, settings.state_dir
-                    )
-
-                if spot:
-                    await publish()
                 background.append(
                     asyncio.create_task(
                         keep_training(
-                            settings.train_at,
-                            calendar.calendar,
-                            alerts,
-                            now,
-                            refresh,
-                            on_spot if spot else None,
-                            first_spot_wait if spot else None,
-                            training,
-                            watch,
+                            settings.train_at, calendar.calendar, alerts, now, refresh, training, watch
                         )
                     )
                 )
             if loki.active() is not None:  # the log-absence alert's line, from this loop (#358)
                 memory = partial(heartbeat.readings, settings.state_dir, now)  # and the memory (#547)
                 background.append(asyncio.create_task(loki.keep_heartbeat(fields=memory)))
-            if settings.cost_budget is not None:
-                background.append(asyncio.create_task(keep_costs(settings, alerts, now)))
             if settings.disk_min_free_percent > 0:
                 disks = DiskWatch(
                     {"data": settings.data_dir, "state": settings.state_dir},

@@ -8,19 +8,24 @@ not applied, and ``/v1/status``'s and ``doctor``'s fields of them.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import signal
 import sys
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
+from krx_quant import swap
 from krx_quant.clock import FakeClock
+from krx_quant.collector import run_collector
 from krx_quant.config import Settings
 from krx_quant.doctor import Status, report
 from krx_quant.engine import PredictionEngine
+from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
@@ -30,7 +35,9 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.swap import NO_NIGHT, SWAP_AT, TrainingWatch, _train, show_night
 from krx_quant.training_nights import Failure, Outcome, TrainingNights
 from tests.api_schema import check
+from tests.collector_doubles import settings_for
 from tests.replay_events import api, get_json
+from tests.waiting import until
 
 # The week of #355: the night of 10-13 was the last applied, 10-17 and 10-18 a weekend.
 APPLIED = date(2026, 10, 13)
@@ -96,6 +103,36 @@ async def test_a_training_that_ends_well_is_no_failure_and_one_with_an_error_say
     assert await _train(APPLIED, script(STEPS)) is None
     failure = await _train(APPLIED, script("print('no archived bars', file=sys.stderr); sys.exit(1)"))
     assert failure == Failure("exit 1, 마지막으로 시작한 단계 없음", 1, None)
+
+
+async def test_the_collector_trains_the_night_in_its_own_process_here_and_keeps_its_outcome(
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Started inside the night (a deploy, a restart), the collector runs that night's training
+    at once, as ``krx-quant train`` beside it (#22), and keeps how it ended (#355). The night is
+    trained on this server only: nothing is published for another machine (#564)."""
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    trained: list[date] = []
+
+    async def train(day: date) -> Failure | None:
+        trained.append(day)
+        return None
+
+    monkeypatch.setattr(swap, "_train", train)
+    settings = replace(settings_for(kis, tmp_path), object_store=str(store_root), train_at=time(21, 30))
+    stop = asyncio.Event()
+    clock = lambda: datetime(2026, 10, 8, 22, 30, tzinfo=KST)  # noqa: E731
+    task = asyncio.create_task(run_collector(settings, stop=stop, clock=clock))
+    try:
+        await until(lambda: TrainingNights(settings.state_dir).outcomes() != {})
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+
+    assert trained == [date(2026, 10, 8)], "the night of the day whose bars were archived at 21:00"
+    assert TrainingNights(settings.state_dir).outcomes()[date(2026, 10, 8)].ok
+    assert not (store_root / "training").exists(), "no settings or calendar published"
 
 
 # The nights in a row

@@ -39,11 +39,16 @@ def test_the_macro_indicators_are_read_at_07_30_unless_moved_or_off() -> None:
     assert settings.regime_rules.shock_sox_pct == 3.0
 
 
-def test_a_cost_budget_needs_the_schedules_it_turns_off() -> None:
-    with pytest.raises(SettingsError, match="KRX_TRAINING_SCHEDULES"):
-        Settings.from_env({**KEYS, "KRX_COST_BUDGET": "krx-quant-monthly"}, dotenv_path=None)
-    both = {**KEYS, "KRX_COST_BUDGET": "krx-quant-monthly", "KRX_TRAINING_SCHEDULES": "a,b"}
-    assert Settings.from_env(both, dotenv_path=None).training_schedules == ("a", "b")
+def test_the_settings_of_the_training_elsewhere_left_in_an_env_are_not_read() -> None:
+    # #564: the night trains on this server alone; a server's .env may still hold them.
+    left = {
+        "KRX_TRAIN_ON": "spot",
+        "KRX_COST_BUDGET": "krx-quant-monthly",  # once refused without KRX_TRAINING_SCHEDULES
+        "KRX_COST_CHECK_SECONDS": "1",  # once refused under 60
+    }
+    settings = Settings.from_env({**KEYS, **left}, dotenv_path=None)
+    assert settings == Settings.from_env(KEYS, dotenv_path=None)
+    assert settings.train_at == time(21, 30)
 
 
 def test_the_target_is_the_touch_target_unless_the_four_minute_move_is_chosen() -> None:
