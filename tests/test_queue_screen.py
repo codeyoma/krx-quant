@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import json
 import random
+import subprocess
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any
 
 import pytest
@@ -598,6 +600,49 @@ def test_a_candidate_s_process_is_stopped_at_its_memory_limit(quick: None) -> No
 
     assert outcome.screened is None and outcome.why is not None
     assert outcome.why.startswith("memory limit (") and outcome.why.endswith(" MB resident, at most 100)")
+
+
+def _until(condition: Callable[[], bool], timeout: float = 20.0) -> None:
+    """Return once ``condition()`` holds, asking it every 20 ms; TimeoutError after ``timeout`` s."""
+    deadline = monotonic() + timeout
+    while not condition():
+        if monotonic() > deadline:
+            raise TimeoutError
+        sleep(0.02)
+
+
+def _gone(pid: int) -> bool:
+    """Whether process ``pid`` has ended (reaped, or a zombie no one reaped yet)."""
+    try:
+        status = Path(f"/proc/{pid}/status").read_text()
+    except FileNotFoundError:
+        return True
+    return "\nState:\tZ" in status
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG is Linux's")
+def test_a_candidate_s_process_ends_with_the_screen_s(tmp_path: Path) -> None:
+    pid = tmp_path / "candidate.pid"
+    candidate = (
+        "import os, time\n"
+        f"open({str(pid) + '.tmp'!r}, 'w').write(str(os.getpid()))\n"
+        f"os.replace({str(pid) + '.tmp'!r}, {str(pid)!r})\n"
+        "while True: time.sleep(1)"
+    )
+    screens = (
+        "import sys\nfrom datetime import timedelta\nfrom krx_quant.queue_screen import run_candidate\n"
+        f"run_candidate('alpha', 2, timedelta(minutes=5), 1e9, program=[sys.executable, '-c', {candidate!r}])"
+    )
+    screen = subprocess.Popen([sys.executable, "-c", screens])
+    try:
+        _until(pid.exists)
+        child = int(pid.read_text())
+        assert not _gone(child)
+    finally:
+        screen.kill()  # as the scheduler stops a job at its time limit
+        screen.wait()
+
+    _until(lambda: _gone(child))
 
 
 def test_the_command_says_when_no_day_was_recorded(

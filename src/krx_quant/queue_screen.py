@@ -55,9 +55,9 @@ new evidence beside the one before it: tuning the score on what it ordered needs
 **Resources.** Each candidate is screened in its own process (``screen-queue --candidate``), one after
 another, under a time limit (``CANDIDATE_TIMEOUT``) and a limit on its resident memory
 (``CANDIDATE_MEMORY_MB``, read from ``/proc``: none where it cannot be read), within the night's
-budget (``SCREEN_BUDGET``). A sample store's day is the whole day of every feature, decompressed
-(``SampleStore.get``) before it is cut to the candidate's. A limit, an error or the budget leaves the
-candidate's score unknown.
+budget (``SCREEN_BUDGET``); on Linux it is killed with the screen's own process. A sample store's
+day is the whole day of every feature, decompressed (``SampleStore.get``) before it is cut to the
+candidate's. A limit, an error or the budget leaves the candidate's score unknown.
 
 **What it cannot see.** The special situations as the engine marks them live, the ten seconds' time
 budget, the CPU shared with the other algorithms and the engine's schedule: the pre-validation's
@@ -67,10 +67,13 @@ checks judge those.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import hashlib
 import json
 import logging
+import signal
 import subprocess
+import sys
 import tempfile
 from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
@@ -501,7 +504,9 @@ def run_candidate(
     with tempfile.TemporaryDirectory(prefix="screen-") as folder:
         out = Path(folder) / "screened.json"
         command = [*program, COMMAND, "--candidate", name, "--days", str(days), "--out", str(out)]
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        process = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, preexec_fn=_with_this_process()
+        )
         began = monotonic()
         while True:
             try:
@@ -522,6 +527,26 @@ def run_candidate(
             return Outcome(Screened.from_dict(json.loads(out.read_text())))
         except (OSError, ValueError, KeyError, TypeError) as e:
             return Outcome(None, f"no result: {type(e).__name__}")
+
+
+def _with_this_process() -> Callable[[], None] | None:
+    """What a candidate's process runs before the program, on Linux: it is killed when this process
+    ends (``prctl(PR_SET_PDEATHSIG, SIGKILL)``), so a screen stopped at its job's time limit leaves no
+    candidate running beside the next job. None elsewhere (macOS: the tests)."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        prctl = ctypes.CDLL(None, use_errno=True).prctl  # looked up here: the child only calls it
+    except (OSError, AttributeError):
+        return None
+
+    def set_death_signal() -> None:
+        prctl(_PR_SET_PDEATHSIG, int(signal.SIGKILL))
+
+    return set_death_signal
+
+
+_PR_SET_PDEATHSIG = 1  # linux/prctl.h
 
 
 def _over(pid: int, began: float, timeout: timedelta, memory_mb: float) -> str | None:
