@@ -63,6 +63,15 @@ def _check_krx_net_assets() -> int:
     return 0
 
 
+def _probe_sample_keys(day: date | None) -> int:
+    """What changes the key of a day a night stored (#565)."""
+    from krx_quant.sample_keys_probe import probe_sample_keys
+
+    report, code = probe_sample_keys(Settings.from_env(require_kis=False), datetime.now(KST), day=day)
+    print(report)
+    return code
+
+
 def add(sub: Commands) -> None:
     """The probes' commands, each with its handler (``cli._parser``)."""
     sub.add_parser(
@@ -106,3 +115,15 @@ def add(sub: Commands) -> None:
         " which day's listed units the net asset total matches, KRX against KIS; reads the state file"
         " only, prints no value",
     ).set_defaults(run=lambda args: _check_krx_net_assets())
+    sample_keys_cmd = sub.add_parser(
+        "probe-sample-keys",
+        help="what changed the key of the days the sample store holds since the night stored them (#565):"
+        " their input files in the Object Store, the training cache and the data directory, the latest day's"
+        " parts not merged yet, the keys changed since the last run; writes only its state file, no price",
+    )
+    sample_keys_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the latest day looked at, YYYY-MM-DD (default: the store's latest)",
+    )
+    sample_keys_cmd.set_defaults(run=lambda args: _probe_sample_keys(args.day))

@@ -1,12 +1,12 @@
 """The data's commands (#578): KIS's subscription limit and REST fallbacks, the one-minute bars'
-backfill, the upload to the Object Store and the macro indicators."""
+backfill, the upload to the Object Store, a day's recording quality and the macro indicators."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import sys
-from datetime import datetime
+from datetime import date, datetime
 
 from krx_quant.cli.core import Commands
 from krx_quant.config import Settings
@@ -58,6 +58,13 @@ async def _archive(recheck: bool) -> int:
     return 1 if report.failed else 0
 
 
+async def _recording_quality(day: date | None) -> int:
+    from krx_quant.recording_quality import recording_quality
+
+    print(await recording_quality(Settings.from_env(require_kis=False), datetime.now(KST), day))
+    return 0
+
+
 def _macro() -> int:
     from krx_quant.macro import run_macro
 
@@ -99,6 +106,20 @@ def add(sub: Commands) -> None:
         "--recheck", action="store_true", help="compare every file with the store and upload what it lacks"
     )
     archive_cmd.set_defaults(run=lambda args: asyncio.run(_archive(args.recheck)))
+    quality_cmd = sub.add_parser(
+        "recording-quality",
+        help="report a trading day's recording quality (#570): disconnects in the session by feed, the"
+        " recorded one-minute bars against KIS's, frames short of fields or not parsed, the REST polls'"
+        " failures, the night futures' recording against the nights before; read-only, prints no market"
+        " value",
+    )
+    quality_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the trading day, YYYY-MM-DD (default: tonight's once its bars are final at 20:30, else the"
+        " trading day before)",
+    )
+    quality_cmd.set_defaults(run=lambda args: asyncio.run(_recording_quality(args.day)))
     sub.add_parser("macro", help="read today's macro indicators and decide the regime, once").set_defaults(
         run=lambda args: _macro()
     )

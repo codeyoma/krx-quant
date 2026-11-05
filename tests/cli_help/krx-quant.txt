@@ -1,9 +1,9 @@
 usage: krx-quant [-h]
-                 {collect,replay,rescore,fit,prevalidate,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,replay,rescore,fit,prevalidate,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
     replay              replay a recorded day through the engine into its own
                         database (no KIS needed)
@@ -76,6 +76,12 @@ positional arguments:
                         exit (stop the collector first)
     archive             merge recorded part files and upload every day to
                         KRX_OBJECT_STORE (safe to rerun)
+    recording-quality   report a trading day's recording quality (#570):
+                        disconnects in the session by feed, the recorded one-
+                        minute bars against KIS's, frames short of fields or
+                        not parsed, the REST polls' failures, the night
+                        futures' recording against the nights before; read-
+                        only, prints no market value
     macro               read today's macro indicators and decide the regime,
                         once
     probe-supply        ask where KIS gives the daily supply indicators
@@ -102,6 +108,12 @@ positional arguments:
                         API (#305): the days, when they came, which day's
                         listed units the net asset total matches, KRX against
                         KIS; reads the state file only, prints no value
+    probe-sample-keys   what changed the key of the days the sample store
+                        holds since the night stored them (#565): their input
+                        files in the Object Store, the training cache and the
+                        data directory, the latest day's parts not merged yet,
+                        the keys changed since the last run; writes only its
+                        state file, no price
     smt                 count a day's SMT divergences (#520), made again from
                         its recording or backfilled bars, beside the engine's
                         live ones; reads only, no price
