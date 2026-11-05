@@ -82,6 +82,13 @@ scripts/loki-query.sh '{service="krx-quant", process="engine"} |~ "admitted on p
   --since 7d --forward --limit 500
 ```
 
+**Bar closes that held the event loop** (#538): one WARNING per bar close that kept the collector's event loop over a second without a turn, with the steps that ran then (`bar close <day> <HH:MM> held the event loop <s>s (over 1s): <step> <s>s, …, other <s>s`; operations.md "봉 마감의 이벤트 루프 막힘 (#538)" says what each step is). The trader's quote stalls are on the same loop: read them together.
+
+```bash
+scripts/loki-query.sh '{service="krx-quant"} |~ "held the event loop|quotes stalled"' \
+  --from 2026-11-06T09:00 --to 2026-11-06T15:40 --forward --limit 1000
+```
+
 **ERRORs in the last 24 hours:**
 
 ```bash

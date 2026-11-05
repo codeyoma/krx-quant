@@ -20,6 +20,10 @@ not for the others (the range), the reference price or the quote features.
 A kind with barriers (#183, the barrier) has their width fixed when the window opens, from
 the bars the bar close's snapshot holds (``Kind.width``): its answer reads it four minutes
 later, and the engine keeps it with every prediction of that bar close.
+
+A kind's answer reads its window's quotes, up to the longest horizon's hour of them: live the
+engine copies the window on the event loop (``kind_window``) and makes the answer off it
+(``KindWindow.answer``, #538), so the loop that also reads KIS and streams the quotes goes on.
 """
 
 from __future__ import annotations
@@ -69,7 +73,7 @@ from krx_quant.feeds import (
     USD_FUTURES,
 )
 from krx_quant.feeds.base import KST, LEVELS, kst_day
-from krx_quant.kinds import Answer, Followed, Kind, QuoteLog
+from krx_quant.kinds import Answer, Followed, Kind, QuoteLog, Taken, follow
 from krx_quant.market_calendar import MarketCalendar, Session
 from krx_quant.pricing import cost_ticks
 from krx_quant.reference import BAR, MAX_QUOTE_AGE, Bar, BarBuilder, ReferencePrice, Source
@@ -457,6 +461,45 @@ class BarsAtClose:
     leaders: dict[str, list[Bar]]
 
 
+@dataclass(frozen=True)
+class KindWindow:
+    """A kind's window from a bar close as the view followed it so far, copied (``MarketView.
+    kind_window``): what its answer is made from, anywhere (#538). The touch window's start (the
+    mid-point, tick, k, best quote before t), the round-trip cost there, the kind's barrier width
+    fixed when it opened, and the quotes and trades logged in its minutes."""
+
+    kind: Kind
+    symbol: str
+    bar_close: datetime
+    anchor: float | None
+    tick: float | None
+    k: int | None
+    bid_start: float | None
+    ask_start: float | None
+    cost: float | None
+    width: Width | None
+    taken: Taken
+
+    def answer(self) -> Answer:
+        """The kind's answer of the window (``Kind.answer_to``), its quotes the kind's: crossed
+        ones only for a kind that counts them (``Kind.crossed``, #187)."""
+        followed = follow(
+            self.taken,
+            self.symbol,
+            self.bar_close,
+            self.anchor,
+            self.tick,
+            self.k,
+            self.bid_start,
+            self.ask_start,
+            cost=self.cost,
+            width=self.width,
+            crossed=self.kind.crossed,
+            horizon=self.kind.horizon,
+        )
+        return self.kind.answer_to(followed)
+
+
 class MarketView:
     def __init__(
         self,
@@ -742,10 +785,30 @@ class MarketView:
         with the kind's barrier width fixed when it opened (#183); a window not followed says so
         (``restarted``), as its touch label does. Its quotes are the kind's: crossed ones only
         for a kind that counts them (``Kind.crossed``, #187)."""
-        window = self.followed(symbol, bar_close, crossed=kind.crossed, horizon=kind.horizon)
-        if window is None:
-            return Answer(None, RESTARTED)
-        return kind.answer_to(replace(window, width=self.kind_width(kind, symbol, bar_close)))
+        window = self.kind_window(kind, symbol, bar_close)
+        return Answer(None, RESTARTED) if window is None else window.answer()
+
+    def kind_window(self, kind: Kind, symbol: str, bar_close: datetime) -> KindWindow | None:
+        """``kind``'s window of ``symbol`` from ``bar_close`` as followed so far, copied, for its
+        answer (``kind_answer``) to be made elsewhere (#538); None for a window not followed (the
+        engine started after its bar close) or without kinds."""
+        window = self._windows.get(symbol, {}).get(bar_close)
+        log = self._logs.get(symbol)
+        if window is None or log is None:
+            return None
+        return KindWindow(
+            kind,
+            symbol,
+            bar_close,
+            window.anchor,
+            window.tick,
+            window.k,
+            window.bid_start,
+            window.ask_start,
+            cost_ticks(window.anchor, window.fee_rate) if window.anchor is not None else None,
+            self.kind_width(kind, symbol, bar_close),
+            log.take(bar_close, bar_close + kind.horizon),
+        )
 
     def kind_width(self, kind: Kind, symbol: str, bar_close: datetime) -> Width | None:
         """The width of ``kind``'s barriers in ``symbol``'s window from ``bar_close`` (#183), fixed

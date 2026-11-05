@@ -73,6 +73,10 @@ Special situations (``special.py``): a symbol in a VI at a bar close is not pred
 special, marked when it is made or as soon as the situation is learned. Each window learned
 is kept in ``special_windows`` (#236), its later versions over it (a VI's release).
 
+Live, each bar close watches the event loop it runs on (``watch_loop``, #538, ``loop_watch.py``):
+that loop also reads KIS and streams the best quotes to the trader. A bar close that keeps it over
+a second without a turn logs one WARNING with how long and which of its steps ran then.
+
 The prediction window is continuous trading, from the first bar close after the open
 until the last bar close whose target (t + 4 minutes) is still in continuous trading:
 09:01–15:16 on a normal day.
@@ -87,7 +91,8 @@ its table's direction (``climate.py``), a model the morning swap installs.
 
 Beside the direction the engine predicts the other kinds registered (#179, ``kinds.py``),
 each at the same bar closes from the same Market View: a kind's baselines predict every
-symbol at once, once the algorithms have started, and its algorithms run with the
+symbol at once, just before the algorithms start (#538: while they run, the baselines' store
+calls waited for the algorithms' threads to let go of the GIL), and its algorithms run with the
 direction's, in the same worker threads, under the same time limit and CPU budget,
 registered after them (the budget skips them first). A kind's predictions go to
 ``kind_predictions``, each with the bar close's k it was made with (#200), its mid-point and tick
@@ -95,7 +100,9 @@ size (``anchor``, ``tick``, #210: the reference its answer is measured from) and
 barriers (#183), their width fixed there (``width_ticks``); at t + 4 minutes
 each window's answer, by the kind's answer function on the quotes the touch label reads, goes
 to ``kind_answers`` (special when a VI, circuit breaker or sidecar known at its bar close, or
-learned since, touches it) and scores every predictor of the kind there. The kinds have no
+learned since, touches it) and scores every predictor of the kind there. Each answer is made
+once, in a worker thread (#538): a longer kind's window holds up to an hour of quotes, and the
+baselines' last window over is that answer. The kinds have no
 consensus and no signals. Each daily review also judges each kind's algorithms against that
 kind's baselines, within the kind. A kind that fails (its answer function, a baseline) is
 logged and never holds up the direction. A kind baseline that predicts from a table (the
@@ -120,6 +127,7 @@ the leaderboard, the statistics and the consensus weights read the live predicti
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import heapq
 import json
 import logging
@@ -195,6 +203,7 @@ from krx_quant.kind_stats import kind_scoring
 from krx_quant.kinds import (
     DIRECTION,
     DIRECTION_KIND,
+    Answer,
     KindBaseline,
     KindForecast,
     KindInputs,
@@ -218,6 +227,7 @@ from krx_quant.lifecycle import (
     target_changed,
 )
 from krx_quant.lifecycle import stages as stages_now
+from krx_quant.loop_watch import LoopWatch, held_text
 from krx_quant.market_calendar import MarketCalendar, first_whole_day
 from krx_quant.market_view import (
     FUTURES_SERIES,
@@ -225,6 +235,7 @@ from krx_quant.market_view import (
     INDEX_FEEDS,
     LOOKAHEAD_DAYS,
     BarsAtClose,
+    KindWindow,
     MarketView,
     next_bar_close,
 )
@@ -247,7 +258,7 @@ from krx_quant.smt import LIVE as SMT_LIVE
 from krx_quant.smt import Detector as SmtDetector
 from krx_quant.special import KOSPI, Kind, SpecialSituations, Window, in_vi, touching
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
-from krx_quant.touch import TARGET_VERSION, WINDOW
+from krx_quant.touch import RESTARTED, TARGET_VERSION, WINDOW
 
 if TYPE_CHECKING:  # the pre-validation replays through this module: its type only
     from krx_quant.prevalidation import Refusal
@@ -316,6 +327,14 @@ REVISION_REVIEW_RUN = "revision_review"
 REVIEW_AFTER_CLOSE = timedelta(minutes=10)
 # How far back a starting engine looks for a kind's predictions left without their answer.
 _KIND_PENDING = timedelta(days=7)
+# The bar close's steps on the event loop, as a WARNING names what held it (#538, ``loop_watch``).
+SCORING = "scoring"
+ANSWERS = "the kinds' answers"
+INPUTS = "the inputs"
+RECORDS = "records"
+SMT_STEP = "SMT"
+KIND_BASELINES = "the kinds' baselines"
+CONSENSUS = "consensus"
 # Days with predictions a review reads back over: the longest rule counts 60 on the bench,
 # and a status can be older than that.
 _REVIEW_DAYS = MAX_REVIEW_DAY  # prediction days a review reads back
@@ -463,6 +482,7 @@ class PredictionEngine:
         daily_algorithms: Sequence[DailyAlgorithm] = (),
         daily_features: DailyFeatures | None = None,
         daily_feature_names: Collection[str] = (),
+        watch_loop: bool = False,
     ) -> None:
         self.store = store
         self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
@@ -539,6 +559,12 @@ class PredictionEngine:
         self._features = feature_store or FeatureStore()
         self._cost: dict[str, float] = {}  # expected seconds per bar close, by algorithm
         self._busy: set[str] = set()  # algorithms still working past their budget
+        # The bar close's event loop, watched live (#538): the one going on, if any.
+        self._watch_loop = watch_loop
+        self._watch: LoopWatch | None = None
+        # The kinds' answers made at the last scoring, by (kind, symbol, bar close): the kinds'
+        # baselines read the window just over from them (#538).
+        self._answered: dict[tuple[str, str, datetime], Answer] = {}
         self._special = SpecialSituations(calendar)
         self.leaders = leaders or Leaders()
         self._last_tick = clock.now()
@@ -999,15 +1025,36 @@ class PredictionEngine:
         """Score, predict and review everything due by now, in time order."""
         now = self.clock.now()
         while (due := self.next_due()) is not None and due <= now:
-            self._score_until(due)
-            if due == next_bar_close(self.calendar, self._last_tick):
-                self._last_tick = due
-                await self._predict(due)
-            if due == self._next_review(self._reviewed_through):
-                self._reviewed_through = due
-                await self._review(due)
-            if self._daily is not None and due == self._daily.next_due():
-                await self._daily.run(due)
+            self._watch = LoopWatch() if self._watch_loop else None
+            predicted = False
+            try:
+                await self._score_until(due)
+                if due == next_bar_close(self.calendar, self._last_tick):
+                    self._last_tick = due
+                    predicted = True
+                    await self._predict(due)
+                if due == self._next_review(self._reviewed_through):
+                    self._reviewed_through = due
+                    await self._review(due)
+                if self._daily is not None and due == self._daily.next_due():
+                    await self._daily.run(due)
+            finally:
+                self._tell_held(due, predicted)
+
+    def _step(self, name: str) -> contextlib.AbstractContextManager[None]:
+        """Time a synchronous step of the bar close on the event loop, when it is watched (#538)."""
+        return contextlib.nullcontext() if self._watch is None else self._watch.step(name)
+
+    def _tell_held(self, due: datetime, predicted: bool) -> None:
+        """End the bar close's watch; a WARNING when it held the event loop too long (#538)."""
+        watch, self._watch = self._watch, None
+        if watch is None:
+            return
+        watch.stop()
+        held = watch.held()
+        if held is not None:
+            what = f"{'bar close' if predicted else 'run'} {due.astimezone(KST):%Y-%m-%d %H:%M}"
+            log.warning("%s", held_text(what, *held))
 
     def bars(self, symbol: str) -> list[Bar]:
         return self._market.bars(symbol, self.clock.now())
@@ -1482,66 +1529,75 @@ class PredictionEngine:
         return await self.notify(text)
 
     async def _predict(self, bar_close: datetime) -> None:
-        self._admit()
-        day_start = datetime.combine(bar_close.date(), time(), KST)
-        at_close: dict[str, _AtClose] = {}
-        frozen = self._market.at_close(bar_close)
-        standings = self.store.statuses()  # read each time: retiring is a command
-        retired, active = _with_status(standings, Status.RETIRED), _with_status(standings, Status.ACTIVE)
-        running = [a for a in self.algorithms if a.name not in retired]
-        # A kind whose window from here would end after the closing auction (#263) predicts nothing.
-        session = self.calendar.session(bar_close.astimezone(KST).date())
-        late = {
-            k.name
-            for k in self.kinds
-            if session is not None and bar_close + k.horizon > session.closing_auction
-        }
-        kind_running = [a for a in self.kind_algorithms if a.name not in retired and a.kind not in late]
-        members = [a.name for a in running if a.name in active]
-        known = self._special.known(before=bar_close)
-        regime = self._regime(bar_close)
-        stopped = [s for s in self.symbols if in_vi(known, s, bar_close)]
-        if stopped:
-            self._record_not_predicted(bar_close, stopped, "vi", running)
-        to_touch = self.target_version >= 2
-        made_by: dict[tuple[str, str, str], dict[str, Forecast | None]] = {}
-        for symbol in self.symbols:
-            if symbol in stopped:
-                continue
-            snapshot = self._market.snapshot(frozen, symbol, self.fee_rate, regime)
-            mid = snapshot.price
-            touch = (
-                TouchTerms.at(self._market.quote_at(symbol, bar_close), snapshot.tick) if to_touch else None
-            )
-            at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names), touch)
-            inputs = Inputs(
-                symbol=symbol,
-                bar_close=bar_close,
-                mid=mid,
-                mid_before=self._market.mid(symbol, bar_close - HORIZON),
-                flat_ticks=snapshot.flat_ticks,
-                tick=snapshot.tick,
-                day_classes=(
-                    # The windows over by now: their bar closes four minutes back or more.
-                    self.store.day_touches(symbol, day_start, bar_close - HORIZON)
+        with self._step(INPUTS):
+            self._admit()
+            day_start = datetime.combine(bar_close.date(), time(), KST)
+            at_close: dict[str, _AtClose] = {}
+            frozen = self._market.at_close(bar_close)
+            standings = self.store.statuses()  # read each time: retiring is a command
+            retired, active = _with_status(standings, Status.RETIRED), _with_status(standings, Status.ACTIVE)
+            running = [a for a in self.algorithms if a.name not in retired]
+            # A kind whose window from here would end after the closing auction (#263) predicts nothing.
+            session = self.calendar.session(bar_close.astimezone(KST).date())
+            late = {
+                k.name
+                for k in self.kinds
+                if session is not None and bar_close + k.horizon > session.closing_auction
+            }
+            kind_running = [a for a in self.kind_algorithms if a.name not in retired and a.kind not in late]
+            members = [a.name for a in running if a.name in active]
+            known = self._special.known(before=bar_close)
+            regime = self._regime(bar_close)
+            stopped = [s for s in self.symbols if in_vi(known, s, bar_close)]
+            if stopped:
+                self._record_not_predicted(bar_close, stopped, "vi", running)
+            to_touch = self.target_version >= 2
+            made_by: dict[tuple[str, str, str], dict[str, Forecast | None]] = {}
+            for symbol in self.symbols:
+                if symbol in stopped:
+                    continue
+                snapshot = self._market.snapshot(frozen, symbol, self.fee_rate, regime)
+                mid = snapshot.price
+                touch = (
+                    TouchTerms.at(self._market.quote_at(symbol, bar_close), snapshot.tick)
                     if to_touch
-                    else self.store.day_classes(symbol, day_start, bar_close)
-                ),
-                previous=self._market.touch(symbol, bar_close - HORIZON).direction if to_touch else None,
-                climate=climate_direction(self.climate, symbol, bar_close) if to_touch else None,
+                    else None
+                )
+                at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names), touch)
+                inputs = Inputs(
+                    symbol=symbol,
+                    bar_close=bar_close,
+                    mid=mid,
+                    mid_before=self._market.mid(symbol, bar_close - HORIZON),
+                    flat_ticks=snapshot.flat_ticks,
+                    tick=snapshot.tick,
+                    day_classes=(
+                        # The windows over by now: their bar closes four minutes back or more.
+                        self.store.day_touches(symbol, day_start, bar_close - HORIZON)
+                        if to_touch
+                        else self.store.day_classes(symbol, day_start, bar_close)
+                    ),
+                    previous=self._market.touch(symbol, bar_close - HORIZON).direction if to_touch else None,
+                    climate=climate_direction(self.climate, symbol, bar_close) if to_touch else None,
+                )
+                for b in self.baselines:
+                    forecast = b.predict(inputs)
+                    status = "ok" if forecast is not None else NO_PREVIOUS
+                    made_by.setdefault((b.name, self._version(b), status), {})[symbol] = forecast
+        with self._step(RECORDS):
+            self._record(
+                bar_close,
+                at_close,
+                [(name, version, made, status) for (name, version, status), made in made_by.items()],
             )
-            for b in self.baselines:
-                forecast = b.predict(inputs)
-                status = "ok" if forecast is not None else NO_PREVIOUS
-                made_by.setdefault((b.name, self._version(b), status), {})[symbol] = forecast
-        self._record(
-            bar_close,
-            at_close,
-            [(name, version, made, status) for (name, version, status), made in made_by.items()],
-        )
-        self._judge_smt(frozen)
-        if not at_close:
+        with self._step(SMT_STEP):
+            self._judge_smt(frozen)
+        # The kinds' baselines before the algorithms start (#538): they read the answers made at
+        # this bar close's scoring and take milliseconds, while beside the algorithms' threads each
+        # of their store calls waited for the GIL, which those threads hold as they compute.
+        with self._step(KIND_BASELINES):
             self._predict_kinds(bar_close, at_close, stopped, kind_running, late)
+        if not at_close:
             return
         # The kinds' algorithms after the direction's: the budget skips them first (#179).
         chosen = {a.name for a in self._within_cpu_budget(bar_close, [*running, *kind_running])}
@@ -1557,17 +1613,16 @@ class PredictionEngine:
         ]
         mine = [runs[m] for m in members if m in runs]
         try:
-            if self.kinds:
-                await asyncio.sleep(0)  # the algorithms start first: the kinds' baselines never hold them up
-                self._predict_kinds(bar_close, at_close, stopped, kind_running, late)
             # The fast consensus: the members done within a moment of starting.
             if mine:
                 await asyncio.wait(mine, timeout=self.consensus_timing.fast_seconds)
-            self._record_consensus(FAST, bar_close, at_close, members, _finished(mine))
+            with self._step(CONSENSUS):
+                self._record_consensus(FAST, bar_close, at_close, members, _finished(mine))
             # The final one: every member done (each has its time budget), not the others.
             if mine:
                 await asyncio.wait(mine)
-            self._record_consensus(FINAL, bar_close, at_close, members, _finished(mine))
+            with self._step(CONSENSUS):
+                self._record_consensus(FINAL, bar_close, at_close, members, _finished(mine))
             await asyncio.gather(*runs.values(), *kind_runs, return_exceptions=True)
         except BaseException:
             for task in [*runs.values(), *kind_runs]:  # shutting down: none may write after the store closes
@@ -1604,8 +1659,12 @@ class PredictionEngine:
                 baselines = self._kind_baselines(kind)
                 made_by: dict[tuple[str, str, str], dict[str, KindForecast | None]] = {}
                 for symbol, c in at_close.items():
-                    # The last window over by now, its own horizon back (#263).
-                    previous = self._market.kind_answer(kind, symbol, bar_close - kind.horizon)
+                    # The last window over by now, its own horizon back (#263): answered at this
+                    # bar close's scoring (#538), else (not followed) answered so here.
+                    over = bar_close - kind.horizon
+                    previous = self._answered.get((kind.name, symbol, over))
+                    if previous is None:
+                        previous = self._market.kind_answer(kind, symbol, over)
                     inputs = KindInputs(
                         symbol=symbol,
                         bar_close=bar_close,
@@ -1842,7 +1901,8 @@ class PredictionEngine:
         made, declined, status = await self._timed(
             name, bar_close, at_close, partial(_predict_symbols, algorithm, model, vectors, bar_close)
         )
-        self._record(bar_close, at_close, _entries(name, model.version, made, declined, status))
+        with self._step(RECORDS):
+            self._record(bar_close, at_close, _entries(name, model.version, made, declined, status))
         return name, made
 
     async def _run_kind(
@@ -1856,7 +1916,10 @@ class PredictionEngine:
         made, declined, status = await self._timed(
             name, bar_close, at_close, partial(_predict_kind_symbols, kind, algorithm, model, vectors)
         )
-        self._record_kind(kind, bar_close, at_close, _entries(name, model.version, made, declined, status))
+        with self._step(RECORDS):
+            self._record_kind(
+                kind, bar_close, at_close, _entries(name, model.version, made, declined, status)
+            )
 
     async def _timed(
         self,
@@ -1944,73 +2007,104 @@ class PredictionEngine:
             heapq.heappush(self._pending, (pending.target_at, pending.prediction_id, pending))
         self._tell(PredictionsStored(bar_close, added.ids))
 
-    def _score_until(self, due: datetime) -> None:
-        scores: list[tuple[int, Score]] = []
-        # The touch label of every window over (#167), predicted or not (a VI), and of each
-        # bar close scored (one from before a restart says so): recorded beside the outcomes,
-        # not yet what they are scored on.
-        windows = dict.fromkeys(self._market.ended_windows(due))
-        while self._pending and self._pending[0][0] <= due:
-            _, _, pending = heapq.heappop(self._pending)
-            mid_target = self._market.mid(pending.symbol, pending.target_at)
-            scores.append((pending.prediction_id, _score(pending, mid_target)))
-            windows[(pending.symbol, pending.target_at - HORIZON)] = None
-        now = self.clock.now()
-        if windows:
-            self.store.add_touches([self._market.touch(symbol, close) for symbol, close in windows], now)
-        if scores:
-            self.store.score_all(scores, now)
-            self._tell(OutcomesScored([prediction_id for prediction_id, _ in scores]))
+    async def _score_until(self, due: datetime) -> None:
+        with self._step(SCORING):
+            scores: list[tuple[int, Score]] = []
+            # The touch label of every window over (#167), predicted or not (a VI), and of each
+            # bar close scored (one from before a restart says so): recorded beside the outcomes,
+            # not yet what they are scored on.
+            windows = dict.fromkeys(self._market.ended_windows(due))
+            while self._pending and self._pending[0][0] <= due:
+                _, _, pending = heapq.heappop(self._pending)
+                mid_target = self._market.mid(pending.symbol, pending.target_at)
+                scores.append((pending.prediction_id, _score(pending, mid_target)))
+                windows[(pending.symbol, pending.target_at - HORIZON)] = None
+            now = self.clock.now()
+            if windows:
+                self.store.add_touches([self._market.touch(symbol, close) for symbol, close in windows], now)
+            if scores:
+                self.store.score_all(scores, now)
+                self._tell(OutcomesScored([prediction_id for prediction_id, _ in scores]))
+        self._answered = {}
         if self.kinds:
-            self._answer_kinds(due, list(windows), now)
+            await self._answer_kinds(due, list(windows), now)
 
-    def _answer_kinds(self, due: datetime, windows: Sequence[tuple[str, datetime]], now: datetime) -> None:
+    async def _answer_kinds(
+        self, due: datetime, windows: Sequence[tuple[str, datetime]], now: datetime
+    ) -> None:
         """Each kind's answer of every window over (#179), as the touch labels are, and of the
         kind's predictions made before a restart (``restarted``): stored once, and told. A
         window is special as a prediction made at its bar close would be: a VI, circuit
         breaker or sidecar known then, or learned since in any version, touches it (as
         training leaves such a bar close out); one learned later marks it then
-        (``PredictionStore.mark_special``). A kind that fails is logged."""
-        # The windows over: the touch windows' for a four-minute kind, a longer kind's own (#263).
-        # Each window length handed out once: two kinds of one horizon share its windows.
-        longer = {h: self._market.ended_windows(due, h) for h in {k.horizon for k in self.kinds} - {WINDOW}}
-        by_kind: dict[str, dict[tuple[str, datetime], None]] = {
-            k.name: dict.fromkeys(windows if k.horizon == WINDOW else longer[k.horizon]) for k in self.kinds
-        }
-        while self._kind_pending and self._kind_pending[0][0] <= due:
-            _, kind_name, symbol, close = heapq.heappop(self._kind_pending)
-            if kind_name in by_kind:
-                by_kind[kind_name][(symbol, close)] = None
-        special: dict[tuple[str, datetime, timedelta], bool] = {}
+        (``PredictionStore.mark_special``). A kind that fails is logged.
 
-        def touched(symbol: str, close: datetime, horizon: timedelta) -> bool:
-            if (symbol, close, horizon) not in special:
-                end = close + horizon
-                special[(symbol, close, horizon)] = touching(
-                    self._special.known(before=close), symbol, close, end
-                ) or touching(self._special.learned_since(close), symbol, close, end)
-            return special[(symbol, close, horizon)]
+        The windows are copied on the event loop and answered in a worker thread (#538): a longer
+        kind's window holds up to its horizon's hour of quotes, and the loop also reads KIS and
+        streams the quotes. The answers are kept for the kinds' baselines (``_answered``)."""
+        with self._step(ANSWERS):
+            # The windows over: the touch windows' for a four-minute kind, a longer kind's own (#263).
+            # Each window length handed out once: two kinds of one horizon share its windows.
+            longer = {
+                h: self._market.ended_windows(due, h) for h in {k.horizon for k in self.kinds} - {WINDOW}
+            }
+            by_kind: dict[str, dict[tuple[str, datetime], None]] = {
+                k.name: dict.fromkeys(windows if k.horizon == WINDOW else longer[k.horizon])
+                for k in self.kinds
+            }
+            while self._kind_pending and self._kind_pending[0][0] <= due:
+                _, kind_name, symbol, close = heapq.heappop(self._kind_pending)
+                if kind_name in by_kind:
+                    by_kind[kind_name][(symbol, close)] = None
+            special: dict[tuple[str, datetime, timedelta], bool] = {}
 
-        for kind in self.kinds:
-            keys = list(by_kind[kind.name])
-            if not keys:
-                continue
-            try:
-                answers = [
-                    (
-                        symbol,
-                        close,
-                        self._market.kind_answer(kind, symbol, close),
-                        touched(symbol, close, kind.horizon),
+            def touched(symbol: str, close: datetime, horizon: timedelta) -> bool:
+                if (symbol, close, horizon) not in special:
+                    end = close + horizon
+                    special[(symbol, close, horizon)] = touching(
+                        self._special.known(before=close), symbol, close, end
+                    ) or touching(self._special.learned_since(close), symbol, close, end)
+                return special[(symbol, close, horizon)]
+
+            todo: list[tuple[PredictionKind, list[_ToAnswer]]] = []
+            for kind in self.kinds:
+                keys = list(by_kind[kind.name])
+                if not keys:
+                    continue
+                try:
+                    todo.append(
+                        (
+                            kind,
+                            [
+                                _ToAnswer(
+                                    symbol,
+                                    close,
+                                    self._market.kind_window(kind, symbol, close),
+                                    touched(symbol, close, kind.horizon),
+                                )
+                                for symbol, close in keys
+                            ],
+                        )
                     )
-                    for symbol, close in keys
-                ]
-                written = self.store.add_kind_answers(kind.name, kind.answer_version, answers, now)
-            except Exception:
-                log.exception("%s: its answers failed at %s", kind.name, due)
-                continue
-            if written:
-                self._tell(KindAnswered(kind.name, written))
+                except Exception:
+                    log.exception("%s: its answers failed at %s", kind.name, due)
+        if not todo:
+            return
+        made = await asyncio.to_thread(_answer_windows, todo)
+        with self._step(ANSWERS):
+            for kind, answers in made:
+                if isinstance(answers, BaseException):
+                    log.error("%s: its answers failed at %s", kind.name, due, exc_info=answers)
+                    continue
+                try:
+                    written = self.store.add_kind_answers(kind.name, kind.answer_version, answers, now)
+                except Exception:
+                    log.exception("%s: its answers failed at %s", kind.name, due)
+                    continue
+                for symbol, close, answer, _ in answers:
+                    self._answered[(kind.name, symbol, close)] = answer
+                if written:
+                    self._tell(KindAnswered(kind.name, written))
 
     def _tell(self, change: Change) -> None:
         for listener in self.listeners:
@@ -2138,6 +2232,45 @@ def _entries(
         nothing: dict[str, _F | None] = {s: None for s, w in declined.items() if w is why}
         entries.append((name, version, nothing, why.value))
     return entries
+
+
+@dataclass(frozen=True)
+class _ToAnswer:
+    """A kind's window to answer (#538): copied on the event loop (None: not followed, the engine
+    restarted in it), and whether a special situation touches it."""
+
+    symbol: str
+    close: datetime
+    window: KindWindow | None
+    special: bool
+
+
+def _answer_windows(
+    todo: Sequence[tuple[PredictionKind, Sequence[_ToAnswer]]],
+) -> list[tuple[PredictionKind, list[tuple[str, datetime, Answer, bool]] | Exception]]:
+    """Each kind's answers of its windows (``KindWindow.answer``; ``restarted`` for one not
+    followed), as ``PredictionStore.add_kind_answers`` takes them; a kind whose answer function
+    fails gets its exception instead. Pure: run in a worker thread (#538)."""
+    made: list[tuple[PredictionKind, list[tuple[str, datetime, Answer, bool]] | Exception]] = []
+    for kind, windows in todo:
+        try:
+            made.append(
+                (
+                    kind,
+                    [
+                        (
+                            w.symbol,
+                            w.close,
+                            Answer(None, RESTARTED) if w.window is None else w.window.answer(),
+                            w.special,
+                        )
+                        for w in windows
+                    ],
+                )
+            )
+        except Exception as e:
+            made.append((kind, e))
+    return made
 
 
 def _score(p: Pending, mid_target: float | None) -> Score:
