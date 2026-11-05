@@ -6,14 +6,18 @@ pre-validation tests record them), backfilled one-minute bars of the days before
 algorithms, and the engine's database. Output: the simulation's predictions, apart from the live
 ones, the status the review at once leaves, the clone check on the simulated days, the restart on
 a new target, the engine's stage, and the scheduled job.
+
+The tests that only read what a simulation left share one (``simulated``, #590). A test that sets
+inputs of its own, or compares two runs (the look-ahead's), simulates its own.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
 import weakref
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -30,15 +34,17 @@ from krx_quant.config import Settings
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds import KST
 from krx_quant.footprint import give_back
+from krx_quant.kind_registry import KINDS
 from krx_quant.kinds import DIRECTION_KIND
 from krx_quant.lifecycle import REGISTERED, Status, target_changed
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.replay import replay_recorded
 from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night
-from krx_quant.simulation import BAR_CLOSE_DAYS, SimulationRun, report, simulate_bar_close
+from krx_quant.simulation import BAR_CLOSE_DAYS, Simulation, SimulationRun, report, simulate_bar_close
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm, spend
+from tests.kind_doubles import DRIFT, TEST_KIND, DriftFrequency
 from tests.prevalidation_doubles import Contrarian, swings
 from tests.replay_doubles import record
 from tests.test_prevalidation import MEMORY_LINE
@@ -62,6 +68,8 @@ BACKFILLED = [date(2026, 9, 10), date(2026, 9, 11)]
 RECORDED = weekdays(date(2026, 9, 14), 22)
 # A simulation replays ten recorded days at least (``simulation.MIN_DAYS``), each a whole session:
 # 10-15 s on a laptop, and past the 30 s default (``pyproject.toml``) on a loaded CI runner (#327).
+# A test that reads the shared simulation (``simulated``) has the limit too: the first to run makes
+# it, and pytest-timeout counts the fixtures' setup.
 TEN_DAYS = pytest.mark.timeout(120)
 
 
@@ -140,21 +148,60 @@ def statuses(s: Settings) -> dict[str, Any]:
         store.close()
 
 
-@TEN_DAYS
-async def test_ten_recorded_days_are_simulated_trained_once_before_them_and_judged_on_day_10(
-    tmp_path: Path,
-) -> None:
+@dataclass(frozen=True)
+class Simulated:
+    """What the shared simulation (``simulated``) left: its settings (the engine's database in its
+    state directory), what it did, the days it replayed, and two of the stand-ins it trained."""
+
+    settings: Settings
+    run: SimulationRun
+    days: list[date]
+    contrarian: Contrarian
+    frequency: DriftFrequency
+
+    def of(self, algorithm: str) -> Simulation:
+        [found] = [sim for sim in self.run.simulations if sim.algorithm == algorithm]
+        return found
+
+
+@pytest.fixture(scope="module")
+def simulated(tmp_path_factory: pytest.TempPathFactory) -> Simulated:
+    """Ten recorded days simulated once for the module (#590), for the tests that only read what the
+    run left: on probation, contrarian, copycat (which calls as contrarian does, on its own feature)
+    and the drift's frequency (a kind's algorithm, its kind beside the registered ones); alpha
+    registered on none. The three tests that read it each simulated their own before, 7-9 s apiece
+    on a laptop; this one takes about 12 s.
+
+    It runs to its end on an event loop of its own (``asyncio.run``) and leaves only data and files,
+    so each test reads them from its own loop. #511's shared demo is a running engine instead, and its
+    tests run on the module's loop."""
     days = RECORDED[:10]
-    s = settings(tmp_path, days)
-    contrarian = Contrarian("contrarian")
-    on_probation(s, "contrarian")
-
-    run = await simulate_bar_close(
-        s, algorithms=[ALPHA, contrarian], kind_algorithms=[], now=night_after(days)
+    s = settings(tmp_path_factory.mktemp("simulated"), days)
+    on_probation(s, "contrarian", "copycat", "frequency")
+    contrarian, frequency = Contrarian("contrarian"), DriftFrequency("frequency", "velocity")
+    run = asyncio.run(
+        simulate_bar_close(
+            s,
+            algorithms=[ALPHA, contrarian, Contrarian("copycat", own="vwap_gap")],
+            kind_algorithms=[frequency],
+            kinds=[*KINDS, TEST_KIND],
+            now=night_after(days),
+        )
     )
+    return Simulated(s, run, days, contrarian, frequency)
 
-    assert contrarian.fitted == [BACKFILLED], "trained once, on its two days before the first replayed"
-    [sim] = run.simulations
+
+@TEN_DAYS
+def test_ten_recorded_days_are_simulated_trained_once_before_them_and_judged_on_day_10(
+    simulated: Simulated,
+) -> None:
+    s, run, days = simulated.settings, simulated.run, simulated.days
+
+    assert simulated.contrarian.fitted == [BACKFILLED], (
+        "trained once, on its two days before the first replayed"
+    )
+    assert {x.algorithm for x in run.simulations} == {"contrarian", "copycat", "frequency"}, "not alpha"
+    sim = simulated.of("contrarian")
     assert (sim.days, run.recorded_days) == (days, 10)
     assert sim.training["cadence"] == "bar_close" and sim.training["last_day"] == BACKFILLED[-1].isoformat()
     assert sim.training["days"] == {"bars": 2}
@@ -169,6 +216,7 @@ async def test_ten_recorded_days_are_simulated_trained_once_before_them_and_judg
         rows = store.sim_scored(1, days, None, False)
         assert {r["algorithm"] for r in rows} == {
             "contrarian",
+            "copycat",
             "baseline-flat",
             "baseline-persist",
             "baseline-random",
@@ -325,24 +373,16 @@ async def test_no_replayed_day_is_predicted_with_what_came_after_it(tmp_path: Pa
 
 
 @TEN_DAYS
-async def test_the_clone_check_reads_the_simulated_days(tmp_path: Path) -> None:
+def test_the_clone_check_reads_the_simulated_days(simulated: Simulated) -> None:
     """Two algorithms simulated together that call alike: the later one is a clone of the earlier,
     on their simulated days."""
-    days = RECORDED[:10]
-    s = settings(tmp_path, days)
-    on_probation(s, "contrarian", "copycat")
-    copycat = Contrarian("copycat", own="vwap_gap")
+    days = simulated.days
 
-    run = await simulate_bar_close(
-        s, algorithms=[Contrarian("contrarian"), copycat], kind_algorithms=[], now=night_after(days)
-    )
-
-    found = {sim.algorithm: sim for sim in run.simulations}
-    assert found["copycat"].status is Status.CLONE
-    changed = statuses(s)["copycat"][-1]
+    assert simulated.of("copycat").status is Status.CLONE
+    changed = statuses(simulated.settings)["copycat"][-1]
     assert changed["reason"].startswith(f"simulated probation {days[0]}..{days[-1]} (10 days): p_up - p_down")
     assert "moves with contrarian (r = 1.000)" in changed["reason"] and changed["simulated"] is True
-    assert found["contrarian"].status is Status.ACTIVE
+    assert simulated.of("contrarian").status is Status.ACTIVE
 
 
 @TEN_DAYS
@@ -472,21 +512,11 @@ def test_nothing_waiting_on_ten_recorded_days_says_so() -> None:
 
 
 @TEN_DAYS
-async def test_a_kind_s_algorithm_is_simulated_on_its_kind_s_answers_against_its_baselines(
-    tmp_path: Path,
+def test_a_kind_s_algorithm_is_simulated_on_its_kind_s_answers_against_its_baselines(
+    simulated: Simulated,
 ) -> None:
-    from tests.kind_doubles import DRIFT, TEST_KIND, DriftFrequency
-
-    days = RECORDED[:10]
-    s = settings(tmp_path, days)
-    on_probation(s, "frequency")
-    frequency = DriftFrequency("frequency", "velocity")
-
-    [sim] = (
-        await simulate_bar_close(
-            s, algorithms=[], kind_algorithms=[frequency], kinds=[TEST_KIND], now=night_after(days)
-        )
-    ).simulations
+    s, days, frequency = simulated.settings, simulated.days, simulated.frequency
+    sim = simulated.of("frequency")
 
     assert (sim.kind, sim.days) == (DRIFT, days) and frequency.fitted_on and frequency.fitted_on[0] > 0
     assert len(frequency.fitted_on) == 1, "trained once"

@@ -246,6 +246,7 @@ async def _run(
             "cooldown_minutes": trader.cooldown_minutes,
             "daily_buy_orders": trader.daily_buy_orders,
             "mock_practice": trader.mock_practice,  # #427
+            "practice_spacing_minutes": trader.practice_spacing_minutes,  # #598
             "cost_map": {"engine": trader.engine_url, "symbol": SYMBOL, "period": COST_MAP_PERIOD},
             "commit": settings.commit,
         },
