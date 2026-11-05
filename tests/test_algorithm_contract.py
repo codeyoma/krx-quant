@@ -207,15 +207,26 @@ def test_training_gives_a_new_versioned_model_that_can_be_saved(algorithm: Algor
 
 
 def test_predicting_takes_a_small_part_of_the_time_budget(algorithm: Algorithm) -> None:
-    # The engine allows 10 seconds per bar close for every symbol; one prediction of each
-    # scenario, a hundred times over, must take well under a second.
+    # The engine allows an algorithm 10 seconds per bar close for every symbol, and all of them
+    # 30 seconds of work together (``Budget``); one prediction of each scenario, a hundred times
+    # over, must take well under a second of work.
+    # The work is the CPU this thread spends, not the clock's time: on a busy runner the clock
+    # also counts the wait for a CPU, and took ito past the second (#574). NumPy's BLAS computes
+    # on this thread alone in the tests (``tests/__init__.py``), so that CPU is all of it. The
+    # best of up to three rounds counts, as ``timeit``'s minimum does: a round the machine slowed
+    # is not the algorithm's cost, while one that costs too much does so every round.
     model = algorithm.default_model()
     vectors = [FeatureVector(values, algorithm.features) for values in SCENARIOS.values()]
-    started = time.perf_counter()
-    for _ in range(100):
-        for features in vectors:
-            predicted(algorithm, features, model, CONTEXT)
-    assert time.perf_counter() - started < 1.0
+    spent: list[float] = []
+    for _ in range(3):
+        started = time.thread_time()
+        for _ in range(100):
+            for features in vectors:
+                predicted(algorithm, features, model, CONTEXT)
+        spent.append(time.thread_time() - started)
+        if spent[-1] < 1.0:
+            break
+    assert min(spent) < 1.0, f"CPU seconds of each round: {spent}"
 
 
 def test_one_dispatcher_gives_a_context_to_the_algorithms_that_predict_with_one_only() -> None:
