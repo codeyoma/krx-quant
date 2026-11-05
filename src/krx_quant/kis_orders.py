@@ -36,6 +36,15 @@ Two layers:
   trader's key (``Account.approval_key``) and keeps its records as they come; nothing of it reaches
   the trading.
 
+The last check (#543, ``BuyLimits``, ``Broker.buy``): a buy of the trader's broker leaves for KIS only
+when it keeps to the limits the trader injects from its settings (``trader/run.py``): its amount, with
+the buys of the day that may still fill, within the cap (``KRX_TRADER_CAPITAL``, the live first
+period's cap below it); its symbol one the trader buys; its price within ``BAND`` of the latest best
+quote, no older than ``FRESH`` seconds. Else it is withheld (``Withheld``): nothing is sent, a WARNING
+says why. The sizing code is what agent PRs change most, and the live account may hold more than the
+cap, so this is the last line before KIS. A sell and a cancel are never checked: a stop in a fall is
+never held up by it.
+
 What is sent again: a call KIS refused for its per-second limit (``BUSY``) after ``BUSY_PAUSE``,
 and one it refused for its token (``TOKEN_REJECTED``) once with a new token. Both are KIS's
 gateway refusing the call before it is taken. Nothing else: an order KIS refused (``rt_cd`` 1,
@@ -72,6 +81,7 @@ from krx_quant.config import (
     Settings,
     SettingsError,
 )
+from krx_quant.feeds.base import KST
 from krx_quant.ratelimit import RateLimiter
 
 log = logging.getLogger(__name__)
@@ -177,6 +187,15 @@ PAGES = 20
 # apart from the mock key's (#408).
 TOKEN_FILE = "trader_kis_token.json"
 LIVE_TOKEN_FILE = "trader_live_kis_token.json"
+# The last check of a buy (#543, ``BuyLimits``): its price at most ``BAND`` off the latest best quote of
+# its symbol (above the ask, below the bid), that quote no older than ``FRESH`` seconds. KRX's dynamic VI
+# stops a KOSPI 200 stock's continuous trading for an auction at a trade 3% from the last one, and the
+# trader buys in no VI window, so a price further off is none the market trades at then: a unit or a
+# field mistaken, another symbol's or another day's price. The trader buys in no stall either (more than
+# five seconds without a quote, ``trader/stall.py``) while 005930's quotes come many times a second, so
+# a latest quote older than twice that is a stream that stopped: nothing to check the price against.
+BAND = 0.03
+FRESH = 10.0
 
 # The fill notice's fields, in order (KIS's example, ``notice_cols``): 26, the live server's layout
 # as the example gives it (not measured). On the mock server each record had 23 fields (#403): the
@@ -595,6 +614,11 @@ class Unexpected(BrokerError):
     """An answer short of a field the probe measured, or with one not as measured."""
 
 
+class Withheld(BrokerError):
+    """A buy the broker's last check kept from KIS (#543, ``Broker.buy``): nothing was sent. Its text
+    says which check, never a price."""
+
+
 def same_number(a: Any, b: Any) -> bool:
     """Two order numbers alike, their leading zeros aside; never when one is empty."""
     x, y = str(a or "").strip().lstrip("0"), str(b or "").strip().lstrip("0")
@@ -801,6 +825,49 @@ class Tokens(Protocol):
     def invalidate(self) -> None: ...
 
 
+@dataclass(frozen=True)
+class BuyLimits:
+    """What a buy keeps to before it leaves for KIS (#543, ``Broker.buy``), injected by the trader from
+    its settings (``trader/run.py``): ``cap`` won at most (``KRX_TRADER_CAPITAL``; ``Broker.set_cap``
+    narrows it, to the live first period's cap), counted with the buys of the day that may still fill;
+    of ``symbols`` alone; priced within ``band`` of the latest best quote of its symbol
+    (``Broker.quoted``), no older than ``fresh`` seconds."""
+
+    cap: int
+    symbols: frozenset[str]
+    band: float = BAND
+    fresh: float = FRESH
+
+
+@dataclass(frozen=True)
+class _Buy:
+    """A buy of a day that may still fill: its symbol, the shares that may (all of them while its
+    answer is not had), and its limit."""
+
+    symbol: str
+    left: int
+    price: int
+    day: date
+
+    @property
+    def amount(self) -> int:
+        return self.left * self.price
+
+
+@dataclass(frozen=True)
+class _Quote:
+    """The latest best quote of a symbol the broker was told (``Broker.quoted``)."""
+
+    bid: float
+    ask: float
+    at: datetime
+
+
+def _number(text: str) -> str:
+    """An order number without its leading zeros (``same_number``'s)."""
+    return str(text or "").strip().lstrip("0")
+
+
 # What a call to the token can raise (``TokenManager.get``): no token, so nothing is sent.
 _TOKEN_FAILED = (kis.KisError, aiohttp.ClientError, OSError, TimeoutError, ValueError, KeyError)
 
@@ -819,21 +886,160 @@ class Broker:
 
     Fills are read on the day's inquiry (``FILLS``), polled after each order (``take``, ``order``),
     not on the real-time fill notice, whose fields on the mock server are not known yet (#403).
+
+    With ``limits`` (#543: the trader's, ``trader/run.py``) a buy is checked last before it is sent
+    (``buy``), at ``now``'s time (KST): its symbol, its price against the latest best quote it was told
+    (``quoted``; its own REST reads, ``best``, count too), and its amount with the buys of the day that
+    may still fill: those KIS took, until an inquiry read shows nothing left of them; those an inquiry
+    read showed with something left (the start's reconcile reads the day's every order, the trader's
+    and any other); and those sent whose answer is not had, whole, for their day (whether they went in,
+    only a read of them would tell, and the trader buys nothing more that day after one, #405). One that
+    does not keep to them is withheld (``Withheld``, nothing sent). Without ``limits`` (the read-only
+    brokers: the day's check, the notice layout, the live probe) nothing is checked.
     """
 
     def __init__(
-        self, account: Account, tokens: Tokens, *, pause: float = BUSY_PAUSE, retries: int = BUSY_RETRIES
+        self,
+        account: Account,
+        tokens: Tokens,
+        *,
+        pause: float = BUSY_PAUSE,
+        retries: int = BUSY_RETRIES,
+        limits: BuyLimits | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.account = account
         self._tokens = tokens
         self._pause = pause
         self._retries = retries
+        self.limits = limits
+        self._cap = None if limits is None else limits.cap
+        self._now: Callable[[], datetime] = now or (lambda: datetime.now(KST))
+        self._quotes: dict[str, _Quote] = {}  # the latest best quote of each symbol
+        # The buys that may still fill (#543): those KIS took or a read showed with something left, by
+        # day and number; those sent whose answer is not had (or not yet: one in flight).
+        self._open: dict[tuple[date, str], _Buy] = {}
+        self._unsure: list[_Buy] = []
+
+    # The last check of a buy (#543).
+
+    @property
+    def cap(self) -> int | None:
+        """What a buy and the buys that may still fill come to at most, in won; None without limits."""
+        return self._cap
+
+    def set_cap(self, cap: int) -> None:
+        """The cap from now (the live first period's, #408, ``run.LiveWatch``), never above the limits'
+        (the settings' capital). Without limits nothing is checked, and nothing changes."""
+        if self.limits is not None:
+            self._cap = min(self.limits.cap, cap)
+
+    def quoted(self, symbol: str, bid: float, ask: float, at: datetime) -> None:
+        """``symbol``'s best quote at ``at`` (the collector's stream, ``trader/run.py``), the latest a
+        buy's price is checked against. One with a side empty, or older than the one kept, is not
+        kept."""
+        if not (bid > 0 and ask > 0):
+            return
+        kept = self._quotes.get(symbol)
+        if kept is None or at >= kept.at:
+            self._quotes[symbol] = _Quote(bid, ask, at)
+
+    def _open_buys(self, day: date) -> list[_Buy]:
+        """The buys of ``day`` that may still fill; those of the days before let go (a KRX limit order
+        is a day order: KIS ends it at the close)."""
+        self._open = {key: buy for key, buy in self._open.items() if buy.day >= day}
+        self._unsure = [buy for buy in self._unsure if buy.day >= day]
+        return [buy for buy in [*self._open.values(), *self._unsure] if buy.day == day]
+
+    def _check(self, symbol: str, quantity: int, price: int) -> _Buy:
+        """The buy of ``quantity`` shares of ``symbol`` at ``price`` if it may be sent; ``Withheld``
+        (and a WARNING) if not."""
+        now = self._now()
+        buy = _Buy(symbol, quantity, price, now.astimezone(KST).date())
+        if self.limits is None or self._cap is None:
+            return buy
+        open_buys = self._open_buys(buy.day)
+        why = self._why_withheld(self.limits, self._cap, buy, open_buys, now)
+        if why is None:
+            return buy
+        quote = self._quotes.get(symbol)
+        log.warning(
+            "the broker's last check withheld a buy of %s share(s) of %s at %s (%s won; %s won in %s buy(s)"
+            " that may still fill, the cap %s won; the latest best quote %s): %s",
+            quantity,
+            symbol,
+            price,
+            f"{buy.amount:,}",
+            f"{sum(b.amount for b in open_buys):,}",
+            len(open_buys),
+            f"{self._cap:,}",
+            "none" if quote is None else f"{quote.bid:g}/{quote.ask:g} at {quote.at.isoformat()}",
+            why,
+        )
+        raise Withheld(f"buy: withheld by the broker's last check (#543): {why}")
+
+    def _why_withheld(
+        self, limits: BuyLimits, cap: int, buy: _Buy, open_buys: list[_Buy], now: datetime
+    ) -> str | None:
+        """Why ``buy`` may not be sent (no price in it); None if it may."""
+        if buy.symbol not in limits.symbols:
+            return f"{buy.symbol} is not a symbol the trader buys ({', '.join(sorted(limits.symbols))})"
+        if buy.left < 1 or buy.price < 1:
+            return "a buy of no share, or at no price"
+        quote = self._quotes.get(buy.symbol)
+        if quote is None:
+            return f"no best quote of {buy.symbol} to check its price against"
+        age = (now - quote.at).total_seconds()
+        if age > limits.fresh:
+            return f"the latest best quote of {buy.symbol} is {age:.0f}s old (more than {limits.fresh:g}s)"
+        band = f"more than {limits.band:.0%}"
+        if buy.price > quote.ask * (1 + limits.band):
+            return f"its price is {buy.price / quote.ask - 1:.1%} above the latest best ask ({band})"
+        if buy.price < quote.bid * (1 - limits.band):
+            return f"its price is {1 - buy.price / quote.bid:.1%} below the latest best bid ({band})"
+        total = buy.amount + sum(b.amount for b in open_buys)
+        if total > cap:
+            return (
+                f"its amount with the {len(open_buys)} buy(s) of the day that may still fill is"
+                f" {total / cap:.0%} of the cap"
+            )
+        return None
+
+    def _saw(self, day: date, row: OrderRow) -> None:
+        """A row of ``day``'s inquiry: a buy with something left is one that may still fill, one with
+        nothing left is over."""
+        number = _number(row.number)
+        if row.cancel or row.side != SIDE_BUY or not number:
+            return
+        if row.left > 0:
+            self._open[(day, number)] = _Buy(row.symbol, row.left, row.price, day)
+        else:
+            self._open.pop((day, number), None)
+
+    def _forget(self, buy: _Buy) -> None:
+        try:
+            self._unsure.remove(buy)
+        except ValueError:  # let go with its day already
+            pass
 
     # Orders.
 
     async def buy(self, symbol: str, quantity: int, price: int) -> Sent:
-        """A limit buy of ``quantity`` shares at ``price`` on KRX."""
-        return sent_of(await self._call("buy", partial(self.account.buy, symbol, quantity, price)))
+        """A limit buy of ``quantity`` shares at ``price`` on KRX, once the last check lets it go
+        (#543, the class's docstring): ``Withheld`` if it does not, nothing sent. Counted as a buy that
+        may still fill from before it is sent: a buy checked meanwhile counts it."""
+        buy = self._check(symbol, quantity, price)
+        self._unsure.append(buy)
+        try:
+            sent = sent_of(await self._call("buy", partial(self.account.buy, symbol, quantity, price)))
+        except NoToken:  # nothing sent
+            self._forget(buy)
+            raise
+        if sent.outcome != UNKNOWN:
+            self._forget(buy)
+        if sent.accepted and sent.ref is not None:
+            self._open.setdefault((buy.day, _number(sent.ref.number)), buy)  # a read meanwhile knows more
+        return sent
 
     async def sell(self, symbol: str, quantity: int, price: int) -> Sent:
         """A limit sell of ``quantity`` shares at ``price`` on KRX."""
@@ -915,7 +1121,10 @@ class Broker:
         context = ("", "")
         for _ in range(PAGES):
             answer = await self._read("orders", partial(self.account.fills, day, symbol, order_no, context))
-            rows += [OrderRow.of(row) for row in answer.rows("output1")]
+            for found in answer.rows("output1"):
+                row = OrderRow.of(found)
+                self._saw(day, row)  # the buys that may still fill (#543)
+                rows.append(row)
             if not answer.more:
                 return rows
             context = answer.context
@@ -984,16 +1193,19 @@ class Broker:
         )
 
     async def best(self, symbol: str) -> Best:
-        """KRX's best ask and bid of ``symbol`` now (the REST quote, when the stream is down, #407)."""
+        """KRX's best ask and bid of ``symbol`` now (the REST quote, when the stream is down, #407): the
+        latest best quote a buy's price is checked against too (#543, ``quoted``), at ``now``'s time."""
         answer = await self._read("book", partial(self.account.book, symbol))
         row = _one(answer, "book", "output1")
-        return Best(
+        best = Best(
             _count(row, "askp1"),
             _count(row, "bidp1"),
             _count(row, "askp_rsqn1"),
             _count(row, "bidp_rsqn1"),
             _field(row, "aspr_acpt_hour"),
         )
+        self.quoted(symbol, best.bid, best.ask, self._now())
+        return best
 
     # Sending.
 
@@ -1041,12 +1253,14 @@ def trader_broker(
     servers: Servers = MOCK,
     per_second: int = PER_SECOND,
     pause: float = BUSY_PAUSE,
+    limits: BuyLimits | None = None,
 ) -> Broker:
     """The trader's broker on KIS's mock server: the trader's own key and account
     (``KRX_TRADER_KIS_*``), never the collector's; its token cached in ``state/trader_kis_token.json``,
     reused across restarts and issued at most once a minute (``auth.TokenManager``: KIS answered a
     second token asked at once with ``TOKEN_TOO_SOON``); its calls paced at ``per_second`` in any
-    1.1 s (``PER_SECOND``, one: the mock server's, #461).
+    1.1 s (``PER_SECOND``, one: the mock server's, #461); its buys checked last by ``limits`` (#543:
+    the trader's, ``trader/run.py``; None for a broker that only reads).
 
     SettingsError when a key is missing, when it is the collector's or the live one
     (``KRX_TRADER_LIVE_KIS_APP_KEY``, #408: the mock mode and the order probe never take it), or when
@@ -1092,6 +1306,7 @@ def trader_broker(
         mock=True,
         per_second=per_second,
         pause=pause,
+        limits=limits,
     )
 
 
@@ -1103,13 +1318,16 @@ def trader_live_broker(
     servers: Servers = LIVE,
     per_second: int = LIVE_PER_SECOND,
     pause: float = BUSY_PAUSE,
+    limits: BuyLimits | None = None,
 ) -> Broker:
     """The trader's broker on its live account (#408): the live key and account
     (``KRX_TRADER_LIVE_KIS_*``), on KIS's live servers (``servers``, ``LIVE``: no setting changes
     them), with the live server's TR IDs (``Tr.live``); its token cached in
     ``state/trader_live_kis_token.json``, apart from the mock key's; its calls paced at
     ``per_second`` in any 1.1 s (``LIVE_PER_SECOND``, two: below the live server's 20 a second; its
-    own limit was not measured, and the mock server's is not taken for it, #461).
+    own limit was not measured, and the mock server's is not taken for it, #461); its buys checked last
+    by ``limits`` (#543: the trader's, the first period's cap told by ``run.LiveWatch``; None for a
+    broker that only reads, the live probe's).
 
     SettingsError when the live key, secret or account is missing, when the key is the collector's or
     the mock one, or the account the mock one: the live key is the new live account's own (#393
@@ -1149,6 +1367,7 @@ def trader_live_broker(
         mock=False,
         per_second=per_second,
         pause=pause,
+        limits=limits,
     )
 
 
@@ -1165,6 +1384,7 @@ def _broker(
     mock: bool,
     per_second: int,
     pause: float,
+    limits: BuyLimits | None,
 ) -> Broker:
     tokens = TokenManager(
         session,
@@ -1179,7 +1399,7 @@ def _broker(
     account = Account(
         session, rest_url, key, secret, account_no, tokens.get, mock=mock, limiter=RateLimiter(per_second)
     )
-    return Broker(account, tokens, pause=pause)
+    return Broker(account, tokens, pause=pause, limits=limits, now=now)
 
 
 def _digits(text: str | None) -> str:
