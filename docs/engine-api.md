@@ -344,8 +344,6 @@
   "mid_display": 81250.0,
   "mid_target": 81550.0,
   "flat_ticks": 2,
-  "class_a": "up",
-  "class_b": "up",
   "special": false,
   "unscorable": null,
   "scored_at": "2026-10-12T09:35:00.003000+09:00",
@@ -364,7 +362,9 @@
 
 `touch`는 그 봉 마감의 도달 정답이고, 예측은 이것으로 채점한다(#160, #167, #170). 그 봉 마감의 모든 예측이 같은 것을 가진다.
 
-한 릴리스 동안의 호환(#170): `class_a`와 `class_b`에는 둘 다 도달 정답(`touch.class`)이 온다. `unscorable`은 도달 정답이 없을 때 그 이유다(`touch.unscorable`. 그 봉 마감에 도달 정답 행이 아예 없으면 `no touch label`). 정답이 있으면 `null`이다. 그래서 #170 전의 화면도 ✓/✗를 새 정답으로 그린다. `mid_close`, `mid_display`, `mid_target`, `flat_ticks`는 DB에 저장된 옛 값 그대로다. 다음 릴리스에서 `class_a`, `class_b`를 없애고 여기에 적는다. 화면은 `touch`를 읽는다.
+`unscorable`은 도달 정답이 없을 때 그 이유다(`touch.unscorable`. 그 봉 마감에 도달 정답 행이 아예 없으면 `no touch label`이고, 이때 `touch`는 `null`이다). 정답이 있으면 `null`이다. `mid_close`, `mid_display`, `mid_target`, `flat_ticks`는 DB에 저장된 옛 값 그대로다. 화면은 `touch`를 읽는다.
+
+> **삭제됨** (2026-11-06, #NNN): `class_a`·`class_b`. #170부터 둘 다 도달 정답(`touch.class`)이었다. #170 전의 화면도 ✓/✗를 새 정답으로 그리게 한 릴리스 동안 두었다. 옛 기준 A·B의 클래스는 지금도 DB(`outcomes`)에만 쓴다(위 "옛 기준 A·B"). 이유: #170에서 한 릴리스만 두기로 함, fork는 쓰지 않음(도달 정답 `touch`가 없을 때만 `class_a`를 읽었고, 그때 `class_a`도 `null`이었다). 대신: `touch.class`.
 
 > **바뀜** (2026-10-14, #193): `class_a`·`class_b`는 기준 A·B의 옛 정답 클래스, `unscorable`은 빠진 중간가(`missing mid: target` 등)였다 → 둘 다 도달 정답, 도달 정답이 없는 이유. 옛 값은 DB(`outcomes`)에 남는다. 이유: 앱 업데이트가 엔진보다 늦어도 옛 앱이 새 정답을 보이게(#160 "한 릴리스 동안 호환"). 2026-10-12(녹화 시작)부터의 지난 예측은 엔진이 시작할 때 그날 녹화로 채운다(아래 "지난 예측의 도달 정답"). 채우기 전과 2026-10-12 전에 채점된 예측은 `null`이다.
 
@@ -887,7 +887,9 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `period`: `today`(기본), `5d`, `20d`
 - `special`: `exclude`(기본) 또는 `include`
 - `kind`(#179): `direction`(기본) 또는 엔진이 예측하는 다른 종류(`GET /v1/kinds`). 없거나 `direction`이면 아래 형식 그대로다(방향의 순위표, 지금 응답과 같다). 다른 종류면 그 종류의 순위표다(아래 "예측 종류"의 `/v1/leaderboard?kind=`). 모르는 종류는 400이다.
-- `basis`(한 릴리스 동안만, #170): #170 전의 화면이 보내는 값(`a` 또는 `b`)이다. 받기만 하고 쓰지 않는다. 응답에는 보낸 값을 그대로 `basis`로 돌려준다(`days` 바로 뒤). 옛 화면은 응답의 `basis`가 요청과 다르면 다시 요청하므로, 다르게 돌려주면 끝없이 다시 요청한다. 보내지 않으면 응답에 `basis`가 없다. `a`, `b`가 아닌 값은 400이다. 다음 릴리스에서 없애고 여기에 적는다.
+- `basis`는 받지 않는다. 보내면 값과 상관없이 400이다(#NNN). 응답에도 `basis`가 없다.
+
+  > **삭제됨** (2026-11-06, #NNN): 질의 값 `basis`(#170 전의 화면이 보내던 `a` 또는 `b`). 한 릴리스 동안 받기만 하고 쓰지 않았고, 응답의 `days` 바로 뒤에 보낸 값을 그대로 돌려줬다. 옛 화면은 응답의 `basis`가 요청과 다르면 다시 요청해서다. `a`, `b`가 아닌 값은 400이었다. 이유: #170에서 한 릴리스만 두기로 함, fork는 쓰지 않음(fork는 `symbol`, `period`, `special`, `kind`만 보낸다). 대신: 없다. 채점 기준은 도달 정답 하나다. 무시하지 않고 400으로 거절한다: 옛 화면이 남아 있으면 무시된 `basis`를 끝없이 다시 요청하기 때문이다.
 
 잘못된 값은 400이다.
 
@@ -1010,8 +1012,8 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 ### `GET /v1/algorithms/{name}/stats?symbol=&period=&special=`
 
-알고리즘 하나(기준 예측도 된다)의 상세 통계다. 질의 값은 순위표와 같다(`basis`도 순위표처럼 받아서 그대로 돌려준다, #170). 모르는 이름은 404다. 다른 종류의 알고리즘이나 기준 예측이면 그 종류의 통계다(#179, 아래 "예측 종류"). 아래는 방향의 것이다.
-- 맨 위에는 `algorithm`(이름)과 질의 값 `symbol`, `period`, `days`(실제로 쓴 날짜 목록), `special`, 그리고 `min_sample`이 온다. 순위표 응답의 맨 위와 같다. 요청에 `basis`가 있으면 `days` 뒤에 그 값이 온다.
+알고리즘 하나(기준 예측도 된다)의 상세 통계다. 질의 값은 순위표와 같다(`basis`를 보내면 순위표처럼 400이다, #NNN). 모르는 이름은 404다. 다른 종류의 알고리즘이나 기준 예측이면 그 종류의 통계다(#179, 아래 "예측 종류"). 아래는 방향의 것이다.
+- 맨 위에는 `algorithm`(이름)과 질의 값 `symbol`, `period`, `days`(실제로 쓴 날짜 목록), `special`, 그리고 `min_sample`이 온다. 순위표 응답의 맨 위와 같다. **삭제됨** (2026-11-06, #NNN): "요청에 `basis`가 있으면 `days` 뒤에 그 값이 온다." 이유: #170에서 한 릴리스만 두기로 함, fork는 쓰지 않음(위 순위표의 `basis`). 대신: 없다. `basis`를 보내면 400이다.
 - `overall`: 같은 질의의 순위표 항목(순위, q값, `excluded` 포함)에 `calibration`과 `calibration_by_class`(`up`, `flat`, `down`)를 더한다. 곡선은 10구간이고, 구간마다 `low`, `high`, `count`, `mean_p`와 `observed`(실제 비율과 Wilson 구간)가 있다.
 - `overall.skill`(#262): 기준율 대비 실력. 예측한 클래스 × 일어난 클래스 표(3 × 3)에서 낸다(`skill.py`). 채점된 예측이 없으면 `null`이다. 상태 판정과 순위에는 쓰지 않고 보여 주기만 한다. 화면은 상세 통계 창의 "기준율 대비 실력" 한 줄로 보인다(codeyoma/FinceptTerminal#85).
   - `n`(채점된 예측 수), `accuracy`(맞힘률), `expected_accuracy`: 같은 비율로 결과와 상관없이 클래스를 냈을 때의 맞힘률 Σ P(그 클래스를 냄)·P(그 클래스가 일어남).
@@ -1034,7 +1036,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 비용 지도다. 상승·하락 신호가 왕복 비용을 갚으려면 얼마나 맞혀야 하는지를, 엔진이 예측하는 지평마다 실제 맞힘률 옆에 놓는다(`cost_map.py`). 지평·비용 화면이 읽는다. 자동 매매 trader도 시작할 때와 매일 08:30에 `?symbol=005930&period=20d&special=exclude`로 읽는다(#395, 설계 [14장](design.md#14-자동-매매-393) "칸"): 방향과 4·15·30분 장벽 줄의 세 예측자의 이름과 수치. 밤 정책 맞추기는 그 이름이 있는 칸 모두를 녹화로 재생해 실행 손익의 하한으로 고르고(#472), trader는 챔피언 정책의 칸을 판정과 상관없이 산다. **바뀜** (2026-11-03, #480): trader는 `verdict.market`이 `pass`인 칸만 매매했다 → 판정은 진단이다. 이유: spec #468 3절 "진입". 리서치의 결론(`research/reports/`)이 바탕이다: 대칭 목표 ±W틱, 왕복 비용 C틱이면 P(상승|신호) − P(하락|신호) ≥ C/W여야 본전이고, 맞힘률로 말하면 p* = (W + C) ÷ 2W를 넘어야 한다. W < C면 다 맞혀도 손해다.
 
-질의 값은 순위표와 같다(`symbol`, `period`, `special`. `kind`와 `basis`는 받지 않는다). 잘못된 값은 400이다. `symbol`을 빼면(`all`) 모든 종목이다.
+질의 값은 순위표와 같다(`symbol`, `period`, `special`. `kind`는 받지 않는다. `basis`는 순위표처럼 400이다). 잘못된 값은 400이다. `symbol`을 빼면(`all`) 모든 종목이다. **바뀜** (2026-11-06, #NNN): `basis`가 `a`, `b`면 받고 쓰지 않았다 → 400. 이유: 순위표의 `basis`를 없앴다.
 
 ```json
 {
@@ -1422,7 +1424,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 |---|---|---|
 | `prediction` | 예측이 저장(표시)될 때. 기준 예측(4종, 버전 1은 3종)은 한 번에, 알고리즘은 각자 끝났을 때 | `bar_close`, `predictions`(항목은 `latest`의 예측 항목에 `symbol`을 더한 것) |
 | `consensus` | 합의가 저장될 때 | `kind`(`fast`, `final`), `bar_close`, `predictions`(합의 예측, 종목마다 하나) |
-| `outcome` | 예측이 채점될 때(봉 마감 4분 뒤) | `outcomes`(채점된 예측. 항목 형식은 같고 `outcome`이 찬다. `outcome`의 `class_a`·`class_b`도 REST처럼 도달 정답이다, #170) |
+| `outcome` | 예측이 채점될 때(봉 마감 4분 뒤) | `outcomes`(채점된 예측. 항목 형식은 같고 `outcome`이 찬다). **삭제됨** (2026-11-06, #NNN): `outcome`의 `class_a`·`class_b`(REST처럼 도달 정답이었다, #170). 이유: REST와 같다. 대신: `outcome.touch.class` |
 | `health` | 연결하자마자 한 번, 그리고 KIS 연결이나 피드의 결측 구간이 바뀔 때 | `kis`(`/v1/status`의 `kis`와 같다). 실시간과 데모만. 지연 초(`seconds_since`, `seconds_since_frame`)나 `last_frame_at`, 필드가 모자란 프레임 수(`short_frames`, #381), REST 조회의 수(`polls`, #441)가 바뀐 것만으로는 보내지 않는다 |
 | `lifecycle` | 알고리즘 상태가 바뀔 때. 일일 점검, 다른 프로세스의 `retire`·`unretire` 명령과 수습 시뮬레이션(#298). 엔진이 시작할 때의 처음 등록은 스트림이 열리기 전이라 오지 않는다 | `algorithm`, `change`(`at`, `from`, `to`, `reason`, `simulated`: `/v1/algorithms`의 상태 이력 항목과 같다). 수습 시뮬레이션(#298)의 판정은 다른 프로세스(`krx-quant simulate`)가 쓰므로 그 상태 변경도 이것으로 온다(`simulated` `true`). 시뮬레이션 예측 자체는 스트림으로 보내지 않는다 |
 | `bar` (#110) | 종목의 지금 만들어지는 1분봉이 바뀌었을 때. 1초마다 살펴 종목마다 많아야 한 번, 그사이 마지막 값으로 보낸다. 바뀌지 않으면 보내지 않는다 | `symbol`, `bar`(`start`, `open`, `high`, `low`, `close`, `volume`, `trades`: `/v1/symbols/{symbol}/bars`의 봉과 같은 형식. 그날 시작한 가장 최근 봉이라, 새 분에 체결이 아직 없으면 끝난 앞 봉이 그대로다) |

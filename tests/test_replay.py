@@ -58,9 +58,9 @@ async def test_a_prediction_is_scored_on_its_bar_closes_touch_label_however_late
 ) -> None:
     """Input: the mid-point 81,250 at the 09:31 bar close (k = 2: the upper target 81,450), the
     bid at 81,400 by the time the predictions are shown, 81,500 from 09:33. Output (#170): every
-    predictor's outcome is the touch label, up (the bid reached 81,450 at 09:33), in
-    ``class_a`` and ``class_b`` too for a screen from before; the mid-points stay as stored,
-    and so do the old bases' classes in the DB (up from the bar close, flat from the display)."""
+    predictor's outcome is the touch label, up (the bid reached 81,450 at 09:33); the mid-points
+    stay as stored, and so do the old bases' classes in the DB (up from the bar close, flat from
+    the display), which the API no longer shows (#592)."""
     events = [
         *steady_book(at("09:29:00"), at("09:31:00"), bid=81_200, ask=81_300),  # mid 81,250
         *steady_book(at("09:31:01"), at("09:32:51"), bid=81_400, ask=81_500),  # 81,450 when displayed
@@ -80,10 +80,11 @@ async def test_a_prediction_is_scored_on_its_bar_closes_touch_label_however_late
     assert (outcome["mid_close"], outcome["mid_display"], outcome["mid_target"]) == (81_250, 81_450, 81_550)
     assert outcome["flat_ticks"] == 2
     assert (outcome["touch"]["class"], outcome["touch"]["upper_at"]) == ("up", "2026-10-12T09:33:00+09:00")
-    assert (outcome["class_a"], outcome["class_b"]) == ("up", "up")
+    assert "class_a" not in outcome and "class_b" not in outcome
     assert outcome["unscorable"] is None
     assert outcome["special"] is False
-    assert {p["outcome"]["class_a"] for p in at_close.values() if p["outcome"]} == {"up"}, "every predictor's"
+    labels = {p["outcome"]["touch"]["class"] for p in at_close.values() if p["outcome"]}
+    assert labels == {"up"}, "every predictor's"
     with sqlite3.connect(tmp_path / "engine.db") as conn:
         stored = conn.execute(
             "SELECT o.class_a, o.class_b FROM outcomes o JOIN predictions p ON p.id = o.prediction_id"
@@ -104,7 +105,7 @@ async def test_a_prediction_whose_quotes_went_silent_is_left_unscorable(tmp_path
     outcome = by_algorithm(body["predictions"], "09:31:00")["baseline-flat"]["outcome"]
     assert outcome["mid_close"] == 81_250
     assert outcome["mid_target"] is None
-    assert (outcome["class_a"], outcome["class_b"]) == (None, None)
+    assert outcome["touch"]["class"] is None
     assert outcome["unscorable"] == "silent quotes"  # the touch label's reason (#170)
 
 
@@ -341,7 +342,7 @@ async def test_a_restarted_engine_scores_what_was_pending(tmp_path: Path) -> Non
     # followed through, so their touch labels say so.
     for close in ("09:31", "09:32"):
         assert outcomes[close]["scored_at"] is not None
-        assert (outcomes[close]["class_a"], outcomes[close]["unscorable"]) == (None, "restarted")
+        assert (outcomes[close]["touch"]["class"], outcomes[close]["unscorable"]) == (None, "restarted")
     # 09:33 passed while the engine was down: no prediction for it.
     assert "09:33" not in outcomes
 
