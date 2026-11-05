@@ -91,6 +91,7 @@ from krx_quant.kis_orders import Broker, BuyLimits, Servers, trader_broker, trad
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 from krx_quant.notify import Alerts
 from krx_quant.predictions import DB_NAME as ENGINE_DB
+from krx_quant.state_lock import in_use
 from krx_quant.trader import (
     COST_MAP_PERIOD,
     KIS_MODES,
@@ -173,7 +174,8 @@ async def run_trader(
     mode on ``live_servers`` (KIS's live ones; a test's fake KIS), with the KIS book's waits
     ``timing``; in mock mode the fill notice recorder (#484) waits ``notice_pace``."""
     clock: Clock = now if now is not None else (lambda: datetime.now(KST))
-    async with kis.rest_session() as orders:
+    # Before its store is opened: a restore of the state backup (#576) is not run under it.
+    async with in_use(settings.state_dir, "the trader"), kis.rest_session() as orders:
         # Made before anything is kept: a mock or live trader that cannot order does not start (#405,
         # #408). The live broker is made whether or not the live mode orders yet: its key is checked.
         # Each checks a buy last against the trader's limits (#543): the capital, its one symbol; the

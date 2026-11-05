@@ -62,7 +62,7 @@ from krx_quant.normal_order import REPORT as NORMAL_ORDER_REPORT
 from krx_quant.normal_order import lines as normal_order_lines
 from krx_quant.normal_order import normal_order_experiment
 from krx_quant.notify import send_notice, send_test_alert
-from krx_quant.object_store import open_store
+from krx_quant.object_store import ObjectStore, open_store
 from krx_quant.order_probe import probe_kis_orders
 from krx_quant.predictions import (
     DB_NAME,
@@ -102,6 +102,8 @@ from krx_quant.simulation import (
 from krx_quant.smt import lines as smt_lines
 from krx_quant.smt import reconstruct as reconstruct_smt
 from krx_quant.smt_experiment import smt_experiment
+from krx_quant.state_backup import KEY as STATE_BACKUP_KEY
+from krx_quant.state_backup import BackupRefused, RestoreRefused, back_up, drill, restore
 from krx_quant.structure_check import structure_check
 from krx_quant.supply_probe import probe_supply
 from krx_quant.trader import LIVE
@@ -295,6 +297,51 @@ async def _archive(recheck: bool) -> int:
     for partition in report.failed:
         print(f"failed: {partition}", file=sys.stderr)
     return 1 if report.failed else 0
+
+
+def _state_store(settings: Settings) -> ObjectStore:
+    store = open_store(settings)
+    if store is None:
+        raise SettingsError("KRX_OBJECT_STORE is not set")
+    return store
+
+
+def _backup_state() -> int:
+    """The nightly backup of the server's state (#576), now."""
+    settings = Settings.from_env(require_kis=False)
+    try:
+        made = back_up(settings.state_dir, _state_store(settings), datetime.now(KST), commit=settings.commit)
+    except BackupRefused as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"backed up: {made.files} files, {made.size / 2**20:,.1f} MB in {made.seconds:.1f}s")
+    return 0
+
+
+def _restore_state(source: Path | None, replace: bool, if_backed_up: bool) -> int:
+    """Put the last backup of the server's state back (#576), before the engine starts."""
+    settings = Settings.from_env(require_kis=False)
+    store = None if source is not None else open_store(settings)
+    if source is None and store is None:
+        if if_backed_up:
+            print("KRX_OBJECT_STORE is not set: nothing restored")
+            return 0
+        raise SettingsError("KRX_OBJECT_STORE is not set")
+    if if_backed_up and store is not None and store.digest(STATE_BACKUP_KEY) is None:
+        print(f"no backup of the server state in the store ({STATE_BACKUP_KEY}): nothing restored")
+        return 0
+    try:
+        done = restore(settings.state_dir, store, datetime.now(KST), source=source, replace=replace)
+    except RestoreRefused as e:
+        print(f"not restored: {e}", file=sys.stderr)
+        return 1
+    return 0 if done else 1
+
+
+def _restore_drill() -> int:
+    """The monthly restore drill (#576): the latest backup checked, the state folder left as it is."""
+    settings = Settings.from_env(require_kis=False)
+    return 0 if drill(settings.state_dir, _state_store(settings), datetime.now(KST)) else 1
 
 
 def _probe_sample_keys(day: date | None) -> int:
@@ -1058,6 +1105,33 @@ def _parser() -> argparse.ArgumentParser:
         help="the latest day looked at, YYYY-MM-DD (default: the store's latest)",
     )
     sample_keys_cmd.set_defaults(run=lambda args: _probe_sample_keys(args.day))
+    sub.add_parser(
+        "backup-state",
+        help="back the server's state up to KRX_OBJECT_STORE now, as the collector does each night (#576)",
+    ).set_defaults(run=lambda args: _backup_state())
+    restore_cmd = sub.add_parser(
+        "restore-state",
+        help="put the latest backup of the server's state back into the state folder, once it checks out"
+        " (#576; stop the engine and the trader first)",
+    )
+    restore_cmd.add_argument(
+        "--from", dest="source", type=Path, help="a backup's state.tar.gz instead of the store's latest"
+    )
+    restore_cmd.add_argument(
+        "--replace",
+        action="store_true",
+        help="move what is in the state folder aside (state/before-restore-<time>/) instead of refusing",
+    )
+    restore_cmd.add_argument(
+        "--if-backed-up",
+        action="store_true",
+        help="without a backup in the store (or a store), restore nothing and exit 0 (a new server's setup)",
+    )
+    restore_cmd.set_defaults(run=lambda args: _restore_state(args.source, args.replace, args.if_backed_up))
+    sub.add_parser(
+        "restore-drill",
+        help="check the latest backup of the server's state in a scratch folder (#576, read-only)",
+    ).set_defaults(run=lambda args: _restore_drill())
     sub.add_parser(
         "rescore",
         help="label every recorded day's bar closes again with the touch target (stop the engine first)",
