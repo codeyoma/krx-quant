@@ -81,6 +81,7 @@ from krx_quant.prevalidation import (
 )
 from krx_quant.process_log import FORMAT as LOG_FORMAT
 from krx_quant.process_log import open_process_log
+from krx_quant.recording_quality import recording_quality
 from krx_quant.redaction import secrets_of
 from krx_quant.replay import replay_day
 from krx_quant.rescore import EngineRunning, rescore
@@ -238,6 +239,11 @@ async def _probe_night(day: date | None) -> int:
 
 def _probe_gaps() -> int:
     print(probe_gaps(Settings.from_env(require_kis=False), datetime.now(KST)))
+    return 0
+
+
+async def _recording_quality(day: date | None) -> int:
+    print(await recording_quality(Settings.from_env(require_kis=False), datetime.now(KST), day))
     return 0
 
 
@@ -940,6 +946,20 @@ def _parser() -> argparse.ArgumentParser:
         help="summarize every recorded day's gaps and the closing auction window's frames, trades and"
         " bars (#344), read-only; prints no market value",
     ).set_defaults(run=lambda args: _probe_gaps())
+    quality_cmd = sub.add_parser(
+        "recording-quality",
+        help="report a trading day's recording quality (#570): disconnects in the session by feed, the"
+        " recorded one-minute bars against KIS's, frames short of fields or not parsed, the REST polls'"
+        " failures, the night futures' recording against the nights before; read-only, prints no market"
+        " value",
+    )
+    quality_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the trading day, YYYY-MM-DD (default: tonight's once its bars are final at 20:30, else the"
+        " trading day before)",
+    )
+    quality_cmd.set_defaults(run=lambda args: asyncio.run(_recording_quality(args.day)))
     sub.add_parser(
         "probe-live-account",
         help="read the trader's live account with KRX_TRADER_LIVE_KIS_* by inquiry calls alone (#408): the"
