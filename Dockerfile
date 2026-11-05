@@ -35,6 +35,13 @@ RUN UV_COMPILE_BYTECODE=0 uv sync --frozen --no-dev
 USER engine
 # /state holds the cached KIS access token; keep it on a volume so restarts reuse it.
 ENV KRX_DATA_DIR=/data KRX_STATE_DIR=/state
+# NumPy's BLAS (OpenBLAS) and OpenMP compute on the thread that calls them (#589), in every process
+# of the image: the engine, the nightly training and the scheduled jobs it starts, the trader and
+# the commands. The engine runs each algorithm in a worker thread of its own, and OpenBLAS's default
+# of a thread per CPU had them wait for one another on the server's two: beside a busy process on
+# two CPUs, ito took 0.49 s a bar close instead of 5-6 ms, and the nightly fits were no faster on
+# two BLAS threads (docs/design.md 5장 "시간 예산").
+ENV OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 # The app's venv first on PATH (#322): `docker compose exec engine krx-quant <command>` finds the
 # command, and `python` there is the app's (the image's own lacks its packages, e.g. pyarrow).
 ENV PATH=/app/.venv/bin:$PATH

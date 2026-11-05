@@ -411,6 +411,10 @@ compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예
 
 Docker 이미지는 `TZ=Asia/Seoul`, `KRX_DATA_DIR=/data`, `KRX_STATE_DIR=/state`로 돈다(`Dockerfile`). `PATH`의 맨 앞은 앱의 venv(`/app/.venv/bin`)다(#322). 그래서 `docker compose exec engine krx-quant <명령>`이 명령을 찾고, 컨테이너 안의 `python`이 앱의 파이썬(`/app/.venv/bin/python`)이다. 엔트리포인트는 `/app/.venv/bin/krx-quant`라 `docker compose run --rm engine <명령>`은 늘 됐다.
 
+이미지는 `OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1`로도 돈다(#589). NumPy의 BLAS(OpenBLAS)와 OpenMP가 부른 스레드에서만 계산한다. 이미지의 모든 프로세스가 같다: 엔진, 엔진이 띄우는 밤 학습과 예약 작업, trader, 손으로 돌리는 명령. 엔진은 봉 마감마다 알고리즘을 저마다 작업 스레드에서 함께 돌린다. 그 스레드들이 서버의 vCPU 둘을 BLAS 스레드와 다투지 않게 한다. 잰 값과 까닭은 [design.md](design.md) 5장 "시간 예산"의 "BLAS·OpenMP 스레드(#589)"에 있다. 사용자가 할 일은 없다: 06:00 배포가 새 이미지로 컨테이너를 만든다. `.env`에 두지 않는다(두면 `.env`의 값이 이긴다).
+
+> **바뀜** (2026-11-06, #NNN): NumPy의 BLAS는 OpenBLAS의 기본대로 CPU마다 스레드 하나(서버에서 둘)로 계산했다 → 이미지의 모든 프로세스에서 부른 스레드 하나로 계산한다. 이유: 알고리즘마다의 작업 스레드가 동시에 돌 때 ito의 고유값 분해가 BLAS 스레드를 기다리며 CPU를 썼다. CPU 둘로 묶은 컨테이너에 바쁜 프로세스 하나를 같이 돌리면 봉 마감 하나가 0.80초 → 0.30초, ito가 0.49초 → 5–6 ms였다. 밤 학습은 BLAS 스레드 둘로 더 빠르지 않았다(#589).
+
 > **바뀜** (2026-10-20, #329): 이미지의 `PATH`에 앱의 venv가 없었다 → 맨 앞에 둔다. 이유: `docker compose exec engine krx-quant <명령>`이 `krx-quant`를 찾지 못했고, 컨테이너의 `python`은 앱의 패키지(`pyarrow` 등)가 없는 이미지의 기본 파이썬이었다. #308 때 에이전트가 그 `python`으로 명령을 줘 틀렸다(#322).
 
 ### 2.3 첫 거래일 확인 (#7)
@@ -1697,6 +1701,10 @@ mock으로 시작한 날부터 비용 지도에서 시장가 왕복으로 통과
   - 같은 분에 trader의 `quotes stalled`가 있는지 맞춰 본다. 단계가 `records`나 `consensus`이고 알고리즘들이 도는 동안이면 저장소 호출이 GIL을 기다린 것이다(수집기는 GIL을 0.5 ms마다 넘긴다, `collector.GIL_SWITCH_SECONDS`). `other`가 크면 그 시각의 엔진 API 요청(화면)이나 다른 작업을 본다.
 - Loki: `{service="krx-quant", process="engine"} |= "held the event loop"`. 하루 수: `sum(count_over_time({service="krx-quant", process="engine"} |= "held the event loop" [1d]))`. 끊김과 함께 보려면 `{service="krx-quant"} |~ "held the event loop|quotes stalled"`.
 - 할 일: 하루 몇 번이고 1–2초면 없다. 5초 가까운 줄이 잦으면 가장 큰 단계를 이슈로 남긴다(무엇을 루프 밖으로 옮기거나 가볍게 할지). 알림 기준(trader의 5초)은 바꾸지 않는다(#538).
+- BLAS·OpenMP 스레드를 하나로 둔 배포(#589, 위 2장의 Docker 이미지) 뒤 첫 거래일에 본다:
+  - `held the event loop` 줄의 하루 수와 초를 그 전 거래일(#538의 감시가 처음 돈 2026-11-06부터)과 견준다(위 Loki 질의). 늘었으면 이슈로 남긴다.
+  - 알고리즘 시간은 줄로 남지 않고, 넘친 때만 WARNING이다: `<이름> took over 10.0s at <봉 마감>; skipped`(알고리즘 하나의 한도), `<이름> skipped at <봉 마감> for the CPU budget (expected …s; budget 30.0s per bar close)`. 질의: `{service="krx-quant", process="engine"} |~ "took over|for the CPU budget"`. 없어야 한다.
+  - 알고리즘마다 봉 마감 한 번에 걸린 시간(지수 평균)은 `/v1/status`의 `cpu.algorithms`다([engine-api.md](engine-api.md)). 에이전트는 서버에 닿지 않으니 사용자가 화면이나 `curl -s http://krx-quant:8080/v1/status | jq .cpu`로 본다. 잰 값으로는 ito가 봉 마감마다 수 ms다. 0.1초를 넘는 일이 잦으면 고정이 들었는지 본다(컨테이너 안 `printenv OPENBLAS_NUM_THREADS`가 `1`인지 본다).
 
 #### trader 침묵 (#542)
 
