@@ -27,7 +27,7 @@ from krx_quant.config import Settings
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.krx_etf_probe import DOCUMENTED, MAX_FAILED_IN_A_ROW, probe_krx_etf
-from krx_quant.nav_probe import DAILY, PRICE
+from krx_quant.net_assets import DAILY, PRICE
 from krx_quant.products import PRODUCTS
 from krx_quant.redaction import secrets_of
 from tests.collector_doubles import settings_for

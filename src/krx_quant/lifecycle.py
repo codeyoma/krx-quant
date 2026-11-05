@@ -5,8 +5,11 @@
   (all its probation days) is above 0. Judged daily, chance alone would promote an
   algorithm with no edge far more often than once in forty. Past the last of those days
   without it, it is a retirement candidate: an alert is sent, once (#87).
-- **active**: in the consensus (#18). Benched if its weakest lift over the last 20
-  trading days is 0 or less.
+- **active**: in the consensus (#18). Benched if its weakest lift is 0 or less: over its
+  latest days active (at most 20) once it has been active 10 days (the first probation review
+  day, ``Rules.min_active_days``), over the last 20 trading days until then (#545). The days it
+  was made active on are the evidence it was chosen on, not evidence that it still works; fewer
+  than 10 days would let a few days' noise decide.
 - **bench**: still predicted and scored. Judged on set days on the bench only (20, 40
   and 60 by default): made active again if its weakest lift by trading day over the last
   20 trading days has a lower bound above 0. Past the last of those days without it, it
@@ -55,7 +58,9 @@ simulation's, the other algorithms' (a clone's twin) the live ones. A simulation
 as it is stored (``review_at_once``), as at the largest review day its days reach; one that does
 not pass stays on probation, and the live days count on toward the next review day. The active
 and bench checks of the latest days read the simulation's rows on its days too, as the probation
-it came out of did; the leaderboard and the statistics never do.
+it came out of did; the leaderboard and the statistics never do. An active algorithm's days active
+come after its simulated days, so from its tenth day active its decay is judged without them
+(#545).
 """
 
 from __future__ import annotations
@@ -215,6 +220,13 @@ class Rules:
     def max_bench(self) -> int:
         return self.bench_days[-1]
 
+    @property
+    def min_active_days(self) -> int:
+        """The days active from which an active algorithm's decay is judged on those days alone
+        (#545): the first probation review day, the fewest days a promotion is judged on. A daily
+        kind's is its recent days' number, so its decay is judged as before."""
+        return self.probation_days[0]
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -259,8 +271,9 @@ def review(
     target version, #169). ``algorithms``, ``rows`` and ``baselines`` are of one kind, judged
     by its ``scoring`` (#179: the direction's by default): a clone is looked for within them.
     An active algorithm is benched, and a benched one recovers, on the ``recent`` latest days
-    (20, a daily kind's too since #298). ``simulated`` are the algorithms with a simulated
-    probation (#298), whose days count as the module doc says.
+    (20, a daily kind's too since #298); an active one on its days active among them once it has
+    ``rules.min_active_days`` (#545). ``simulated`` are the algorithms with a simulated probation
+    (#298), whose days count as the module doc says.
     """
     rules = rules or Rules()
     cached = _cached(rows, baselines, scoring.target_version)
@@ -423,7 +436,8 @@ class _Judge:
         self, name: str, status: Status, held: list[date], earlier: list[str], *, due: bool | None = None
     ) -> Change | None:
         """The change ``name``'s status is due for, if any; on probation judged on a review day
-        of ``held``'s count, or as ``due`` says (a simulation's review at once, #298)."""
+        of ``held``'s count, or as ``due`` says (a simulation's review at once, #298); active, on
+        the latest of ``held``, its days active, once there are ``Rules.min_active_days`` (#545)."""
         if status in (Status.PROBATION, Status.CLONE):
             measured = correlations(name, earlier, self.rows(held, True), self.scoring.lean)
             twin = most_correlated(measured)
@@ -451,15 +465,20 @@ class _Judge:
                         f" by trading day at {self.rules.confidence:.1%} ({passed.n} days scored)",
                     )
         elif status is Status.ACTIVE:
-            judged = self._judged(name, self.recent)
+            # Its days active among the latest (``held``: from the first day it counts), once
+            # there are enough; the latest days until then (#545).
+            counted = set(held)
+            active = [d for d in self.recent if d in counted]
+            alone = len(held) >= self.rules.min_active_days
+            judged = self._judged(name, active if alone else self.recent)
             weakest = None if judged is None else judged.weakest_lift
             if weakest is not None and weakest <= 0:
-                return Change(
-                    name,
-                    status,
-                    Status.BENCH,
-                    f"weakest lift {weakest:.4f} over the last {len(self.recent)} days",
+                over = (
+                    f"the last {len(active)} days active"
+                    if alone
+                    else f"the last {len(self.recent)} days ({len(active)} of them active)"
                 )
+                return Change(name, status, Status.BENCH, f"weakest lift {weakest:.4f} over {over}")
         elif status is Status.BENCH and len(held) in self.rules.bench_days:
             passed = self._passed_by_day(name, self.recent)
             if passed is not None:
