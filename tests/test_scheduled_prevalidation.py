@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -51,6 +52,7 @@ from krx_quant.scheduled import (
     Ran,
     Revising,
     Scheduler,
+    Target,
     prevalidation_job_name,
     prevalidation_order,
     prevalidation_reports,
@@ -59,6 +61,7 @@ from krx_quant.scheduled import (
     revision_job_name,
     revision_turn,
 )
+from krx_quant.scheduled.prevalidations import prevalidations_quiet, revisions_quiet
 from krx_quant.touch import TARGET_VERSION
 from tests.fake_github import REPO, TOKEN, fake_github
 from tests.scheduled_doubles import (
@@ -66,7 +69,6 @@ from tests.scheduled_doubles import (
     CALENDAR,
     COMMIT,
     FRIDAY,
-    MONDAY,
     SATURDAY,
     SUNDAY,
     THURSDAY,
@@ -78,6 +80,7 @@ from tests.scheduled_doubles import (
     settle,
 )
 from tests.test_scheduled import Writes
+from tests.test_scheduled_give_way import Takes
 from tests.waiting import until
 
 ORDER = ("mandelbrot", "breiman", "kalman", "shannon", "poisson")
@@ -152,7 +155,9 @@ def test_each_job_prevalidates_its_algorithm_and_posts_on_204() -> None:
     for listed in PREVALIDATIONS:
         name = listed.command[1]
         assert listed.command == ("prevalidate", name)
-        assert listed.timeout == timedelta(hours=6 if name.startswith("breiman") else 5)
+        # The slowest run's pace over 20 days, with room (#546): the other kinds' replay theirs too.
+        other_kind = kind_of(EVERYONE[name]) != DIRECTION
+        assert listed.timeout == (timedelta(hours=4, minutes=30) if other_kind else timedelta(hours=3))
         assert [t.issue for t in listed.targets] == [204]
         assert [(a.title, a.path) for a in listed.attach] == [
             (f"리포트 state/prevalidations/{name}.json", f"prevalidations/{name}.json")
@@ -250,6 +255,50 @@ def test_a_run_that_left_no_verdict_waits_for_a_deploy_then_for_the_others() -> 
     assert tonight(night(SATURDAY, runs=crashed, reports=judged)) is None  # the same code: nothing
 
 
+def quiet(n: Night) -> tuple[str, ...]:
+    """The algorithms that may be pre-validated second on a quiet night, as the jobs' conditions on
+    one see them (#546), in turn."""
+    due = tuple(j.command[1] for j in PREVALIDATIONS if j.quiet is not None and j.quiet(n))
+    assert prevalidations_quiet(n, ORDER) == due
+    return due
+
+
+def test_a_quiet_night_asks_for_a_second_after_exactly_one_whatever_came_of_it() -> None:
+    assert quiet(night(FRIDAY)) == (), "none ran tonight: the night's turn picks"
+    for outcome in (OK, FAILED):
+        one = {"mandelbrot": ran(FRIDAY, outcome)}
+        assert tonight(night(FRIDAY, runs=one)) is None
+        assert quiet(night(FRIDAY, runs=one)) == ("breiman", "kalman", "shannon", "poisson"), "in turn"
+    # A restart cut it (it may have taken the engine down with it): no second tonight.
+    assert quiet(night(FRIDAY, runs={"mandelbrot": ran(FRIDAY, INTERRUPTED)})) == ()
+    two = {"mandelbrot": ran(FRIDAY), "breiman": ran(FRIDAY)}
+    assert quiet(night(FRIDAY, runs=two)) == (), "never more than two"
+    # A changed code's run tonight is the night's one too (#454).
+    n = night(FRIDAY)
+    revised = replace(n, records={revision_job_name("turing"): ran(FRIDAY)})
+    assert tonight(revised) is None and quiet(revised) == ORDER
+    assert quiet(replace(revised, records={**revised.records, **night(FRIDAY, runs=one).records})) == ()
+    # Those never tried before those tried again on new code, as in the night's turn.
+    again = {name: ran(THURSDAY) for name in ORDER[1:]}  # no verdict, on the code before NEW
+    deployed = {"mandelbrot": ran(FRIDAY, commit=NEW)}
+    assert quiet(night(FRIDAY, runs={**deployed, **again}, commit=NEW)) == ORDER[1:]
+    retried = {**deployed, **again, "poisson": ran(THURSDAY, INTERRUPTED)}  # cut by a restart: fresh
+    assert quiet(night(FRIDAY, runs=retried, commit=NEW)) == ("poisson",)
+    assert quiet(night(FRIDAY, runs={**one, **again})) == (), "the same code, no verdict: not again"
+
+
+def test_a_changed_code_may_be_the_quiet_night_s_second_ahead_of_the_waiting() -> None:
+    changed = {"neyman": revising(MIN_DAYS)}
+    first = {prevalidation_job_name("mandelbrot"): ran(FRIDAY, OK)}
+    n = revision_night(FRIDAY, changed, runs=first)
+    assert revisions_quiet(n, [j.command[1] for j in REVISIONS]) == ("neyman",)
+    assert [j.command[1] for j in REVISIONS if j.quiet is not None and j.quiet(n)] == ["neyman"]
+    assert prevalidations_quiet(n, ORDER) == ORDER[1:], "asked after it, in the list's order"
+    both = revision_night(FRIDAY, changed, runs={**first, revision_job_name("neyman"): ran(FRIDAY, OK)})
+    assert revisions_quiet(both, [j.command[1] for j in REVISIONS]) == ()
+    assert prevalidations_quiet(both, ORDER) == ()
+
+
 # The jobs run
 
 
@@ -292,7 +341,10 @@ class Prevalidates(Runs):
         return Ran(1, f"{name}: refused ({MIN_DAYS} recorded days)\n  stats: FAILED - weakest lift\n", "")
 
 
-async def test_one_algorithm_a_night_in_turn_each_refusal_on_204_with_its_report(tmp_path: Path) -> None:
+async def test_in_turn_one_a_night_two_on_a_quiet_one_each_refusal_on_204_with_its_report(
+    tmp_path: Path,
+) -> None:
+    """The runs take no time: every night is quiet, and a second follows the first (#546)."""
     clock = FakeClock(at(FRIDAY, "22:00"))
     runs = Prevalidates(clock, tmp_path)  # the state file's directory is the state directory
 
@@ -304,16 +356,16 @@ async def test_one_algorithm_a_night_in_turn_each_refusal_on_204_with_its_report
     def told(lines: int) -> Callable[[], bool]:
         return lambda: len(lines_told) == lines
 
-    nights = [FRIDAY, SATURDAY, SUNDAY, MONDAY, TUESDAY]
+    nights = [FRIDAY, FRIDAY, SATURDAY, SATURDAY, SUNDAY]
     async with fake_github() as hub:
         hub.labels = {204: {"ready-for-human"}}
         async with scheduling(
             tmp_path, at(FRIDAY, "22:00"), PREVALIDATIONS, runs=runs, github=hub, facts=facts, clock=clock
         ) as (_, _, lines_told, state):
-            for count, day in enumerate(nights, start=1):
+            for count, day in zip((2, 4, 5), (FRIDAY, SATURDAY, SUNDAY), strict=True):
                 clock.set(at(day, "22:30"))
-                await until(told(count))  # its result's line
-            assert runs.names() == list(ORDER)  # one a night, in turn
+                await until(told(count))  # their results' lines
+            assert runs.names() == list(ORDER)  # in turn, two a quiet night
             assert [state.jobs[f"prevalidate-{n}"].day for n in ORDER] == nights
             clock.set(at(WEDNESDAY, "22:30"))
             await settle()
@@ -350,6 +402,54 @@ async def test_one_algorithm_a_night_in_turn_each_refusal_on_204_with_its_report
     )
     # A refusal failed, as its exit code 1 always did to the conditions: they are as they were.
     assert {(r.outcome, r.verdict) for r in state.jobs.values()} == {(FAILED, REFUSED)}
+
+
+@pytest.mark.parametrize(
+    ("took", "second", "saturday"),
+    [
+        # 23:30: breiman's 4 h 30 min still ends by 05:30; kalman's turn the next night.
+        (timedelta(hours=1), "prevalidate breiman", "prevalidate kalman"),
+        # 01:30: past breiman's last start (01:00), not kalman's (02:30): the first that fits.
+        (timedelta(hours=3), "prevalidate kalman", "prevalidate breiman"),
+        # 02:31: none fits; the next night's turn is breiman's, in turn.
+        (timedelta(hours=4, minutes=1), None, "prevalidate breiman"),
+    ],
+)
+async def test_a_quiet_night_s_second_pre_validation_follows_every_other_job_if_it_ends_by_05_30(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, took: timedelta, second: str | None, saturday: str
+) -> None:
+    """Input: mandelbrot's run in its turn taking ``took`` from 22:30, a job listed after it, and
+    breiman and kalman waiting too. Output (#546): once that job ran, the first of the waiting in turn
+    whose time limit still ends by 05:30 runs; two at most."""
+    later = Job(
+        name="later",
+        due=lambda n: n.record is None or n.record.day != n.day,  # once a night
+        command=("later",),
+        timeout=timedelta(minutes=30),
+        targets=(Target(999),),
+    )
+    caplog.set_level("INFO", logger="krx_quant.scheduled")
+    clock = FakeClock(at(FRIDAY, "22:00"))
+    runs = Takes(clock, {"prevalidate mandelbrot": took})
+    facts = Facts(MIN_DAYS, ("mandelbrot", "breiman", "kalman"))
+    async with scheduling(
+        tmp_path, clock.now(), [*PREVALIDATIONS, later], runs=runs, facts=facts, clock=clock
+    ) as (_, _, _, _):
+        clock.set(at(FRIDAY, "22:30"))
+        await until(lambda: runs.names() == ["prevalidate mandelbrot"])
+        clock.set(at(FRIDAY, "22:30") + took)
+        await until(lambda: "later" in runs.ended)
+        clock.set(at(SATURDAY, "22:30"))  # the next night's turn marks the end of this one
+        await until(lambda: saturday in [name for name, when in runs.started if when >= clock.now()])
+    friday = [name for name, when in runs.started if when < at(SATURDAY, "22:30")]
+    assert friday == ["prevalidate mandelbrot", "later", *([second] if second else [])]
+    passed = {
+        r.getMessage().split(":")[0] for r in caplog.records if "due on the quiet night" in r.getMessage()
+    }
+    if second is None:
+        assert passed == {"scheduled job prevalidate-breiman", "scheduled job prevalidate-kalman"}
+    elif second.endswith("kalman"):
+        assert passed == {"scheduled job prevalidate-breiman"}  # asked before kalman, too late
 
 
 # What came of a run (#440): a refusal is the command's verdict, not a failure, though its exit
@@ -402,7 +502,7 @@ async def test_each_end_of_a_pre_validation_is_told_in_words_of_its_own(tmp_path
         "passed": TOLD + "통과, 종료 코드 0, 0초.",
         "refused": TOLD + "거부, 종료 코드 1, 0초.",
         "raised": TOLD + "예외, 종료 코드 1, 0초.",
-        "timed_out": TOLD + "시간 초과, 제한 시간 5시간을 넘어 멈춤, 0초.",
+        "timed_out": TOLD + "시간 초과, 제한 시간 4시간 30분을 넘어 멈춤, 0초.",
         "killed": TOLD + "신호로 죽음, 종료 코드 -9(SIGKILL), 0초.",
     }
     assert {name: heading for name, (_, heading, _) in seen.items()} == {
@@ -566,7 +666,9 @@ def test_every_bar_close_algorithm_has_a_revision_job_turing_too() -> None:
     for job in REVISIONS:
         name = job.command[1]
         assert job.name == revision_job_name(name)
-        assert job.timeout == timedelta(hours=6 if name.startswith("breiman") else 5)
+        # As its first pre-validation's (#546).
+        other_kind = kind_of(EVERYONE[name]) != DIRECTION
+        assert job.timeout == (timedelta(hours=4, minutes=30) if other_kind else timedelta(hours=3))
         assert [t.issue for t in job.targets] == [PREVALIDATION_ISSUE]
         assert job.report == f"prevalidations/{name}.json"
         assert ("#283에 요약한다" in job.targets[0].note) == (name == "neyman")

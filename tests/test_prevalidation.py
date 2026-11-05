@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from krx_quant import engine as engine_module
-from krx_quant import prevalidation, stats
+from krx_quant import lifecycle, prevalidation, stats
 from krx_quant.algorithms import Algorithm, Model, NothingToLearn, RegistrationError, Sample, save_model
 from krx_quant.algorithms.cox5d import Cox5d
 from krx_quant.baselines import TOUCH_BASELINES
@@ -307,8 +307,8 @@ async def test_a_wait_is_told_once_for_the_code_and_target_it_waits_on_across_re
     assert told == lost, "Telegram did not take it: told at the next review"
     assert told == (
         "사전 검증 대기: contrarian. 검증을 통과해야 돌기 시작합니다. 봉 마감 알고리즘은 녹화가 10거래일 "
-        "이상이면 밤 학습 뒤 예약 작업이 한 밤에 하나씩 차례로 검증합니다. 결과는 #204에 댓글로 "
-        "올라옵니다. 손으로 돌릴 것은 없습니다."
+        "이상이면 밤 학습 뒤 예약 작업이 한 밤에 하나씩(시간이 남는 밤에는 둘) 차례로 검증합니다. 결과는 "
+        "#204에 댓글로 올라옵니다. 손으로 돌릴 것은 없습니다."
     )
     assert "krx-quant prevalidate" not in told
     assert await start(days[1] + timedelta(days=7)) == [], "a restart: told already"
@@ -763,9 +763,9 @@ def _verdict(result: prevalidation.Prevalidation) -> dict[str, Any]:
 async def test_each_replayed_day_logs_its_memory_and_lets_its_engine_go_before_the_next(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Input: three recorded days. Output: a memory line a replayed day (#383), and each day's
-    engine gone, and the memory it freed handed back, before the next day is trained; the same
-    report as when the engines were kept, as before #383."""
+    """Input: three recorded days. Output: a memory line a replayed day (#383) and one for the
+    verdict (#546), and each day's engine gone, and the memory it freed handed back, before the next
+    day is trained; the same report as when the engines were kept, as before #383."""
     engines: list[weakref.ref[PredictionEngine]] = []
     alive_at_fits: list[int] = []
     given_back: list[int] = []
@@ -799,6 +799,13 @@ async def test_each_replayed_day_logs_its_memory_and_lets_its_engine_go_before_t
         f"memory on {d} (day {i} of 3)" for i, d in enumerate(DAYS[:3], 1)
     ]
     assert all(re.fullmatch(rf"looking: memory on \S+ \(day \d of 3\): {MEMORY_LINE}", x) for x in lines)
+    # And the verdict's, which reads every replayed day at once (#546).
+    [verdict] = [r.getMessage() for r in caplog.records if ": memory of the verdict " in r.getMessage()]
+    assert re.fullmatch(
+        rf"looking: memory of the verdict on 3 days: {_MB} MB at the start; verdict {_MB} MB \(peak {_MB}\); "
+        r"peaks since (each phase began|the process started)",
+        verdict,
+    )
 
     # As before #383: each day's engine kept until the next day's replay ended, nothing handed back.
     held: list[PredictionEngine] = []
@@ -985,6 +992,166 @@ async def test_a_replayed_day_s_review_holds_a_fraction_of_what_it_did_and_decid
     )
     assert _verdict(now) == _verdict(before)
     assert replayed_rows(now.db or Path()) == replayed_rows(before.db or Path())
+
+
+class ReadAsBefore546:
+    """A review's reads before #546 (``lifecycle._Read``): each set of days read apart, every
+    predictor's rows with special ones and without, each kept until the review ended."""
+
+    of = None  # the stats read every predictor's rows
+
+    def __init__(self, rows: Any, baselines: Any, target_version: int) -> None:
+        self._rows, self._baselines, self._target = rows, baselines, target_version
+        self._read: dict[tuple[tuple[date, ...], bool], list[dict[str, Any]]] = {}
+
+    def __call__(self, chosen: Sequence[date], special: bool) -> list[dict[str, Any]]:
+        key = (tuple(chosen), special)
+        if key not in self._read:
+            self._read[key] = stats.on_target(self._rows(chosen, special), self._baselines, self._target)
+        return self._read[key]
+
+
+def read_as_before_546(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reviews, their clone check and the verdict read as before #546: each set of days apart
+    (``ReadAsBefore546``), the clone check every predictor's leans from the rows of all its days at
+    once, the verdict every predictor's whole rows."""
+
+    def correlated(judge: Any, name: str, others: Sequence[str], days: Sequence[date]) -> dict[str, float]:
+        every = lifecycle.leans(judge.rows(days, True), judge.scoring.lean)
+        return lifecycle.correlated(name, others, [every])
+
+    def whole(verdict: Any) -> Any:
+        def judged(*args: Any, **kwargs: Any) -> Any:
+            with monkeypatch.context() as m:
+                read_as_before_487(m)
+                return verdict(*args, **kwargs)
+
+        return judged
+
+    monkeypatch.setattr(lifecycle, "_Read", ReadAsBefore546)
+    monkeypatch.setattr(lifecycle._Judge, "correlated", correlated)
+    monkeypatch.setattr(prevalidation, "_judge", whole(prevalidation._judge))
+    monkeypatch.setattr(prevalidation, "_judge_kind", whole(prevalidation._judge_kind))
+
+
+def on_target_models(s: Settings, algorithms: Sequence[Algorithm]) -> None:
+    """The models of the target the nights would have saved for ``algorithms`` (their defaults,
+    marked so): the reviews of a replay count them from its first day, as the server's are."""
+    for a in algorithms:
+        model = replace(a.default_model(), version=f"{a.name}-night", target_version=TARGET_VERSION)
+        save_model(s.state_dir, a.name, model)
+
+
+# Two pre-validations of six days, each a whole session, traced (tracemalloc): about 60 s on a
+# laptop, past the 30 s default (``pyproject.toml``) on a loaded CI runner (#327).
+@pytest.mark.timeout(240)
+async def test_a_replayed_day_s_review_holds_about_as_much_whatever_the_days_before_it_and_decides_the_same(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Input: six recorded days, the running algorithms on models of the target (counted from the
+    first day, as the server's are; the candidate from its second, and a clone of one of them), probation
+    judged on days 2 to 4. Output (#546): what the end of a replayed day holds at most grows by under a
+    fifth of what it did over the days, when each set of days the review asked for kept every
+    predictor's rows (the clone check's with special predictions too); the verdict holds under half.
+    The same report, predictions (the consensus's too), status changes and weights as then."""
+
+    async def traced(root: Path) -> tuple[prevalidation.Prevalidation, list[int], list[int]]:
+        """The run's report, each replayed day's end's peak, and the verdict's."""
+        peaks: list[int] = []
+        verdicts: list[int] = []
+        review, judge = PredictionEngine._review, prevalidation._judge
+
+        async def measured(self: PredictionEngine, at: datetime) -> None:
+            tracemalloc.start()  # what it allocates, at most at once
+            try:
+                await review(self, at)
+                peaks.append(tracemalloc.get_traced_memory()[1])
+            finally:
+                tracemalloc.stop()
+
+        def judged(*args: Any, **kwargs: Any) -> prevalidation.Prevalidation:
+            tracemalloc.start()
+            try:
+                result = judge(*args, **kwargs)
+                verdicts.append(tracemalloc.get_traced_memory()[1])
+                return result
+            finally:
+                tracemalloc.stop()
+
+        monkeypatch.setattr(PredictionEngine, "_review", measured)
+        monkeypatch.setattr(prevalidation, "_judge", judged)
+        s = replace(settings(root, DAYS[:6]), probation_review_days=(2, 3, 4))
+        running: list[Algorithm] = [
+            ALPHA,
+            Contrarian("contrarian"),
+            Contrarian("slow", own="depth_imbalance", lag=6),
+        ]
+        on_target_models(s, running)
+        try:
+            result = await prevalidate(
+                s, "looking", algorithms=[*running, Contrarian("looking", own="vwap_gap")], now=AFTER
+            )
+        finally:
+            monkeypatch.setattr(PredictionEngine, "_review", review)
+            monkeypatch.setattr(prevalidation, "_judge", judge)
+        return result, peaks, verdicts
+
+    now, peaks, verdict = await traced(tmp_path / "now")
+    read_as_before_546(monkeypatch)
+    before, peaks_before, verdict_before = await traced(tmp_path / "before")
+
+    conn = sqlite3.connect(now.db or Path())
+    try:
+        candidates = {
+            r[0] for r in conn.execute("SELECT algorithm FROM runs WHERE kind = 'retire_candidate'")
+        }
+        changed = conn.execute(
+            "SELECT algorithm, previous, status FROM statuses WHERE previous IS NOT NULL"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert candidates == {"alpha", "contrarian", "slow"}, "the running ones counted from the first day"
+    assert ("looking", "probation", "clone") in changed, "the clone check read the running ones' leans"
+    grown, grown_before = peaks[-1] - peaks[0], peaks_before[-1] - peaks_before[0]
+    assert grown < grown_before / 5, (
+        f"{grown / 2**20:.2f} MB over five days, {grown_before / 2**20:.2f} MB before"
+    )
+    assert verdict[0] < verdict_before[0] / 2, (
+        f"{verdict[0] / 2**20:.2f} MB, {verdict_before[0] / 2**20:.2f} before"
+    )
+    assert _verdict(now) == _verdict(before)
+    assert replayed_rows(now.db or Path()) == replayed_rows(before.db or Path())
+
+
+async def test_the_stats_rows_of_some_predictors_a_day_at_a_time_are_those_of_one_read_in_its_order(
+    tmp_path: Path,
+) -> None:
+    """Input: a replay's database of three days. Output (#546): a review's rows of some predictors
+    (``_Read.of``), read a day at a time, are those of one read of every day, in its order; with
+    special predictions, every read is the store's."""
+    s = settings(tmp_path, DAYS[:3])
+    running: list[Algorithm] = [ALPHA, Contrarian("contrarian")]
+    on_target_models(s, running)
+    result = await prevalidate(
+        s, "looking", algorithms=[*running, Contrarian("looking", own="vwap_gap")], now=AFTER
+    )
+    store = PredictionStore(result.db or Path())
+    try:
+        days = store.prediction_days(DAYS[2], 10)
+        baselines = {b.name for b in TOUCH_BASELINES}
+        read = lifecycle._Read(store.reviewed, baselines, TARGET_VERSION)
+        every = stats.on_target(store.reviewed(days, False), baselines, TARGET_VERSION)
+        for predictors in ({"alpha"}, {"looking", *baselines}, {"contrarian", "alpha", *baselines}):
+            for chosen in (days, days[:2], days[1:]):
+                kept = {d.isoformat() for d in chosen}
+                expected = [r for r in every if r["algorithm"] in predictors and r["bar_close"][:10] in kept]
+                assert read.of(chosen, predictors) == expected and len(expected) > 100
+        assert read(days, False) == every
+        assert read(days[1:], True) == stats.on_target(
+            store.reviewed(days[1:], True), baselines, TARGET_VERSION
+        )
+    finally:
+        store.close()
 
 
 async def test_a_day_with_nothing_the_algorithm_can_learn_from_is_predicted_by_its_defaults(

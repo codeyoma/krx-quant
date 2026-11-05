@@ -14,11 +14,13 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from krx_quant import lifecycle
 from krx_quant.algorithms import Model
 from krx_quant.algorithms.contract import KindSample
 from krx_quant.clock import FakeClock
@@ -30,6 +32,7 @@ from krx_quant.nightly import train_night
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.predictions import PredictionStore
 from krx_quant.prevalidation import admits, prevalidate
+from krx_quant.stats import on_target
 from krx_quant.swap import reload_models
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import bar_answers, fit_algorithm, training_day
@@ -41,7 +44,7 @@ from tests.prevalidation_doubles import AFTER, ALPHA, DAYS, Contrarian, report, 
 from tests.replay_doubles import busy_morning, record
 from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, at, run
 from tests.synthetic_bars import day_of_bars
-from tests.test_prevalidation import _verdict, read_as_before_487, replayed_rows
+from tests.test_prevalidation import _verdict, read_as_before_487, read_as_before_546, replayed_rows
 
 
 async def test_a_recorded_day_trains_a_kind_on_the_answers_the_engine_scores(tmp_path: Path) -> None:
@@ -262,7 +265,8 @@ async def test_a_kind_s_review_in_a_replay_decides_the_same_on_the_fields_it_rea
     """Input: five recorded days, probation judged from its second day on, and the drift's turner.
     Output (#487): the drift's reviews in the replay read the fields they
     judge by (``kind_reviewed``) and decide what they did on every predictor's whole rows: the same
-    report, predictions, status changes and weights."""
+    report, predictions, status changes and weights. And (#546) what they did reading each set of
+    days apart, the clone check all its days at once, and the verdict every whole row."""
 
     async def judged(root: Path) -> Any:
         s = replace(settings(root, DAYS[:5]), probation_review_days=(2, 3, 4))
@@ -276,7 +280,20 @@ async def test_a_kind_s_review_in_a_replay_decides_the_same_on_the_fields_it_rea
         )
 
     now = await judged(tmp_path / "now")
+    # A day at a time, the kind's rows of some predictors are those of one read, in its order (#546).
+    store = PredictionStore(now.db)
+    try:
+        days = store.prediction_days(DAYS[4], 10)
+        version, baselines = TEST_KIND.answer_version, {b.name for b in TEST_KIND.baselines}
+        rows = partial(store.kind_reviewed, DRIFT, version)
+        every = on_target(rows(days, False), baselines, version)
+        for predictors in ({"turner"}, {"turner", *baselines}):
+            expected = [r for r in every if r["algorithm"] in predictors]
+            assert lifecycle._Read(rows, baselines, version).of(days, predictors) == expected and expected
+    finally:
+        store.close()
     read_as_before_487(monkeypatch)
+    read_as_before_546(monkeypatch)
     before = await judged(tmp_path / "before")
 
     replayed = replayed_rows(now.db)
