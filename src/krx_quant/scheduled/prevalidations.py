@@ -11,11 +11,11 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path
 
-from krx_quant.algorithms import DAILY_ALGORITHMS
+from krx_quant.algorithms import DAILY_ALGORITHMS, KIND_ALGORITHMS
 from krx_quant.daily import DailyAlgorithm, DailyKind
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, report_path
-from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, Night, Target
+from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, JobRecord, Night, Target
 
 # The daily kinds' issue (#264), open_to_close's: its pre-validation and simulation post there too.
 # The daily check (``daily-check-264``, ``probes``) named it until that job left ``JOBS`` (#505).
@@ -23,8 +23,10 @@ DAILY_CHECK_ISSUE = 264
 
 # ⑤ The pre-validations (#204): a new algorithm runs live once its pre-validation has passed
 # (``prevalidation.py``). Once ``MIN_DAYS`` trading days are recorded, one waiting algorithm
-# is pre-validated a night, at most (``prevalidation_tonight``): a run replays 20 days beside
-# the live engine, on a 2 GB server with burst CPU. They go in this order, then any other
+# is pre-validated a night in its turn (``prevalidation_tonight``): a run replays 20 days beside
+# the live engine, on a 2 GB server with burst CPU. On a quiet night a second one follows
+# (#546, ``prevalidations_quiet``): once every job of the night had its turn, the first in turn whose
+# time limit still ends by 05:30; never more than two. They go in this order, then any other
 # waiting algorithm in the registry's. A verdict on the code and the target an algorithm runs
 # now (passed, or refused) is not asked for again: a deploy that changes its code, or the
 # target, asks again. A run that left no verdict on them (it crashed, or hit its time limit)
@@ -32,14 +34,18 @@ DAILY_CHECK_ISSUE = 264
 # a restart cut runs again the next night (the scheduler).
 PREVALIDATE_FIRST = ("mandelbrot", "breiman", "kalman", "shannon", "poisson")
 PREVALIDATION_ISSUE = 204
-# A run takes about 20 times a day's replay (20 days, the algorithm retrained before each);
-# breiman retrains LightGBM each day and takes longest, and so does each Breiman of the
-# barrier's horizon ladder (#263). Bounds, not estimates: room for the burst CPU running out.
-# Each must start by 05:30 less its limit (00:30, the Breimans 23:30).
-PREVALIDATION_TIMEOUT = timedelta(hours=5)
-PREVALIDATION_TIMEOUTS = {
-    name: timedelta(hours=6) for name in ("breiman", "breiman-15m", "breiman-30m", "breiman-60m")
-}
+# The bar-close pre-validations a night (#546): one in its turn, a second on a quiet night.
+PREVALIDATIONS_A_NIGHT = 2
+# A run takes about 20 times a day's replay (20 days, the algorithm retrained before each). The
+# limits are the slowest run's pace over 20 days, rounded up with room to spare (#546; they were 5
+# hours, 6 for the Breimans, set before any run). A direction algorithm's day took 6.5 minutes at
+# most (neyman, 2026-11-01: 15 days in 1 h 37 min): 2 h 10 min for 20, a 3-hour limit. Another
+# bar-close kind's algorithm replays its kind besides the direction (#263) and takes longest: 11.4
+# minutes a day (mandelbrot, 2026-10-24: 10 days in 1 h 54 min), 10.9 (breiman-30m, 2026-11-04: 18
+# days in 3 h 16 min): 3 h 48 min for 20, a limit of 4 h 30 min. Each must start by 05:30 less its
+# limit (02:30; the other kinds' 01:00).
+PREVALIDATION_TIMEOUT = timedelta(hours=3)
+PREVALIDATION_TIMEOUTS = {a.name: timedelta(hours=4, minutes=30) for a in KIND_ALGORITHMS}
 # An algorithm's turn tonight: never tried (or cut by a restart), or tried again.
 FRESH, AGAIN = "fresh", "again"
 
@@ -85,16 +91,30 @@ def prevalidation_turn(night: Night, algorithm: str) -> str | None:
 
 
 def prevalidation_tonight(night: Night, order: Sequence[str]) -> str | None:
-    """The algorithm pre-validated tonight, of ``order``: none if one was tonight already
-    (whatever came of it), a changed code's too (#454, ``revision_tonight``); else the first FRESH,
-    else the first AGAIN."""
-    if _revision_ran_tonight(night) or any(
-        (record := night.records.get(prevalidation_job_name(name))) is not None and record.day == night.day
-        for name in order
-    ):
+    """The algorithm pre-validated tonight in its turn, of ``order``: none if one was tonight
+    already (whatever came of it), a changed code's too (#454, ``revision_tonight``); else the first
+    FRESH, else the first AGAIN."""
+    if _ran_tonight(night, order):
         return None
     turns = [(name, prevalidation_turn(night, name)) for name in order]
     return next((n for n, t in turns if t == FRESH), None) or next((n for n, t in turns if t == AGAIN), None)
+
+
+def prevalidations_quiet(night: Night, order: Sequence[str]) -> tuple[str, ...]:
+    """The algorithms of ``order`` that may be pre-validated second on a quiet night (#546, ``Job.quiet``:
+    every job of the night had its turn), in turn: none unless exactly one bar-close pre-validation
+    ran tonight (a changed code's too) to its end (one a restart cut may have taken the engine down
+    with it); those FRESH, else those AGAIN. The scheduler runs the first whose time limit still
+    ends by 05:30."""
+    if not _second(night, order):
+        return ()
+    return _in_turn([(name, prevalidation_turn(night, name)) for name in order])
+
+
+def _in_turn(turns: Sequence[tuple[str, str | None]]) -> tuple[str, ...]:
+    """Of each name's turn, those FRESH, else those AGAIN."""
+    fresh = tuple(n for n, t in turns if t == FRESH)
+    return fresh or tuple(n for n, t in turns if t == AGAIN)
 
 
 def _prevalidation_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
@@ -102,6 +122,36 @@ def _prevalidation_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Nigh
         return prevalidation_tonight(night, order) == algorithm
 
     return due
+
+
+def _prevalidation_quiet(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
+    def due(night: Night) -> bool:
+        return algorithm in prevalidations_quiet(night, order)
+
+    return due
+
+
+def _ran_tonight(night: Night, order: Sequence[str]) -> list[JobRecord]:
+    """The bar-close pre-validations run tonight, whatever came of them: first ones (of ``order``)
+    and changed code's (#454)."""
+    first = [
+        record
+        for name in order
+        if (record := night.records.get(prevalidation_job_name(name))) is not None and record.day == night.day
+    ]
+    revised = [
+        record
+        for name, record in night.records.items()
+        if name.startswith(REVISION_JOB) and record.day == night.day
+    ]
+    return first + revised
+
+
+def _second(night: Night, order: Sequence[str]) -> bool:
+    """Whether a quiet night may run a second bar-close pre-validation (#546): one ran tonight, to
+    its end (ok or failed: not cut by a restart)."""
+    ran = _ran_tonight(night, order)
+    return len(ran) == PREVALIDATIONS_A_NIGHT - 1 and all(r.outcome in (OK, FAILED) for r in ran)
 
 
 def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
@@ -112,6 +162,7 @@ def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
         Job(
             name=prevalidation_job_name(name),
             due=_prevalidation_due(name, order),
+            quiet=_prevalidation_quiet(name, order),
             command=("prevalidate", name),
             timeout=PREVALIDATION_TIMEOUTS.get(name, PREVALIDATION_TIMEOUT),
             targets=(Target(PREVALIDATION_ISSUE, note=_prevalidation_note(name)),),
@@ -131,21 +182,18 @@ def _prevalidation_note(algorithm: str) -> str:
 # The pre-validations of changed code (#454, ``revisions.py``): a running bar-close algorithm whose
 # code changed is back on probation, and is pre-validated on the recorded days after the change only
 # (``prevalidate <name> --revision``: from its first whole trading day), once ``MIN_DAYS`` of them are
-# recorded. Every check, as a first pre-validation's. It shares the one a night of the bar-close
-# pre-validations (a run replays the same days beside the live engine) and comes first: its algorithm
-# runs already, and its probation cannot make it active before it passed; the waiting ones run on the
-# nights after. One a night among them, in the registries' order (turing too: its exemption is its
-# first revision's). Its verdict is not asked for again; a run that left none runs again after a
-# deploy, after the ones not tried yet, as a first pre-validation does. Its result goes to #204.
+# recorded. Every check, as a first pre-validation's. It shares the night's turns of the bar-close
+# pre-validations (a run replays the same days beside the live engine: one in its turn, a second on
+# a quiet night, #546) and comes first: its algorithm runs already, and its probation cannot make it
+# active before it passed; the waiting ones run after it. In the registries' order among them (turing
+# too: its exemption is its first revision's). Its verdict is not asked for again; a run that left
+# none runs again after a deploy, after the ones not tried yet, as a first pre-validation does. Its
+# result goes to #204.
 REVISION_JOB = "prevalidate-revision-"
 
 
 def revision_job_name(algorithm: str) -> str:
     return f"{REVISION_JOB}{algorithm}"
-
-
-def _revision_ran_tonight(night: Night) -> bool:
-    return any(name.startswith(REVISION_JOB) and r.day == night.day for name, r in night.records.items())
 
 
 def revision_turn(night: Night, algorithm: str) -> str | None:
@@ -177,21 +225,33 @@ def revision_turn(night: Night, algorithm: str) -> str | None:
 
 
 def revision_tonight(night: Night, order: Sequence[str]) -> str | None:
-    """The algorithm of ``order`` whose changed code is pre-validated tonight (#454): none if a
-    bar-close pre-validation (a first one or a changed code's) ran tonight; else the first FRESH,
-    else the first AGAIN."""
-    if _revision_ran_tonight(night) or any(
-        (record := night.records.get(prevalidation_job_name(name))) is not None and record.day == night.day
-        for name in order
-    ):
+    """The algorithm of ``order`` whose changed code is pre-validated tonight in its turn (#454):
+    none if a bar-close pre-validation (a first one or a changed code's) ran tonight; else the first
+    FRESH, else the first AGAIN."""
+    if _ran_tonight(night, order):
         return None
     turns = [(name, revision_turn(night, name)) for name in order]
     return next((n for n, t in turns if t == FRESH), None) or next((n for n, t in turns if t == AGAIN), None)
 
 
+def revisions_quiet(night: Night, order: Sequence[str]) -> tuple[str, ...]:
+    """The algorithms of ``order`` whose changed code may be pre-validated second on a quiet night
+    (#546), in turn, as ``prevalidations_quiet``; listed before the first ones, they come first."""
+    if not _second(night, order):
+        return ()
+    return _in_turn([(name, revision_turn(night, name)) for name in order])
+
+
 def _revision_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
     def due(night: Night) -> bool:
         return revision_tonight(night, order) == algorithm
+
+    return due
+
+
+def _revision_quiet(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
+    def due(night: Night) -> bool:
+        return algorithm in revisions_quiet(night, order)
 
     return due
 
@@ -204,6 +264,7 @@ def revision_jobs(names: Sequence[str]) -> tuple[Job, ...]:
         Job(
             name=revision_job_name(name),
             due=_revision_due(name, order),
+            quiet=_revision_quiet(name, order),
             command=("prevalidate", name, "--revision"),
             timeout=PREVALIDATION_TIMEOUTS.get(name, PREVALIDATION_TIMEOUT),
             targets=(Target(PREVALIDATION_ISSUE, note=_revision_note(name)),),
@@ -330,7 +391,8 @@ _DAILY_PREVALIDATION_NOTES = {
 # It gives way to a bar-close pre-validation as the bar-close simulation does (below, #376). It never
 # holds back the daily pre-validations: they run before it (a pass enrolls that night), take about a
 # minute, are not one a night, and start by 04:30. Judged by its hour, it gives way only when it
-# would start after 22:30 with a Breiman due (last start 23:30) or after 23:30 with another one.
+# would start after 00:00 with another bar-close kind's algorithm due (last start 01:00), or after
+# 01:30 with a direction one (02:30; #546: before, 22:30 and 23:30).
 SIMULATION_ISSUE = 298
 DAILY_SIMULATION_TIMEOUT = timedelta(hours=1)
 
@@ -407,10 +469,11 @@ DAILY_SIMULATION = Job(
 # and live the engine runs them all at each bar close anyway; one run a night also leaves the rest of
 # the night to a pre-validation. It is listed before the pre-validations (#298: it can make
 # algorithms already running official at once), but gives way to the night's pre-validation when,
-# run first to its limit, it would carry that one past its last start (00:30, the Breimans 23:30):
-# the pre-validation runs first and the simulation after it, that night if it can still start by
-# 00:30, else the next (#376, the decision of 2026-10-26). Its limit never fits before a 5- or
-# 6-hour pre-validation inside the night, so on a night both are due the pre-validation goes first.
+# run first to its limit, it would carry that one past its last start (02:30, the other kinds' 01:00,
+# #546): the pre-validation runs first and the simulation after it, that night if it can still start
+# by 00:30, else the next (#376, the decision of 2026-10-26). From 22:30 (``KRX_JOBS_AT``) its limit
+# fits before no pre-validation's 3 or 4½ hours, so on a night both are due the pre-validation goes
+# first.
 # Before, the simulation the night after each pass pushed the next pre-validation back a night (8
 # waited on 2026-10-26), and an algorithm not pre-validated does not run at all, while a simulation
 # put off only judges a night later: its probation's live days count on. After it gave way on two nights
