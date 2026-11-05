@@ -834,7 +834,7 @@ SERVER_CELLS = (
     (Cell("barrier_30m", "barrier-persist-30m"), "baseline"),
 )
 # The integrated best quotes of a recorded day on the server: about 570,000 (the book's and the
-# trades', ``passive.py``'s measurement).
+# trades', as #432's measurement counted them).
 SERVER_QUOTES = 570_000
 
 

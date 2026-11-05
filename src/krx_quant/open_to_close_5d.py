@@ -33,7 +33,7 @@ its first look, it is given up (``no candle``). A circuit breaker or a sidecar o
 sessions makes it special; a VI does not, and the path counts the five sessions' VIs (``vi``).
 
 **Dividends.** KIS's adjusted prices do not take cash dividends out: the scheduled job
-``probe-dividends-310`` (``dividend_probe``, 2026-10-21) found the adjusted over the traded close
+``probe-dividends-310`` (2026-10-21) found the adjusted over the traded close
 stepping on a split alone in ten years, never on an ex-dividend day, while KIS's 락 구분 of the day
 (``flng_cls_code``) marked the ex-dividend days, 02 at each year-end and 05 at the quarters. So a
 window with an ex-dividend day after its first session (whose open is ex already) leans down by the

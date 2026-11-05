@@ -25,29 +25,23 @@ from krx_quant import loki
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
-from krx_quant.candle_probe import probe_candles
 from krx_quant.climate_gate import climate_gate
 from krx_quant.climate_prior import REPORT as CLIMATE_PRIOR_REPORT
 from krx_quant.climate_prior import climate_prior_experiment
 from krx_quant.climate_prior import lines as climate_prior_lines
-from krx_quant.close_probe import probe_close
 from krx_quant.closing_flow_check import check_closing_flow, check_krx_net_assets
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError, read_values
-from krx_quant.cost_map_audit import run_audit as run_cost_map_audit
 from krx_quant.daily import DailyKind
 from krx_quant.daily_check import DAYS as DAILY_CHECK_DAYS
 from krx_quant.daily_check import daily_check
 from krx_quant.daily_training import daily_algorithm, fit_daily, prevalidate_daily
 from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
-from krx_quant.dividend_probe import probe_dividends
 from krx_quant.doctor import doctor, doctor_settings
 from krx_quant.error_breakdown import DEFAULT_ALGORITHM as ERROR_ALGORITHM
 from krx_quant.error_breakdown import DEFAULT_DAYS as ERROR_DAYS
 from krx_quant.error_breakdown import error_breakdown
-from krx_quant.expected_open_probe import DAYS as EXPECTED_OPEN_DAYS
-from krx_quant.expected_open_probe import probe_expected_open
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.gaps_probe import probe_gaps
@@ -59,10 +53,8 @@ from krx_quant.lifecycle import Status
 from krx_quant.live_probe import probe_live_account
 from krx_quant.macro import run_macro
 from krx_quant.market_calendar import calendar_store, first_whole_day
-from krx_quant.member_frames_probe import probe_member_frames
 from krx_quant.model_shelf import Shelf
 from krx_quant.nav_probe import probe_nav
-from krx_quant.net_buys_probe import probe_net_buys
 from krx_quant.neyman_backfill import neyman_backfill
 from krx_quant.neyman_variants import neyman_variants
 from krx_quant.night_probe import probe_night
@@ -75,9 +67,6 @@ from krx_quant.normal_order import normal_order_experiment
 from krx_quant.notify import send_notice, send_test_alert
 from krx_quant.object_store import open_store
 from krx_quant.order_probe import probe_kis_orders
-from krx_quant.poisson_link import REPORT as POISSON_LINK_REPORT
-from krx_quant.poisson_link import lines as poisson_link_lines
-from krx_quant.poisson_link import poisson_link_experiment
 from krx_quant.predictions import (
     DB_NAME,
     REVISION_CHANGED,
@@ -122,7 +111,6 @@ from krx_quant.trader.limits import CONTROL_SECONDS
 from krx_quant.trader.limits import ask as ask_trader
 from krx_quant.trader.mock_check import check_mock_trades
 from krx_quant.trader.notice_layout import fill_notice_layout
-from krx_quant.trader.passive import run_passive_entry
 from krx_quant.trader.promotion import mode_at
 from krx_quant.trader.refit import run_refit
 from krx_quant.trader.report import run_night, run_report
@@ -131,9 +119,6 @@ from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import TraderStore
 from krx_quant.training import fit_algorithm
-from krx_quant.turing_prior import REPORT as TURING_PRIOR_REPORT
-from krx_quant.turing_prior import lines as turing_prior_lines
-from krx_quant.turing_prior import turing_prior_experiment
 
 # A command's handler (#499): the parsed arguments in, the exit code out.
 Run = Callable[[argparse.Namespace], int]
@@ -210,23 +195,6 @@ async def _refit_policy(engine_url: str | None, report: bool) -> int:
     return await run_refit(settings, trader, datetime.now(KST), engine_url)
 
 
-async def _measure_passive_entry(engine_url: str | None) -> int:
-    """A passive entry at the best bid against the trader's marketable one, on the recordings (#432),
-    read-only, in the engine's container: what the scheduled job ``passive-entry-432`` ran until it
-    left ``JOBS`` (#505)."""
-    settings = Settings.from_env(require_kis=False)
-    return await run_passive_entry(settings, TraderSettings.from_env(), engine_url)
-
-
-async def _cost_map_audit(engine_url: str | None) -> int:
-    """Every ranked algorithm of the trader's kinds judged as the cost map's top (#438), read-only:
-    in the engine's container: what the scheduled job ``cost-map-audit-438`` ran until it left
-    ``JOBS`` (#505)."""
-    settings = Settings.from_env(require_kis=False)
-    url = engine_url or TraderSettings.from_env().engine_url
-    return await run_cost_map_audit(settings.state_dir / DB_NAME, url, settings.target_version)
-
-
 async def _check_mock_trades(day: date | None) -> int:
     """A mock trading day's orders in the ledger against KIS's order inquiry (#405), read-only."""
     return await check_mock_trades(Settings.from_env(require_kis=False), datetime.now(KST), day)
@@ -280,28 +248,13 @@ def _registry_password() -> int:
     return 0
 
 
-async def _probe_candles() -> int:
-    await probe_candles(Settings.from_env(), datetime.now(KST).date())
-    return 0
-
-
 async def _probe_night(day: date | None) -> int:
     print(await probe_night(Settings.from_env(require_kis=False), datetime.now(KST), day))
     return 0
 
 
-def _probe_expected_open(days: int) -> int:
-    print(probe_expected_open(Settings.from_env(require_kis=False), datetime.now(KST), days))
-    return 0
-
-
 def _probe_gaps() -> int:
     print(probe_gaps(Settings.from_env(require_kis=False), datetime.now(KST)))
-    return 0
-
-
-def _probe_member_frames() -> int:
-    print(probe_member_frames(Settings.from_env(require_kis=False), datetime.now(KST)))
     return 0
 
 
@@ -327,21 +280,6 @@ def _check_krx_net_assets() -> int:
 
 async def _probe_supply() -> int:
     calls, failed = await probe_supply(Settings.from_env(), datetime.now(KST).date())
-    return 1 if failed == calls else 0  # nothing answered
-
-
-async def _probe_net_buys() -> int:
-    calls, failed = await probe_net_buys(Settings.from_env(), datetime.now(KST).date())
-    return 1 if failed == calls else 0  # nothing answered
-
-
-async def _probe_close() -> int:
-    calls, failed = await probe_close(Settings.from_env(), datetime.now(KST).date())
-    return 1 if failed == calls else 0  # nothing answered
-
-
-async def _probe_dividends() -> int:
-    calls, failed = await probe_dividends(Settings.from_env(), datetime.now(KST).date())
     return 1 if failed == calls else 0  # nothing answered
 
 
@@ -636,31 +574,6 @@ def _normal_order(days: int) -> int:
         print(e, file=sys.stderr)
         return 1
     print("\n".join(normal_order_lines(result, settings.state_dir / NORMAL_ORDER_REPORT)))
-    return 0
-
-
-def _poisson_link(days: int) -> int:
-    """The asymmetric link experiment for poisson (#439): its lines; exit 1 without a recorded day."""
-    settings = Settings.from_env(require_kis=False)
-    try:
-        result = poisson_link_experiment(settings, days=days)
-    except FileNotFoundError as e:
-        print(e, file=sys.stderr)
-        return 1
-    print("\n".join(poisson_link_lines(result, settings.state_dir / POISSON_LINK_REPORT)))
-    return 0
-
-
-def _turing_prior(days: int) -> int:
-    """The symbol and climate prior experiment for turing (#448): its lines; exit 1 without a
-    recorded day."""
-    settings = Settings.from_env(require_kis=False)
-    try:
-        result = turing_prior_experiment(settings, days=days)
-    except FileNotFoundError as e:
-        print(e, file=sys.stderr)
-        return 1
-    print("\n".join(turing_prior_lines(result, settings.state_dir / TURING_PRIOR_REPORT)))
     return 0
 
 
@@ -979,30 +892,6 @@ def _parser() -> argparse.ArgumentParser:
         " trader-report's",
     )
     refit_cmd.set_defaults(run=lambda args: asyncio.run(_refit_policy(args.engine_url, args.report)))
-    passive_cmd = sub.add_parser(
-        "measure-passive-entry",
-        help="measure on the recorded quotes and KRX trades how a buy resting at the best bid would have"
-        " done against the trader's marketable entry (#432), on the signals of tonight's cost map's cells"
-        " and days: fill rates under two fill assumptions, hit rates, net ticks; read-only, no price",
-    )
-    passive_cmd.add_argument(
-        "--engine-url",
-        help="the Engine API the cost map is read from (default KRX_TRADER_ENGINE_URL, which compose sets"
-        " to the engine service's, http://engine:8080; else http://127.0.0.1:8080)",
-    )
-    passive_cmd.set_defaults(run=lambda args: asyncio.run(_measure_passive_entry(args.engine_url)))
-    audit_cmd = sub.add_parser(
-        "cost-map-audit",
-        help="judge every ranked algorithm of the trader's kinds as tonight's cost map judges its top"
-        " (#438): the visible top against the cost map to the number, the hidden ones by the same rule,"
-        " the rise and fall calls' hit rates apart; exploratory, read-only, no price",
-    )
-    audit_cmd.add_argument(
-        "--engine-url",
-        help="the Engine API the cost map is read from (default KRX_TRADER_ENGINE_URL, which compose sets"
-        " to the engine service's, http://engine:8080; else http://127.0.0.1:8080)",
-    )
-    audit_cmd.set_defaults(run=lambda args: asyncio.run(_cost_map_audit(args.engine_url)))
     report_cmd = sub.add_parser(
         "trader-report",
         help="print the trader's report of a trading day (#402), read-only from state/trader.sqlite3: its"
@@ -1043,28 +932,9 @@ def _parser() -> argparse.ArgumentParser:
         help="ask each feed's REST fallback once and print what it would record (safe beside the collector)",
     ).set_defaults(run=lambda args: asyncio.run(_check_fallbacks()))
     sub.add_parser(
-        "probe-candles",
-        help="measure what KIS's day/week/month/year chart query gives, read-only (safe beside collect)",
-    ).set_defaults(run=lambda args: asyncio.run(_probe_candles()))
-    sub.add_parser(
         "probe-supply",
         help="ask where KIS gives the daily supply indicators (#226), read-only; prints no market value",
     ).set_defaults(run=lambda args: asyncio.run(_probe_supply()))
-    sub.add_parser(
-        "probe-net-buys",
-        help="compare KIS's KRX (J) and integrated (UN) investor net buys by era and count the stored"
-        " ones (#264), read-only; prints no market value",
-    ).set_defaults(run=lambda args: asyncio.run(_probe_net_buys()))
-    sub.add_parser(
-        "probe-close",
-        help="compare the KRX day candle's close with KRX's one-minute bars and the recorded closing"
-        " auction (#264), read-only; prints no market value",
-    ).set_defaults(run=lambda args: asyncio.run(_probe_close()))
-    sub.add_parser(
-        "probe-dividends",
-        help="compare KIS's adjusted and as-traded KRX day candles and count their ex-date flags (#310),"
-        " read-only; prints no market value",
-    ).set_defaults(run=lambda args: asyncio.run(_probe_dividends()))
     sub.add_parser(
         "probe-nav",
         help="ask where KIS gives the single-stock leveraged and inverse ETFs' net assets (#305),"
@@ -1085,29 +955,11 @@ def _parser() -> argparse.ArgumentParser:
         help="the evening whose night to read, YYYY-MM-DD (default: the latest one subscribed for)",
     )
     night_cmd.set_defaults(run=lambda args: asyncio.run(_probe_night(args.day)))
-    expected_cmd = sub.add_parser(
-        "probe-expected-open",
-        help="count what the recorded books carried of the auctions' expected fill (#304), read-only;"
-        " prints no market value",
-    )
-    expected_cmd.add_argument(
-        "--days",
-        type=_positive,
-        default=EXPECTED_OPEN_DAYS,
-        help=f"the latest recorded trading days to read (default {EXPECTED_OPEN_DAYS})",
-    )
-    expected_cmd.set_defaults(run=lambda args: _probe_expected_open(args.days))
     sub.add_parser(
         "probe-gaps",
         help="summarize every recorded day's gaps and the closing auction window's frames, trades and"
         " bars (#344), read-only; prints no market value",
     ).set_defaults(run=lambda args: _probe_gaps())
-    sub.add_parser(
-        "probe-member-frames",
-        help="count the member feed's raw frames whose field count is not 78 (#381), with each one's"
-        " field shapes beside the next full frame's and the other feeds' frames around it, read-only;"
-        " prints no field value",
-    ).set_defaults(run=lambda args: _probe_member_frames())
     sub.add_parser(
         "probe-live-account",
         help="read the trader's live account with KRX_TRADER_LIVE_KIS_* by inquiry calls alone (#408): the"
@@ -1250,18 +1102,6 @@ def _parser() -> argparse.ArgumentParser:
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
     climate_prior_cmd.set_defaults(run=lambda args: _climate_prior(args.days))
-    poisson_link_cmd = sub.add_parser(
-        "poisson-link",
-        help="compare the climate baseline, poisson and poisson's lean through an asymmetric multinomial"
-        " link on the pre-validation's folds (#439; reads the training samples, replays nothing)",
-    )
-    poisson_link_cmd.add_argument(
-        "--days",
-        type=_positive,
-        default=PREVALIDATION_DAYS,
-        help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
-    )
-    poisson_link_cmd.set_defaults(run=lambda args: _poisson_link(args.days))
     normal_order_cmd = sub.add_parser(
         "normal-order",
         help="compare newton, gauss, granger, markov and kalman with normal_forecast's targets taken as"
@@ -1275,18 +1115,6 @@ def _parser() -> argparse.ArgumentParser:
         help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
     )
     normal_order_cmd.set_defaults(run=lambda args: _normal_order(args.days))
-    turing_prior_cmd = sub.add_parser(
-        "turing-prior",
-        help="compare the climate baseline, turing, and turing with the symbol, each slot's class frequencies"
-        " or both on the pre-validation's folds (#448; reads the training samples, replays nothing)",
-    )
-    turing_prior_cmd.add_argument(
-        "--days",
-        type=_positive,
-        default=PREVALIDATION_DAYS,
-        help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
-    )
-    turing_prior_cmd.set_defaults(run=lambda args: _turing_prior(args.days))
     neyman_variants_cmd = sub.add_parser(
         "neyman-variants",
         help="neyman's variants (#455): the discovery that fixes the window's N, then the verdict on the"
