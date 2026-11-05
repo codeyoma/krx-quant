@@ -44,6 +44,7 @@ from krx_quant.replay import replay_into
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import bar_answers, training_day
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
+from tests.api_doubles import listening
 from tests.api_schema import check
 from tests.prevalidation_doubles import AFTER, ALPHA
 from tests.prevalidation_doubles import DAYS as PREVALIDATION_DAYS
@@ -584,7 +585,7 @@ async def test_a_range_prediction_keeps_its_bar_close_s_k_after_the_price_moves_
             client, f"/v1/symbols/{SYMBOL}/kinds/range/predictions?bar_close=2026-10-12T09:33:00%2B09:00"
         )
         symbols = await get_json(client, "/v1/symbols")
-        ws = await client.ws_connect("/v1/stream")
+        ws = await listening(client)
         assert isinstance(engine.clock, FakeClock)
         rest = [e for e in events if e[1]["received_at"] > split]
         await replay_into(engine, engine.clock, rest, until=at("09:36:00"))
