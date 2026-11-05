@@ -794,7 +794,9 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
   - 돌지 않는 알고리즘은 대개 상태 이력이 없다(`status.status`와 `since`가 `null`, `history`가 빈 목록). `stage`와 `simulation`은 `null`이다. 수습 중인 하루 한 번 종류의 알고리즘이 코드나 입력이 바뀌어 사전 검증을 다시 기다리면(#264) `status`는 수습 그대로이고 `state`는 `waiting`이다.
 - `prevalidation`(#561): 사전 검증의 어디쯤인지다.
   - `exempt`: 사전 검증이 생기기 전에 등록돼(`prevalidation.REGISTERED_BEFORE`: newton, gauss, granger, markov, turing) 리포트 없이 돈다. 코드가 바뀌면 그 리비전은 사전 검증을 받는다(#454).
-  - `queue`: `waiting`인 봉 마감 알고리즘이 밤 사전 검증 순서에서 기다리는 알고리즘 가운데 몇째인지(1이 다음). 순서는 예약 작업의 것(`scheduled.prevalidations.prevalidation_order`: `PREVALIDATE_FIRST`, 그다음 등록 순서)이고, 사전 검증은 밤에 하나씩 돈다. 같은 코드로 판정 없이 끝난 실행(메모리 부족 등)은 다음 배포를 기다리는데, 자리는 그것을 보지 않는다. 하루 한 번 종류의 알고리즘은 기다리는 첫 밤에 저마다 돌아서 `null`이다. `waiting`이 아니면 `null`이다.
+  - `queue`: `waiting`인 봉 마감 알고리즘이 밤 사전 검증 순서에서 기다리는 알고리즘 가운데 몇째인지(1이 다음). 순서는 예약 작업의 것이다: 마지막 대기열 훑기가 정한 순서(#599, 서버의 `state/prevalidations/queue.json`, 4일 넘게 오래되면 쓰지 않는다), 훑기가 정하지 않은 것은 그 뒤에 등록 차례(`scheduled.prevalidations.prevalidation_order`: `PREVALIDATE_FIRST`, 그다음 등록 순서)로([operations.md](operations.md) "새 알고리즘 사전 검증 (#24)"의 "대기열 훑기 (#599)"). 사전 검증은 밤에 하나씩(조용한 밤에는 둘) 돈다. 같은 코드로 판정 없이 끝난 실행(메모리 부족 등)은 다음 배포를 기다리는데, 자리는 그것을 보지 않는다. 하루 한 번 종류의 알고리즘은 기다리는 첫 밤에 저마다 돌아서 `null`이다. `waiting`이 아니면 `null`이다.
+
+    > **바뀜** (2026-11-06, #610): 자리는 늘 등록 차례의 것이었다 → 마지막 대기열 훑기가 정한 순서의 것이다. 이유: 밤의 사전 검증이 그 순서로 돈다(#599).
   - `refused`: `refused`이면 그 리포트의 `at`(돌린 시각), `code`(판정한 코드 digest, `prevalidation.code_digest`), `target_version`(판정한 정답 버전, 다른 종류는 그 종류의 정답 버전), `inputs`(1이 아닌 입력 버전, #297), `checks`(떨어진 검사의 이름, 리포트 순서: `days`, `features`, `budget`, `correlation`, `stats`), `why`(떨어진 검사마다 `검사: 내용`을 `; `로 이은 것). 아니면 `null`이다. 리포트 전체는 서버의 `state/prevalidations/<이름>.json`과 #204의 예약 작업 댓글에 있다.
 - `kinds`(#561): 엔진이 예측하는 종류마다(방향, 다른 종류, 하루 한 번 종류 순) 그 알고리즘들이다.
   - `kind`, `target_version`: 그 종류의 알고리즘이 학습하고 판정받는 정답 버전. 방향은 엔진의 `KRX_TARGET_VERSION`, 다른 종류는 그 종류의 정답 버전이다.
