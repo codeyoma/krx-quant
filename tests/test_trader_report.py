@@ -11,29 +11,39 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import date
+from contextlib import closing
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 
+from krx_quant.barriers import BARRIER as BARRIER_KIND
+from krx_quant.barriers import TIMEOUT, UP_FIRST
 from krx_quant.config import Settings
+from krx_quant.kinds import Answer
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
+from krx_quant.trader import MOCK, PAPER, SYMBOL, review
+from krx_quant.trader import policy as policies
+from krx_quant.trader.paper import STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.report import (
     AGENT,
+    PRACTICE_TRADES,
     REFIT_HEADING,
     calls_agent,
     last_of_week,
+    practice_trades,
     read,
     reasons,
     render,
     report_day,
     run_night,
+    run_report,
 )
 from krx_quant.trader.selection import choose
 from krx_quant.trader.settings import TraderSettings
-from krx_quant.trader.store import DB_NAME, TraderStore
+from krx_quant.trader.store import DB_NAME, Entry, Exit, TraderStore
 from tests.promotion_doubles import CLOSE_CALL, WEEKDAYS, day_ran, judged_at, setup
 from tests.test_trader_limits import BOUGHT, TEN, rules
 from tests.test_trader_promotion import begun
@@ -495,3 +505,300 @@ def test_the_report_reads_the_store_read_only(tmp_path: Path) -> None:
     reported(tmp_path)
 
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.name.startswith(DB_NAME)} == before
+
+
+# The decision sources (#560): what each made of the day, and whether the calls it traded were right.
+
+
+def kept(
+    state: Path,
+    prediction: int,
+    entered: str,
+    shares: int,
+    fees: tuple[float, float, float],
+    out: tuple[str, float, str] | None,
+    *,
+    mode: str = MOCK,
+    policy: int | None = 1,
+    champion: bool = True,
+    shadow: bool = False,
+    practice: bool = False,
+    p_star: float = 0.63,
+) -> None:
+    """A trade of a book kept as the trader keeps one (``store.enter``, ``exit``): ``shares`` of the
+    barrier's ``prediction`` bought at 70,100 at ``entered``, its buy's commission, sale's commission
+    and tax ``fees``, sold as ``out`` says (when, at what, why) or still open."""
+    store = TraderStore(state / DB_NAME)
+    try:
+        close = at(entered) - timedelta(seconds=2)
+        trade = store.enter(
+            0,
+            Entry(
+                mode=mode,
+                symbol=SYMBOL,
+                kind=BARRIER.kind,
+                predictor=BARRIER.predictor,
+                prediction_id=prediction,
+                bar_close=close,
+                probability=0.7,
+                threshold=0.6,
+                anchor=70_050,
+                tick=100,
+                width_ticks=2,
+                target=70_250,
+                stop=69_850,
+                time_barrier=close + timedelta(minutes=4),
+                decided_at=at(entered),
+                entry_at=at(entered),
+                entry_price=70_100,
+                quantity=shares,
+                buy_fee=fees[0],
+                quote_at=at(entered),
+                role="top",
+                p_star=p_star,
+                low=0.9,
+                policy_id=policy,
+                champion=champion,
+                shadow=shadow,
+                practice=practice,
+            ),
+        )
+        if out is not None:
+            hms, sold, why = out
+            store.exit(trade, Exit(at(hms), sold, why, fees[1], fees[2], at(hms)))
+    finally:
+        store.close()
+
+
+def four_sources(state: Path) -> None:
+    """A mock day's four decision sources. The champion's book and its paper shadow buy the 10:00 rise
+    as the module's example trade: 14 shares sold at the target, 1.5 ticks up (+21 ticks for the 14),
+    2,261.735 won of costs, −161.735 won. The practice buys a share of the 10:10 rise, stopped 2 ticks
+    down (costs 10.5 + 10.5 + 139.8 = 160.8 won: −360.8 won), and one of the 10:20 rise, still open.
+    The challenger buys 10 shares of the 10:00 rise (p* 0.65), sold at its time barrier where it
+    bought (costs 105.15 + 105.15 + 1,402 = 1,612.3 won), and of the 10:20 rise (p* 0.60), stopped 2
+    ticks down (−2,000 won, costs 105.15 + 104.85 + 1,398 = 1,608 won). The engine answers the 10:00
+    rise up first and the 10:10 one by its timeout; the 10:20 one is not answered yet."""
+    champion_and_challenger(state)
+    started(state, MOCK)
+    engine = PredictionStore(state / ENGINE_DB)
+    try:
+        for close in ("10:00:00", "10:10:00", "10:20:00"):
+            Barrier(close).write(engine)
+        engine.add_kind_answers(
+            BARRIER_KIND.name,
+            BARRIER_KIND.answer_version,
+            [
+                (SYMBOL, at("10:00:00"), Answer(UP_FIRST), False),
+                (SYMBOL, at("10:10:00"), Answer(TIMEOUT), False),
+            ],
+        )
+    finally:
+        engine.close()
+    with closing(sqlite3.connect(state / ENGINE_DB)) as db:
+        ids = [r[0] for r in db.execute("SELECT id FROM kind_predictions ORDER BY bar_close")]
+    ten, ten_ten, ten_twenty = ids
+    example = (147.21, 147.525, 1_967.0)
+    kept(state, ten, "10:00:02", 14, example, ("10:02:00", 70_250, TAKE_PROFIT))
+    kept(
+        state,
+        ten,
+        "10:00:02",
+        14,
+        example,
+        ("10:02:00", 70_250, TAKE_PROFIT),
+        mode=PAPER,
+        champion=False,
+        shadow=True,
+    )
+    stopped, still_open = ("10:12:00", 69_900, STOP_LOSS), None
+    kept(state, ten_ten, "10:10:02", 1, (10.5, 10.5, 139.8), stopped, policy=None, practice=True)
+    kept(state, ten_twenty, "10:20:02", 1, (10.5, 0.0, 0.0), still_open, policy=None, practice=True)
+    timed, stopped = ("10:04:00", 70_100, TIME), ("10:21:00", 69_900, STOP_LOSS)
+    for prediction, entered, fees, out, p_star in [
+        (ten, "10:00:02", (105.15, 105.15, 1_402.0), timed, 0.65),
+        (ten_twenty, "10:20:02", (105.15, 104.85, 1_398.0), stopped, 0.60),
+    ]:
+        kept(state, prediction, entered, 10, fees, out, mode=PAPER, policy=2, champion=False, p_star=p_star)
+
+
+SOURCES_HEAD = "출처 | 매매 | 체결 손익 | 비용 | 순손익 | 청산 | 맞음 | p*"
+
+
+def test_each_decision_source_s_trades_are_tallied_from_the_stored_day(tmp_path: Path) -> None:
+    """#560: a row each, in won and in ticks (each trade's, times its shares), the exits' shares and
+    the calls traded against the engine's answers."""
+    four_sources(tmp_path)
+
+    lines = reported(tmp_path).splitlines()
+
+    head = lines.index(SOURCES_HEAD)
+    assert lines[head - 1].startswith("출처별 손익 (#560): 그날 진입한 매매, 손익은 그 가운데 청산한 것")
+    example = (
+        "+21.0틱 | 22.6틱 2,262원 | -1.6틱 -162원 | 목표 100%, 손절 0%, 시간 0% | 100%(상승 1·보합 0·하락 0)"
+    )
+    assert lines[head + 1 : head + 5] == [
+        f"챔피언 정책 1 | 1건 | {example} | 0.630",
+        "연습(KIS 모의) | 2건(열림 1) | -2.0틱 | 1.6틱 161원 | -3.6틱 -361원 | 목표 0%, 손절 100%, 시간 0% | "
+        "0%(상승 0·보합 1·하락 0, 답 없음 1) | 0.630",
+        f"그림자(챔피언 정책 1, 모의 체결) | 1건 | {example} | 0.630",
+        "도전 정책 2 | 2건 | -20.0틱 | 32.2틱 3,220원 | -52.2틱 -5,220원 | 목표 0%, 손절 50%, 시간 50% | "
+        "100%(상승 1·보합 0·하락 0, 답 없음 1) | 0.600–0.650",
+    ]
+    assert lines[head + 5] == "", "the table ends there"
+
+    (tmp_path / ENGINE_DB).unlink()
+    without = reported(tmp_path).splitlines()
+    assert without[without.index(SOURCES_HEAD) + 1].endswith("| ?(엔진 DB를 읽지 못함) | 0.630")
+
+
+def test_a_paper_day_s_sources_are_the_champion_s_book_and_each_challenger(tmp_path: Path) -> None:
+    """In paper the champion's book is the paper book itself: no shadow, no practice; a source that
+    bought nothing has its row all the same."""
+    champion_and_challenger(tmp_path)
+    Day(tmp_path, desk=True).run([TEN, BOUGHT])
+
+    lines = reported(tmp_path).splitlines()
+
+    head = lines.index(SOURCES_HEAD)
+    assert [line.split(" | ")[:2] for line in lines[head + 1 : head + 3]] == [
+        ["챔피언 정책 1", "1건(열림 1)"],
+        ["도전 정책 2", "1건(열림 1)"],
+    ]
+    assert lines[head + 1].endswith("| - | - | - | - | 답 없음 1 | 0.600"), "open: no P&L, no answer yet"
+    assert lines[head + 3] == ""
+
+
+def test_the_practice_s_trades_are_folded_apart_and_the_report_says_their_sum(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#560: the report keeps the practice's sum; its trades a line each go to the night job's fold
+    (``PRACTICE_TRADES``), or under the report when it is run by hand."""
+    four_sources(tmp_path)
+    settings = Settings(kis_app_key="", kis_app_secret="", state_dir=tmp_path, fee_rate=FEE)
+    practised = "1. 10:10:02 → 10:12:00 손절(stop_loss) · barrier breiman(top) · 오름 0.70 ≥ θ 0.6"
+
+    text = reported(tmp_path)
+
+    assert practised not in text
+    assert (
+        "연습 매매 2건(KIS 모의, 챔피언 칸이 없던 때 1주씩: 승격·관문·모의 기록·손실 한도에는 세지 않고, "
+        "계좌 손익·위험 규칙·실행 점검에는 센다), 순손익 합 -361원 · 매매별 줄은 맨 아래 `연습 매매별 줄`에 "
+        "따로 둔다(#560)"
+    ) in text.splitlines()
+    assert "1. 10:00:02 → 10:02:00 익절(take_profit)" in text, "the champion's trades stay"
+    folded = practice_trades(read(tmp_path / DB_NAME, WEDNESDAY, CALENDAR)).splitlines()
+    assert folded[0] == "연습 매매별 줄 (#560) · 2026-10-14 · 2건(진입 순, 가격은 싣지 않는다)"
+    assert folded[1].startswith(practised) and folded[2].startswith("   실행: "), "with its execution"
+    assert folded[3].startswith("2. 10:20:02 → 열림(아직 청산하지 않았다)") and len(folded) == 5
+
+    assert run_report(settings, at("22:40:00"), fold=tmp_path / PRACTICE_TRADES) == 0
+    out = capsys.readouterr().out
+    assert practised not in out and AGENT in out
+    assert (tmp_path / PRACTICE_TRADES).read_text(encoding="utf-8").splitlines() == folded
+
+    assert run_report(settings, at("22:40:00")) == 0
+    by_hand = capsys.readouterr().out
+    assert by_hand.rstrip("\n").endswith("\n".join(folded)), "by hand: printed under the report"
+    assert not PRICE.search((tmp_path / PRACTICE_TRADES).read_text(encoding="utf-8")), "no price"
+
+
+def test_the_second_line_keeps_the_form_calls_agent_reads(tmp_path: Path) -> None:
+    """#560 adds sections below; the second line, which the job's label reads (``calls_agent``), is
+    as it was: the agent's turn and its reasons, or none."""
+    four_sources(tmp_path)
+
+    wednesday = reported(tmp_path).splitlines()
+    friday = reported(tmp_path, "2026-10-16 22:40:00").splitlines()
+
+    assert wednesday[1] == "에이전트 차례: 아님(밤의 기록만: 라벨을 바꾸지 않는다)"
+    assert friday[1] == "에이전트 차례: 이번 주 마지막 거래일(금요일)"
+    assert [calls_agent("\n".join(lines)) for lines in (wednesday, friday)] == [False, True]
+    assert [line for line in wednesday if line.startswith(AGENT)] == [wednesday[1]], "that line alone"
+
+
+def kept_empty(state: Path, left_out: list[dict[str, object]]) -> int:
+    """The champion kept on the night before the test day with no cell, as the re-fit keeps one whose
+    every cell it left out (``policy.add``)."""
+    db = policies.connect(state / DB_NAME)
+    try:
+        review.begin(db, at("2026-10-13 22:31:00"), CALENDAR.session)
+        version, _ = policies.add(
+            db, at("2026-10-13 22:31:00"), "밤 맞추기", [], left_out, {"grid": {"min_days": 20}}
+        )
+    finally:
+        db.close()
+    return version
+
+
+def test_a_day_no_cell_traded_says_the_champion_had_none_and_why_its_fit_left_them_out(
+    tmp_path: Path,
+) -> None:
+    """#560: the cost map passes no cell (``no_pass``), but since #480 that decides nothing: the empty
+    champion does, and its fit's night left out every cell for too few recorded days."""
+    days = [("direction", "consensus-final", "consensus", 18), ("barrier", "barrier-persist", "baseline", 13)]
+    kept_empty(
+        tmp_path,
+        [{"kind": k, "predictor": p, "role": r, "why": "few_days", "recorded_days": d} for k, p, r, d in days]
+        + [
+            {"kind": "barrier", "predictor": "breiman", "role": "top", "why": "few_trades", "most_trades": 12}
+        ],
+    )
+    failing = cost_map([cost_row("barrier", top=predictor("breiman", 0.55, "fail"))])
+    Day(tmp_path, desk=True, picks=choose(failing).picks, selection=choose(failing)).run([TEN])
+
+    lines = reported(tmp_path).splitlines()
+
+    assert (
+        "매매할 칸 없음: 챔피언 정책 1에 칸이 없다(빈 정책 · 고르기의 기록은 no_pass이나, #480 뒤로 비용 "
+        "지도의 판정은 매매를 정하지 않는다)"
+    ) in lines
+    assert (
+        "- 챔피언 정책 1: 2026-10-13 22:31에 맞춘 정책: 그 밤 맞추기가 칸을 남기지 않았다 · 뺀 칸 3: "
+        "few_days 2(녹화한 날 13–18일, 20일 필요), few_trades 1(1주씩 잰 체결이 가장 많을 때 12건, 20건 필요)"
+    ) in lines
+    assert "비용 지도가 본 칸(그 판정은 #480 뒤로 매매를 정하지 않는다):" in lines
+    assert "- barrier top breiman: fail(하한 0.550, p* 0.630, 300건)" in lines
+
+
+def test_a_champion_s_cell_whose_predictor_is_gone_is_why_none_traded(tmp_path: Path) -> None:
+    """The champion's one cell is gone (#469): on 10-13 the engine made barrier predictions of
+    barrier-persist and none of breiman (``test_trader_review.py``). The pick says so."""
+    keep(tmp_path, at("2026-10-13 22:31:00"), policy_cell(BARRIER))
+    engine = PredictionStore(tmp_path / ENGINE_DB)
+    Barrier("2026-10-13 10:00:00", predictor="barrier-persist").write(engine)
+    engine.close()
+    Day(tmp_path, desk=True, gone=True).run([TEN])
+
+    lines = reported(tmp_path).splitlines()
+
+    assert (
+        "매매할 칸 없음: 챔피언 정책 1의 칸 1개가 그날 매매하지 않았다: barrier breiman(top) "
+        "gone(not_in_policy)" in lines
+    )
+
+
+async def test_the_night_s_fit_that_kept_nothing_says_what_it_left_out(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The first night keeps the empty champion (the cost map's one cell never predicted: left out,
+    #472); the second fits the same and keeps nothing: its report says so, with why it left the cell
+    out (#560), where it said only the causes it might be."""
+    PredictionStore(tmp_path / ENGINE_DB).close()
+    settings = Settings(kis_app_key="", kis_app_secret="", state_dir=tmp_path, fee_rate=FEE)
+    failing = cost_map([cost_row("barrier", top=predictor("breiman", 0.60, "fail"))])
+
+    async with EngineApi([failing]).serving() as url:
+        assert await run_night(settings, TraderSettings(engine_url=url), at("22:31:00")) == 0
+        capsys.readouterr()
+        assert await run_night(settings, TraderSettings(engine_url=url), at("2026-10-15 22:31:00")) == 0
+
+    report, refit = capsys.readouterr().out.split(f"\n{REFIT_HEADING}\n")
+    assert (
+        "- 밤 정책 맞추기: 새 정책을 저장하지 않았다: 맞춘 값(넣은 칸 0개)이 챔피언 정책 1과 같다 · 뺀 칸 1: "
+        "few_days 1(녹화한 날 0일, 20일 필요)"
+    ) in report.splitlines()
+    assert "새 정책 없음 · 맞춘 값이 챔피언 정책 1과 같아 저장하지 않았다" in refit
+    assert (tmp_path / PRACTICE_TRADES).read_text(encoding="utf-8") == (
+        "연습 매매별 줄 (#560) · 2026-10-15: 그날 연습 매매가 없다.\n"
+    ), "written every night, for the job's fold"

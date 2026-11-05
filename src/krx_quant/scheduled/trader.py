@@ -4,7 +4,8 @@ they run.
 
 The mock day's check against KIS, the passive entry's measurement and the cost map's audit ran,
 posted their results and left ``JOBS`` (#505), as a one-off job does once it has done its work.
-Their commands stay for a run by hand.
+The mock check's command stays for a run by hand; the other two left with their code once
+concluded (#559).
 """
 
 from __future__ import annotations
@@ -12,10 +13,10 @@ from __future__ import annotations
 from datetime import timedelta
 
 from krx_quant.process_log import Ran
-from krx_quant.scheduled.core import FAILED, OK, Job, Night, Target
+from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, Night, Target
 from krx_quant.trader.notice_layout import DONE as LAYOUT_DONE
 from krx_quant.trader.notice_layout import PARTIAL as LAYOUT_PARTIAL
-from krx_quant.trader.report import calls_agent
+from krx_quant.trader.report import PRACTICE_HEADING, PRACTICE_TRADES, calls_agent
 
 # The trader's night (#399, #400, #402, #393 "정책과 자기 개선", "리포트와 에이전트"): every trading
 # day's night, after the nightly training, ``refit-policy --report`` first judges, on a review night
@@ -76,9 +77,11 @@ TRADER_REPORT = Job(
         Target(
             TRADER_REPORT_ISSUE,
             note=(
-                "자동 매매의 밤 리포트(#402): 그날의 매매와 장부, 칸 고르기(매매할 칸이 없던 까닭), 정책별 "
-                "모의 성적과 도전 정책 판정, 그 밤의 교체·내림·들어감·맞춘 정책, 실전 관문, 한도와 정지. "
-                "그 아래는 밤 정책 맞추기(#399, #400)와 mock 연습 칸 고르기(#474)의 출력이다. "
+                "자동 매매의 밤 리포트(#402): 그날의 매매와 장부, 출처별 손익(#560), 칸 고르기(매매할 칸이 "
+                "없던 까닭), 정책별 모의 성적과 도전 정책 판정, 그 밤의 교체·내림·들어감·맞춘 정책, "
+                "실전 관문, 한도와 정지. "
+                "그 아래는 밤 정책 맞추기(#399, #400)와 mock 연습 칸 고르기(#474)의 출력이고, 맨 아래 접힌 "
+                "블록은 그날 연습 매매의 매매별 줄이다. "
                 "`에이전트 차례:` 줄이 까닭을 말하는 밤"
                 "(그 주 마지막 거래일, 한도 정지, 챔피언 교체, 관문 통과, 맞추기 실패)과 "
                 "작업이 실패한 밤에만 "
@@ -89,6 +92,8 @@ TRADER_REPORT = Job(
             ),
         ),
     ),
+    # #560: the mock practice's trades a line each, folded under the report, which says their sum.
+    attach=(Attachment(PRACTICE_HEADING, PRACTICE_TRADES),),
 )
 
 # The mock server's fill notice (#484, #403): the order probe (``probe-kis-orders``) measured every

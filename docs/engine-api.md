@@ -250,7 +250,7 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `smt`(날은 `smt_day`, 사건은 `smt_event`, #521), `supply`(항목은 `supply_day`, #226), `algorithms`, `algorithm_detail`, `leaderboard`, `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. 도전 정책 묶음은 `trader_cohort`, 그 판정은 `trader_cohort_verdict`, #473. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `smt`(날은 `smt_day`, 사건은 `smt_event`, #521), `supply`(항목은 `supply_day`, #226), `algorithms`(항목은 `algorithm`, 상태는 `algorithm_state`, #561), `algorithm_detail`, `leaderboard`, `leaderboard_days`(예측자는 `day_series`, #561), `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. 도전 정책 묶음은 `trader_cohort`, 그 판정은 `trader_cohort_verdict`, #473. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
 - 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭"). 장벽의 것은 `barrier_output`, `barrier_path`, `barrier_stats`다(#183, 아래 "장벽").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
@@ -273,7 +273,7 @@
 | `last_bar_close` | 마지막으로 예측한 봉 마감 시각 |
 | `pending_outcomes` | 채점을 기다리는 예측 수 |
 | `special` | 오늘 알게 된 특수 상황(엔진 메모리). 항목마다 `kind`(`vi`, `circuit_breaker`, `sidecar`), `symbol`(VI의 종목, 시장 전체면 `null`), `start`, `end`. 해제를 아직 모르는 VI의 `end`는 발동 + 3분이다. 지난날과 단계·VI 종류(`detail`)는 `GET /v1/symbols/{symbol}/special`에 있다(#236) |
-| `training` | 지난밤 학습(#22). `day`, `finalized_at`(승격 목록 확정 시각, KST), `applied`(그 승격이 지금 돌고 있는지), `reason`, `promoted`(알고리즘 → 버전), `reports`(알고리즘별 `promoted`, `reason`: 검증 log loss 비교). 도달 정답(#169, 기본 정답 버전 3)에서는 밤마다 다시 맞춘 `baseline-climate` 표도 `promoted`와 `reports`에 온다. 밤 학습을 하는 서버(`KRX_TRAIN_AT`이 `off`가 아니다)에서는 #355의 네 필드가 더 있다(선택 필드. 없는 엔진도 계약에 맞다): `last_applied`(08:00 교체가 마지막으로 적용한 밤, `state/models/applied.json`. 없으면 `null`), `nights_not_applied`(그 뒤 거래일 밤 중 학습이 실패했거나 다음 거래일 08:00이 지나도록 목록이 적용되지 않은 밤 수), `not_applied`(그 밤들, 오래된 것부터), `failures`(그중 학습이 실패한 밤, `state/training_nights.json`에서: `day`, `ended_at`(KST), `exit_code`(신호로 죽었으면 음수: `-9`는 SIGKILL. 시간 제한이나 Spot이면 `null`), `step`(마지막으로 시작한 단계, 모르면 `null`), `reason`(알림의 이유)). 갱신은 `training`과 같은 때다(시작, 08:00 교체, 밤 학습이 끝난 뒤). 승격 목록이 하나도 없으면 밤 학습을 하지 않는 엔진은 `training`이 `null`이고, 밤 학습을 하는 서버는 실패한 밤도 보이도록 객체를 준다: `day`, `finalized_at`이 `null`, `promoted` `{}`, `reports` `[]`, `applied` `false`, `reason` `no night's promotion list yet`과 위 네 필드 |
+| `training` | 지난밤 학습(#22). `day`, `finalized_at`(승격 목록 확정 시각, KST), `applied`(그 승격이 지금 돌고 있는지), `reason`, `promoted`(알고리즘 → 버전), `reports`(알고리즘별 `promoted`, `reason`: 검증 log loss 비교). 도달 정답(#169, 기본 정답 버전 3)에서는 밤마다 다시 맞춘 `baseline-climate` 표도 `promoted`와 `reports`에 온다. 밤 학습을 하는 서버(`KRX_TRAIN_AT`이 `off`가 아니다)에서는 #355의 네 필드가 더 있다(선택 필드. 없는 엔진도 계약에 맞다): `last_applied`(08:00 교체가 마지막으로 적용한 밤, `state/models/applied.json`. 없으면 `null`), `nights_not_applied`(그 뒤 거래일 밤 중 학습이 실패했거나 다음 거래일 08:00이 지나도록 목록이 적용되지 않은 밤 수), `not_applied`(그 밤들, 오래된 것부터), `failures`(그중 학습이 실패한 밤, `state/training_nights.json`에서: `day`, `ended_at`(KST), `exit_code`(신호로 죽었으면 음수: `-9`는 SIGKILL. 시간 제한이나 프로세스를 띄우지 못했으면 `null`), `step`(마지막으로 시작한 단계, 모르면 `null`), `reason`(알림의 이유)). 갱신은 `training`과 같은 때다(시작, 08:00 교체, 밤 학습이 끝난 뒤). 승격 목록이 하나도 없으면 밤 학습을 하지 않는 엔진은 `training`이 `null`이고, 밤 학습을 하는 서버는 실패한 밤도 보이도록 객체를 준다: `day`, `finalized_at`이 `null`, `promoted` `{}`, `reports` `[]`, `applied` `false`, `reason` `no night's promotion list yet`과 위 네 필드 |
 
 > **바뀜** (2026-10-23, #357): `training`은 지난밤 목록과 그 적용 여부뿐이었고, 목록이 없으면 `null`이었다 → 마지막으로 적용된 밤과 그 뒤 적용되지 않은 밤, 실패한 밤을 더했다(선택 필드, 스키마의 `training`). 밤 학습을 하는 서버는 목록이 없어도 객체를 주고, 그때 `day`, `finalized_at`은 `null`이다(스키마도 `null`을 받는다). 이유: 2026-10-14부터 7밤 동안 학습이 적용되지 않았는데 `training`은 10-13 밤을 `applied`로 보일 뿐이라 며칠째인지 알 수 없었다(#355).
 
@@ -655,7 +655,9 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 ### `GET /v1/algorithms`
 
-엔진이 돌리는 알고리즘과 지금 쓰는 모델이다. 등록됐지만 사전 검증(#24)을 기다리는 알고리즘은 엔진이 돌리기 시작할 때까지 나오지 않는다(`/v1/algorithms/{name}`도 404).
+등록된 모든 알고리즘과 지금 쓰는 모델이다(#561). 엔진이 돌리는 알고리즘뿐 아니라 사전 검증(#24)을 기다리거나 거부된 알고리즘도 나온다. 항목의 `state`가 그 알고리즘이 어디에 서 있는지, `prevalidation`이 사전 검증의 어디쯤인지를 말하고, `kinds`가 종류마다 알고리즘을 상태별로 묶는다.
+
+> **바뀜** (2026-11-06, #573): "엔진이 돌리는 알고리즘과 지금 쓰는 모델이다. 등록됐지만 사전 검증(#24)을 기다리는 알고리즘은 엔진이 돌리기 시작할 때까지 나오지 않는다(`/v1/algorithms/{name}`도 404)" → 등록된 모든 알고리즘이 나오고, 항목에 `state`와 `prevalidation`이, 맨 위에 `kinds`가 붙었다. 이유: 대기·거부된 알고리즘이 목록에 없어서, 장벽 모델 넷이 기다리고 `breiman-30m`과 `cox-5d`가 거부된 것을 텔레그램으로만 알았다(#561).
 
 > **바뀜** (2026-10-11, #57): "등록된 알고리즘" → "엔진이 돌리는 알고리즘". 이유: 새 알고리즘은 사전 검증을 통과해야 돈다(#24).
 
@@ -725,8 +727,29 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
         "weakest": {"baseline": "baseline-flat", "n": 2, "value": -0.0123, "low": -0.3867, "high": 0.3621},
         "enough": true, "simulated": 0
       },
-      "simulation": null
+      "simulation": null,
+      "state": "probation",
+      "prevalidation": {"exempt": true, "queue": null, "refused": null}
+    },
+    {
+      "name": "breiman-30m",
+      "kind": "barrier_30m",
+      "status": {"status": null, "since": null, "history": []},
+      "stage": null,
+      "simulation": null,
+      "state": "refused",
+      "prevalidation": {
+        "exempt": false, "queue": null,
+        "refused": {
+          "at": "2026-11-04T23:40:00+09:00", "code": "0a1b2c3d4e5f6a7b", "target_version": 2, "inputs": {},
+          "checks": ["stats"], "why": "stats: weakest lift -0.0040 over 7650 scored predictions; …"
+        }
+      }
     }
+  ],
+  "kinds": [
+    {"kind": "direction", "target_version": 3, "predicting": ["newton", "gauss"], "states": {"active": ["newton"], "probation": ["gauss"]}},
+    {"kind": "barrier_30m", "target_version": 2, "predicting": [], "states": {"refused": ["breiman-30m"]}}
   ],
   "baselines": [
     {
@@ -759,7 +782,23 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 }
 ```
 
-(글은 줄였다. 알고리즘 항목에는 모든 필드가 오고, 기준 예측은 넷(정답 버전 1이면 셋), 합의는 둘이 다 온다.)
+(글은 줄였다. 알고리즘 항목에는 모든 필드가 오고, 기준 예측은 넷(정답 버전 1이면 셋), 합의는 둘이 다 온다. 값은 예시다.)
+
+- 순서(#561): 등록 순서다. 방향의 알고리즘, 다른 종류의 알고리즘, 하루 한 번 종류의 알고리즘 순이다.
+- `state`(#561): 엔진이 돌리는 알고리즘은 지금 상태(`probation`, `active`, `bench`, `clone`, `retired`. `status.status`와 같다. 은퇴한 것도 목록에 남는다)다. 돌지 않는 알고리즘은 그 이유다.
+  - `waiting`: 사전 검증을 기다린다. 밤의 예약 작업이 스스로 돌린다([operations.md](operations.md) "예약 작업 (#215)").
+  - `refused`: 가장 최근 리포트가 지금의 코드, 정답 버전, 입력을 거부했다. 엔진은 돌리지 않고, 밤 학습과 다른 후보의 재생에서도 빠진다(`prevalidation.left_out`, #544와 같은 규칙). 같은 코드·정답 버전·입력으로는 다시 검증하지 않는다. 코드가 바뀌어 배포되면 다시 `waiting`이 된다.
+  - `held`: 사전 검증은 통과했지만 그 하루 한 번 종류의 판정일을 아직 코드에 고정하지 않아 수습에 오르지 않는다(#310, `DailyKind.review_hold`).
+  - `awaiting`: 그 하루 한 번 종류가 탐침의 결과를 기다려 돌지 않는다(#310, `DailyKind.awaiting`).
+  - 돌지 않는 알고리즘은 대개 상태 이력이 없다(`status.status`와 `since`가 `null`, `history`가 빈 목록). `stage`와 `simulation`은 `null`이다. 수습 중인 하루 한 번 종류의 알고리즘이 코드나 입력이 바뀌어 사전 검증을 다시 기다리면(#264) `status`는 수습 그대로이고 `state`는 `waiting`이다.
+- `prevalidation`(#561): 사전 검증의 어디쯤인지다.
+  - `exempt`: 사전 검증이 생기기 전에 등록돼(`prevalidation.REGISTERED_BEFORE`: newton, gauss, granger, markov, turing) 리포트 없이 돈다. 코드가 바뀌면 그 리비전은 사전 검증을 받는다(#454).
+  - `queue`: `waiting`인 봉 마감 알고리즘이 밤 사전 검증 순서에서 기다리는 알고리즘 가운데 몇째인지(1이 다음). 순서는 예약 작업의 것(`scheduled.prevalidations.prevalidation_order`: `PREVALIDATE_FIRST`, 그다음 등록 순서)이고, 사전 검증은 밤에 하나씩 돈다. 같은 코드로 판정 없이 끝난 실행(메모리 부족 등)은 다음 배포를 기다리는데, 자리는 그것을 보지 않는다. 하루 한 번 종류의 알고리즘은 기다리는 첫 밤에 저마다 돌아서 `null`이다. `waiting`이 아니면 `null`이다.
+  - `refused`: `refused`이면 그 리포트의 `at`(돌린 시각), `code`(판정한 코드 digest, `prevalidation.code_digest`), `target_version`(판정한 정답 버전, 다른 종류는 그 종류의 정답 버전), `inputs`(1이 아닌 입력 버전, #297), `checks`(떨어진 검사의 이름, 리포트 순서: `days`, `features`, `budget`, `correlation`, `stats`), `why`(떨어진 검사마다 `검사: 내용`을 `; `로 이은 것). 아니면 `null`이다. 리포트 전체는 서버의 `state/prevalidations/<이름>.json`과 #204의 예약 작업 댓글에 있다.
+- `kinds`(#561): 엔진이 예측하는 종류마다(방향, 다른 종류, 하루 한 번 종류 순) 그 알고리즘들이다.
+  - `kind`, `target_version`: 그 종류의 알고리즘이 학습하고 판정받는 정답 버전. 방향은 엔진의 `KRX_TARGET_VERSION`, 다른 종류는 그 종류의 정답 버전이다.
+  - `predicting`: 엔진이 그것으로 예측하는 알고리즘(정식, 수습, 벤치, 복제), 등록 순서. 비면 그 종류는 기준 예측만으로 돈다(예: 장벽 모델이 모두 기다리거나 거부됐을 때).
+  - `states`: `state`마다 그 알고리즘들, 등록 순서. 알고리즘이 없는 상태는 빠진다.
 
 - `kind`(#179): 그 알고리즘이 예측하는 종류다. 지금 알고리즘은 모두 `direction`이다. 다른 종류의 알고리즘도 같은 목록에 같은 형식으로 오고(방향 알고리즘 뒤, 등록 순서), `stage`와 `validation`은 그 종류의 것이다. `baselines`와 `consensus`는 방향의 것이다. 다른 종류의 기준 예측 카드는 `GET /v1/kinds`에 있다.
 
@@ -813,7 +852,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 ### `GET /v1/algorithms/{name}`
 
-등록된 알고리즘 하나다(#19). `/v1/algorithms` 항목과 같고(카드, 피처·파라미터의 뜻, 학습 정보 `model.training`, 지난밤 검증 `validation`, 판정 단계 `stage` 포함), 서버에 설치된 모델 이력 `model_history`가 붙는다. 등록된 알고리즘이 아닌 이름(기준 예측, 합의 포함)은 404다. 기준 예측과 합의의 카드는 `/v1/algorithms`의 `baselines`, `consensus`에 있다. 성적은 `/v1/algorithms/{name}/stats`에 있다.
+등록된 알고리즘 하나다(#19). `/v1/algorithms` 항목과 같고(카드, 피처·파라미터의 뜻, 학습 정보 `model.training`, 지난밤 검증 `validation`, 판정 단계 `stage`, `state`와 `prevalidation` 포함), 서버에 설치된 모델 이력 `model_history`가 붙는다. 돌지 않는 알고리즘(대기, 거부)도 답한다(#561). 등록된 알고리즘이 아닌 이름(기준 예측, 합의 포함)은 404다. 기준 예측과 합의의 카드는 `/v1/algorithms`의 `baselines`, `consensus`에 있다. 성적은 `/v1/algorithms/{name}/stats`에 있다.
 
 ```json
 {
@@ -834,7 +873,9 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 ```
 
 - `model_history`: `state/models/history.json`(#45)에서 그 알고리즘의 항목이다. 오래된 것부터 온다. 서버는 지금 모델과 바로 전 모델의 파일만 남기지만(#361), 이력은 지운 버전의 항목도 그대로 둔다. `why`는 `fit`, `promotion <밤 날짜>`, `rollback from <버전>`, `installed before`(이력이 생기기 전에 깔려 있던 모델)다. `version`이 `null`이면 기본 모델로 돌아간 것이다. 한 번도 설치하지 않았으면 빈 목록이다. 재생에는 서버 상태가 없어서 늘 빈 목록이다. 데모 엔진은 Newton에 가상 이력(학습 설치, 롤백)을 보인다.
-- `model`은 엔진이 지금 돌리는 모델이다. 설치나 롤백 직후 1분 안에는 `model_history`의 마지막과 다를 수 있다(엔진이 모델 파일을 30초마다 본다).
+- `model`은 엔진이 지금 돌리는 모델이다. 설치나 롤백 직후 1분 안에는 `model_history`의 마지막과 다를 수 있다(엔진이 모델 파일을 30초마다 본다). 돌지 않는 알고리즘은 엔진이 쥔 모델(대개 기본 모델, 기다리는 동안 밤 학습이 만든 모델이면 그것)이다.
+
+> **바뀜** (2026-11-06, #573): 사전 검증을 기다리는 알고리즘은 404였다 → 등록된 알고리즘은 돌지 않아도 답한다. 이유: `/v1/algorithms`와 같다(#561).
 
 ### `GET /v1/leaderboard?symbol=&period=&special=`
 
@@ -888,6 +929,68 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `ranked`와 `unranked` 항목에는 `status`(지금 상태: `probation`, `active`, `bench`, `retired`, `clone`. 상태 기록이 없는 합의는 `null`)가 붙는다. 순위는 상태를 보지 않는다. 상태는 캐시하지 않고 요청마다 읽는다. 그래서 다른 프로세스의 `retire`가 바로 보인다.
 - 그 기간에 채점된 기준 예측이 하나도 없으면 `lift`가 빠진다.
 
+### `GET /v1/leaderboard/days?kind=&limit=N` (#561)
+
+한 종류의 예측자마다 거래일별 성적이다(`algorithm_days.py`). 순위표는 오늘·5일·20일 세 칸이라 성적이 언제 떨어졌는지 보이지 않는다(turing의 하락은 #206의 일회성 작업에서야 보였다). 그래서 날마다 맞힘률, 방향을 부른 비율, 클래스마다의 정밀도, 같은 봉 마감의 기후 기준 예측 대비 lift, log loss, 그날의 상태를 낸다.
+
+- `kind`: 순위표와 같다(기본 `direction`, 모르는 종류는 400).
+- `limit`: 점검을 마친 최근 날 수(기본 20, 최대 60). 잘못된 값은 400.
+
+```json
+{
+  "kind": "direction", "days": ["2026-11-04", "2026-11-05"], "climate": "baseline-climate", "min_sample": 200,
+  "algorithms": [
+    {
+      "algorithm": "turing", "status": "active",
+      "decay": {"days": 8, "rule_days": 10, "weakest": {"baseline": "baseline-flat", "n": 8800, "value": -0.012}, "enough": true, "flagged": true},
+      "days": [
+        {
+          "day": "2026-11-04", "status": "active", "simulated": false, "n": 1100,
+          "accuracy": 0.57, "coverage": 0.53,
+          "precision": {"up": {"n": 380, "value": 0.43}, "flat": {"n": 520, "value": 0.77}, "down": {"n": 200, "value": 0.32}},
+          "lift": {"n": 1100, "value": 0.08}, "log_loss": 0.94
+        }
+      ]
+    }
+  ],
+  "baselines": [{"algorithm": "baseline-climate", "status": null, "decay": null, "days": []}],
+  "consensus": [{"algorithm": "consensus-final", "status": null, "decay": null, "days": []}],
+  "members": [
+    {
+      "day": "2026-11-04", "consensus": "consensus-final", "members": ["newton", "turing"], "n": 1100, "accuracy": 0.59,
+      "vs": {
+        "newton": {"n": 1100, "accuracy": 0.6, "consensus": 0.59, "lift": -0.01},
+        "turing": {"n": 1100, "accuracy": 0.57, "consensus": 0.59, "lift": 0.02}
+      },
+      "best": "newton", "lift": -0.01
+    }
+  ]
+}
+```
+
+(값은 예시다. 시세 값이나 가격은 없다.)
+
+- **날**(`days`, 오래된 것부터): 그날의 점검(장 마감 + 10분, 위 "상태 관리")을 마친 날 중 그 종류의 예측이 있는 날이다. 그날의 봉 마감은 모두 채점됐다. 오늘은 점검 뒤에 들어간다. 하루 한 번 종류는 정답이 있는 날이다(정답이 점검 뒤에 온다. 상태 판정이 세는 날과 같다).
+- **예측**: 순위표와 같은 것을 센다. 그 봉 마감의 정답(방향은 도달 정답, 다른 종류는 그 종류의 정답)으로 채점된 것, 특수 상황 제외, 알고리즘은 목표로 학습한 모델의 예측만(`stats.on_target`. 방향은 정답 버전 2부터, 순위표처럼), 기준 예측과 합의는 모두. 종목은 합친다.
+- **예측자**: `algorithms`(그 종류의 등록된 알고리즘, 등록 순서. 그다음 그 날들에 예측이 남은 다른 이름, 이름 순), `baselines`(그 종류의 기준 예측, 이름 순), `consensus`(방향의 둘. 다른 종류는 빈 목록). 항목마다 `status`(지금 상태. 기준 예측, 합의, 한 번도 돌지 않은 알고리즘은 `null`), `decay`, `days`(채점된 예측이 있는 날만)가 온다.
+- **날의 값**:
+  - `status`: 그날 장 마감 때의 상태다. 점검이 바꾼 상태는 다음 날부터다. 기준 예측과 합의는 `null`이다.
+  - `simulated`: 그날 값이 수습 시뮬레이션(#298)의 것인지. 시뮬레이션이 재생한 날은 그 알고리즘의 실시간 예측 대신 시뮬레이션 예측과 그 재생의 기준 예측으로 잰다(상태 판정과 같다). 그날의 `status`는 `probation`이다. 순위표와 상세 통계는 시뮬레이션 예측을 세지 않으므로 여기와 `/v1/algorithms`의 `simulation`에서만 보인다.
+  - `n`, `accuracy`(맞힘률: 가장 큰 확률의 클래스가 맞음, 동률은 가운데 클래스, 그다음 첫 클래스), `coverage`(행동 클래스를 부른 비율. 방향은 상승·하락).
+  - `precision`: 종류의 클래스마다(방향은 `up`, `flat`, `down`) 그 클래스를 부른 수 `n`과 그중 그 클래스가 일어난 비율 `value`. 부른 적이 없으면 `value`가 `null`이다.
+  - `lift`: 같은 종목·봉 마감의 기후 기준 예측(`climate`. 방향 `baseline-climate`, 변동폭 `range-climate`, 장벽 `barrier-climate`, 15·30·60분 장벽 `barrier-climate-15m` 등, 시가→종가 `otc-climate`, 5거래일 `otc5-climate`) 대비 맞힘률 차이와 짝 수 `n`. 기후 기준 예측 자신, 짝이 없는 날, 기후 기준 예측이 없는 엔진(정답 버전 1)은 `null`이다. 하루 값이라 구간은 없다(매분 예측은 서로 독립이 아니다, 위 "lift").
+  - `log_loss`: −ln p(일어난 클래스)의 평균. 밤 학습처럼 p를 10⁻⁶ 아래로 두지 않는다(`forecasts.LOSS_FLOOR`). 밤 학습의 교체는 이것으로 정한다(#437). 맞힘률과 나란히 보면 둘이 어떻게 갈리는지 보인다.
+- **`decay`**(하락 표시, 정식인 알고리즘만. 그 밖에는 `null`): 지금의 정식이 된 뒤의 날 중 최근 20일(하루 한 번 종류는 그 종류의 최근 날 수) 안의 날에서, 기준 예측마다의 lift 중 가장 약한 것을 벤치 판정(#545)과 같이 잰다(그 날들의 짝을 모두 합친 값). 판정은 바꾸지 않는다. 벤치 판정은 정식 열째 날부터 그 날들만으로 판정하므로, 그 전의 `flagged`는 규칙이 아직 움직이지 않는 하락을 보인다.
+  - `days`: 센 정식 날 수. `rule_days`: 벤치 판정이 정식인 날만으로 판정하기 시작하는 날 수(`Rules.min_active_days`: `KRX_PROBATION_REVIEW_DAYS`의 첫 판정일).
+  - `weakest`: 가장 약한 lift의 `baseline`, 짝 수 `n`, 값 `value`. 짝이 없는 기준 예측이 하나라도 있으면 `null`이다.
+  - `enough`: 채점된 예측과 기준 예측마다의 짝이 `min_sample`(`KRX_MIN_SAMPLE`, 하루 한 번 종류는 그 종류의 것) 이상인지. `flagged`: `enough`이고 `weakest.value`가 0 이하.
+- **`members`**(방향만, 다른 종류는 빈 목록): 날마다 최종 합의(`consensus-final`)를 그날 장 마감 때 정식이던 알고리즘(`members`, 등록 순서)과 같은 봉 마감에서 견준다. 합의 예측이 채점되지 않은 날은 빠진다.
+  - `n`, `accuracy`: 그날 합의의 채점 수와 맞힘률.
+  - `vs`: 구성원마다 합의와 함께 예측한 봉 마감 수 `n`, 그 봉 마감에서 구성원의 맞힘률 `accuracy`, 합의의 맞힘률 `consensus`, 그 차이 `lift`(합의 − 구성원). 함께 예측한 봉 마감이 없는 구성원은 빠진다.
+  - `best`: 합의가 가장 덜 앞선(가장 약한 lift) 구성원, `lift`가 그 값이다. 0보다 작으면 그날 그 구성원 혼자가 합의보다 많이 맞혔다. 보고만 한다: 합의 규칙은 바꾸지 않는다.
+- **계산**: 날마다 한 번, 이벤트 루프 밖에서 그날의 예측을 하루씩 읽어 계산하고 엔진 프로세스의 메모리에 둔다(`algorithm_days.Kept`: 종류 × 날 512개까지, 가장 오래 묻지 않은 것부터 버린다). 요청은 없는 날만 계산한다. 같은 요청을 다시 해도, 새 봉 마감이 저장돼도 다시 계산하지 않는다. 다시 계산하는 것은 시뮬레이션이 저장됐을 때, 지난 정답이나 특수 상황 구간을 채우거나 `rescore`가 다시 썼을 때(`runs`의 `touch_fill`, `rescore`, `kind_fill`, `special_fill`), 하루 한 번 종류는 그 정답이 들어왔을 때뿐이다(`PredictionStore.refill_mark`). 상태(그날의 것과 지금 것)는 요청마다 `statuses`에서 읽는다. 엔진이 다시 시작하면(06:00 배포) 첫 요청이 그 종류의 날을 다시 계산한다.
+  - 측정(2026-11-06, 개발 맥, 만든 DB: 20일 × 3종목 × 봉 마감 376개 × 예측자 19, 예측 428,640개): 처음 요청이 20일을 계산하는 데 3.6–4.9초(하루 약 0.2초), 그다음 요청은 0.01초였다. 처음 요청이 늘린 프로세스 메모리 고점은 약 16 MB(tracemalloc 고점 12 MB, 계산한 날로 남는 것 3 MB)다. 같은 DB에서 `/v1/leaderboard?period=20d`는 20.8초였다.
+
 ### `GET /v1/consensus`
 
 합의의 구성과 가중치다.
@@ -921,7 +1024,9 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
     > **바뀜** (2026-10-18, #278): `independence`에 "자기상관을 보정한 판은 아직 없다"고 적었다 → 거래일 단위 kappa(`by_day`)가 그 몫이다. 이유: 사용자가 Pesaran–Timmermann(2009)의 회귀판 대신 lift처럼 거래일 단위로 보기로 정했다(2026-10-18, #262).
 - `by_symbol`, `by_slot`, `by_model_version`: 종목별, 30분 시간대별, 모델 버전별 항목이다. 시간대는 예측한 봉의 시작 시각 기준이다(`"09:00"`은 09:01–09:30 마감). 이 항목들의 lift는 함께 검정하지 않으므로 `q`와 `significant`가 `null`이다. 거래일 단위 값(`by_day`)은 이 항목들에도 있다.
 - `by_volatility`(#262): 변동성 3분위별 항목(`low`, `mid`, `high`). 형식은 `by_symbol`의 항목과 같다(`q`·`significant`는 `null`, `by_day`는 있다). 화면은 상세 통계 창의 "변동성별" 탭에 낮음·중간·높음 순서로 보이고, 탭의 툴팁에 종목마다의 경계를 보인다(codeyoma/FinceptTerminal#85). 변동성은 그 봉 마감에 장벽 종류가 저장한 폭 w를 그 봉 마감 중간가의 bp로 바꾼 값이다(w틱 × 호가단위 ÷ 중간가 × 10⁴, `kind_predictions`의 `width_ticks`, `tick`, `anchor`). w는 1분 변화의 지수가중 표준편차 × √4이고 k보다 좁지 않으며 봉 마감에 안다. 틱이 아니라 bp로 재는 것은 호가단위가 가격대 경계에서 바뀌기 때문이다. 종목마다 자른다: 그 기간 그 종목의 모든 봉 마감의 w(예측자의 것만이 아니다)를 정렬한 1/3과 2/3 자리 값(둘 사이면 아래 것)이 경계이고, 그래서 예측자마다 같은 봉 마감들이 같은 칸에 든다(나란히 견줄 수 있다). w가 아래 경계 이하면 `low`, 위 경계 이하면 `mid`, 그 위면 `high`이고, 경계는 `volatility_cuts`에 종목마다 `[아래, 위]`(bp)로 온다. w가 없는 봉 마감(장벽 예측 전, 중간가를 저장하기 전 #210, 장벽 종류가 없는 엔진)의 예측은 넣지 않는다. 그래서 이 둘은 장벽 종류가 있어야 차고, 방향의 응답 중 다른 종류에 기대는 유일한 것이다. 예측이 없는 칸은 빠진다. 적중이 어느 변동성에서 나오는지 보려는 것이다. 변동성이 크면 4분 안에 ±k에 닿기 쉬워, 변동성만 맞혀도 보합과 움직임을 가를 수 있다(Christoffersen & Diebold 2006은 평균이 0이 아닐 때 변동성이 방향 예측력을 만든다는 것을 보였다).
-- 예전에 예측한 적이 있는 알고리즘과 합의(`consensus-fast`, `consensus-final`)는 그 기간에 예측이 없어도 404가 아니라 빈 통계(`n` 0)를 낸다.
+- 예전에 예측한 적이 있는 알고리즘과 합의(`consensus-fast`, `consensus-final`)는 그 기간에 예측이 없어도 404가 아니라 빈 통계(`n` 0)를 낸다. 등록된 알고리즘은 한 번도 돌지 않았어도(대기, 거부) 빈 통계다(#561).
+
+  > **바뀜** (2026-11-06, #573): 한 번도 돌지 않은 방향 알고리즘은 404였다 → 빈 통계. 이유: `/v1/algorithms`가 그것도 보이므로(#561).
 
   > **바뀜** (2026-10-10, #51): 합의는 한 번도 예측하지 않은 엔진에서 404였다 → 기준 예측처럼 늘 아는 이름이다. 이유: 계약 테스트가 빈 엔진에서 404를 찾았다. 화면은 합의 성적을 늘 물을 수 있어야 한다.
 
@@ -1474,7 +1579,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 (값은 지어낸 예다.)
 
-- `updated_at`: trader가 상태를 마지막으로 쓴 때. `alive`: 그것이 엔진의 지금과 15초 안이면 참이다(trader가 돈다). 거짓이면 아래 값은 trader가 멈추기 전의 것이다.
+- `updated_at`: trader가 상태를 마지막으로 쓴 때. `alive`: 그것이 엔진의 지금과 15초 안이면 참이다(trader가 돈다). 거짓이면 아래 값은 trader가 멈추기 전의 것이다. 장중에 `updated_at`이 60초(열린 포지션이 있으면 20초) 넘게 오래되면 묻는 이가 없어도 엔진이 텔레그램으로 한 번 알린다(#542, [operations.md](operations.md) 3장 "trader 침묵 (#542)").
 - `mode`: `paper`, `mock`(#405) 또는 `live`(#408). trader가 실제로 도는 모드다: `KRX_TRADER_MODE=live`라도 실전 관문과 실행 점검 전에는 `paper`다(`live.configured`가 그것을 말한다). **바뀜** (2026-10-31, #425): `paper` 또는 `mock` → `live`가 더해졌다. 이유: #408. `status`: `running`(돈다), `entries_paused`(새 진입 정지), `paused`(정지하고 즉시 매도), `order_failed`(mock에서 KIS 주문이 실패해 오늘은 새로 사지 않음, #405), `daily_limit`(하루 손실 한도로 오늘 멈춤), `cumulative_limit`(누적 손실 한도로 `rearm`까지 멈춤). 여럿이 맞으면 `cumulative_limit`, `daily_limit`, `paused`, `entries_paused`, `order_failed` 순서로 앞의 것이다. `champion`·`gate`·`policies`는 어느 모드에서도 paper의 기록이다(mock에서는 챔피언의 그림자 장부의 것, #405). **바뀜** (2026-10-30, #422): `mode`는 `paper`뿐이었고 `order_failed`가 없었다 → mock과 그 주문 실패가 들어왔다. 이유: #405. `started_at`: 이번 시작.
 - `capital`: 운용 상한(원). `cash`: 주문 가능 현금(모의: 운용 상한 + 청산한 매매의 순손익 − 열린 포지션의 매수 금액과 수수료).
 - `position`: 열린 포지션, 없으면 `null`. `bid`·`bid_at`은 평가에 쓴 매수 1호가와 그 받은 시각(산 뒤의 호가가 아직 없으면 `null`), `unrealized`는 그 매수 1호가에 지금 팔면 받을 순손익(매수·매도 수수료와 매도세를 뺀다), `selling`은 정지·한도가 팔게 해서 다음 호가를 기다리는지, mock(#405)에서는 KIS에 팔고 있는지(손절·시간·정지·한도의 팔기가 시작됐다)다. mock의 `unrealized`는 이미 판 몫(익절 매도의 일부 체결, 팔고 있는 매도)을 그 체결 금액으로, 남은 주식만 그 매수 1호가로 센다.
@@ -2011,10 +2116,10 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 - **창의 끝.** 위 "여러 세션 창". 예정에 없던 휴장(KIS가 쉰다고 알린 날)이 생기면 다섯째로 실제 연 날이 끝이다.
 - **특수 상황.** 다섯 세션 중 하루라도 서킷브레이커나 사이드카가 있으면 그 창의 정답이 특수다. VI는 특수가 아니고, 경로에 다섯 세션의 VI 수를 남긴다. 2026-10-12 전에는 특수 기록이 없으므로 사전 검증에서는 특수인 창이 없다.
 - **채점 시각.** 창의 다섯째 세션 밤, 그날 KRX 일봉이 저장된 뒤 20:35부터 10분마다다. 그래서 종목마다 채점을 기다리는 예측이 늘 넷 있다. 7일 뒤에도 오지 않으면 `no candle`이다.
-- **배당.** KIS 수정주가(`FID_ORG_ADJ_PRC=0`)는 현금배당을 빼지 않는다. 2026-10-21 밤 예약 작업 `probe-dividends-310`(`krx-quant probe-dividends`, [operations.md](operations.md#배당과-수정주가-확인-310))이 세 종목의 10년(2016-10-21부터, 종목마다 2,451일, 150번 조회에 실패 0)을 수정주가와 원주가로 받아 견줬다: 두 종가의 비가 바뀐 날(원 단위 반올림인 0.05% 미만 빼고)은 005930의 2018-05-04 액면분할 하루뿐이었고, 배당락일에는 계단이 하나도 없었다. 그래서 배당락일이 창 안(첫 세션 뒤)에 있는 정답은 배당만큼 하락 쪽으로 기운다. spec의 대안대로 정답은 그대로 두고, 경로에 배당락 표시(`ex_dividend`)를 남겨 진단할 수 있게 한다(정답·학습·판정은 이 표시를 읽지 않는다).
+- **배당.** KIS 수정주가(`FID_ORG_ADJ_PRC=0`)는 현금배당을 빼지 않는다. 2026-10-21 밤 예약 작업 `probe-dividends-310`([operations.md](operations.md#배당과-수정주가-확인-310))이 세 종목의 10년(2016-10-21부터, 종목마다 2,451일, 150번 조회에 실패 0)을 수정주가와 원주가로 받아 견줬다: 두 종가의 비가 바뀐 날(원 단위 반올림인 0.05% 미만 빼고)은 005930의 2018-05-04 액면분할 하루뿐이었고, 배당락일에는 계단이 하나도 없었다. 그래서 배당락일이 창 안(첫 세션 뒤)에 있는 정답은 배당만큼 하락 쪽으로 기운다. spec의 대안대로 정답은 그대로 두고, 경로에 배당락 표시(`ex_dividend`)를 남겨 진단할 수 있게 한다(정답·학습·판정은 이 표시를 읽지 않는다).
   - **배당락일은 KIS 일봉 행의 락 구분(`flng_cls_code`)이 알려 준다.** 같은 측정에서 `02`(배당락)는 해마다 연말 배당락일(종목마다 10번. 000660은 2023-12-27 다음이 2025-02-27, 2026-02-26), `05`(중간배당락)는 분기 배당락일(005930 10번, 000660 13번, 009150 없음), 그 밖의 모든 날은 `00`이었다(액면분할한 날도). 다른 값은 오지 않았다. `mod_yn`은 늘 `N`, `revl_issu_reas`는 늘 빈 값, `prtt_rate`는 늘 0이었다. 수집이 KRX 일봉에 락 구분을 둔다(`ex_code`, [events.md](events.md#candles-일주월년봉-rest-111-112)).
   - **`ex_dividend`.** 첫 세션 뒤 네 세션(둘째–다섯째) 중 하나의 락 구분이 `02`나 `05`면 `true`, 넷 모두 `00`이면 `false`, 그 밖이면 `null`(모름)이다: 그 종목의 날이 없는 세션, 락 구분이 없는 일봉(수집이 아직 채우지 못한 옛 일봉), 잰 적 없는 값이 낀 창이다(`daily.ex_dividend_of`). 첫 세션이 배당락일이면 세지 않는다: 그날 시가가 이미 배당락 뒤 가격이라 기울지 않는다.
-  - **잰 적 없는 값은 모름(`null`)이다.** KIS 문서는 `01`(권리락), `03`(분배락), `04`(권배락) 등을 더 적지만 10년 동안 한 번도 오지 않아, 여기서 무엇을 뜻하는지 재지 않았다(CODING_STANDARDS.md "External data is probed before it is used"). 그래서 문서상 배당이 드는 `04`도 `true`가 아니고, 배당이 아닌 `01`도 `false`가 아니다. 그런 값이 오면 `probe-dividends`를 다시 돌려 정한다.
+  - **잰 적 없는 값은 모름(`null`)이다.** KIS 문서는 `01`(권리락), `03`(분배락), `04`(권배락) 등을 더 적지만 10년 동안 한 번도 오지 않아, 여기서 무엇을 뜻하는지 재지 않았다(CODING_STANDARDS.md "External data is probed before it is used"). 그래서 문서상 배당이 드는 `04`도 `true`가 아니고, 배당이 아닌 `01`도 `false`가 아니다. 그런 값이 오면 새 probe로 재서 정한다. **바뀜** (2026-11-06, #567): "그런 값이 오면 `probe-dividends`를 다시 돌려 정한다" → 새 probe로 잰다. 위 "배당"의 그 예약 작업 뒤에 적었던 명령 `krx-quant probe-dividends`도 뺐다. 이유: 그 명령과 `dividend_probe.py`를 지웠다(결론이 났다, #310. 사용자 결정 2026-11-05, #563). 대신: git 이력.
   - **⚠ 빠진 분기 배당락일이 있을 수 있다.** 005930의 `05`는 2017–2019년 8번(2019년 3분기부터 없음)과 2021-06-29, 2026-09-29뿐이고, 000660의 `05`는 2022년부터 분기마다 있다. 삼성전자는 공개된 배당 이력으로는 2017년부터 분기마다 배당했으므로(이 저장소가 잰 것은 아니다), KIS가 005930의 분기 배당락일 일부를 표시하지 않았을 수 있다. 그래서 `false`는 "KIS가 창 안에 배당락을 표시하지 않았다"이지 "배당락일이 없다"가 아니다. 다른 출처(예: 배당 일정 조회)로 대조하려면 따로 측정한다.
 
   > **바뀜** (2026-10-22, #347): "KIS 수정주가가 현금배당을 빼는지는 아직 모른다 ⚠ … 그때까지 경로의 `ex_dividend`는 배당락일 달력이 없어 늘 `null`이다(모름)" → 빼지 않는다(실측). `ex_dividend`를 KRX 일봉의 락 구분(`02`·`05`)으로 채운다. 이유: 2026-10-21 밤 `probe-dividends-310`(#310).
@@ -2084,7 +2189,9 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 - `predict(features, model)`: 한 종목의 피처로 `{p_up, p_flat, p_down, expected_ticks}`를 낸다. 세 확률의 합은 1이다. 읽는 데이터가 봉 마감에 없으면 `NotPredicted(Abstention.NO_BOOK)`을 던져 그 종목을 예측하지 않는다(#25). 엔진은 이유를 예측의 `status`로 남기고, 밤 학습과 사전 검증은 그 표본을 검증에서 뺀다.
 - `predict_with_context(features, model, context)`(고를 수 있는 능력, #429, `contract.ContextAware`): 피처와 함께 어디서 묻는지(`PredictionContext(symbol, bar_close)`: 종목과 봉 마감)를 받아 `predict`와 같은 것을 낸다. 이 능력이 있는 알고리즘은 `predict`로는 예측하지 않는다(`MissingContext`). 맥락은 피처가 아니다. 그 알고리즘이 맥락으로 읽는 것은 자기 모델의 것이다(Shannon의 기후 사전 확률 표, 아래 "Shannon"). 그래서 피처 저장소와 표본 저장소는 그대로다. 지금은 방향 알고리즘만 가질 수 있고, 가진 것은 Shannon뿐이다.
 
-예측은 모두 디스패처 하나(`contract.forecast_of`)로 묻는다(#429): 엔진의 봉 마감 예측(`_predict_symbols`. 그래서 사전 검증과 수습 시뮬레이션의 재생도), 밤 학습의 검증(`nightly._losses`, 표본마다 그 표본의 종목과 봉 마감), 실험의 (c)(`climate_prior.py`)와 (b)–(e)(`turing_prior.py`, #448). 디스패처는 능력이 있는지(`ContextAware`)를 보고 길을 고른다(예외를 잡아 고르지 않는다). 맥락이 필요한 알고리즘을 맥락 없이 물으면 `MissingContext`로 분명하게 실패한다(엔진은 그 봉 마감의 그 알고리즘을 `error`로 남긴다). 능력이 없는 알고리즘은 전처럼 `predict`로 묻고 맥락을 받지 않는다. 다른 종류의 알고리즘(`KindAlgorithm`)은 `predict`뿐이다.
+예측은 모두 디스패처 하나(`contract.forecast_of`)로 묻는다(#429): 엔진의 봉 마감 예측(`_predict_symbols`. 그래서 사전 검증과 수습 시뮬레이션의 재생도), 밤 학습의 검증(`nightly._losses`, 표본마다 그 표본의 종목과 봉 마감), 실험의 (c)(`climate_prior.py`). 디스패처는 능력이 있는지(`ContextAware`)를 보고 길을 고른다(예외를 잡아 고르지 않는다). 맥락이 필요한 알고리즘을 맥락 없이 물으면 `MissingContext`로 분명하게 실패한다(엔진은 그 봉 마감의 그 알고리즘을 `error`로 남긴다). 능력이 없는 알고리즘은 전처럼 `predict`로 묻고 맥락을 받지 않는다. 다른 종류의 알고리즘(`KindAlgorithm`)은 `predict`뿐이다.
+
+> **삭제됨** (2026-11-05, #566): 디스패처를 부르는 곳에서 #448 실험의 (b)–(e)(`turing_prior.py`). 이유: 그 실험의 코드를 지웠다(아래 "Turing의 종목과 사전 확률 실험 (#448)"). 대신: 없다.
 
 > **바뀜** (2026-10-14, #189): 카드는 과학자, 성격, 핵심 로직, 고유 피처, 학습 방법 다섯 칸이었고 파라미터에는 뜻이 없었다 → 예측 방식(`forecasting`)과 실패 조건(`failure`)을 더했고, 파라미터마다 뜻(`param_meanings`)을 둔다. 기준 예측과 합의도 같은 형식의 카드를 가진다(`baselines.py`, `consensus.py`의 `cards`). 이유: 상세 창의 "학습·예측 방식"이 무엇을 정답으로 배우고 확률을 어떻게 만드는지, 어떤 장에서 틀리기 쉬운지, 이름이 무슨 뜻인지 다 말하게 하려고(2026-10-14 인터뷰, QUANT LETTER의 카드 형식).
 
@@ -2247,13 +2354,15 @@ docker compose run --rm --no-deps engine prevalidate <이름> --revision  # 코�
   - `diagnostics`(#283): 방향 알고리즘이 진단을 내면(`diagnostics()`, `contract.Diagnostics`. 지금은 Neyman, 아래 "Neyman"의 "사전 검증의 진단") 검사 밖에서 잰 것이다. 판정에 쓰지 않는다. 진단을 내지 않는 알고리즘의 리포트에는 이 칸이 없다. 진단을 내는 알고리즘은 walk-forward 학습을 진단의 `fit`으로 한다(알고리즘의 `fit`과 같은 모델을 내고, 가는 길에 본 것을 잰다). 재생한 날마다 그날의 표본(밤 학습이 읽는 것처럼 그날의 기준가(`reference`)를 단 것)과 그날을 예측한 모델을 진단에 준다. 그 표본은 다음 날의 학습에도 쓰이므로 더 읽는 것은 마지막 날 하나다. 진단의 오류는 실행을 멈추지 않는다: 리포트에 `{"error": …}`로 남고, 그 뒤로는 알고리즘의 `fit`이 학습한다. 명령의 출력에도 진단이 낸 줄이 나온다.
 - **실행 기록**(#262): `state/prevalidations/<이름>.history.jsonl`. 리포트를 남긴 실행마다 한 줄(학습 오류, 잠금, 시간 제한으로 리포트 없이 끝난 실행은 없다. `prevalidated_at`, `code`, `target_version`, `passed`, `days`, 그리고 #262부터 `weakest_lift`(가장 약한 lift의 값)와 `day_low`(가장 약한 lift의 거래일 단위 95% 하한). 둘은 잴 수 없으면 `null`이고, 그 전의 줄과 리포트로 만든 첫 줄에는 없다)을 덧붙인다. 리포트는 마지막 것만 남기므로, 몇 번 돌렸는지는 여기서 센다. 기록이 없는데 리포트가 있으면(이 기록이 생기기 전에 돈 사전 검증) 그 리포트를 첫 줄로 삼는다. 명령은 전에 돈 적이 있으면 `run before: N, M of them on any of these days`를 출력한다. M이 1 이상이면 이번 실행은 그 날들의 M + 1번째이고, `stats` 검사가 더 엄격하다(위 "기준"). 빨리 훑어보는 `--days 5`도 그 날들의 실행으로 센다.
 - 명령은 검사별 결과를 출력하고, 통과하면 0, 아니면 1로 끝난다.
-- **엔진의 관문**: 실시간 엔진은 봉 마감마다 아직 돌리지 않은 알고리즘의 리포트를 읽는다. `passed`가 `true`이고 `code`가 지금 코드의 digest와 같고 `target_version`이 지금 `KRX_TARGET_VERSION`과 같으면(없으면 1로 본다) 그 봉 마감부터 수습(`registered`)으로 돌린다. 그 밤 예약 작업 `simulate-bar-close-298`이 그 수습을 최근 녹화일로 시뮬레이션해 바로 판정한다(위 "상태 관리"의 "수습 시뮬레이션", #298). digest는 알고리즘 모듈 파일(패키지면 그 안의 모든 `.py`)의 SHA-256 앞 16자리다. 공용 코드(`features.py` 등)는 넣지 않는다. 그 알고리즘이 가져다 쓰는 코드(`code_from`)는 넣는다: `cox-5d`의 `cox` 패키지(#310), `shannon`의 `algorithms/priors.py`(#451). 그 전에는 예측하지 않고, `/v1/algorithms`와 상태 점검에도 나오지 않는다. 기다리는 알고리즘은 일일 점검이 텔레그램으로 알린다(`[알림] 사전 검증 대기: <이름>. 검증을 통과해야 돌기 시작합니다. …. 결과는 #204에 댓글로 올라옵니다. 손으로 돌릴 것은 없습니다.`, 가운데는 예약 작업이 언제 검증하는지다: [operations.md](operations.md#새-알고리즘-사전-검증-24)). 기다리는 코드, 정답 버전, 입력의 버전(`prevalidation.judging`)마다 한 번이다: `runs`에 `prevalidation_waiting`(내용은 그 셋의 JSON)으로 남겨 엔진이 다시 시작해도 다시 보내지 않고, 그중 하나가 바뀌면 다시 보낸다. 보내지 못하면 다음 점검이 다시 보낸다(#516). 리포트가 지금 코드와 정답 버전(하루 한 번 예측 종류는 입력의 버전도)을 판정해 거부했으면(`passed`가 `false`이고 `days`가 10 이상: 예약 작업이 다시 돌리지 않는 리포트, `LastReport.judged`) 그 알고리즘은 기다리는 것이 아니라 거부다(`prevalidation.refusals`, 엔진의 `refused()`). 그 리포트를 처음 본 일일 점검이 `[알림] 사전 검증 거부: <이름> (<통과하지 못한 검사들의 check: detail, `; `로 이음>). …`을 한 번 보내고, `runs`에 `prevalidation_refused`로 남겨 엔진이 다시 시작해도 다시 보내지 않는다. 보내지 못하면 다음 점검이 다시 보낸다. 코드나 정답 버전이 바뀌면 리포트가 맞지 않아 다시 기다린다(대기 알림). 같은 코드로 손으로 다시 돌려 또 거부되면 새 리포트라 한 번 더 보낸다. 10거래일보다 적은 날의 거부(훑어보기)는 판정이 아니라 대기로 남는다.
+- **엔진의 관문**: 실시간 엔진은 봉 마감마다 아직 돌리지 않은 알고리즘의 리포트를 읽는다. `passed`가 `true`이고 `code`가 지금 코드의 digest와 같고 `target_version`이 지금 `KRX_TARGET_VERSION`과 같으면(없으면 1로 본다) 그 봉 마감부터 수습(`registered`)으로 돌린다. 그 밤 예약 작업 `simulate-bar-close-298`이 그 수습을 최근 녹화일로 시뮬레이션해 바로 판정한다(위 "상태 관리"의 "수습 시뮬레이션", #298). digest는 알고리즘 모듈 파일(패키지면 그 안의 모든 `.py`)의 SHA-256 앞 16자리다. 공용 코드(`features.py` 등)는 넣지 않는다. 그 알고리즘이 가져다 쓰는 코드(`code_from`)는 넣는다: `cox-5d`의 `cox` 패키지(#310), `shannon`의 `algorithms/priors.py`(#451). 그 전에는 예측하지 않고 상태 점검에도 나오지 않는다. `/v1/algorithms`에는 `state` `waiting`으로, 밤 사전 검증 순서의 자리(`prevalidation.queue`)와 함께 나온다(#561). 기다리는 알고리즘은 일일 점검이 텔레그램으로 알린다(`[알림] 사전 검증 대기: <이름>. 검증을 통과해야 돌기 시작합니다. …. 결과는 #204에 댓글로 올라옵니다. 손으로 돌릴 것은 없습니다.`, 가운데는 예약 작업이 언제 검증하는지다: [operations.md](operations.md#새-알고리즘-사전-검증-24)). 기다리는 코드, 정답 버전, 입력의 버전(`prevalidation.judging`)마다 한 번이다: `runs`에 `prevalidation_waiting`(내용은 그 셋의 JSON)으로 남겨 엔진이 다시 시작해도 다시 보내지 않고, 그중 하나가 바뀌면 다시 보낸다. 보내지 못하면 다음 점검이 다시 보낸다(#516). 리포트가 지금 코드와 정답 버전(하루 한 번 예측 종류는 입력의 버전도)을 판정해 거부했으면(`passed`가 `false`이고 `days`가 10 이상: 예약 작업이 다시 돌리지 않는 리포트, `LastReport.judged`) 그 알고리즘은 기다리는 것이 아니라 거부다(`prevalidation.refusals`, 엔진의 `refused()`). 그 리포트를 처음 본 일일 점검이 `[알림] 사전 검증 거부: <이름> (<통과하지 못한 검사들의 check: detail, `; `로 이음>). …`을 한 번 보내고, `runs`에 `prevalidation_refused`로 남겨 엔진이 다시 시작해도 다시 보내지 않는다. 보내지 못하면 다음 점검이 다시 보낸다. 코드나 정답 버전이 바뀌면 리포트가 맞지 않아 다시 기다린다(대기 알림). 같은 코드로 손으로 다시 돌려 또 거부되면 새 리포트라 한 번 더 보낸다. 10거래일보다 적은 날의 거부(훑어보기)는 판정이 아니라 대기로 남는다.
 
   > **바뀜** (2026-10-14, #191): 리포트는 코드 digest만 맞으면 통했다 → 정답 버전도 맞아야 한다. 이유: 버전 1에서 통과한 알고리즘이 버전 2로 바꾼 뒤 도달 정답과 그 기준 예측으로 판정받지 않고 돌기 시작하지 않게(리뷰).
 
   > **바뀜** (2026-10-24, #369): 통과하지 않은 알고리즘은 모두 기다리는 알고리즘으로 엔진이 시작할 때마다 알렸다 → 지금 코드를 거부한 리포트의 알고리즘은 거부로, 리포트마다 한 번 알린다. 이유: 엔진이 거래일마다 다시 시작해(06:00 배포나 07:20 재시작) 거부된 채로 둔 `cox-5d`(#310)의 대기 알림이 날마다 왔다. 같은 코드로는 사전 검증이 다시 돌지 않으니 기다리는 것이 아니다.
 
   > **바뀜** (2026-11-04, #516): "엔진이 시작한 뒤 첫 일일 점검 때 기다리는 알고리즘을 텔레그램으로 한 번 알린다(`[알림] 사전 검증 대기: …`)"(알린 이름은 메모리에만 있었고, 문구 끝이 `서버에서 장 시간 밖에 krx-quant prevalidate <이름>`) → 기다리는 코드·정답 버전·입력마다 한 번, 예약 작업이 저절로 검증한다는 문구로 알린다. 이유: 엔진이 거래일마다 다시 시작해 같은 알림이 날마다 왔고, 사전 검증은 밤 예약 작업이 돌린다(#204, #508).
+
+  > **바뀜** (2026-11-06, #573): 기다리는 알고리즘과 거부된 알고리즘은 `/v1/algorithms`에 나오지 않았다 → `state` `waiting`·`refused`로 나오고, 거부는 리포트의 날짜·떨어진 검사·코드·정답 버전과 함께다(`prevalidation`). 이유: 대기와 거부를 텔레그램으로만 알았다(#561).
 - 하루 한 번 예측 종류의 알고리즘은 입력의 버전도 맞아야 한다(#297, 아래 "하루 한 번 예측 종류의 알고리즘"의 `inputs`).
 
   > **바뀜** (2026-10-19, #297): 관문은 코드와 정답 버전만 봤다 → 하루 한 번 예측 종류는 리포트의 `inputs`(피처마다의 버전)도 지금 피처의 버전과 같아야 한다. 이유: `cox`의 코드는 그대로인데 수급 입력의 데이터가 바뀌었다(NXT 개장 전 KRX 순매수). 그 데이터로 다시 판정받기 전에 돌기 시작하지 않게.
@@ -2411,7 +2520,10 @@ docker compose run --rm --no-deps engine prevalidate <이름> --revision  # 코�
 
 **하루 한 번 예측 종류의 학습(#264, `daily_training.py`).** 하루 한 번 종류의 알고리즘(`cox`)의 표본(`DailySample`)은 종목 × 날마다 그날 08:50의 피처와 그날의 정답이다(`daily_features.samples`). 녹화나 백필 1분봉이 아니라 서버에 있는 이력을 읽는다: KRX 일봉(`data/candles/…/krx.parquet`), 미국 일봉(`data/us_daily/`, 아래), KIS 일별 수급(`state/supply/…/kis.parquet`), 1분봉(프리마켓), 야간선물 녹화.
 - 밤 학습은 방향과 다른 종류의 알고리즘 다음, 맨 끝에 학습한다. 그 밤의 날까지의 최근 `training_days`로 다시 맞추고 **늘 승격한다**(기후 표처럼). 하루가 종목마다 표본 하나라 검증 3일로는 견줄 수 없고, 하루를 더한 10년 학습은 거의 바뀌지 않는다. 실력은 사전 검증의 walk-forward와 실시간 성적으로 본다. 리포트(`reports/<날짜>/cox.json`)에 `kind`, `cadence`(`daily`), `target_version`(그 종류의 정답 버전, 지금 2), `training_days`(첫날과 마지막 날), `labels.samples.candles`(정답 있는 표본 수), `challenger`, `recent`(최근 60일을 그 전 날로 학습한 모델로 예측한 log loss. 1/3씩이면 ln 3 = 1.0986. 보기만 하고 승격에 쓰지 않는다)가 남는다. 텔레그램 요약에 `open_to_close 정답 표본: KRX 일봉 N개 (첫날 – 마지막 날) · 최근 60일 표본 밖 log loss x`가 한 줄 붙는다.
-- 서버의 파일을 읽으므로 `KRX_TRAIN_ON=server`일 때만 학습한다(Spot은 이 파일이 없다).
+- 서버의 파일을 읽는다. 밤 학습은 서버에서만 돈다.
+
+  > **바뀜** (2026-11-06, #572): "`KRX_TRAIN_ON=server`일 때만 학습한다(Spot은 이 파일이 없다)" → 늘 학습한다. 이유: EC2 Spot 학습과 `KRX_TRAIN_ON`을 지웠다(#23 계획 없음, 계정 정책이 Spot을 막음, 사용자가 2026-11-05에 정했다).
+
 - `krx-quant fit cox`는 마지막 저장된 KRX 일봉까지로 같은 학습을 해 `state/models/cox.json`에 쓴다.
 - **미국 일봉(`us_daily.py`).** 수집기의 이력 작업(시작할 때와 20:30, 매크로 읽기를 켰을 때 `KRX_MACRO_AT`)이 SOX, 엔비디아, 마이크론, VIX의 일 종가를 Yahoo 차트 API(매크로 읽기와 같은 출처)에서 받아 `data/us_daily/symbol=<지표>/closes.parquet`에 둔다. 처음에는 10년(`range=10y`), 그다음은 한 달(`range=1mo`)을 받아 날짜로 합친다(다시 받은 날은 바꾼다). 업로드하지 않는다(잃으면 다시 받는다).
 
@@ -2617,30 +2729,7 @@ docker compose run --rm --no-deps engine climate-prior --days 5   # 빨리 훑�
 
 #### 비대칭 확률 연결 실험 (#439)
 
-Poisson의 쏠림을 순서형 로지스틱 대신 비대칭 다항 연결로 세 확률로 바꾸면 방향을 부르고 맞힘률이 오르는지 잰다(`poisson_link.py`, #442). 늘 보합만 내는 까닭이 연결인지 입력(쏠림)인지 가르는 실험일 뿐이다. 엔진은 돌리지 않고, Poisson의 코드와 모델은 그대로다.
-
-```bash
-docker compose run --rm --no-deps engine poisson-link            # 최근 20 녹화일
-docker compose run --rm --no-deps engine poisson-link --days 5   # 빨리 훑어보기
-```
-
-- **fold.** 사전 검증(위 "사전 검증 (#24)")과 같고, Shannon의 기후 사전 확률 실험(위 "기후 사전 확률 실험 (#429)")과 같은 방식이다. 최근 20 녹화일(모자라면 있는 만큼)을 하루씩 예측한다. 그날 전의 Poisson 학습 창(20거래일)으로 맞춘 모델이 예측하고, 그날로는 학습하지 않는다. 엔진을 재생하지 않는다. 그날의 학습 표본(밤 학습과 같은 표본. 밤 학습이 저장했으면 표본 저장소에서 꺼낸다, #370)을 세 쪽이 예측한다. 셋 모두 정답이 있는 봉 마감마다 예측하므로 모두 센다. 그날 방향이 있는 체결을 받기 전이라 쏠림을 모르는 봉 마감에서는 (b)와 (c)가 Poisson처럼 세 확률을 1/3씩 둔다(`unknown`으로 따로 센다).
-- **세 쪽.**
-  - (a) `climate`: 날마다 그 전 20거래일로 다시 맞춘 `baseline-climate` 표. 사전 검증의 재생과 같다.
-  - (b) `poisson`: 지금의 Poisson(순서형 로지스틱, 기울기 k와 문턱 c). 사전 검증의 walk-forward가 학습시키는 그대로다.
-  - (c) `asymmetric`(`AsymmetricLink`): (b)의 강도(`base.*`, `excite.*`)를 그대로 쓴다. 그래서 봉 마감마다 쏠림이 (b)와 같고, 연결만 다르다. 쏠림을 학습 창의 평균과 표준편차로 표준화하고(z), 클래스마다 절편 b와 가중치 w를 둔 다항 로지스틱으로 바꾼다: P(클래스) ∝ exp(b_클래스 + w_클래스 × z). 쏠림 0에서 상승과 하락이 달라도 되고(절편), 쏠림에 다르게 반응해도 된다(가중치). Shannon의 L1 회귀(`shannon._fista`, 벌점 후보 0.1, 0.03, 0.01, 0.003, 0.001, 절편에는 벌점이 없다)로 맞춘다.
-- **조정은 검증 날의 도착을 보지 않는다**(`tuned`). L1 벌점은 학습 창의 마지막 거래일들에서 고른다. Shannon의 규칙대로 날 단위로, 정답과 쏠림이 있는 표본의 20%에 가장 가깝게 둔다. 그런 표본이 100개보다 적거나 하루뿐이면 가운데 0.01을 쓰고 검증하지 않는다. 강도는 표본마다 다음 4분의 도착으로 배운다. 그래서 검증 날들의 쏠림은 그 전 날들로만 맞춘 Poisson의 강도로 낸다. 예측하는 날이 받는 쏠림과 같은 조건이다. 검증 날의 도착은 조정에 들어가지 않는다(시험이 확인한다). 4분 창은 시작한 날에 끝나서, 도착이 다음 날로 넘어가지 않는다. 고른 벌점으로, (b)의 강도로 낸 학습 창 전체의 쏠림에 연결을 다시 맞춘다.
-- (c)의 모델 버전은 `poisson-asymmetric-<마지막 학습일>-<해시>`다. 파라미터는 (b)의 것에 `link.penalty`, `link.mean`, `link.sd`(쏠림 표준화), `link.bias.<클래스>`, `link.w.<클래스>`, `link.validation_from`, `link.validation_to`, `link.validation_days`를 더한다. (b)가 학습 전이면 (c)도 `poisson-asymmetric-default`다. 가중치가 0이고 절편이 Poisson 기본값의 쏠림 0 예측이라, Poisson 기본 모델과 같은 예측을 낸다.
-- **비교 규칙(돌리기 전에 정했다, `rule`).** `better`는 (c)의 (b) 대비 lift(봉 마감 짝) > 0이다. `lower_bound_up`은 (c)의 기후 대비 거래일 단위 하한이 (b)의 것보다 높은지다. 둘 다면 `met`이고, 순서형 연결이 Poisson을 막았다고 본다. 아니면 연결만의 문제가 아니다. 그때는 아래 쏠림 분포와 (c)의 가중치로 입력에 정보가 있는지 본다. L1은 검증 날에 쓸모없는 가중치를 0으로 만든다. 그래서 가중치가 모두 0인 fold는 쏠림이 검증 날에 아무것도 더하지 못한 날이다.
-- **리포트** `state/experiments/poisson-link-439.json`. 돌릴 때마다 덮어쓴다.
-  - `days`, `link`(입력 `lean`, 벌점 후보, 검증 몫), `folds`: 날마다 `models`(세 쪽의 모델 버전), `trained_on`((b)의 연결과 (c)가 배운 표본: 정답과 쏠림이 있음), `scored`, `unknown`, `ordered`((b)의 `slope`, `cut`), `link`((c)의 `penalty`, `validation_days`, `lean_mean`, `lean_sd`, 클래스마다 `bias`와 `w`. 기본값이면 null).
-  - `arms`: 쪽마다 `n`, `accuracy`(맞힘률), `coverage`(상승·하락 예측의 몫), `directional_precision`, `brier`, `by_class`(클래스마다 `recall`, `precision`, `predicted`, `happened`), `confusion`(부른 클래스 → 나온 클래스 → 봉 마감 수). 비율은 95% Wilson 구간이다.
-  - `lift`: `over_climate`의 `poisson`, `asymmetric`과 `asymmetric_over_poisson`. 각각 `pairs`(봉 마감 짝의 맞힘률 이득, 95% 정규 구간)와 `by_day`(거래일 단위: 하루 평균 이득을 값 하나로, 95% Student t 구간. 그 하한이 사전 검증의 `day_low`다)가 있다.
-  - `rule`: `better`, `lower_bound_up`, `met`.
-  - `leans`: 쏠림이 있는 봉 마감의 쏠림(fold마다 (b)의 강도로 낸 값)의 수, 평균, 표준편차, 분위수(5, 25, 50, 75, 95%)와 5분위(`bins`). 분위마다 범위, 수, 나온 클래스 수(`happened`), (b)와 (c)가 부른 클래스 수(`called`)가 있다. 같은 값이 많아 경계가 겹치면 빈 분위는 빠진다.
-- **출력.** 같은 숫자를 줄로 낸다(날, 개수, 비율, lift, 쏠림, 계수. 시세 값은 없다). 규칙 줄(`#439 rule: … -> met …` 또는 `not met …`) 뒤에 (c)의 기후 대비 lift가 0 위인지 나온다. 0 위가 아니면 넣어도 사전 검증의 `stats`를 넘지 못한다. 이어서 쏠림 분포와 5분위 표, fold마다 (b)의 k와 c, (c)의 벌점·쏠림 표준화·클래스별 가중치와 절편, (c)가 쏠림에 가중치를 둔 fold 수가 나온다. 녹화일이 없으면 1로 끝난다.
-- **메모리.** 사전 검증의 학습 단계와 같다(재생은 없다, #383). 학습 창의 날만 들고 지나간 날은 버린다. 날마다 메모리 줄(`poisson link: memory on <날> (day i of n): …`)을 남기고 비운 메모리를 돌려준다.
-- **서버에서는** 예약 작업 `poisson-link-439`가 돌린다([operations.md](operations.md#예약-작업-215)). 에이전트가 결과를 보고 Poisson에 넣을지에 대한 안을 #439에 남기고, 넣는 것은 다음 PR에서 정한다. 넣으면 코드 digest가 바뀌어 사전 검증이 다시 돈다. **삭제됨** (2026-11-04, #506): 그 예약 작업. 2026-11-02 밤에 돌아 #439에 남긴 뒤 `JOBS`에서 뺐다. 이유: 할 일을 마쳤다. 대신: 손으로 `docker compose run --rm engine poisson-link`.
+> **삭제됨** (2026-11-05, #566): 이 실험. 명령 `poisson-link`, 모듈 `src/krx_quant/poisson_link.py`(`AsymmetricLink`), 그 테스트, 리포트 `state/experiments/poisson-link-439.json`을 쓰는 일. 예약 작업 `poisson-link-439`는 2026-11-02 밤에 돌아 결과를 #439에 올렸고 #506에서 `JOBS`에서 뺐다. 명령은 손으로 돌릴 수 있게 남겼었다(#505). 이유: 결론이 났다(#439). 14일 동안 손으로 돌린 기록이 없어 사용자가 2026-11-05에 코드와 함께 지우기로 정했다(#559). 대신: git 이력. 결과는 #439의 댓글에 있다. Poisson의 코드와 모델은 그대로다.
 
 ### Turing
 
@@ -2672,39 +2761,7 @@ docker compose run --rm --no-deps engine poisson-link --days 5   # 빨리 훑어
 
 #### Turing의 종목과 사전 확률 실험 (#448)
 
-Turing의 입력에 종목, 종목 × 30분 시간대의 클래스 빈도(기후 사전 확률, 위 "기후 사전 확률 실험 (#429)"), 또는 둘 다를 더하면 기후 기준에 지는 몫을 되찾는지 잰다(`turing_prior.py`, #453). #431의 오류 분석에서 Turing의 입력에는 시간(`minutes_since_open`)은 있지만 종목이 없었다. 그런데 종목마다 정답 분포가 크게 다르고, 조용할 때(σ̂₄ 하위 삼분위) 보합이 많은데도 방향을 자주 불러 기후 기준에 졌다. 실험일 뿐이다. 엔진은 돌리지 않고, Turing의 코드와 모델은 그대로다(코드 digest가 그대로라 Turing의 사전 검증도 다시 돌지 않는다).
-
-```bash
-docker compose run --rm --no-deps engine turing-prior            # 최근 20 녹화일
-docker compose run --rm --no-deps engine turing-prior --days 5   # 빨리 훑어보기
-```
-
-- **fold.** 사전 검증(위 "사전 검증 (#24)")과 같고, 기후 사전 확률 실험과 같은 방식이다. 최근 20 녹화일(모자라면 있는 만큼)을 하루씩 예측한다. 그날 전의 Turing 학습 창(60거래일, 백필만 있는 날 포함)으로 맞춘 모델이 예측하고, 그날로는 학습하지 않는다. 기후 기준은 자기 창(20거래일)으로 맞춘다. 엔진을 재생하지 않는다. 그날의 학습 표본(밤 학습과 같은 표본. 밤 학습이 저장했으면 표본 저장소에서 꺼낸다, #370)을 다섯 쪽이 예측한다. Turing은 모든 봉 마감을 예측하므로(학습 전에는 세 확률 1/3씩) 정답이 있는 봉 마감을 모두 센다.
-- **다섯 쪽.** 같은 봉 마감에서 견준다.
-  - (a) `climate`: 날마다 그 전 20거래일로 다시 맞춘 `baseline-climate` 표. 사전 검증의 재생과 같다.
-  - (b) `turing`: 지금의 Turing(등록된 알고리즘 그대로). 사전 검증의 walk-forward가 학습시키는 그대로이고, 엔진처럼 예측한다(시험이 확인한다).
-  - (c) `turing_symbol`(`TuringPlus(symbol=True)`): (b)가 받은 바로 그 표본으로 학습한다. Turing의 피처(같은 순서) 뒤에 종목 입력 `symbol` 하나를 더한다. LightGBM의 범주형 입력(`categorical_feature`)이다. 학습 창의 종목마다 종목 코드 순서로 번호를 매겨 모델에 둔다(`symbol.<종목>`). 학습 창에 없던 종목은 빈 입력이다.
-  - (d) `turing_prior`(`TuringPlus(prior=True)`): 입력 둘을 더한다. 봉 마감의 종목 × 시간대 기후 사전 확률에서 `climate_up` = log(p상승 / p보합), `climate_down` = log(p하락 / p보합)이다. #429와 같은 정의다(`algorithms/priors.py`를 가져다 쓰고 고치지 않는다. 그 파일은 Shannon의 코드 digest에 든다).
-  - (e) `turing_symbol_prior`: 셋을 다 더한다.
-  - (c)–(e)는 Turing과 같은 부스팅(`BOOSTING`, 200번, 한 스레드, 고정 시드)이다. 엔진처럼 디스패처(`forecast_of`)로 종목과 봉 마감을 주고 묻는다. 모델 버전은 `turing-symbol-…`, `turing-prior-…`, `turing-symbol-prior-…`이고, 학습 전에는 `…-default`(세 확률 1/3)다. 한 날의 (c)–(e)는 Turing 피처의 행렬을 함께 쓴다.
-- **사전 확률.** 위 "Shannon"의 "기후 사전 확률"과 같다. fold의 학습 창(Turing의 60거래일) 표본만 센다.
-  - **인과적.** 학습 표본마다 학습 창에서 그 표본의 날 전의 날만 센다. 그 표본의 날과 그 뒤의 정답은 들어가지 않는다(시험이 확인한다). 그래서 창의 첫날 표본의 사전 확률은 세 클래스가 같다.
-  - **모델에 둔다.** fold의 모델이 예측에 쓰는 사전 확률은 학습 창의 모든 날로 센 것이고, 모델의 파라미터(`prior.<종목>.<시간대>.<클래스>`, `prior.<종목>.all.<클래스>`)에 둔다. 피처가 아니다.
-- **σ̂₄ 삼분위.** #431의 것과 같다. 봉 마감에서의 장벽 σ̂₄(중간가 대비 bp)를 엔진 DB에서 쓰지 않고 읽는다(`error_breakdown.read_sigmas`). 종목마다 예측한 날들의 σ̂₄가 있는 봉 마감으로 삼분위 경계를 정한다(`api.volatility_cuts`). σ̂₄가 없는 봉 마감(1분봉 20개 미만, 기록 없음)은 `none`이다.
-- **판정 규칙(돌리기 전에 정했다, `candidates`).** (c), (d), (e)마다 `better`((b) 대비 lift(봉 마감 짝) > 0)와 `lower_bound_up`(기후 대비 거래일 단위 하한이 (b)의 것보다 높음)을 본다. 둘 다면 그 쪽이 "후보"(`candidate`)다. 후보도 바로 Turing에 넣지 않는다. 넣으면 Turing의 코드 digest가 바뀌어, 그 코드가 배포된 날 Turing이 수습으로 돌아가고(`code changed`), 바뀐 뒤 녹화일이 10일 쌓인 밤 그 날들로만 사전 검증(`prevalidate turing --revision`)을 받는다. 정식은 그 사전 검증과 바뀐 뒤 날들의 실시간 수습을 모두 통과해야 된다(위 "상태 관리"의 "코드가 바뀌는 날", #454).
-
-  > **바뀜** (2026-11-02, #457): "넣으면 코드 digest가 바뀌어 사전 검증이 다시 돌고, 최종 판정은 그 뒤의 날들로 한다" → 위. 이유: 그 문장은 틀렸다. Turing은 사전 검증을 면제받고(`REGISTERED_BEFORE`), 돌고 있는 알고리즘은 코드가 바뀌어도 상태 그대로 돌아서, 넣어도 사전 검증은 다시 돌지 않았다. #454가 그렇게 돌게 만들었다.
-- **리포트** `state/experiments/turing-prior-448.json`. 돌릴 때마다 덮어쓴다.
-  - `days`, `turing_days`(60), `prior`(입력, 가짜 수), `folds`: 날마다 `models`(다섯 쪽의 모델 버전), `trained_on`((b)–(e)가 배운 표본: 정답이 있음), `scored`.
-  - `arms`: 쪽마다 `n`, `accuracy`(맞힘률), `coverage`(상승·하락 예측의 몫), `directional_precision`, `brier`, `by_class`(클래스마다 `recall`, `precision`, `predicted`, `happened`), `confusion`(부른 클래스 → 나온 클래스 → 봉 마감 수), `over_climate`(기후 대비 lift, 기후 자신은 null), `over_turing`((c)–(e)의 (b) 대비 lift, 나머지는 null). 비율은 95% Wilson 구간이다. lift마다 `pairs`(봉 마감 짝의 맞힘률 이득, 95% 정규 구간)와 `by_day`(거래일 단위: 하루 평균 이득을 값 하나로, 95% Student t 구간. 그 하한이 사전 검증의 `day_low`다)가 있다.
-  - `by_volatility`: `with_sigma`(σ̂₄가 있는 봉 마감 수)와 `cells`(`low`, `mid`, `high`, `none`마다 `arms`와 같은 것). `by_slot`: 30분 칸(`09:00`은 봉 마감 09:01–09:30)마다 같은 것. 봉 마감이 없는 칸은 빠진다.
-  - `rule`: (c)–(e)마다 `better`, `lower_bound_up`, `candidate`. `candidates`: 후보인 쪽.
-  - `gain`: 마지막 날의 (c)–(e) 모델에서 더한 입력마다 트리 이득(gain) 전체에서 차지한 몫. 트리가 그 입력을 얼마나 썼는지 본다. 학습 전이면 null.
-- **출력.** 같은 숫자를 줄로 낸다(날, 개수, 비율, lift, 이득 몫. 시세 값, σ̂₄ 값과 경계는 없다). 쪽마다의 표, 클래스별 재현율·정밀도, 혼동 행렬, lift, 규칙 줄(`#448 rule, (c): … -> a candidate` 또는 `not a candidate`)과 후보 줄, 이득 몫, σ̂₄ 삼분위별·30분 칸별 표(쪽마다 맞힘률, 커버리지, Brier, 기후 대비와 (b) 대비 짝 lift와 거래일 하한, 혼동 행렬)가 나온다. 리포트 JSON은 칸이 많아 GitHub 댓글 한도를 넘으면 댓글에서 줄여 붙는다. 칸의 숫자는 출력에 모두 있다. 녹화일이 없으면 1로 끝난다.
-- **메모리.** 사전 검증의 학습 단계와 같다(재생은 없다, #383). 학습 창의 날만 들고 지나간 날은 버린다. 날마다 메모리 줄(`turing prior: memory on <날> (day i of n): …`)을 남기고 비운 메모리를 돌려준다.
-- **서버에서는** 예약 작업 `turing-prior-448`이 돌린다([operations.md](operations.md#예약-작업-215)). 에이전트가 결과를 보고 Turing에 넣을지에 대한 안을 #448에 남기고, 사용자가 정한다. 넣으면 다음 PR에서 하고, 위 "판정 규칙"처럼 Turing이 수습으로 돌아가 바뀐 뒤의 날로 다시 판정받는다(#454). **삭제됨** (2026-11-04, #506): 그 예약 작업. 2026-11-02 밤에 돌아 #448에 남긴 뒤 `JOBS`에서 뺐다. 이유: 할 일을 마쳤다. 대신: 손으로 `docker compose run --rm engine turing-prior`.
-
-  > **바뀜** (2026-11-02, #457): "코드 digest가 바뀌어 사전 검증이 다시 돈다" → 수습으로 돌아가 바뀐 뒤의 날로 다시 판정받는다. 이유: 위 "판정 규칙"의 바뀜과 같다.
+> **삭제됨** (2026-11-05, #566): 이 실험. 명령 `turing-prior`, 모듈 `src/krx_quant/turing_prior.py`(`TuringPlus`), 그 테스트, 리포트 `state/experiments/turing-prior-448.json`을 쓰는 일. 예약 작업 `turing-prior-448`은 2026-11-02 밤에 돌아 결과를 #448에 올렸고 #506에서 `JOBS`에서 뺐다. 명령은 손으로 돌릴 수 있게 남겼었다(#505). 이유: 결론이 났다(#448). 14일 동안 손으로 돌린 기록이 없어 사용자가 2026-11-05에 코드와 함께 지우기로 정했다(#559). 대신: git 이력. 결과는 #448의 댓글에 있다. Turing의 코드와 모델, `algorithms/priors.py`는 그대로다.
 
 ### Neyman (#266)
 
@@ -2995,7 +3052,7 @@ docker compose run --rm --no-deps engine normal-order --days 5   # 빨리 훑어
   - 연구용 손익(보기용): 거래당 33.8bp(95% 구간 −23.5 – 91.1), 롱 56.5bp(−18.7 – 131.7), 공매도 −38.1bp(−90.3 – 14.2).
 - **사용자 결정(2026-10-24).** `cox-5d`는 거부된 채로 둔다. 새 버전(주간 피처 후보 등)은 지금 만들지 않는다. 그래서 `open_to_close_5d`는 기준 예측 셋(`otc5-flat`, `otc5-climate`, `otc5-persist`)만 돈다.
 - **엔진이 하는 것.** 판정일 보류를 풀어도(위 "5거래일 시가→종가"의 "상태") `cox-5d`는 돌지 않는다. 엔진은 통과한 리포트가 있는 알고리즘만 수습에 올린다(`prevalidation.admits`):
-  - 엔진은 예측하지 않고 상태도 두지 않는다(`/v1/algorithms`에 나오지 않는다). "사전 검증 대기"(`waiting()`)도 "판정일 보류"(`held()`)도 아니고 거부(`refused()`, #369)다. 이 리포트를 처음 본 점검(15:40)이 "사전 검증 거부: cox-5d (stats: weakest lift 0.0204 …). …"를 한 번 보내고, 엔진이 다시 시작해도 다시 보내지 않는다(`runs`의 `prevalidation_refused`).
+  - 엔진은 예측하지 않고 상태도 두지 않는다. `/v1/algorithms`에는 `state` `refused`로, 거부한 리포트의 날짜·떨어진 검사·코드·정답 버전과 함께 나온다(#561. 그 전에는 나오지 않았다). "사전 검증 대기"(`waiting()`)도 "판정일 보류"(`held()`)도 아니고 거부(`refused()`, #369)다. 이 리포트를 처음 본 점검(15:40)이 "사전 검증 거부: cox-5d (stats: weakest lift 0.0204 …). …"를 한 번 보내고, 엔진이 다시 시작해도 다시 보내지 않는다(`runs`의 `prevalidation_refused`).
   - 예약 사전 검증은 같은 코드로 다시 돌지 않는다(리포트가 지금 코드를 판정했다, `LastReport.judged`). `cox` 또는 `cox-5d`의 코드가 바뀌면 그 밤 다시 돈다(`code_from`). 판정일을 고정한 이 변경(`open_to_close_5d.py`)은 digest에 들지 않아 다시 돌리지 않는다.
   - `simulate daily`는 수습에 올리지도 시뮬레이션하지도 않고, `simulate-daily-298`은 그 때문에 돌지 않는다.
   - 밤 학습은 계속 학습한다(돌지 않는 모델이다).

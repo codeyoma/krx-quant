@@ -1422,6 +1422,12 @@ class PredictionEngine:
         longest = max(rules.max_probation, rules.max_bench, kind.recent_days)
         return self.store.kind_answered_days(kind.name, kind.answer_version, until, longest + 20)
 
+    def next_review_day(self) -> date | None:
+        """The day of the next daily review: the days before it have been reviewed, their bar closes
+        all scored (``stages``; the days each algorithm's series counts, #561)."""
+        upcoming = self._next_review(self._reviewed_through)
+        return None if upcoming is None else upcoming.astimezone(KST).date()
+
     async def stages(self) -> dict[str, Stage]:
         """Where each algorithm on probation or on the bench stands toward its next review
         (#165, ``lifecycle.stages``), as of the latest review: the days counted as the review
@@ -1430,8 +1436,7 @@ class PredictionEngine:
         only once a review has run or a status changed: the days reviewed do not change.
         """
         standings = self.store.statuses()
-        upcoming = self._next_review(self._reviewed_through)
-        next_day = None if upcoming is None else upcoming.astimezone(KST).date()
+        next_day = self.next_review_day()
         key = (
             sorted((name, s.status.value, s.since) for name, s in standings.items()),
             next_day,

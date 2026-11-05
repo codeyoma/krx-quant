@@ -36,6 +36,7 @@ from krx_quant.engine import (
     Event,
     Notify,
     PredictionEngine,
+    Refused,
     Regimes,
     partitions,
 )
@@ -78,6 +79,7 @@ async def replay(
     leaders: Leaders | None = None,
     regimes: Regimes | None = None,
     admits: Admits | None = None,
+    refused: Refused | None = None,
     revisions: RevisionGate | None = None,
     review_rules: Rules | None = None,
     target_version: int = 1,
@@ -101,7 +103,8 @@ async def replay(
     the ``kinds`` besides the direction with their algorithms (#179); the symbols' previous
     trading days' ranges from ``previous`` (#181; without: unknown); the daily kinds (#264) only
     given their KRX days (``daily``), with their algorithms and features. With ``revisions`` (#454,
-    tests) it keeps the code each running bar-close algorithm runs, as live.
+    tests) it keeps the code each running bar-close algorithm runs, as live; ``refused`` tells which
+    of those ``admits`` keeps out were refused (#561: the demo's).
     """
     clock = FakeClock(start or datetime.combine(kst_day(until), time(), KST))
     engine = PredictionEngine(
@@ -120,6 +123,7 @@ async def replay(
         leaders=leaders,
         regimes=regimes,
         admits=admits,
+        refused=refused,
         revisions=revisions,
         review_rules=review_rules,
         target_version=target_version,

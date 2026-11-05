@@ -29,6 +29,7 @@ ROUTES = {
     "/v1/algorithms/{name}": "algorithm_detail",
     "/v1/algorithms/{name}/stats": "algorithm_stats",
     "/v1/leaderboard": "leaderboard",
+    "/v1/leaderboard/days": "leaderboard_days",  # #561
     "/v1/cost-map": "cost_map",  # #307
     "/v1/consensus": "consensus",
     "/v1/macro": "macro",

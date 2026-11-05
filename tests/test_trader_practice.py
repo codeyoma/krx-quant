@@ -404,7 +404,19 @@ async def test_a_day_without_a_champion_cell_practises_a_share_on_kis_kept_as_pr
         " · θ 0.6" in text
     )
     assert "연습 칸 (#474): 주기 1에 고정 · barrier breiman(top) · θ 0.6(2026-10-13 22:40에 고름)" in text
-    assert "매매할 칸 없음: 비용 지도에서 시장가 왕복으로 통과한 칸이 없다(no_pass)" in text
+    assert "매매할 칸 없음: 챔피언 정책 1에 칸이 없다(빈 정책 · 고르기의 기록은 no_pass이나" in text, (
+        "the cause (#560): the empty champion, not the cost map's verdicts"
+    )
+    assert (
+        "연습(KIS 모의) | 1건 | +2.5틱 | 1.6틱 162원 | +0.9틱 +88원 | 목표 100%, 손절 0%, 시간 0% | "
+        "답 없음 1 | 0.630"
+    ) in text.splitlines(), "the practice's row (#560): its share bought at 70,050 and sold at 70,300"
+    assert "\n1. 10:00:02 → " not in text, "its trade's line folded apart (#560)"
+    assert (
+        report.practice_trades(report.read(tmp_path / DB_NAME, DAY, CALENDAR))
+        .splitlines()[1]
+        .startswith("1. 10:00:02 → 10:02:30 익절(take_profit) · barrier breiman(top)")
+    )
     assert "KIS 모의와 그림자 장부" not in text, "no pair of the practice (#548)"
     assert "읽은 예측(연습 칸 고르기의 챔피언 장부): 읽은 예측 1 · 산 것 1" in text
     assert "70,050" not in text and "70050" not in text, "no price"
