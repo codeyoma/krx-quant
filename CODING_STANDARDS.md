@@ -37,6 +37,7 @@ Seen here:
 
 - `tst_krx_cost` waited for requests in a fixed order (fork #99).
 - Tests slept a fixed time before they checked: for the stream to count a new client, for an alert sent in the background, for the collector's stale checks to run. The checks that nothing went stale could pass before any check had run (#490).
+- `test_api_stream` asked for the last two events of a bar close to be the fast and the final consensus. The engine promises only the fast one before the final one, and on main after #538 a kind's algorithm finished between them. Five other stream tests replayed before the stream counted their client (#540).
 - `test_algorithms_replay` ran the real Mandelbrot and Breiman ladder against a 0.6 s budget and failed on slower runners (#327).
 - `test_the_replay_shares_the_cpu_budget_with_the_live_algorithms_as_live` slept 3 ms and 4 ms against a 5.5 ms budget. On a loaded machine the late wake-ups alone went over it (#327).
 - At load averages of 150–600, runs of the replay tests that went past their limits stopped for good at 0% CPU, in 3 of about 70 runs. pytest-timeout's `signal` method had raised its timeout inside an asyncio callback, such as `gather`'s, which wakes the awaiting task, or the one that hands a worker thread's result to the loop. asyncio logged the exception and went on, and the test never woke. Other runs ended in a pytest `INTERNALERROR` while it formatted such a timeout's traceback (#335).

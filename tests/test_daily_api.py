@@ -21,6 +21,7 @@ from krx_quant.kinds import DIRECTION_KIND
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
+from tests.api_doubles import listening
 from tests.api_schema import check
 from tests.daily_doubles import SYMBOLS, made_history
 
@@ -129,7 +130,7 @@ async def test_the_stream_sends_the_daily_predictions_and_answers_as_they_are_st
     engine, clock = daily_engine(tmp_path, at("08:40"))
 
     async with TestClient(TestServer(create_app(engine))) as client:
-        ws = await client.ws_connect("/v1/stream")
+        ws = await listening(client)
         received: list[dict[str, Any]] = []
 
         async def listen() -> None:  # beside the replay: a client that keeps up
@@ -138,14 +139,14 @@ async def test_the_stream_sends_the_daily_predictions_and_answers_as_they_are_st
                 check("event", event)
                 received.append(event)
 
-        listening = asyncio.create_task(listen())
+        reading = asyncio.create_task(listen())
         for until in [at("08:51"), *(at(f"{h:02d}:00") for h in range(10, 16))]:  # the queue stays short
             await replay_into(engine, clock, [], until=until)
             await asyncio.sleep(0.05)
         store_monday(tmp_path, -0.05)
         await replay_into(engine, clock, [], until=at("15:46"))
         async with asyncio.timeout(5):
-            await listening
+            await reading
         await ws.close()
 
     [made] = [
