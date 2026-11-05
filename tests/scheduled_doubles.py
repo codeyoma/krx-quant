@@ -23,6 +23,7 @@ from krx_quant.scheduled import (
     STATE_FILE,
     Facts,
     Job,
+    JobRecord,
     JobState,
     Ran,
     Scheduler,
@@ -103,6 +104,7 @@ async def scheduling(
     told: Told | None = None,
     secrets: Sequence[str] = (),
     clock: FakeClock | None = None,
+    ran: Callable[[str, JobRecord], None] | None = None,
 ) -> AsyncIterator[tuple[FakeClock, Runs, Told, JobState]]:
     """A scheduler running on a fake clock until the block ends (the collector stops)."""
     clock = clock or FakeClock(start)
@@ -134,6 +136,7 @@ async def scheduling(
             facts=read_facts,
             session_facts=read_session_facts,
             runner=runs,
+            ran=ran,
         )
         task = asyncio.create_task(scheduler.run())
         try:

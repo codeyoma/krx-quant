@@ -387,7 +387,9 @@ def docker_calls(server: Path) -> list[str]:
     return log.read_text().splitlines() if log.exists() else []
 
 
-def test_the_server_updates_to_a_new_main_and_says_so(server: Path) -> None:
+def test_the_server_updates_to_a_new_main_and_logs_its_report(server: Path) -> None:
+    """#614: a clean update's report goes to the log alone (``notify --log-only``: Loki keeps it); the
+    engine's readiness line at 08:40 tells the commit on Telegram."""
     assert update(server).returncode == 0
     assert docker_calls(server) == [], "nothing new: nothing restarted"
 
@@ -398,8 +400,9 @@ def test_the_server_updates_to_a_new_main_and_says_so(server: Path) -> None:
     assert git(server, "rev-parse", "HEAD") == new
     calls = docker_calls(server)
     assert calls.count("compose up -d --build") == 1
-    notice = (server.parent / "docker.log").read_text().split(" notify ", 1)[1]
-    assert notice.startswith("자동 업데이트") and new[:7] in notice and "- Granger learns" in notice
+    [report] = notices(server)
+    assert report.startswith("--log-only 자동 업데이트") and new[:7] in report
+    assert "- Granger learns" in (server.parent / "docker.log").read_text()
 
 
 def sudo_calls(server: Path) -> list[str]:
@@ -554,7 +557,7 @@ def test_an_update_keeps_the_used_latest_and_previous_images_and_a_day_of_build_
     server: Path,
 ) -> None:
     """#379, #568: after the new engine started, every other tag is taken off and the images left
-    without one go; the build cache no build used for a day goes. The notice says what Docker
+    without one go; the build cache no build used for a day goes. The report says what Docker
     kept and the disk's free space, before and after, and Docker's version and storage driver."""
     (server / "IMAGES").write_text(
         "krx-quant:latest\nkrx-quant:previous\n<none>:<none>\nregistry.example/krx-quant:latest\nbusybox:1.37\n"
@@ -632,6 +635,8 @@ def test_a_prune_that_fails_leaves_the_update_done_and_the_notice_says_why(serve
     assert f"could not prune the images: {error}" in result.stderr
     log = (server.parent / "docker.log").read_text()
     assert "자동 업데이트 오류" not in log
+    [notice] = notices(server)
+    assert notice.startswith("자동 업데이트: "), "a cleanup that failed is sent, not logged alone (#614)"
     assert "Docker 이미지 ? → ?, 빌드 캐시 ? → ?" in log, "what could not be read is said so"
     assert f"Docker 정리 실패: 이미지({error}); 빌드 캐시({error}). 다음 배포가 다시 정리합니다." in log
 

@@ -7,8 +7,14 @@ At 08:00 each trading day the latest night's list not applied yet is, if it was 
 running engine notices a model file that changed (the swap, ``krx-quant fit``,
 ``krx-quant rollback``) and switches to it within half a minute; the server then
 publishes what it runs (``live.json`` and the models), the champions of the next night. Its
-Telegram line names the models it installed, but not those of the algorithms the engine does not
-run because their pre-validation refused the code they have (#544, ``not_run``).
+line names the models it installed, but not those of the algorithms the engine does not run because
+their pre-validation refused the code they have (#544, ``not_run``). The line is logged; the
+morning's readiness line tells whether the night's list was applied and how many models changed
+(#614, ``MorningSwap``, ``readiness.py``).
+
+> **바뀜** (2026-11-06, #616): the line went to Telegram at 08:00, every model with its version →
+> logged only; the 08:40 readiness line carries its outcome. 이유: the night's summary had told the
+> same promotions the night before, and the line named 11 and more versions a morning (#614).
 
 The nightly training runs at ``KRX_TRAIN_AT`` on trading days, here, in its own process (its
 whole output and exit code in Loki, ``process="training"``, #358; the engine's own log says how it
@@ -137,6 +143,28 @@ class NightStatus:
         ]
         night = {k: v for k, v in self.night.as_dict().items() if k != "refused"}
         return {**night, "applied": self.applied, "reason": self.reason, "reports": reports}
+
+
+@dataclass(frozen=True)
+class MorningSwap:
+    """A trading day's morning swap as the readiness line tells it (#614, ``readiness.py``): the
+    night whose list it read (None: no list yet), whether that list runs or why not, and the
+    algorithms whose model it changed, those the engine does not run left out (#544,
+    ``not_run``), as its line names them."""
+
+    day: date
+    night: date | None
+    applied: bool
+    reason: str
+    changed: tuple[str, ...]
+
+
+def morning_outcome(today: date, status: NightStatus | None, refused: Collection[str] = ()) -> MorningSwap:
+    """The swap of ``today`` that read ``status`` (None: no list yet), as ``swap_notice`` counts it."""
+    if status is None:
+        return MorningSwap(today, None, False, "no list yet", ())
+    changed = tuple(n for n in status.night.promoted if n not in refused) if status.applied else ()
+    return MorningSwap(today, status.night.day, status.applied, status.reason, changed)
 
 
 def latest_night(store: ObjectStore, before: date) -> Night | None:
@@ -420,14 +448,15 @@ async def keep_models(
     shelf: Shelf,
     engine: PredictionEngine,
     calendar: MarketCalendar,
-    notify: Callable[[str], Awaitable[bool]],
+    swapped: Callable[[MorningSwap], None],
     now: Callable[[], datetime],
     watch: TrainingWatch | None = None,
 ) -> None:
     """The collector's model task, until cancelled: the morning swap on trading days (at
-    once if started between 08:00 and the open), the engine switched to any model file that
-    changes, and what it runs published. Without a store only the files are watched. With
-    ``watch``, a night not applied by the swap counts to the nights in a row (#355).
+    once if started between 08:00 and the open), its outcome logged and handed to ``swapped``
+    (the readiness line, #614), the engine switched to any model file that changes, and what it
+    runs published. Without a store only the files are watched. With ``watch``, a night not
+    applied by the swap counts to the nights in a row (#355).
     """
     swap_at = _first_swap(calendar, now())
     if store is not None:
@@ -452,9 +481,11 @@ async def keep_models(
                 today = kst_day(swap_at)
                 swap_at = next_on_trading_day(calendar, SWAP_AT, now())
                 status = await morning_swap(store, shelf, engine, today=today, at=now(), watch=watch)
-                notice = None if status is None else swap_notice(status, not_run(engine, shelf.state_dir))
-                if notice is not None:
-                    await notify(notice)
+                refused = frozenset() if status is None else not_run(engine, shelf.state_dir)
+                line = None if status is None else swap_notice(status, refused)
+                if line is not None:  # the readiness line tells its outcome (#614)
+                    log.info("the morning swap: %s", line)
+                swapped(morning_outcome(today, status, refused))
                 if watch is not None:
                     watch.morning()
                 await asyncio.to_thread(
@@ -662,10 +693,10 @@ def _tell_tail(day: date, lines: Sequence[str]) -> None:
 
 
 def swap_notice(status: NightStatus, refused: Collection[str] = ()) -> str | None:
-    """The morning swap's Telegram line: the night's list not used and why, or the models it
-    installed. Not those of the ``refused`` algorithms (#544, ``not_run``): installed, they run
-    nothing, so they are not told as changed. None when nothing is to be told: the list promoted
-    nothing, or only theirs."""
+    """The morning swap's line, logged (#614: the readiness line tells its outcome): the night's
+    list not used and why, or the models it installed. Not those of the ``refused`` algorithms
+    (#544, ``not_run``): installed, they run nothing, so they are not told as changed. None when
+    nothing is to be told: the list promoted nothing, or only theirs."""
     if not status.applied:
         return f"{status.night.day} 밤 학습 결과를 쓰지 않습니다: {status.reason}"
     changes = ", ".join(

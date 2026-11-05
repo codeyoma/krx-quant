@@ -99,10 +99,14 @@ def _restore_drill() -> int:
     return 0 if drill(settings.state_dir, _state_store(settings), datetime.now(KST)) else 1
 
 
-async def _notify(text: str) -> int:
-    """Send a notice from a script (the server's auto-update); 1 if it did not go."""
-    from krx_quant.notify import send_notice
+async def _notify(text: str, log_only: bool = False) -> int:
+    """Send a notice from a script (the server's auto-update); 1 if it did not go. ``log_only``: log it
+    and send nothing (#614: a clean update, which the engine's readiness line tells)."""
+    from krx_quant.notify import log_notice, send_notice
 
+    if log_only:
+        log_notice(text)
+        return 0
     return 0 if await send_notice(Settings.from_env(require_kis=False), text) else 1
 
 
@@ -208,7 +212,12 @@ def add(sub: Commands) -> None:
     ).set_defaults(run=lambda args: _restore_drill())
     notify_cmd = sub.add_parser("notify", help="send a notice to the Telegram chat that receives alerts")
     notify_cmd.add_argument("text")
-    notify_cmd.set_defaults(run=lambda args: asyncio.run(_notify(args.text)))
+    notify_cmd.add_argument(
+        "--log-only",
+        action="store_true",
+        help="log the notice (INFO) and send nothing: a report the readiness line tells (#614)",
+    )
+    notify_cmd.set_defaults(run=lambda args: asyncio.run(_notify(args.text, args.log_only)))
     fake = sub.add_parser("fake-kis", help="run a local fake KIS server for offline testing")
     fake.add_argument("--port", type=int, default=18080)
     fake.add_argument("--host", default="127.0.0.1", help="address to listen on (0.0.0.0 inside Docker)")

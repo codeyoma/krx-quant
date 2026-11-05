@@ -470,6 +470,7 @@ class Scheduler:
         facts: Callable[[], Awaitable[Facts]] | None = None,
         session_facts: Callable[[], Awaitable[Facts]] | None = None,
         runner: Runner = run_command,
+        ran: Callable[[str, JobRecord], None] | None = None,
     ) -> None:
         self._jobs = jobs
         self._at = at
@@ -484,6 +485,9 @@ class Scheduler:
         self._facts = facts
         self._session_facts = session_facts
         self._runner = runner
+        # Each run's end, a cut one's too, as it is kept (#614): the readiness line keeps them until a
+        # line that told them went, as the state keeps a job's last run alone.
+        self._ran = ran or (lambda name, record: None)
 
     @property
     def _night_jobs(self) -> list[Job]:
@@ -567,6 +571,7 @@ class Scheduler:
             if record.outcome == RUNNING:
                 record.outcome = INTERRUPTED
                 self._state.save()
+                self._ran(name, record)
                 log.warning("scheduled job %s was cut on the night of %s: it runs again", name, record.day)
                 job = self._job_named(name)
                 if job is not None and job.session is not None:
@@ -788,6 +793,7 @@ class Scheduler:
             verdict=self._verdict(job, ran, started),
         )
         self._state.jobs[job.name] = record
+        self._ran(job.name, record)
         log.info(
             "scheduled job %s: %s (exit %s) in %.1fs",
             job.name,
