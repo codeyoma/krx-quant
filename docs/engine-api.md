@@ -2086,7 +2086,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 
 예측은 모두 디스패처 하나(`contract.forecast_of`)로 묻는다(#429): 엔진의 봉 마감 예측(`_predict_symbols`. 그래서 사전 검증과 수습 시뮬레이션의 재생도), 밤 학습의 검증(`nightly._losses`, 표본마다 그 표본의 종목과 봉 마감), 실험의 (c)(`climate_prior.py`). 디스패처는 능력이 있는지(`ContextAware`)를 보고 길을 고른다(예외를 잡아 고르지 않는다). 맥락이 필요한 알고리즘을 맥락 없이 물으면 `MissingContext`로 분명하게 실패한다(엔진은 그 봉 마감의 그 알고리즘을 `error`로 남긴다). 능력이 없는 알고리즘은 전처럼 `predict`로 묻고 맥락을 받지 않는다. 다른 종류의 알고리즘(`KindAlgorithm`)은 `predict`뿐이다.
 
-> **삭제됨** (2026-11-05, #PRNUM): 디스패처를 부르는 곳에서 #448 실험의 (b)–(e)(`turing_prior.py`). 이유: 그 실험의 코드를 지웠다(아래 "Turing의 종목과 사전 확률 실험 (#448)"). 대신: 없다.
+> **삭제됨** (2026-11-05, #566): 디스패처를 부르는 곳에서 #448 실험의 (b)–(e)(`turing_prior.py`). 이유: 그 실험의 코드를 지웠다(아래 "Turing의 종목과 사전 확률 실험 (#448)"). 대신: 없다.
 
 > **바뀜** (2026-10-14, #189): 카드는 과학자, 성격, 핵심 로직, 고유 피처, 학습 방법 다섯 칸이었고 파라미터에는 뜻이 없었다 → 예측 방식(`forecasting`)과 실패 조건(`failure`)을 더했고, 파라미터마다 뜻(`param_meanings`)을 둔다. 기준 예측과 합의도 같은 형식의 카드를 가진다(`baselines.py`, `consensus.py`의 `cards`). 이유: 상세 창의 "학습·예측 방식"이 무엇을 정답으로 배우고 확률을 어떻게 만드는지, 어떤 장에서 틀리기 쉬운지, 이름이 무슨 뜻인지 다 말하게 하려고(2026-10-14 인터뷰, QUANT LETTER의 카드 형식).
 
@@ -2614,7 +2614,7 @@ docker compose run --rm --no-deps engine climate-prior --days 5   # 빨리 훑�
 
 #### 비대칭 확률 연결 실험 (#439)
 
-> **삭제됨** (2026-11-05, #PRNUM): 이 실험. 명령 `poisson-link`, 모듈 `src/krx_quant/poisson_link.py`(`AsymmetricLink`), 그 테스트, 리포트 `state/experiments/poisson-link-439.json`을 쓰는 일. 예약 작업 `poisson-link-439`는 2026-11-02 밤에 돌아 결과를 #439에 올렸고 #506에서 `JOBS`에서 뺐다. 명령은 손으로 돌릴 수 있게 남겼었다(#505). 이유: 결론이 났다(#439). 14일 동안 손으로 돌린 기록이 없어 사용자가 2026-11-05에 코드와 함께 지우기로 정했다(#559). 대신: git 이력. 결과는 #439의 댓글에 있다. Poisson의 코드와 모델은 그대로다.
+> **삭제됨** (2026-11-05, #566): 이 실험. 명령 `poisson-link`, 모듈 `src/krx_quant/poisson_link.py`(`AsymmetricLink`), 그 테스트, 리포트 `state/experiments/poisson-link-439.json`을 쓰는 일. 예약 작업 `poisson-link-439`는 2026-11-02 밤에 돌아 결과를 #439에 올렸고 #506에서 `JOBS`에서 뺐다. 명령은 손으로 돌릴 수 있게 남겼었다(#505). 이유: 결론이 났다(#439). 14일 동안 손으로 돌린 기록이 없어 사용자가 2026-11-05에 코드와 함께 지우기로 정했다(#559). 대신: git 이력. 결과는 #439의 댓글에 있다. Poisson의 코드와 모델은 그대로다.
 
 ### Turing
 
@@ -2646,7 +2646,7 @@ docker compose run --rm --no-deps engine climate-prior --days 5   # 빨리 훑�
 
 #### Turing의 종목과 사전 확률 실험 (#448)
 
-> **삭제됨** (2026-11-05, #PRNUM): 이 실험. 명령 `turing-prior`, 모듈 `src/krx_quant/turing_prior.py`(`TuringPlus`), 그 테스트, 리포트 `state/experiments/turing-prior-448.json`을 쓰는 일. 예약 작업 `turing-prior-448`은 2026-11-02 밤에 돌아 결과를 #448에 올렸고 #506에서 `JOBS`에서 뺐다. 명령은 손으로 돌릴 수 있게 남겼었다(#505). 이유: 결론이 났다(#448). 14일 동안 손으로 돌린 기록이 없어 사용자가 2026-11-05에 코드와 함께 지우기로 정했다(#559). 대신: git 이력. 결과는 #448의 댓글에 있다. Turing의 코드와 모델, `algorithms/priors.py`는 그대로다.
+> **삭제됨** (2026-11-05, #566): 이 실험. 명령 `turing-prior`, 모듈 `src/krx_quant/turing_prior.py`(`TuringPlus`), 그 테스트, 리포트 `state/experiments/turing-prior-448.json`을 쓰는 일. 예약 작업 `turing-prior-448`은 2026-11-02 밤에 돌아 결과를 #448에 올렸고 #506에서 `JOBS`에서 뺐다. 명령은 손으로 돌릴 수 있게 남겼었다(#505). 이유: 결론이 났다(#448). 14일 동안 손으로 돌린 기록이 없어 사용자가 2026-11-05에 코드와 함께 지우기로 정했다(#559). 대신: git 이력. 결과는 #448의 댓글에 있다. Turing의 코드와 모델, `algorithms/priors.py`는 그대로다.
 
 ### Neyman (#266)
 

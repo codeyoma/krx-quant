@@ -269,7 +269,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `fake-kis [--port 18080] [--host 127.0.0.1] [--trades]` | 가짜 KIS 서버(아래 "키 없이 확인하기") | 없어도 된다 |
 | `demo-engine [--port 8090] [--host 127.0.0.1] [--db state/demo.sqlite3] [--pace 초]` | 데모 엔진 API(아래 "화면을 만들 때"). `--pace`는 10:00부터 이어 재생하며 스트림을 보낸다 | 없어도 된다 |
 
-> **삭제됨** (2026-11-05, #PRNUM): 결론이 난 실험 넷의 명령. `measure-passive-entry [--engine-url 주소]`(대기 매수를 녹화로 재던 측정, #432), `cost-map-audit [--engine-url 주소]`(비용 지도 감사, #438), `poisson-link [--days N]`(Poisson의 비대칭 확률 연결 실험, #439), `turing-prior [--days N]`(Turing의 종목과 기후 사전 확률 실험, #448). 그 예약 작업은 #506에서 `JOBS`에서 뺐고, 명령은 손으로 돌릴 수 있게 남겼었다(#505). 이유: 결론이 났다(#432, #438, #439, #448). 14일 동안 손으로 돌린 기록이 없어 사용자가 2026-11-05에 코드와 함께 지우기로 정했다(#559). 대신: git 이력. 결과는 각 이슈의 댓글에 있다.
+> **삭제됨** (2026-11-05, #566): 결론이 난 실험 넷의 명령. `measure-passive-entry [--engine-url 주소]`(대기 매수를 녹화로 재던 측정, #432), `cost-map-audit [--engine-url 주소]`(비용 지도 감사, #438), `poisson-link [--days N]`(Poisson의 비대칭 확률 연결 실험, #439), `turing-prior [--days N]`(Turing의 종목과 기후 사전 확률 실험, #448). 그 예약 작업은 #506에서 `JOBS`에서 뺐고, 명령은 손으로 돌릴 수 있게 남겼었다(#505). 이유: 결론이 났다(#432, #438, #439, #448). 14일 동안 손으로 돌린 기록이 없어 사용자가 2026-11-05에 코드와 함께 지우기로 정했다(#559). 대신: git 이력. 결과는 각 이슈의 댓글에 있다.
 
 > **삭제됨** (2026-10-23, #360): `logs-bundle [--days N | --since 때] [--grep 패턴]`(상태 폴더의 로그 파일 `state/logs/`를 가려서 한 파일로 묶던 명령, #356). 이유: 사용자가 로그를 Grafana Cloud Loki로만 남기기로 정했다(2026-10-23). 대신: Loki에서 질의한다([docs/agents/server-logs.md](docs/agents/server-logs.md)).
 
