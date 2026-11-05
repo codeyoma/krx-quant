@@ -1,6 +1,7 @@
 """The trader's KIS order module (#404, ``kis_orders.Broker``): orders, fills read off the day's
 inquiry (full and partial), refusals, cancels, the balance, the orderable cash and the quotes; the
-trader's own token, cached and replaced when it expires; the pace and what is sent again.
+trader's own token, cached and replaced when it expires; the pace and what is sent again; the last
+check of a buy before it leaves for KIS (#543).
 
 KIS is the fake one (``fake_kis.FakeKis`` with a ``FakeAccount``), answering in the shapes, codes
 and messages the order probe measured on the mock server (#403, ``kis_orders.PROBE_COMMENT``)
@@ -9,12 +10,14 @@ where it has them. Every value here is made up: the keys, the account, the price
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import math
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -22,6 +25,7 @@ from typing import Any
 import pytest
 
 from krx_quant import kis, kis_orders, ratelimit
+from krx_quant.auth import TokenManager
 from krx_quant.config import DEFAULT_REST_URL, DEFAULT_WS_URL, Settings, SettingsError
 from krx_quant.fake_kis import NOTHING_TO_CANCEL, FakeAccount, FakeKis
 from krx_quant.feeds.base import KST
@@ -34,17 +38,20 @@ from krx_quant.kis_orders import (
     Answer,
     Best,
     Broker,
+    BuyLimits,
     NoToken,
     Orderable,
     Price,
     Servers,
     Unanswered,
     Unexpected,
+    Withheld,
     trader_broker,
     trader_live_broker,
 )
 from krx_quant.ratelimit import RateLimiter
 from tests.test_ratelimit import Monotonic
+from tests.waiting import until
 
 DAY = date(2026, 10, 30)
 NOW = datetime.combine(DAY, time(10, 0), KST)
@@ -86,11 +93,20 @@ def settings_of(fake: FakeKis, tmp_path: Path, **changes: Any) -> Settings:
 
 @asynccontextmanager
 async def broker_of(
-    fake: FakeKis, settings: Settings, now: Callable[[], datetime] = lambda: NOW
+    fake: FakeKis,
+    settings: Settings,
+    now: Callable[[], datetime] = lambda: NOW,
+    limits: BuyLimits | None = None,
 ) -> AsyncIterator[Broker]:
     async with kis.rest_session() as session:
         yield trader_broker(
-            session, settings, now, servers=Servers(fake.rest_url, fake.ws_url), per_second=1000, pause=0.01
+            session,
+            settings,
+            now,
+            servers=Servers(fake.rest_url, fake.ws_url),
+            per_second=1000,
+            pause=0.01,
+            limits=limits,
         )
 
 
@@ -633,3 +649,314 @@ async def test_fills_that_cannot_be_read_leave_the_order_unsettled_for_the_calle
     assert taken.sent.ref is not None and kis_orders.same_number(
         taken.sent.ref.number, account.orders[0].number
     )
+
+
+# The last check of a buy (#543)
+
+# The trader's limits as ``trader/run.py`` injects them: the capital, its one symbol.
+LIMITS = BuyLimits(1_000_000, frozenset({SYMBOL}))
+
+
+def quote_of(broker: Broker, account: FakeAccount, at: datetime = NOW, symbol: str = SYMBOL) -> None:
+    """The collector's latest best quote, KIS's book as it is, as the trader tells the broker."""
+    broker.quoted(symbol, account.bid, account.ask, at)
+
+
+async def test_a_buy_within_the_limits_leaves_for_kis(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """Sixteen shares at the ask, 977,600 won, within the 1,000,000 cap: sent and filled."""
+    fake, account = trader
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        quote_of(broker, account)
+        taken = await broker.take(SYMBOL, SIDE_BUY, 16, account.ask, DAY, wait=WAIT, poll=POLL)
+    assert taken.sent.outcome == ACCEPTED and taken.filled == 16
+    assert len(posted(fake, kis_orders.BUY)) == 1
+
+
+async def test_a_buy_above_the_cap_is_withheld_with_a_warning_and_nothing_is_sent(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Seventeen shares at the ask, 1,038,700 won, above the cap: withheld, before any call. The
+    error's text, which the failures and the night's report keep, holds no price."""
+    fake, account = trader
+    caplog.set_level(logging.WARNING, logger="krx_quant.kis_orders")
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        quote_of(broker, account)
+        with pytest.raises(Withheld) as withheld:
+            await broker.take(SYMBOL, SIDE_BUY, 17, account.ask, DAY, wait=WAIT, poll=POLL)
+    assert str(withheld.value) == (
+        "buy: withheld by the broker's last check (#543): its amount with the 0 buy(s) of the day that"
+        " may still fill is 104% of the cap"
+    )
+    assert str(account.ask) not in str(withheld.value)
+    assert fake.posts_received == [] and fake.rest_requests == [], "nothing sent, nothing read"
+    [warning] = [r for r in caplog.records if r.name == "krx_quant.kis_orders"]
+    assert warning.levelno == logging.WARNING
+    assert "withheld a buy of 17 share(s) of 005930 at 61100 (1,038,700 won" in warning.getMessage()
+
+
+async def test_the_buys_that_may_still_fill_count_toward_the_cap_until_a_read_shows_them_over(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """Ten shares resting on KIS (611,000 won) and seven more (427,700) are above the cap together:
+    the seven are withheld. Once the ten are cancelled and a read shows nothing left of them, the
+    seven go."""
+    fake, account = trader
+    account.fills = False  # a buy rests
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        quote_of(broker, account)
+        first = await broker.buy(SYMBOL, 10, account.ask)
+        assert first.accepted and first.ref is not None
+        with pytest.raises(Withheld, match="the 1 buy\\(s\\) of the day that may still fill is 104%"):
+            await broker.buy(SYMBOL, 7, account.ask)
+        await broker.cancel(first.ref)
+        with pytest.raises(Withheld):  # cancelled on KIS, but no read has shown it yet
+            await broker.buy(SYMBOL, 7, account.ask)
+        assert await broker.order(DAY, SYMBOL, first.ref) is not None
+        second = await broker.buy(SYMBOL, 7, account.ask)
+    assert second.accepted
+    assert [o.quantity for o in account.placed(kis_orders.SIDE_BUY)] == [10, 7]
+
+
+async def test_a_buy_left_open_by_a_cancel_that_could_not_be_sent_counts(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Four of ten filled and the cancel could not be sent: the six left (366,600 won) still count,
+    and eleven more (672,100) are withheld; ten (611,000) go."""
+    fake, account = trader
+    account.depth = 4
+
+    async def no_token(self: Broker, order: kis_orders.OrderRef) -> kis_orders.Sent:
+        raise NoToken("cancel: no access token (made up), nothing sent")
+
+    monkeypatch.setattr(Broker, "cancel", no_token)
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        quote_of(broker, account)
+        taken = await broker.take(SYMBOL, SIDE_BUY, 10, account.ask, DAY, wait=0.2, poll=POLL)
+        assert taken.unsettled and taken.left == 6
+        with pytest.raises(Withheld, match="104% of the cap"):
+            await broker.buy(SYMBOL, 11, account.ask)
+        sent = await broker.buy(SYMBOL, 10, account.ask)
+    assert sent.accepted
+
+
+async def test_after_a_restart_the_buys_the_day_s_inquiry_shows_count(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """A buy resting on KIS from before a restart (or the account's own): the new broker learns it from
+    the day's inquiry, which the start's reconcile reads before any buy (#406), and counts it."""
+    fake, account = trader
+    account.fills = False
+    async with broker_of(fake, settings_of(fake, tmp_path)) as before:
+        assert (await before.buy(SYMBOL, 10, account.ask)).accepted
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        quote_of(broker, account)
+        [row] = await broker.open_orders(DAY)
+        with pytest.raises(Withheld, match="the 1 buy\\(s\\) of the day that may still fill"):
+            await broker.buy(SYMBOL, 7, account.ask)
+    assert row.left == 10 and len(account.placed(kis_orders.SIDE_BUY)) == 1
+
+
+async def test_a_buy_whose_answer_is_lost_counts_whole_until_its_day_is_over(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """Whether a buy without an answer went in, no answer tells: it counts whole for its day (the
+    trader buys nothing more that day after it, #405). A KRX limit order is a day order: the next day
+    it counts no more."""
+    fake, account = trader
+    account.fills, account.lose_answers = False, 1
+    clock = [NOW]
+    async with broker_of(fake, settings_of(fake, tmp_path), lambda: clock[0], LIMITS) as broker:
+        quote_of(broker, account)
+        lost = await broker.buy(SYMBOL, 10, account.ask)
+        assert lost.outcome == UNKNOWN
+        with pytest.raises(Withheld, match="104% of the cap"):
+            await broker.buy(SYMBOL, 7, account.ask)
+        clock[0] = NOW + timedelta(days=1)
+        quote_of(broker, account, clock[0])
+        next_day = await broker.buy(SYMBOL, 7, account.ask)
+    assert next_day.accepted
+
+
+async def test_two_buys_at_once_count_each_other(trader: tuple[FakeKis, FakeAccount], tmp_path: Path) -> None:
+    """Nine shares twice at once (549,900 won each): the second is checked while the first is in flight,
+    counts it, and is withheld."""
+    fake, account = trader
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        quote_of(broker, account)
+        first, second = await asyncio.gather(
+            broker.buy(SYMBOL, 9, account.ask), broker.buy(SYMBOL, 9, account.ask), return_exceptions=True
+        )
+    assert isinstance(first, kis_orders.Sent) and first.accepted
+    assert isinstance(second, Withheld)
+    assert len(posted(fake, kis_orders.BUY)) == 1
+
+
+def gate_tokens(monkeypatch: pytest.MonkeyPatch, held: set[int]) -> tuple[asyncio.Event, list[int]]:
+    """The trader's token held back on its calls numbered in ``held`` (from 1), until the gate opens:
+    a token renewed, KIS's once-a-minute issuance waited out. The calls asked so far."""
+    gate, asked = asyncio.Event(), list[int]()
+    real = TokenManager.get
+
+    async def gated(self: TokenManager) -> str:
+        asked.append(len(asked) + 1)
+        if asked[-1] in held:
+            await gate.wait()
+        return await real(self)
+
+    monkeypatch.setattr(TokenManager, "get", gated)
+    return gate, asked
+
+
+WHY_AGAIN = {
+    "the quote ages": "is 11s old",
+    "the quote moves": "below the latest best bid",
+    "the cap narrows": "122% of the cap",
+}
+
+
+@pytest.mark.parametrize("meanwhile", list(WHY_AGAIN))
+async def test_a_buy_is_checked_again_after_waiting_for_its_token(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, meanwhile: str
+) -> None:
+    """The buy passed its first check, then waited for its token: checked again right before it is
+    sent, it is withheld once the quote is eleven seconds old, has moved 5% away, or the cap is the
+    first period's. Nothing is sent."""
+    fake, account = trader
+    gate, asked = gate_tokens(monkeypatch, {1})
+    clock = [NOW]
+    async with broker_of(fake, settings_of(fake, tmp_path), lambda: clock[0], LIMITS) as broker:
+        quote_of(broker, account)
+        buying = asyncio.create_task(broker.buy(SYMBOL, 5, account.ask))
+        await until(lambda: asked == [1])
+        if meanwhile == "the quote ages":
+            clock[0] = NOW + timedelta(seconds=11)
+        elif meanwhile == "the quote moves":
+            broker.quoted(SYMBOL, 64_100, 64_200, NOW + timedelta(seconds=1))
+        else:
+            broker.set_cap(250_000)
+        gate.set()
+        with pytest.raises(Withheld, match=WHY_AGAIN[meanwhile]):
+            await buying
+    assert account.placed(kis_orders.SIDE_BUY) == [] and posted(fake, kis_orders.BUY) == []
+
+
+async def test_a_buy_sent_again_after_a_refusal_for_the_limit_is_checked_again(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KIS's gateway refused the buy for its per-second limit (``BUSY``, not taken); before it goes
+    again the quote moved 5% away: the second send is withheld."""
+    fake, account = trader
+    fake.busy[kis_orders.BUY.mock] = 1
+    gate, asked = gate_tokens(monkeypatch, {2})
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        quote_of(broker, account)
+        buying = asyncio.create_task(broker.buy(SYMBOL, 5, account.ask))
+        await until(lambda: asked == [1, 2])
+        broker.quoted(SYMBOL, 57_800, 57_900, NOW + timedelta(seconds=1))
+        gate.set()
+        with pytest.raises(Withheld, match="above the latest best ask"):
+            await buying
+    assert account.placed(kis_orders.SIDE_BUY) == []
+    assert len(posted(fake, kis_orders.BUY)) == 1, "the refused send alone"
+
+
+async def test_a_buy_of_a_symbol_the_trader_does_not_buy_is_withheld(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    fake, account = trader
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        quote_of(broker, account, symbol="000660")
+        with pytest.raises(Withheld, match="000660 is not a symbol the trader buys \\(005930\\)"):
+            await broker.buy("000660", 1, account.ask)
+    assert fake.posts_received == []
+
+
+@pytest.mark.parametrize(
+    ("price", "quoted_ago", "why"),
+    [
+        (64_200, 0.0, "its price is 5.1% above the latest best ask \\(more than 3%\\)"),
+        (57_900, 0.0, "its price is 5.1% below the latest best bid \\(more than 3%\\)"),
+        (61_100, 11.0, "the latest best quote of 005930 is 11s old \\(more than 10s\\)"),
+        (61_100, None, "no best quote of 005930 to check its price against"),
+    ],
+)
+async def test_a_buy_far_from_the_latest_quote_or_without_a_recent_one_is_withheld(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path, price: int, quoted_ago: float | None, why: str
+) -> None:
+    """Against the latest best quote of 61,000/61,100: more than 3% above the ask or below the bid, or
+    no quote within ten seconds."""
+    fake, account = trader
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        if quoted_ago is not None:
+            quote_of(broker, account, NOW - timedelta(seconds=quoted_ago))
+        with pytest.raises(Withheld, match=why):
+            await broker.buy(SYMBOL, 1, price)
+    assert fake.posts_received == []
+
+
+async def test_a_buy_within_the_band_goes_and_kis_s_own_book_is_a_quote_too(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """3% above the ask at most goes (62,900 against 61,100: 2.9%); the broker's own REST read of KIS's
+    book (``best``, in a stall) is a quote to check against, as the stream's is."""
+    fake, account = trader
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        await broker.best(SYMBOL)
+        near = await broker.buy(SYMBOL, 1, 62_900)
+        ten_seconds = NOW - timedelta(seconds=10)
+        broker.quoted(SYMBOL, 0, account.ask, NOW)  # a side empty: not a quote, the REST read stays
+        broker.quoted(SYMBOL, account.bid, account.ask, ten_seconds)  # older than the one kept
+        at_the_ask = await broker.buy(SYMBOL, 1, account.ask)
+    assert near.accepted and at_the_ask.accepted
+
+
+async def test_the_live_first_period_s_cap_narrows_the_cap_never_above_the_settings(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The first period's 250,000 won (#408, told by ``run.LiveWatch``): five shares (305,500) are
+    withheld, four (244,400) go. A cap above the settings' capital is the capital."""
+    fake, account = trader
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=LIMITS) as broker:
+        quote_of(broker, account)
+        broker.set_cap(250_000)
+        with pytest.raises(Withheld, match="122% of the cap"):
+            await broker.buy(SYMBOL, 5, account.ask)
+        four = await broker.buy(SYMBOL, 4, account.ask)
+        broker.set_cap(5_000_000)
+        capped = broker.cap
+    assert four.accepted and capped == 1_000_000
+
+
+async def test_no_sell_nor_cancel_is_ever_checked(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """A stop in a fall is never held up: with no quote at all and a cap of one won, a sell of
+    6,100,000 won at the day's lower limit, a sell of another symbol, a marketable sell (``take``) and
+    a cancel all leave for KIS."""
+    fake, account = trader
+    account.holdings.update({SYMBOL: 101, "000660": 5})
+    tiny = BuyLimits(1, frozenset({"999999"}))
+    async with broker_of(fake, settings_of(fake, tmp_path), limits=tiny) as broker:
+        far = await broker.sell(SYMBOL, 100, account.lower)
+        other = await broker.sell("000660", 5, account.lower)
+        taken = await broker.take(SYMBOL, SIDE_SELL, 1, account.bid, DAY, wait=WAIT, poll=POLL)
+        account.holdings[SYMBOL] = 1
+        account.fills = False
+        resting = await broker.sell(SYMBOL, 1, account.upper)
+        assert resting.ref is not None
+        cancel = await broker.cancel(resting.ref)
+    assert far.accepted and other.accepted and taken.filled == 1 and cancel.accepted
+    assert len(posted(fake, kis_orders.SELL)) == 4 and len(posted(fake, kis_orders.CANCEL)) == 1
+
+
+async def test_without_limits_a_broker_checks_nothing(
+    trader: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The read-only brokers (the day's check, the notice layout, the live probe) carry no limits."""
+    fake, account = trader
+    async with broker_of(fake, settings_of(fake, tmp_path)) as broker:
+        sent = await broker.buy("000660", 1_000, account.ask)
+        broker.set_cap(1)
+    assert sent.accepted and broker.cap is None and broker.limits is None
