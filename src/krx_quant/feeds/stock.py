@@ -13,6 +13,7 @@ from krx_quant.feeds.base import (
     LEVELS,
     RECEIVED_AT,
     Feed,
+    RawFeed,
     RestFeed,
     Row,
     kst,
@@ -167,6 +168,25 @@ def _normalize_book(f: dict[str, str], received_at: datetime) -> Row:
 
 
 BOOK = Feed("H0UNASP0", tuple(BOOK_COLUMNS), BOOK_SCHEMA, _normalize_book)
+
+
+# H0STASP0, the KRX-only real-time order book (KIS: "국내주식 실시간호가 (KRX)" [실시간-004]), registered
+# for 005930's inverse ETF (#606): ETFs do not trade on NXT. Column order per KIS's example
+# (examples_llm/domestic_stock/asking_price_krx, read 2026-11-06): the integrated book's first 59
+# fields, then MID_PRC, MIDP_TOTAL_RSQN, MIDP_CLS_CODE and MARKET_CLS_CODE, which the example added on
+# 2026-09-28 for KRX's after-market. No such frame has been seen live: they are recorded raw only
+# until ``probe-inverse-book`` has read them (#606).
+KRX_BOOK_COLUMNS = (
+    *BOOK_COLUMNS[: BOOK_COLUMNS.index("STCK_DEAL_CLS_CODE") + 1],
+    "MID_PRC",
+    "MIDP_TOTAL_RSQN",
+    "MIDP_CLS_CODE",
+    "MARKET_CLS_CODE",
+)
+# The example's layout before 2026-09-28: the first 59 of those.
+KRX_BOOK_OLD_WIDTH = KRX_BOOK_COLUMNS.index("MID_PRC")
+
+KRX_BOOK = RawFeed("H0STASP0", KRX_BOOK_COLUMNS)
 
 
 QUOTE_SCHEMA = pa.schema(

@@ -31,6 +31,17 @@ class Feed:
 
 
 @dataclass(frozen=True)
+class RawFeed:
+    """A KIS real-time WebSocket feed registered and recorded raw only: its frames have not been
+    seen live, so no event is made of them until a probe has read them (CODING_STANDARDS.md
+    "External data is probed before it is used"). ``columns`` is the layout KIS's example gives,
+    which the probe checks the frames against."""
+
+    tr_id: str
+    columns: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class RestFeed:
     """A KIS quotation endpoint polled over REST, keyed by e.g. a symbol."""
 

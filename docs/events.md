@@ -40,6 +40,8 @@
 | `received_at` | timestamp(us, UTC) | 수신 시각 |
 | `message` | string | 받은 메시지 원문 |
 
+인버스 ETF의 KRX 호가(`H0STASP0`, 키 `0193L0`, #606)는 raw에만 있고 events는 없다. 이 앱키로 오는 프레임의 배치를 서버에서 확인하기 전이라 이벤트를 만들지 않는다([kis-feeds.md](kis-feeds.md#인버스-etf-호가-606)). 확인한 뒤의 PR이 이벤트를 더한다.
+
 ## events: 체결 (`H0UNCNT0` 통합, `H0STCNT0` KRX, `H0NXCNT0` NXT)
 
 KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여러 개 들어 있으면 여러 행이 된다.
