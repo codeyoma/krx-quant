@@ -78,7 +78,7 @@ import pyarrow
 
 from krx_quant.algorithms import Algorithm, KindAlgorithm
 from krx_quant.algorithms.contract import Sample
-from krx_quant.archive import partition_files
+from krx_quant.archive import guarded_files
 from krx_quant.backfill import MINUTE_BARS_TR, bars_key
 from krx_quant.contracts import days_to_expiry
 from krx_quant.features import SLOT_RETURN_DAYS, FeatureVector, Leaders, TouchTerms
@@ -212,7 +212,7 @@ def read_files(
     (``training.needs_leaders``), the leaders'."""
     files: list[Path] = []
     if calendar.session(day) is not None:
-        files += partition_files(data_dir / regime_prefix(day) / "symbol=market")
+        files += guarded_files(data_dir / regime_prefix(day) / "symbol=market")
     if needs_previous_day(names, kinds):
         before = day
         for _ in range(max(SLOT_RETURN_DAYS)):  # the previous day's is the first (#181, #183, #265)

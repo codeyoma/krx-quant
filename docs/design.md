@@ -71,7 +71,7 @@
 | `feeds/` (`base.py`, `stock.py`, `market.py`) | 피드별 KIS 형식과 정규화한 이벤트 스키마. 주식 피드와 시장 피드(지수, 선물, 미국, 옵션) |
 | `masters.py`, `contracts.py` | KIS 마스터 파일에서 최근월물 코드 찾기, 만기 규칙으로 월물 정하기(백필) |
 | `collector.py`, `polling.py`, `poll_outages.py`, `recorder.py`, `health.py` | 구독과 REST 조회, REST 조회의 피드·키별 호출·실패·장애 수와 그 알림(#441), Parquet 녹화, 결측·지연 판정과 알림, 피드·키마다 그날 필드가 모자란 프레임 수(#381), 녹화한 결측 구간 읽기(`read_gaps`: `probe-gaps`와 trader 재생, #552) |
-| `market_calendar.py`, `backfill.py`, `archive.py`, `object_store.py` | 거래 일정, 1분봉 백필(과 엔진·학습이 읽는 전 거래일 시간대 범위 #181, 앞선 20거래일의 시간대 수익률 #265), 장 마감 업로드, Object Store(로컬·S3) |
+| `market_calendar.py`, `backfill.py`, `archive.py`, `object_store.py`, `raw_days.py` | 거래 일정, 1분봉 백필(과 엔진·학습이 읽는 전 거래일 시간대 범위 #181, 앞선 20거래일의 시간대 수익률 #265), 장 마감 업로드와 30일 지난 서버 raw 지우기(#607), Object Store(로컬·S3), 서버에서 지운 raw를 S3에서 받아 읽기(#607) |
 | `clock.py`, `reference.py`, `pricing.py`, `special.py`, `touch.py` | 엔진 시계, 1분봉과 기준가(통합 중간가), 호가단위와 보합 범위, VI·서킷브레이커·사이드카, 도달 정답(호가 규칙과 1분봉 규칙, #167, #169) |
 | `engine.py`, `market_view.py`, `baselines.py`, `climate.py`, `features.py`, `algorithms/`, `consensus.py` | 예측 엔진, 엔진과 학습이 같이 보는 1분봉·기준가, 기준 예측(도달 정답의 시간대 기후 표 포함, #169), 피처 저장소, 알고리즘 규약과 알고리즘, 합의 |
 | `predictions.py`, `stats.py`, `lifecycle.py`, `api.py`, `stream.py` | SQLite 저장, 통계와 순위표, 알고리즘 상태, 엔진 API와 WebSocket 스트림(형식은 `schemas/engine-api-v1.json`) |
@@ -343,6 +343,7 @@ v1에서는 쓰지 않는다. 조사 결과는 [paid-data.md](paid-data.md)에 �
 ### 4.7 저장
 
 - 원본 체결·호가: 하루 단위 Parquet 파일로 저장하고, 장 마감 후 S3에 올린다. 영구 보관한다.
+  - 서버의 `raw`는 30일 뒤 지운다. S3 사본을 받아 SHA-256이 같은 것을 확인한 파티션만이다. 지운 날을 읽는 명령은 S3에서 받아 읽고, 받지 못하면 실패한다(#607, [operations.md](operations.md#서버의-raw-30일-607)).
   - 거래일마다 장 마감 15분 뒤와 매일 21:00(NXT·애프터마켓 종료와 20:30 백필 뒤, 밤 학습 전)에 올린다. 파티션마다 파일 하나로 합치고, 다시 올려도 결과가 같다(#6).
   - 서버의 `.env`에는 이 버킷만 읽고 쓰는 IAM 사용자 키를 둔다. 지울 수 있는 것은 모델(`engine/models/`)뿐이다(#361). 덮어쓰기는 막을 수 없고 모델은 지우므로, 버킷 버전 관리를 켜고 덮어쓰거나 지운 이전 버전을 30일 보관한다.
     > **바뀜** (2026-10-23, #362): 삭제 불가 → 모델만 지울 수 있다. 이유: 사용자가 모델을 지금 것과 바로 전 것만 남기기로 정했다(2026-10-23, #361).

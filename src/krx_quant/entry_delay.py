@@ -35,7 +35,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from krx_quant.archive import partition_files
+from krx_quant.archive import guarded_files
 from krx_quant.baselines import baselines_for
 from krx_quant.consensus import NAMES
 from krx_quant.feeds import BOOK, TRADE
@@ -79,7 +79,7 @@ def _day_quotes(data_dir: Path, day: date, symbol: str) -> Quotes | None:
     sources = []
     for feed, bid, ask in _QUOTE_FEEDS:
         partition = data_dir / "events" / f"date={day}" / f"feed={feed}" / f"symbol={symbol}"
-        files = partition_files(partition)
+        files = guarded_files(partition)
         columns = ("received_at", bid, ask)
         if files and set(columns) <= set(pq.read_schema(files[0]).names):  # as ``read_partition``
             sources.append((files, columns))
