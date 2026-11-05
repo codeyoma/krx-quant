@@ -11,7 +11,9 @@ for the GIL while the algorithms' threads hold it) stops the quotes with it.
 one. The bar close times its steps on the loop (``step``: synchronous code only, never an await);
 those that ran in that longest stretch are what held it, and the rest of it is ``other`` (the loop's
 other work, or the bar close's between its steps). Over ``LIMIT_SECONDS`` the engine logs one
-WARNING with them (``held``). The live engine watches its bar closes (``watch_loop``); replays and
+WARNING with them (``held``) and keeps them in the store's ``runs`` as ``LOOP_HELD`` (``held_detail``,
+#589), which the night's report of the bar closes' times reads (``bar_close_times.py``): the server
+cannot read Loki. The live engine watches its bar closes (``watch_loop``); replays and
 pre-validations do not.
 """
 
@@ -19,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from collections.abc import Iterator
 
 # A bar close that keeps the loop this long without a turn is told (#538): the trader's quotes stall
@@ -27,6 +30,8 @@ LIMIT_SECONDS = 1.0
 # How often the heartbeat asks for a turn. A stretch is measured to within this.
 TICK_SECONDS = 0.05
 OTHER = "other"
+# The ``runs`` kind of a stretch over ``LIMIT_SECONDS`` (#589); its detail is ``held_detail``'s.
+LOOP_HELD = "loop_held"
 _SHOWN = 0.01  # a step's seconds in the stretch, below which the WARNING leaves it out
 
 
@@ -88,3 +93,8 @@ def held_text(what: str, seconds: float, parts: list[tuple[str, float]]) -> str:
     """The WARNING's text: ``<what> held the event loop <s>s (over <limit>s): <step> <s>s, …``."""
     named = ", ".join(f"{name} {s:.2f}s" for name, s in parts)
     return f"{what} held the event loop {seconds:.2f}s (over {LIMIT_SECONDS:g}s): {named}"
+
+
+def held_detail(seconds: float, parts: list[tuple[str, float]]) -> str:
+    """The ``LOOP_HELD`` run's detail: JSON of the stretch's seconds and its parts' (#589)."""
+    return json.dumps({"seconds": round(seconds, 2), "parts": {name: round(s, 2) for name, s in parts}})
