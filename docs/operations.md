@@ -404,6 +404,7 @@ compose와 스크립트가 읽는 변수다. 엔진은 `KRX_BIND_ADDRESS`를 예
 | `TS_AUTHKEY` | `deploy/setup-server.sh` | 없음(브라우저 로그인) | Tailscale auth key |
 | `KRX_UPDATE_TRIES`, `KRX_UPDATE_PAUSE` | `deploy/auto-update.sh` | 36, 5 | 새 엔진이 API에 답하는지 이 횟수만큼, 이 초 간격으로 본다(기본 3분) |
 | `KRX_UPDATE_NOW` | `deploy/auto-update.sh` | 지금(KST) | `<요일 1–7> <HHMM>`. 장 시간 판정을 테스트에서 바꾼다 |
+| `KRX_UPDATE_GITHUB_API` | `deploy/auto-update.sh` | `https://api.github.com/repos/codeyoma/krx-quant` | 배포할 커밋의 `ci` 실행을 읽는 GitHub API의 저장소 주소(#541, 4장). 테스트가 가짜 GitHub로 바꾼다. 서버에서는 두지 않는다 |
 | `AWS_REGION`, `ZONE`, `INSTANCE`, `BUNDLE`, `BLUEPRINT`, `IAM_USER`, `SNAPSHOT_UTC` | `deploy/create-aws.sh` | 2.1절 | AWS 자원 이름과 위치 |
 | `KEEP`, `SECONDS_TO_RECORD` | `deploy/smoke-local.sh` | 없음, 15 | `KEEP=1`이면 컨테이너와 볼륨을 남긴다. 녹화 시간(초) |
 
@@ -1526,7 +1527,7 @@ Toss: 109 calls, 1 failed; tokens issued: 0
 |---|---|
 | 03:00 | Lightsail 자동 스냅샷 |
 | 05:30 (매일) | GitHub Actions의 `fincept-pointer`가 `fincept` 포인터를 fork `custom`의 최신 커밋으로 맞춘다(#186). 평소에는 `custom`에 push 될 때 바로 옮기고, 이 실행은 놓친 것을 잡는다. 포인터를 옮기면 main에 새 커밋이 생기므로 06:00 자동 업데이트가 엔진을 다시 시작한다(다음 행) |
-| 06:00 (매일) | 자동 업데이트(`krx-quant-update` 타이머). main에 새 커밋이 있으면 받아 엔진을 다시 띄운다(4장). 포인터만 바꾼 커밋(`fincept: follow custom to …`)도 새 커밋이라 엔진을 다시 띄운다 |
+| 06:00 (매일) | 자동 업데이트(`krx-quant-update` 타이머). main에 새 커밋이 있고 그 커밋에서 `ci`가 통과했으면 받아 엔진을 다시 띄운다(4장, #541). 포인터만 바꾼 커밋(`fincept: follow custom to …`)도 새 커밋이라 엔진을 다시 띄운다. 그 커밋은 `ci` 실행이 없어서 아래 커밋의 결과로 본다 |
 | 06:00–15:20 (거래일, 10분마다) | ETF 순자산(#305): 그날 15:20 수요가 읽을 전 거래일 순자산이 아직 없는 상품만 KIS에 다시 묻는다(상품마다 2번). 모두 들어오면(KRX의 것이든 KIS의 것이든) 멈춘다. KIS가 다음 날로 넘어가는 시각을 재지 않아서다([kis-feeds.md](kis-feeds.md#etf-순자산-305)의 "수집") |
 | 08:05–15:20 (거래일, 5분마다, `KRX_OPENAPI_KEY`가 있으면) | ETF 순자산(#305, #368): 08:05에 KRX Open API에서 빠진 날(곧 전 거래일)을 받는다. 전 거래일 값이 없으면 들어올 때까지 5분마다 그날만 다시 묻는다. 15:20까지 오지 않으면 경고를 남기고 그날 수요는 KIS의 순자산을 쓴다. 들어오면 KRX 마감 흐름의 지난날 표를 다시 계산한다([krx-openapi.md](krx-openapi.md)의 "백필과 매일 수집") |
 | 07:20 (거래일) | 전날 이전부터 돌던 수집기가 스스로 멈추고 Docker가 다시 띄운다(`KRX_RESTART_AT`, #115). 그날의 KIS 마스터로 선물·옵션 월물과 등가격 ±2 행사가를 다시 고른다. 그날 06:00 배포로 시작한 수집기는 그대로다. 매크로(07:30)와 NXT 장전(08:00) 전이라, 새 수집기가 그날 매크로를 처음부터 읽고 녹화가 비지 않는다 |
@@ -2497,6 +2498,22 @@ docker compose start engine
 - 06:00은 밤 학습(21:30) 뒤, NXT 개장과 아침 모델 교체(08:00) 전이다. 다시 띄우는 동안 녹화가 비지 않는다.
 - 야간선물(18:00–06:00, #264)도 비지 않는다. 타이머는 06:00:00 뒤에 돌고(systemd는 정한 시각보다 먼저 돌리지 않는다), `docker compose up -d --build`는 새 이미지를 다 만든 뒤에야 옛 엔진을 멈춘다. 밤 18:00–06:00에 손으로 배포하면 그동안의 야간선물이 빈다(다시 받을 곳이 없다).
 - 엔진이 마지막으로 정상 기동을 확인한 커밋은 서버의 `.auto-update-deployed`에 남는다. main이 그 커밋이면 아무것도 하지 않는다. 재부팅 등으로 업데이트가 중간에 끊겼으면 다음 실행이 다시 한다.
+- **CI가 통과한 커밋만 배포한다(#541).** 새 main을 받기 전에, 바로 그 커밋을 main에 push 해서 시작된 `ci` workflow 실행을 GitHub API에서 읽는다(`GET /repos/codeyoma/krx-quant/actions/workflows/ci.yml/runs?event=push&head_sha=<커밋>`). 그 실행의 결론이 `success`일 때만 배포한다. 다른 커밋의 실행과 PR의 실행(PR과 main을 합친 것을 시험한다)은 세지 않는다. 같은 커밋의 실행이 둘이면 새것을 본다. 네 경우는 이렇다.
+
+  | CI | 배포 | 저널(`journalctl -u krx-quant-update`) | 텔레그램 |
+  |---|---|---|---|
+  | 통과(`success`) | 그 커밋을 배포한다(아래는 전과 같다) | `auto-update: <이전> -> <새 커밋>` | `[알림] 자동 업데이트: …` |
+  | 대기·진행 중(`queued`, `in_progress` 등), 실행이 아직 없음 | 지금 엔진을 그대로 둔다. 다음 06:00이 다시 본다 | `auto-update: keeping <돌던 커밋>: the ci of <커밋 40자> is not done (<상태>, 없으면 no run yet) <실행 주소>` | 없음 |
+  | 실패(`failure`, `cancelled`, `timed_out` 등 `success`가 아닌 결론) | 그대로 둔다 | `auto-update: keeping <돌던 커밋>: the ci of <커밋 40자> failed (<결론>) <실행 주소>` | `[알림] 자동 업데이트 보류: main <커밋>의 CI가 실패했습니다(<결론>). 엔진은 <돌던 커밋> 그대로이고, CI가 통과한 main을 기다립니다.`와 실행 주소. 커밋마다 한 번(`.auto-update-ci-failed`) |
+  | GitHub를 읽지 못함(HTTP 오류, 연결 실패, 모양이 다른 답) | 그대로 둔다. 종료 코드 1 | `auto-update: keeping <돌던 커밋>: could not read the ci of <커밋 40자> from GitHub (<이유>)`. 이유는 `HTTP 403, 0 requests left this hour`, `HTTP 503`, `URLError(ConnectionRefusedError)`, `JSONDecodeError` 같은 것이다 | `[알림] 자동 업데이트 보류: GitHub에서 main <커밋>의 CI 결과를 읽지 못했습니다(<이유>). 엔진은 <돌던 커밋> 그대로입니다.` 실행마다 |
+
+  - 같은 실패를 매일 알리지 않는다. 알린 커밋은 `.auto-update-ci-failed`에 남고, 다음 날 main이 그대로면 저널에 `told on Telegram before`만 남는다. 더 새 커밋이 또 실패하면 그 커밋으로 한 번 더 온다. 텔레그램이 받지 않은 알림은 남기지 않아서 다음 실행이 다시 보낸다. 실패한 실행을 GitHub에서 다시 돌려(re-run) 통과하면 다음 06:00이 그 커밋을 배포하고 파일을 지운다.
+  - 토큰 없이 읽는다. 저장소가 공개라 되고, 토큰 없는 한도는 서버 주소마다 시간당 60번이다. 배포할 새 커밋이 있는 실행만 한 번 묻는다(main이 그대로이거나 시작하지 못한 커밋이면 묻지 않는다). JSON은 서버의 `python3`(Ubuntu 24.04에 있다)가 표준 라이브러리로 읽는다. GitHub의 오류 글은 저널과 알림에 싣지 않는다(속도 제한의 글에 서버 주소가 든다). 주소는 `KRX_UPDATE_GITHUB_API`로 바꿀 수 있다(테스트용, 2장 "설정 값 전체").
+  - `fincept` 포인터만 옮긴 커밋은 실행이 없다. `fincept-pointer` workflow가 `GITHUB_TOKEN`으로 push 해서 다른 workflow를 시작하지 않는다(2026-11-05 확인: 포인터 커밋 `63e4cdc`의 `ci` 실행 0개). 이미지(`.dockerignore`)와 CI(서브모듈 없이 받는다)는 `fincept/`를 읽지 않으므로, main 끝의 그런 커밋들은 그 아래 첫 커밋의 결과로 본다. 저널에 `auto-update: main <커밋> only moves the fincept pointer since <아래 커밋>; its ci answers`가 남는다.
+  - 알림을 텔레그램으로 고른 이유. (1) 사람이 매일 보는 곳이고, 자동 업데이트의 결과가 이미 거기로 간다. (2) 빨간 main이 서버에 해가 되는 때는 배포를 막을 때이고, 그것을 아는 것은 06:00의 이 스크립트다. 알림 하나가 "오늘 배포하지 않은 이유"와 "main이 빨갛다"를 함께 말한다. (3) 새 비밀값, 권한, 손으로 만드는 규칙이 없고 테스트가 그대로 시험한다. Grafana 규칙은 이 스크립트의 저널이 Loki에 가지 않아 읽을 줄이 없고(텔레그램 알림만 `notify` 명령의 줄로 간다), 커넥터로 손으로 만들어 PR에서 시험할 수 없다. GitHub 이슈는 workflow에 이슈 쓰기 권한을 더해야 하고, 사람이 아니라 에이전트의 일감 목록에 쌓인다. 받아들인 것: main이 빨개진 뒤 06:00까지 최대 하루 늦게 알고, 06:00 전에 다시 녹색이 된 main은 알리지 않는다(배포를 막지 않았다).
+  - 이 변경을 처음 받는 06:00 배포는 이전 스크립트로 돌아 CI를 보지 않는다(돌던 `auto-update.sh`는 그대로 읽힌다). 그다음 실행부터 본다. 서버에서 손으로 할 일은 없다.
+
+  > **바뀜** (2026-11-05, #550): main의 최신 커밋을 CI 결과를 보지 않고 배포했다 → 그 커밋에서 `ci` workflow가 통과했을 때만 배포하고, 기다리거나 실패했거나 GitHub를 읽지 못하면 돌던 버전을 그대로 둔다. main CI가 실패하면 텔레그램으로 커밋마다 한 번 알린다. 이유: main에는 branch protection이 없어서 여러 세션이 머지한 PR이 함께 시험되지 않은 채 쌓일 수 있고, 2026-11-05 #539의 머지 커밋(3f9611e)에서 main CI가 실패했다(#540). 이를 막는 장치가 없었다(#541).
 - 평일 07:50–20:10에는 손으로 실행해도 거부한다.
 - 실행마다 먼저 커널 자동 재부팅 설정과 디스크에 남는 journal을 넣는다(`sudo -n deploy/kernel-recovery.sh`, #385, #389). main이 그대로인 날에도 돈다. 다시 돌려도 같고 엔진과 Docker는 다시 띄우지 않는다. 비밀번호 없는 sudo가 없으면 `could not apply deploy/kernel-recovery.sh …`를 남기고 업데이트는 그대로 한다(1장 12번 3단계).
 - 새 엔진이 3분 안에 API에 답하지 않으면 이전 커밋으로 되돌려 다시 띄운다. 실패한 커밋은 서버의 `.auto-update-failed`에 남아서, main이 더 바뀔 때까지 다시 시도하지 않는다.
@@ -2522,7 +2539,7 @@ docker compose start engine
 - 회원사 프레임의 필드 수 확인(#381)을 담은 엔진은 수집, 저장, 정규화를 바꾸지 않는다(08:00 무렵 필드가 모자란 회원사 프레임은 전처럼 raw에만 남고 ERROR가 난다). 그 밤 예약 작업 `probe-member-frames-381`이 녹화한 모든 날의 회원사 프레임 중 필드 수가 맞지 않는 것을 #381에 남긴다(2장 "회원사 프레임의 필드 수 확인 (#381)"). 서버에서 손으로 할 일은 없다. **삭제됨** (2026-11-04, #506): 예약 작업 `probe-member-frames-381`. 2026-10-29 밤에 돌고 `JOBS`에서 뺐다. 이유: 할 일을 마쳤다.
 - 필드가 모자란 회원사 프레임을 WARNING으로 낮추는 엔진(#419, #381)은 처음 뜰 때부터 그런 프레임을 ERROR 대신 WARNING(`H0UNMBC0 frame short of fields kept raw only (…)`)으로 남기고, 피드·키마다 그날 수를 센다(`/v1/status`의 `kis.feeds[].short_frames`, `krx-quant doctor` 2절). raw에만 남기고 이벤트를 버리는 것은 그대로다. 그래서 08:00에 Grafana 알림 `krx-quant-engine-error`가 울리지 않는다. 서버에서 손으로 할 일은 없다.
 - REST 조회 장애를 세는 엔진(#441)은 처음 뜰 때부터 조회마다 피드·키별로 호출, 실패, 오류 코드, 장애를 센다(`/v1/status`의 `kis.polls`, `krx-quant doctor` 2절). 재시도, 간격, 토큰 재발급, 주문은 바꾸지 않는다. 한 키가 3번 이상 잇달아 10분 이상 실패하면 `[장애] KIS REST 조회 …`가, 그 조회의 모든 키가 다시 답하면 `[복구]`가 온다(6장). 서버에서 손으로 할 일은 없다.
-- 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), 끝 줄에 디스크 여유와 Docker가 가진 크기(#379, 아래), `[알림] 자동 업데이트 실패: …`, 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 오류일 때 엔진은 그대로 돈다.
+- 결과는 텔레그램으로 온다(`krx-quant notify`): `[알림] 자동 업데이트: <이전> → <새 커밋>`과 커밋 제목(최대 10개), 끝 줄에 디스크 여유와 Docker가 가진 크기(#379, 아래), `[알림] 자동 업데이트 실패: …`, CI 때문에 배포하지 않으면 `[알림] 자동 업데이트 보류: …`(위, #541), 그 밖의 오류(GitHub 접속 실패 등)는 `[알림] 자동 업데이트 오류: …`. 보류와 오류일 때 엔진은 그대로 돈다.
 - 업데이트가 끝나면(새 엔진이 API에 답하고 Spot 학습용 이미지를 올린 뒤) Docker가 3일(72시간) 동안 쓰지 않은 빌드 캐시와, 컨테이너가 쓰지 않는 이미지 중 만든 지 3일이 지난 것을 이름이 있든 없든 지운다(#379): `docker builder prune -af --filter until=72h`, `docker image prune -af --filter until=72h`.
   - 도는 엔진의 이미지는 컨테이너가 쓰고 있어서 지우지 않는다.
   - 되돌리기는 이전 커밋을 다시 빌드한다. 옛 이미지가 필요 없다. 지난 3일 동안 쓴 빌드 캐시가 남아 있어서, 보통은 아무것도 다시 받지 않고 바로 만든다. 캐시가 없어도 PyPI에서 다시 받아 만든다.
@@ -2629,6 +2646,8 @@ docker compose logs --tail 200 engine
 | `[알림] <날짜> 밤 학습 결과를 쓰지 않습니다: <이유>` | `/v1/status`의 `training.reason` | 전날 모델이 계속 돈다. `final at ..., after 07:30`이면 다음 아침에 쓴다(더 새 밤이 없으면). `not in the store: ...`면 S3에 모델이 없는 것이다. 다음 아침에 다시 시도한다. |
 | `[알림] 자동 업데이트: <이전> → <새 커밋>` | 끝 줄의 `디스크 여유 … · Docker 이미지 …, 빌드 캐시 …`(#379) | 06:00 자동 업데이트가 됐다. 할 일은 없다. 디스크 여유가 날마다 줄면 아래 "디스크가 찬다" 행을 본다. |
 | `[알림] 자동 업데이트 실패: <커밋>이 시작되지 않아 ...` | `journalctl -u krx-quant-update -n 50`, `docker compose logs --tail 200 engine` | 새 커밋이 3분 안에 API에 답하지 않아 이전 커밋으로 되돌렸다. 고친 커밋을 main에 올리면 다음 06:00에 받는다. "되돌렸지만 엔진이 응답하지 않습니다"면 4장의 SQLite 스키마 주의를 본다. |
+| `[알림] 자동 업데이트 보류: main <커밋>의 CI가 실패했습니다(<결론>). …`와 실행 주소 (#541) | 그 실행의 페이지(어느 job, 어느 테스트가 실패했는지), `journalctl -u krx-quant-update -n 50` | main의 그 커밋에서 `ci`가 통과하지 않아 배포하지 않았다. 엔진은 돌던 커밋 그대로다. 고친 PR을 머지하거나, 우연한 실패면 GitHub에서 그 실행을 다시 돌린다(re-run). 다음 06:00이 통과한 main을 배포한다. 같은 커밋은 다시 알리지 않는다(4장). |
+| `[알림] 자동 업데이트 보류: GitHub에서 main <커밋>의 CI 결과를 읽지 못했습니다(<이유>). …` (#541) | `journalctl -u krx-quant-update -n 50`, 서버에서 `curl -s https://api.github.com/rate_limit`(한도를 쓰지 않는다. `rate.remaining`이 남은 수) | GitHub API가 답하지 않았거나(`HTTP 5xx`, `URLError(…)`) 시간당 60번의 토큰 없는 한도를 다 썼다(`HTTP 403, 0 requests left this hour`). 엔진은 그대로 돈다. 다음 06:00이 다시 묻는다. 바로 하려면 한 시간 뒤 장 시간 밖에서 `deploy/auto-update.sh`를 실행한다. |
 | `[알림] 자동 업데이트 오류: <명령> (줄 N). 엔진은 그대로입니다.` | `journalctl -u krx-quant-update -n 50` | GitHub 접속 실패나 fast-forward가 안 되는 체크아웃 등이다. 엔진은 그대로 돈다. 원인을 고치고 다음 06:00을 기다리거나, 장 시간 밖에서 `deploy/auto-update.sh`를 실행한다. |
 | `[알림] 예약 작업 <이름>(<날> 밤): 성공(통과, 거부, 예외, 실패, 시간 초과, 신호로 죽음), … 댓글: <주소> …` | 그 이슈의 댓글 | 결과가 올라갔고 이슈는 `ready-for-agent`다. 에이전트에게 "결과 봐줘"라고 하면 된다. `거부`는 사전 검증의 정상적인 판정이다(고장이 아니다, #440). `예외`, `실패`면 댓글의 stderr를, `신호로 죽음`이면 메모리(커널 로그의 OOM)를 본다. 말의 뜻은 3장 "예약 작업 (#215)"의 "텔레그램". 다시 돌리려면 같은 절의 "손으로 다시 돌리기" |
 | `[알림] 예약 작업 …: … GitHub에 올리지 못했습니다(<이유>). …` | `state/scheduled.json`의 `unposted`, 로그의 `could not post` | `KRX_GITHUB_TOKEN이 없음`이면 토큰을 넣는다(#218). `HTTP 401`·`403`·`404`면 토큰이 만료됐거나 권한(Issues: Read and write)이나 저장소(`KRX_GITHUB_REPO`)가 틀렸다. 고치고 `docker compose up -d`하면 시작할 때 올린다. 그 밖(`HTTP 5xx`, `not reachable`)은 다음 밤에 저절로 다시 올린다 |
@@ -3029,6 +3048,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `.auto-update-deployed` | 엔진이 마지막으로 정상 기동을 확인한 커밋 |
 | `.auto-update-failed` | 시작하지 못한 커밋. main이 바뀔 때까지 다시 시도하지 않는다 |
 | `.auto-update-push-failed` | Spot 학습용 이미지를 ECR에 올리지 못했다(#23). 다음 자동 업데이트가 새 커밋이 없어도 다시 올리고 지운다 |
+| `.auto-update-ci-failed` | `ci`가 실패해 텔레그램으로 알린 커밋(#541). 같은 커밋을 다시 알리지 않는다. CI가 통과한 커밋을 배포하면 지운다 |
 
 **Grafana Cloud Loki** (`KRX_LOKI_URL`, #358): 모든 프로세스의 로그 줄(가린 것)과 엔진의 heartbeat. 레이블 `service`, `process`, `level`. 14일 보관. 로그가 남는 곳은 여기뿐이다(6장 "Grafana Cloud Loki로 보내는 로그 (#358)").
 
