@@ -1,5 +1,6 @@
 """The engine's commands (#578): the collector, which runs the engine, and its algorithms' models and
-standing: replay, rescore, fit, pre-validate, train, simulate, roll back, retire."""
+standing: replay, rescore, fit, pre-validate, screen the pre-validations' queue, train, simulate, roll
+back, retire."""
 
 from __future__ import annotations
 
@@ -264,6 +265,43 @@ def _prevalidate(name: str, days: int, revision: bool = False) -> int:
     return 0 if result.passed else 1
 
 
+def _screen_queue(days: int, candidate: str | None, out: Path | None) -> int:
+    """The queue screen (#599): every bar-close algorithm waiting, each in its own process, and the
+    order of their pre-validations; with ``candidate``, that one's folds alone, into ``out`` (what each
+    of those processes runs)."""
+    from krx_quant.queue_screen import QUEUE, lines, save_screened, screen, screen_queue
+
+    settings = Settings.from_env(require_kis=False)
+    if candidate is not None:
+        if out is None:
+            print("--candidate needs --out: the file its folds are written to", file=sys.stderr)
+            return 2
+        try:
+            screened = screen(settings, candidate, days=days)
+        except (FileNotFoundError, ValueError) as e:
+            print(e, file=sys.stderr)
+            return 1
+        save_screened(out, screened)
+        score = "unknown" if screened.score is None else f"{screened.score:+.4f}"
+        print(f"{candidate}: score {score} ({screened.calls} calls on {len(screened.days)} days)")
+        return 0
+    from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS
+    from krx_quant.scheduled.prevalidations import prevalidation_order
+
+    turn = prevalidation_order([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)])
+    try:
+        queue = screen_queue(settings, turn, days=days)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
+    if queue is None:
+        print("queue screen (#599): no bar-close algorithm waits for its pre-validation")
+        return 0
+    for line in lines(queue, settings.state_dir / QUEUE):
+        print(line)
+    return 0
+
+
 def _simulate(which: str) -> int:
     """Simulate the probations that wait for it (#298), print what came of them; exit 1 if one
     could not run."""
@@ -365,6 +403,21 @@ def _prevalidate_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _screen_queue_arguments(parser: argparse.ArgumentParser) -> None:
+    from krx_quant.prevalidation import PREVALIDATION_DAYS
+
+    parser.add_argument(
+        "--days",
+        type=positive,
+        default=PREVALIDATION_DAYS,
+        help=f"recorded trading days the folds predict (default: {PREVALIDATION_DAYS}, the pre-validation's)",
+    )
+    parser.add_argument(
+        "--candidate", help="screen this algorithm alone, in this process (each candidate's process runs it)"
+    )
+    parser.add_argument("--out", type=Path, help="with --candidate: the file its folds are written to")
+
+
 def _simulate_arguments(parser: argparse.ArgumentParser) -> None:
     from krx_quant.simulation import BAR_CLOSE_COMMAND, DAILY
 
@@ -408,6 +461,12 @@ def add(sub: Commands) -> None:
         help="replay a new algorithm on the latest recorded days; the engine starts it only if it passes",
         arguments=_prevalidate_arguments,
     ).set_defaults(run=lambda args: _prevalidate(args.algorithm, args.days, args.revision))
+    sub.add_parser(
+        "screen-queue",
+        help="order the algorithms waiting for their pre-validation by a cheap walk-forward screen (#599);"
+        " it admits, refuses and skips none",
+        arguments=_screen_queue_arguments,
+    ).set_defaults(run=lambda args: _screen_queue(args.days, args.candidate, args.out))
     train_cmd = sub.add_parser(
         "train", help="train every algorithm on KRX_OBJECT_STORE's latest days and store the promotion list"
     )

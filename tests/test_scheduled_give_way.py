@@ -111,6 +111,7 @@ def test_the_simulations_give_way_to_the_pre_validations_only() -> None:
         "simulate-daily-298",
         "simulate-bar-close-298",
         "sample-profile-512",  # as the simulations do (#512, ``tests/test_sample_profile.py``)
+        "screen-queue-599",  # likewise (#599, ``tests/test_queue_screen.py``)
     ]
     # Listed as #298 decided; the daily pre-validations before the daily simulation, which enrolls
     # a pass that night, so it never holds them back.

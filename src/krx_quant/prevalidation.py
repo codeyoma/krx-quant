@@ -108,6 +108,7 @@ from krx_quant.algorithms import (
     Algorithm,
     Diagnostics,
     KindAlgorithm,
+    KindSample,
     Model,
     NothingToLearn,
     Sample,
@@ -1138,6 +1139,14 @@ class _WalkForward:
         the day's reference price, as the nightly training reads them; none if the day has none."""
         found = self._load(day)
         return [] if found is None else found.of(self._algorithm.features)
+
+    def kind_samples_on(self, day: date) -> list[KindSample]:
+        """``day``'s samples of a kind's algorithm (``kind``): its features, each with its kind's answer
+        of the bar close (the queue screen scores them, #599); none if the day has none."""
+        if self._kind is None:
+            raise ValueError(f"{self._algorithm.name} predicts the direction: it has no kind's samples")
+        found = self._load(day)
+        return [] if found is None else found.of_kind(self._kind, self._algorithm.features)
 
     def climate_before(self, day: date) -> Model:
         """The climate baseline's table fitted on the latest ``CLIMATE_DAYS`` days before

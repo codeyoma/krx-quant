@@ -1,0 +1,11 @@
+usage: krx-quant screen-queue [-h] [--days DAYS] [--candidate CANDIDATE]
+                              [--out OUT]
+
+options:
+  -h, --help            show this help message and exit
+  --days DAYS           recorded trading days the folds predict (default: 20,
+                        the pre-validation's)
+  --candidate CANDIDATE
+                        screen this algorithm alone, in this process (each
+                        candidate's process runs it)
+  --out OUT             with --candidate: the file its folds are written to
