@@ -54,7 +54,10 @@ by the nightly re-fit (#399, from the engine's container).
   the trader read it (null until it has: it reads them every ``CONTROL_SECONDS``);
 - ``halts`` (#396): each loss limit reached: when, the day, the limit and the P&L that reached it;
   a cumulative one's re-arm (``lifted_at``);
-- ``snapshot`` (#396): the trader's state now, one row it rewrites (``GET /v1/trader``);
+- ``snapshot`` (#396): the trader's state now, one row it rewrites (``GET /v1/trader``), and its
+  process's resident memory (``RESIDENT``, #547), which the engine's heartbeat reads
+  (``read_resident``): the trader runs in a container of its own, whose processes the engine
+  cannot see;
 - ``days`` (#396): each trading day's ledger by mode: the net P&L realized, the trades, the day's
   and the cumulative P&L at their lowest, the limits, the status and the limit reached; all of it the
   loss limits' count, and since #533 the mock book's practice trades beside it (their net that day,
@@ -505,6 +508,9 @@ DAILY_LIMIT, CUMULATIVE_LIMIT = "daily_limit", "cumulative_limit"
 # GET /v1/trader: the trader is running while its snapshot is at most this old (it rewrites it
 # every ``limits.HEARTBEAT`` at least).
 ALIVE_SECONDS = 15.0
+# The snapshot's field beside the trader's state (#547): its process's resident memory, MB (null
+# where it cannot be read). Not a field of GET /v1/trader (``TRADER_FIELDS``).
+RESIDENT = "rss_mb"
 # GET /v1/trader: the last controls shown.
 CONTROLS_SHOWN = 20
 
@@ -1899,6 +1905,30 @@ def read_trader(
             rows = db.execute("SELECT * FROM controls ORDER BY id DESC LIMIT ?", (CONTROLS_SHOWN,))
             body["controls"] = [_control(r).as_json() for r in rows]
     return body
+
+
+def read_resident(path: Path, now: datetime) -> float | None:
+    """The trader's resident memory in MB as its snapshot says it (#547, the engine's heartbeat), while
+    it runs: the snapshot at most ``ALIVE_SECONDS`` old at ``now``. None without a store or a snapshot,
+    for one without the figure (written before #547, or where ``/proc`` cannot be read), or when the
+    store cannot be read (one being made, without its tables yet)."""
+    try:
+        with reading(path) as db:
+            row = None if db is None else db.execute("SELECT at, body FROM snapshot WHERE id = 1").fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        updated = datetime.fromisoformat(row["at"])
+        value = json.loads(row["body"]).get(RESIDENT)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if abs((now - updated).total_seconds()) > ALIVE_SECONDS:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
 
 
 # The fields of the trader's state it writes (``PaperTrader.state``) and GET /v1/trader gives.

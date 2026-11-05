@@ -17,6 +17,7 @@ which ``docker compose logs`` keeps until the 06:00 deploy makes a new container
   night=<night>``), between a line saying what started and one with its exit code (or the time
   limit that stopped it). The engine tells it so (``BY_PARENT``): it sends nothing itself. Its
   output also comes back whole (``Ran``): the exit code, the last step the training started.
+  While it runs, ``running`` names it, and the engine's heartbeat says its memory (#547).
 
 This module was ``log_files.py`` (#356), which also wrote each process's lines to files under
 ``state/logs`` and packed them for an agent (``krx-quant logs-bundle``). Those went in #360: the
@@ -144,18 +145,30 @@ class Ran:
 @dataclass(frozen=True)
 class Child:
     """What a process the engine starts is, for its lines in Loki (#358): the ``process`` label,
-    and the fields each of its lines starts with (its night, its job)."""
+    and the fields each of its lines starts with (its night, its job); and what the engine's
+    heartbeat calls it while it runs (#547, ``running``)."""
 
     process: str
     fields: str
+    name: str = ""
 
     @classmethod
     def training(cls, night: date) -> Child:
-        return cls(loki.TRAINING, f"night={night.isoformat()}")
+        return cls(loki.TRAINING, f"night={night.isoformat()}", "training")
 
     @classmethod
     def job(cls, name: str, night: date) -> Child:
-        return cls(loki.JOB, f"job={name} night={night.isoformat()}")
+        return cls(loki.JOB, f"job={name} night={night.isoformat()}", f"job {name}")
+
+
+# The processes ``run_logged`` started that have not ended (#547): pid -> what it is.
+_running: dict[int, str] = {}
+
+
+def running() -> dict[int, str]:
+    """The processes the engine started that run now, for its heartbeat's memory (#547): each pid
+    and what it is (``Child.name``: ``training``, ``job <name>``; else the program's name)."""
+    return dict(_running)
 
 
 class ChildLog:
@@ -230,6 +243,7 @@ async def run_logged(
         readers.append(asyncio.create_task(out.copy(process.stderr, stderr)))
     # The process's end is timed too: one that closes its output early still stops at the limit.
     ended = asyncio.create_task(process.wait())
+    _running[process.pid] = (child.name if child else "") or os.path.basename(shown(command)[0])
     try:
         try:
             _, pending = await asyncio.wait([*readers, ended], timeout=timeout.total_seconds())
@@ -240,6 +254,7 @@ async def run_logged(
         finally:
             for task in (*readers, ended):
                 task.cancel()
+            _running.pop(process.pid, None)
     except BaseException:  # cancelled: it stops with the engine
         _kill(process)
         out.note(

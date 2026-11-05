@@ -11,11 +11,12 @@ refusal (HTTP 4xx) is not tried again. At most ``MAX_QUEUED`` messages wait: a n
 dropped and counted, so that the order holds. When the process stops, ``close`` sends what is left
 for ``CLOSE_SECONDS`` at most.
 
-Each message is logged before it is queued (``alert: <text>``, WARNING), and again once Telegram
-has taken it (``telegram sent: <text>``, INFO), or once it is dropped, and why (``telegram send
-failed: …``, ERROR). A try that is followed by another logs ``telegram send retry in <n>s: …``
-(WARNING). The ``telegram sent`` line says it reached Telegram: a Grafana alert rule that stands
-in for an alert the engine could not send reads it (#358, docs/operations.md "Grafana 알림 규칙").
+Each message is logged before it is queued (``alert: <text>``, WARNING; the nightly training's
+summary at INFO, #580: a report, no warning), and again once Telegram has taken it (``telegram
+sent: <text>``, INFO), or once it is dropped, and why (``telegram send failed: …``, ERROR). A try
+that is followed by another logs ``telegram send retry in <n>s: …`` (WARNING). The ``telegram
+sent`` line says it reached Telegram: a Grafana alert rule that stands in for an alert the engine
+could not send reads it (#358, docs/operations.md "Grafana 알림 규칙").
 """
 
 from __future__ import annotations
@@ -116,13 +117,15 @@ class Alerts:
         self._active.discard(key)
         self._send(f"[복구] {text}")
 
-    async def deliver(self, text: str) -> bool:
+    async def deliver(self, text: str, *, level: int = logging.WARNING) -> bool:
         """Send a notice that is not a problem to resolve (an algorithm to retire) and wait:
         whether it went. It takes its place in the queue and its tries (#489), so the wait can
         last about two minutes while Telegram cannot be reached. Not without Telegram set up (it
-        is only logged), so it is asked for again once it is.
+        is only logged), so it is asked for again once it is. ``level`` is its ``alert:`` line's: a
+        report that is no warning (the nightly training's summary, #580) is logged at INFO, so
+        that its lines are not counted as warnings.
         """
-        log.warning("alert: %s", text)
+        log.log(level, "alert: %s", text)
         if self._url is None:
             return False
         went: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
@@ -279,15 +282,16 @@ def _retry_after(body: str) -> float | None:
     return seconds if seconds >= 0 else None
 
 
-async def send_notice(settings: Settings, text: str) -> bool:
+async def send_notice(settings: Settings, text: str, *, level: int = logging.WARNING) -> bool:
     """Send a notice outside the collector (a training summary, the auto-update's); whether it
-    went. The process waits for its tries (#489), about two minutes at most."""
+    went. The process waits for its tries (#489), about two minutes at most. ``level``: its
+    ``alert:`` line's (``Alerts.deliver``)."""
     async with aiohttp.ClientSession() as session:
         alerts = Alerts(
             session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
         )
         try:
-            return await alerts.deliver(text)
+            return await alerts.deliver(text, level=level)
         finally:
             await alerts.close()
 
