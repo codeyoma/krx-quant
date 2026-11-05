@@ -24,6 +24,7 @@ FIRST = (
     "probe-sample-keys-565",
     "probe-sample-keys-565-again",
     "trader-report",
+    "recording-quality-570",
     "fill-notice-layout-403",
     "signal-review-206-1201",
     "probe-live-account-408",
