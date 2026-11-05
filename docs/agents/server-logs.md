@@ -89,6 +89,21 @@ scripts/loki-query.sh '{service="krx-quant"} |~ "held the event loop|quotes stal
   --from 2026-11-06T09:00 --to 2026-11-06T15:40 --forward --limit 1000
 ```
 
+**Engine API requests by route** (#588): the API logs no line a request. One INFO line at each 00:00 KST and one when the API stops (07:20 restart, 06:00 deploy) counts the requests since the line before, by route pattern: `Engine API requests from <since> to <until>: <N> in all; GET /v1/status 41230 (200 41229, 503 1) p95 3ms; …; GET /v1/stream 4 (101 4), WebSocket p95 7201s max 25200s, 1 open; unmatched 3 (404 3) p95 1ms; not called: GET /v1/algorithms/{name}, …`. Statuses, the p95 milliseconds to the answer, the stream's connections by their seconds; never an address, query or path value (operations.md "엔진 API 요청 수 (#588)" says what each part is).
+
+```bash
+scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "Engine API requests from "' --since 14d --forward --limit 100
+```
+
+- Whether one route was called at all: `|= "; GET /v1/algorithms/{name} "` on the same selector (a route in the `not called:` list is followed by a comma, not a space). No line means no one called it.
+- Its requests over 14 days (connector, `queryType: "instant"`):
+
+  ```
+  sum(sum_over_time({service="krx-quant", process="engine"} |= "Engine API requests from "
+    |= "; GET /v1/algorithms/{name} " | regexp `; GET /v1/algorithms/\{name\} (?P<n>\d+) `
+    | unwrap n | __error__="" [14d]))
+  ```
+
 **ERRORs in the last 24 hours:**
 
 ```bash
