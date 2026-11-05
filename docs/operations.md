@@ -1710,7 +1710,7 @@ mock 모드의 trader는 시작할 때마다(06:00 배포, 재시작, watchdog�
 - **장부와 다른 계좌**: 장부에 없는 보유(005930이 장부의 열린 매매보다 많거나 다른 종목), 장부에 없는 오늘의 미체결 주문, 계좌에 없는 장부의 주식, 가리지 못한 응답 없는 매수가 있으면 그것을 건드리지 않고 새 진입을 멈춘다(`controls`의 `pause`, `source` `reconcile`, 상태 `entries_paused`). 장부의 포지션은 원래 규칙대로 판다. `[알림] 자동 매매(mock): 시작할 때 KIS 계좌가 장부와 다릅니다: 장부에 없는 보유 005930 3주 (…); 장부에 없는 미체결 주문 1건; …`가 온다. 다시 시작해 같은 것을 찾으면 다시 알리지 않는다. 주문 프로브가 그날 돈 동안의 주문(`state/scheduled.json`)은 세지 않는다. 프로브가 남긴 주식은 가릴 수 없어 장부에 없는 보유로 보인다(알림이 그렇다고 적는다).
 - **할 일**: KIS 모의투자 계좌(HTS·MTS)에서 보유와 미체결을 본다. 장부 밖의 것은 손으로 팔거나 취소해도 되고 그대로 두어도 된다. 그다음 서버에서 `docker compose exec trader krx-quant trade resume`(trader 컨테이너가 멈춰 있으면 `docker compose run --rm trader trade resume`). 재개는 그때 장부 밖에 있던 보유와 주문을 trader의 것이 아닌 것으로 받아들인다: 다음 시작부터는 그보다 많아질 때만 다시 멈춘다. 계좌에 없는 장부의 주식은 받아들이지 않는다: 다음 시작에 다시 멈추므로, 장부를 고치는 일은 에이전트에게 맡긴다.
 - KIS를 읽지 못하면 `[알림] 자동 매매(mock): 시작할 때 KIS 계좌를 읽지 못했습니다(…). 장부와 맞추기 전에는 사지도 팔지도 않고, 30초마다 다시 읽습니다.`가 오고, 읽으면 `[알림] 자동 매매(mock): KIS 계좌를 읽어 장부와 맞췄습니다.`가 온다. 그동안 읽은 예측은 사지 않는다(`decisions.reason` `reconciling`).
-- **서버가 멈춰 있던 동안의 위험**: trader가 멈춰 있으면 손절가와 시간 장벽을 아무도 보지 않는다. KIS에는 걸어 둔 익절 매도만 남아, 값이 목표가에 닿으면 팔리지만 손절가 아래로 내려가도 팔리지 않는다. 그 익절 매도도 당일 주문이라 그날 장 마감(15:30)에 끝나고, 그 뒤에는 KIS에 아무 주문도 없다. 멈춘 서버는 watchdog(#385)이 15분 뒤에 다시 켜고, 다시 뜬 trader가 위대로 판다: 그사이 손절가 아래로 얼마나 내려갔든 그때의 매수 1호가에 판다. 다음 날까지 멈춰 있었으면 그 매매는 다음 거래일의 첫 호가에 판다(그 호가가 09:00 전에 오면 시가 단일가에 들어간다).
+- **서버가 멈춰 있던 동안의 위험**: trader가 멈춰 있으면 손절가와 시간 장벽을 아무도 보지 않는다. KIS에는 걸어 둔 익절 매도만 남아, 값이 목표가에 닿으면 팔리지만 손절가 아래로 내려가도 팔리지 않는다. 그 익절 매도도 당일 주문이라 그날 장 마감(15:30)에 끝나고, 그 뒤에는 KIS에 아무 주문도 없다. 멈춘 서버는 watchdog(#385)이 15분 뒤에 다시 켜고, 다시 뜬 trader가 위대로 판다: 그사이 손절가 아래로 얼마나 내려갔든 그때의 매수 1호가에 판다. 다음 날까지 멈춰 있었으면 그 매매는 다음 거래일의 첫 호가에 판다(그 호가가 09:00 전에 오면 시가 단일가에 들어간다). 서버는 살아 있고 trader만 멈췄으면(watchdog은 재부팅하지 않는다) 엔진이 장중에 `[장애]`로 알린다(아래 "trader 침묵 (#542)").
 - 로그(Loki `{service="krx-quant", process="trader"}`): INFO `trader: the KIS account is as the ledger has it (outside it, accepted: …)`, `trader: the take_profit sell of trade N left on KIS is over (…)`, `trader: the buy left open on KIS on <날> is over with its day`, `trader: the buy at <가격> sent on <날> is not on KIS: it did not go in`. WARNING `trader: the KIS account is unlike the ledger (…): new entries paused`, `trader: the buy at <가격> whose answer was lost was found on KIS: … adopted`, `trader: could not read the KIS account to reconcile it with the ledger (…)`.
 - 기록: `docker compose exec trader python -c 'import sqlite3; [print(r) for r in sqlite3.connect("file:/state/trader.sqlite3?mode=ro", uri=True).execute("select at, status, detail, resumed_at from reconciles order by id desc limit 10")]'`. `outside` 열에는 KIS 주문번호가 있으니 공개 이슈에 붙이지 않는다.
 
@@ -1758,6 +1758,37 @@ mock으로 시작한 날부터 비용 지도에서 시장가 왕복으로 통과
   - 같은 분에 trader의 `quotes stalled`가 있는지 맞춰 본다. 단계가 `records`나 `consensus`이고 알고리즘들이 도는 동안이면 저장소 호출이 GIL을 기다린 것이다(수집기는 GIL을 0.5 ms마다 넘긴다, `collector.GIL_SWITCH_SECONDS`). `other`가 크면 그 시각의 엔진 API 요청(화면)이나 다른 작업을 본다.
 - Loki: `{service="krx-quant", process="engine"} |= "held the event loop"`. 하루 수: `sum(count_over_time({service="krx-quant", process="engine"} |= "held the event loop" [1d]))`. 끊김과 함께 보려면 `{service="krx-quant"} |~ "held the event loop|quotes stalled"`.
 - 할 일: 하루 몇 번이고 1–2초면 없다. 5초 가까운 줄이 잦으면 가장 큰 단계를 이슈로 남긴다(무엇을 루프 밖으로 옮기거나 가볍게 할지). 알림 기준(trader의 5초)은 바꾸지 않는다(#538).
+
+#### trader 침묵 (#542)
+
+trader는 수집기와 따로 산다(위, [design.md](design.md#14-자동-매매-393) 14장 "프로세스"). 그래서 trader만 멈추면(메모리 부족, 예외로 끝남, 손으로 멈춤, 시작하자마자 끝나며 다시 뜨기를 되풀이함) 서버와 엔진은 그대로 돌고 watchdog(#385)도 재부팅하지 않는다. 그동안 손절가와 시간 장벽을 아무도 보지 않는다(위 "시작할 때 계좌 맞추기 (#406)"의 "서버가 멈춰 있던 동안의 위험"). 엔진(수집기)이 그것을 텔레그램으로 알린다(`trader_watch.py`). trader의 코드와 동작은 바뀌지 않았다: 엔진이 없어도 전처럼 돈다.
+
+- 엔진은 5초마다(`trader_watch.CHECK_SECONDS`) trader 저장소(`state/trader.sqlite3`의 `snapshot`)를 읽기만 하고 trader가 상태를 마지막으로 쓴 때를 본다. trader는 상태를 적어도 5초마다, 열린 포지션의 매수 1호가가 움직이면 1초마다 쓴다(`GET /v1/trader`의 `alive`가 읽는 것과 같다. 그것은 누가 물을 때만 읽힌다).
+- 거래일의 장중(개장부터 종가 단일가가 끝날 때까지, 보통 09:00–15:30. 늦게 여는 날은 엔진의 시장 달력대로)에 마지막 상태가 60초(`SILENT_SECONDS`) 넘게, 그 상태에 열린 포지션이 있으면 20초(`HOLDING_SECONDS`) 넘게 오래되면 한 번 알린다:
+
+  ```
+  [장애] 자동 매매(mock): trader가 1분 2초 동안 상태를 쓰지 않았습니다(마지막 10:00:05, 열린 포지션 없음). trader가 멈췄으면 손절가와 시간 장벽을 아무도 보지 않습니다. 서버에서 `docker compose ps trader`와 `docker compose logs --tail 50 trader`를 봅니다(docs/operations.md 3장 "trader 침묵 (#542)").
+  ```
+
+  - 괄호 안의 모드는 마지막 상태의 것이다. 열린 포지션이 있으면 `열린 포지션 있음: 매매 <번호>`다(`/v1/trader/trades`의 그 매매). 마지막 상태가 다른 날이면 `마지막 11-04 15:02:11`이다. 시간은 `N초`, `N분 M초`, `N시간 M분`이다.
+  - 기준: 60초는 이슈(#542)가 정했다. 20초는 #551이 정했다(이슈는 "더 빨리"만 적었다): 포지션을 들고 있는 trader는 1–5초마다 쓰므로 하트비트 네 번을 놓친 때이고, `alive`가 거짓이 되는 15초(`store.ALIVE_SECONDS`)도 지났다. 엔진이 5초마다 보므로 알림은 마지막 상태에서 20–25초(포지션 없음: 60–65초) 뒤에 온다. 2026-10-30 – 11-05(Loki의 trader 줄 전체)에 trader는 06:00 배포 때만 멈췄다(7번, 모두 `exit 0`, 11–27초 뒤 다시 시작). 장중에 멈춘 적은 없어서 이 기준으로 알렸을 날은 없다.
+  - 둘 다 코드의 상수이고 설정 값이 아니다.
+- 장 밖(휴장일, 개장 전, 장 마감 뒤, 06:00 배포와 07:20 수집기 재시작)에는 알리지 않는다. 개장 전부터 멈춘 trader는 개장(보통 09:00) 때 알린다. trader가 상태를 한 번도 쓰지 않은 서버(저장소나 상태가 없다)는 알리지 않는다.
+- trader가 다시 쓰기 시작해 60초(`RECOVER_SECONDS`) 동안 이어 쓰면 한 번 온다. 그동안 끊김 없이 읽어야 한다: 5초마다 읽은 상태가 모두 15초 안의 것이고, 앞 읽기와 15초 넘게 벌어지지 않고, 그 사이에 상태가 없거나 저장소를 읽지 못한 읽기가 없어야 한다. 하나라도 있으면 60초를 처음부터 다시 센다. 장 밖에서도 온다(전날 멈춘 trader를 06:00 배포가 다시 띄운 때 등):
+
+  ```
+  [복구] 자동 매매(mock): trader가 다시 상태를 씁니다(10:04:17부터, 멈춘 동안 4분 12초).
+  ```
+
+  - 한 번 쓰고 다시 멈추는 trader(시작하자마자 끝나 Docker가 다시 띄우기를 되풀이한다. Docker는 다시 띄울 때마다 기다림을 두 배로 늘려 곧 몇십 초 간격이 된다)에는 `[복구]`도 새 `[장애]`도 보내지 않는다: 알린 침묵이 이어진다.
+- 같은 침묵은 한 번만 알린다. 엔진은 알린 침묵을 그 마지막 상태의 시각으로 `state/trader_alert.json`에 남겨(8장), 그동안 엔진이 다시 떠도(07:20, 메모리 부족) 다시 보내지 않고 `[복구]`는 보낸다.
+- 저장소를 읽지 못하면 WARNING `could not read the trader's state in <경로> (<오류>): read again every 5s`를 한 번 남기고 5초마다 다시 읽는다(다시 읽히면 INFO `the trader's state is read again`). 그동안은 알리지 않는다.
+- Loki: 알림은 엔진의 줄이다: `{service="krx-quant", process="engine"} |= "alert: [" |= "trader가"`(텔레그램에 닿았으면 `telegram sent: …`도). 그때 trader가 무엇을 했는지는 `{service="krx-quant", process="trader"}`의 마지막 줄과 `krx-quant trade ended: exit <코드>`, `krx-quant trade started (pid …)`다. `exit -9 (SIGKILL)`는 메모리 부족이다.
+- 할 일:
+  1. `docker compose ps trader`(`Up`인지, `Restarting`인지)와 `docker compose logs --tail 50 trader`. 메모리 부족이면 `sudo journalctl -k | grep -i -E 'oom|killed process'`.
+  2. 멈춰 있으면 `docker compose up -d trader`. 다시 뜬 trader는 무엇이든 사고팔기 전에 계좌와 장부를 맞추고(mock, live. 위 "시작할 때 계좌 맞추기 (#406)"), 열린 매매를 원래 규칙대로 판다.
+  3. 다시 뜨지 않는데 열린 포지션이 있으면(mock, live) KIS 계좌(HTS·MTS)에서 보유와 걸린 익절 매도를 보고 손으로 판다. 장부를 고치는 일은 에이전트에게 맡긴다.
+  4. 되풀이해 끝나면(`Restarting`) 로그의 traceback을 이슈로 남긴다.
 
 #### 실전 (#408)
 
@@ -2642,6 +2673,7 @@ docker compose logs --tail 200 engine
 | `[알림] 자동 매매(live): 실전 첫 단계(…)를 점검대로 마쳤습니다. 운용 상한을 250,000원에서 1,000,000원으로 올립니다.` | `/v1/trader`의 `live.ramp.lifted_at` | 첫 단계의 체결 차이와 점검이 맞아 상한을 올렸다(#408). 할 일은 없다 |
 | `[알림] 자동 매매(live): 실전 첫 단계의 점검을 벗어나 새 진입을 멈췄습니다: …` | `/v1/trader`의 `status`(`entries_paused`), `pause.source`(`ramp`), `live.ramp.checks`, 밤 리포트의 "실전 준비" | 첫 단계에서 주문 실패, 계좌 맞추기 멈춤, 끝나지 않은 주문, 종가 뒤 청산, KIS 대조가 다른 날, 또는 기간을 채운 뒤 체결 차이가 기준을 넘었다(#408). 들고 있는 것은 원래 규칙대로 판다. 까닭을 본 뒤(에이전트에게 맡겨도 된다) `docker compose exec trader krx-quant trade resume`: 첫 단계를 그때부터 다시 센다 |
 | `[알림] 자동 매매(<mock\|live>): <날>의 주문이 장부와 KIS 주문 체결 조회에서 다릅니다(…)` | 저장소의 `order_checks`, 밤 리포트의 "실전 준비" | 장 마감 뒤 trader가 그날 장부의 주문을 KIS와 견주었더니 달랐다(#408). 그날은 실행 점검에서 통과로 세지 않는다. 한국투자증권 계좌의 그날 주문을 보고, 다른 까닭은 에이전트에게 맡긴다 |
+| `[장애] 자동 매매(<모드>): trader가 <시간> 동안 상태를 쓰지 않았습니다(마지막 <시각>, 열린 포지션 …). …` (#542) | `docker compose ps trader`, `docker compose logs --tail 50 trader`, Loki `{service="krx-quant", process="trader"}`의 마지막 줄과 `krx-quant trade ended: exit <코드>` | 장중에 trader가 상태를 60초(열린 포지션이 있으면 20초) 넘게 쓰지 않았다. 엔진이 한 번 알린다(3장 "trader 침묵 (#542)"). 멈춰 있으면 `docker compose up -d trader`. 다시 뜨지 않는데 열린 포지션이 있으면 KIS 계좌에서 손으로 판다. trader가 60초 동안 다시 쓰면 `[복구] 자동 매매(<모드>): trader가 다시 상태를 씁니다(…)`가 온다. |
 | `[장애] 엔진 API를 열지 못했습니다` | 로그의 `Engine API not started on ...` | 녹화와 예측은 계속한다. 다른 프로세스가 8080을 쓰는지 확인하고 `docker compose up -d`로 다시 띄운다. |
 | 알고리즘을 다시 학습하고 싶다 | 밤 학습 결과는 텔레그램과 `/v1/status`의 `training` | 밤 학습이 매일 한다. 당장 바꾸려면 알고리즘마다(`newton`, `gauss`, `granger`, `markov`, `kalman`, `shannon`, `poisson`, `turing`) `docker compose run --rm --no-deps engine fit <이름>`. 엔진이 1분 안에 새 모델로 바꾼다. 되돌리려면 `docker compose exec engine krx-quant rollback <이름>`(위 "밤 학습과 모델 교체"). |
 | `[알림] 사전 검증 대기: <이름>. 검증을 통과해야 돌기 시작합니다. <누가 언제 검증하는지>. 결과는 #204에 댓글로 올라옵니다. 손으로 돌릴 것은 없습니다.` | `curl -s http://krx-quant:8080/v1/algorithms`에 그 이름이 없다 | 새로 등록됐거나 코드·정답 버전·입력이 바뀐 알고리즘이 사전 검증을 기다린다. 할 일은 없다: 봉 마감 알고리즘은 녹화가 10거래일 이상이면 밤 학습 뒤 예약 작업이 한 밤에 하나씩 차례로, 하루 한 번 예측 알고리즘은 그 입력과 정답이 다 들어온 첫 밤에 검증해 #204에 남긴다(3장 "새 알고리즘 사전 검증"). 알고리즘이 기다리는 코드·정답 버전·입력마다 한 번 온다: DB의 `runs`(`kind`가 `prevalidation_waiting`)에 남아 엔진이 다시 시작해도 다시 오지 않는다(#516). 손으로 다시 돌리는 법(에이전트용)은 3장에 있다. 사전 검증이 지금 코드를 거부한 알고리즘에는 오지 않는다(아래 `사전 검증 거부`, #369). |
@@ -2966,6 +2998,24 @@ rm -rf ~/krx-quant/state/logs
    - 문구: `[Grafana] KIS WebSocket이 지난 1시간에 {{ $values.A.Value }}번 짧게 끊겼다가 30초 안에 다시 붙었습니다. 한 번씩은 알리지 않지만(#488), 이렇게 잦으면 KIS 연결이나 서버 네트워크를 봅니다. Loki: {service="krx-quant", process="engine"} |= "short drop"`
    - 2026-11-04에 사용자의 요청으로 에이전트가 커넥터로 만들었다(평가 상태 `ok`, #508).
 
+**제안: 아직 만들지 않은 규칙 (#542).** 위 규칙은 엔진의 줄만 본다. 2026-11-02 14:00의 `trader: the sell order unknown (-): …`와 11-03 14:02의 `telegram send failed: Telegram not reachable: …`(둘 다 ERROR)는 trader(`process="trader"`)의 줄이라 어느 규칙에도 걸리지 않았다. 아래는 저장소 밖의 설정이라 #551은 만들지 않았다. 사용자가 확인하면 에이전트가 커넥터로 만들고 이 절의 목록에 옮긴다.
+
+5. **trader의 예상 못 한 ERROR·CRITICAL** (`krx-quant-trader-error`, 제안): 2번과 같은 틀을 trader의 줄에 둔다.
+   - 질의 A(instant):
+     ```
+     sum by (logger, message) (count_over_time(
+       {service="krx-quant", process="trader", level=~"error|critical"}
+         | regexp ` (?:ERROR|CRITICAL) (?P<logger>[\w.]+): (?:trader: )?(?P<message>[^0-9:(\[\n]{1,40})`
+         | logger != ""
+       [10m]))
+     ```
+   - trader의 메시지는 거의 `trader: `로 시작해서, 그것을 건너뛰고 뒤의 앞부분으로 묶는다(`the sell order unknown `, `telegram send failed`).
+   - 2026-11-05에 이 질의(창 1일)를 `scripts/loki-query.sh`로 11-01 – 11-05에 돌려 보았다: 묶음은 둘, `krx_quant.trader.limits`의 `the sell order unknown `과 `krx_quant.notify`의 `telegram send failed`였다(위의 두 줄).
+   - 빼는 틀은 없다. trader가 텔레그램으로 알리는 ERROR는 그날 첫 KIS 주문 실패(`[알림] 자동 매매(<모드>): … 주문을 …`)뿐이고 그날 둘째부터는 알리지 않는다. 그래서 겹치는 것은 하루 첫 실패 하나다.
+   - 조건, 대기, 데이터 없음, 그룹은 2번과 같다.
+   - 문구: `[Grafana] krx-quant trader ERROR: {{ $labels.logger }}: {{ $labels.message }}… (지난 10분 {{ $values.A.Value }}줄). trader가 알리지 않은 오류일 수 있습니다.`
+6. **trader 로그 끊김** (제안하지 않음): 장중의 trader 침묵은 엔진이 알린다(3장 "trader 침묵 (#542)"). 엔진이나 서버가 멈추면 1번이 알린다. Loki의 trader 줄로 침묵을 보는 규칙(예: 10분 동안 줄 없음)은 지금은 맞지 않는다. trader는 매매가 없으면 줄을 남기지 않는다: 2026-11-05 장중에 trader 줄 사이의 가장 긴 틈은 42분(13:00 전)이었고, 밤에는 몇 시간씩 없다. trader에 엔진의 heartbeat 같은 줄이 생기면 1번의 틀(`process="trader"`)로 장 밖까지 볼 수 있다.
+
 LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때는 아직 로그가 없어 결과는 비었다). 규칙을 만들면 만든 날과 Grafana의 규칙 uid를 이 절에 적는다.
 
 ## 7. 비용
@@ -3045,6 +3095,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `training-samples/date=<날>/<키>.json.gz` | 표본 저장소(#370): 밤 학습이 만든 날마다의 표본(모든 알고리즘의 피처, 정답, 종류의 정답)과 그것을 만든 키. 다음 밤은 키가 같으면 다시 만들지 않고 읽는다. 사전 검증과 수습 시뮬레이션도 읽는다(쓰지 않는다. 백필 날도 #374부터, 그 전에는 녹화한 날만). 학습이 끝나면 그 밤의 어느 단계도 읽지 않는 날과 다른 키의 파일, 반쯤 쓴 `.tmp`를 지운다. 지워도 된다: 다음 밤 하루만 모든 날을 다시 만들어 오래 걸린다. 위 "밤 학습과 모델 교체"의 "날마다의 표본은 표본 저장소에 둔다" |
 | `training-cache/` | 밤 학습이 Object Store에서 받아 둔 백필 1분봉과 녹화 이벤트의 사본. 키 경로가 같다. 학습이 끝나면 그 밤에 쓴 가장 오래된 날보다 오래된 날짜를 지운다  그 날의 표본이 읽는 앞선 날(시간대 수익률이면 20거래일, #274)은 남긴다 |
 | `disk_alert.json` | `{"low": ["data"]}`: 여유가 기준보다 작다고 알린 디스크(#379). 그 디스크를 먼저 읽은 폴더(`data`, `state`)로 적는다. 재시작해도 다시 알리지 않고, 여유가 돌아오면 `[복구]`를 보내고 지운다. 디스크가 가득 차 쓰지 못하면 재시작 뒤 한 번 더 알린다 |
+| `trader_alert.json` | `{"silent_since": "<ISO 시각>"}`: 엔진이 알린 trader 침묵의 마지막 상태 시각(#542, 3장 "trader 침묵 (#542)"). 재시작해도 그 침묵을 다시 알리지 않고, trader가 다시 쓰면 `[복구]`를 보내고 `null`로 바꾼다. trader는 읽지 않는다 |
 | `cost_guard.json` | Cost Guard가 이달 한 일(#23): `month`(UTC `YYYY-MM`), `warned`(알린 비율, %), `stopped`(Spot 스케줄을 끔), `stop_told`(끈 것을 알림), `spent`(이달 값으로 마지막에 읽은 비용), `carried`(지난달 마지막 비용. 이 값 이상이 보이는 동안은 지난달 값으로 본다). 재시작해도 다시 알리지 않으려고 둔다. 잃어도 다음 달 1일에 스케줄을 다시 켠다 |
 | `scheduled.json` | 예약 작업의 상태(#215): 작업마다 마지막으로 돈 것(`day`, `outcome`, `started_at`, `commit`, `exit_code`, `seconds`, `timed_out`, `comments`)과 아직 올리지 못한 결과(`unposted`), 수습 시뮬레이션이 사전 검증에 자리를 내준 밤(`gave_way`, #376). 형식은 3장 "예약 작업 (#215)". `.scheduled.json.tmp`는 쓰는 중인 임시 파일, `scheduled.json.bad`는 읽지 못해 옮겨 둔 것이다 |
 | `snapshots.json` | 서버 요약(#322): 지난 1시간에 요약을 올린 이슈와 시각(`posted`: `issue`, `at`), 댓글은 올렸는데 `needs-server-snapshot` 라벨을 떼지 못한 이슈(`unlabel`). 재시작해도 한도가 이어지게 둔다. 통째로 바꿔 쓴다(`.snapshots.json.tmp`). 잃으면 한도가 처음부터 다시 센다(6장 "서버 상태 보기 (#322)") |

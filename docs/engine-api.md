@@ -1474,7 +1474,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 (값은 지어낸 예다.)
 
-- `updated_at`: trader가 상태를 마지막으로 쓴 때. `alive`: 그것이 엔진의 지금과 15초 안이면 참이다(trader가 돈다). 거짓이면 아래 값은 trader가 멈추기 전의 것이다.
+- `updated_at`: trader가 상태를 마지막으로 쓴 때. `alive`: 그것이 엔진의 지금과 15초 안이면 참이다(trader가 돈다). 거짓이면 아래 값은 trader가 멈추기 전의 것이다. 장중에 `updated_at`이 60초(열린 포지션이 있으면 20초) 넘게 오래되면 묻는 이가 없어도 엔진이 텔레그램으로 한 번 알린다(#542, [operations.md](operations.md) 3장 "trader 침묵 (#542)").
 - `mode`: `paper`, `mock`(#405) 또는 `live`(#408). trader가 실제로 도는 모드다: `KRX_TRADER_MODE=live`라도 실전 관문과 실행 점검 전에는 `paper`다(`live.configured`가 그것을 말한다). **바뀜** (2026-10-31, #425): `paper` 또는 `mock` → `live`가 더해졌다. 이유: #408. `status`: `running`(돈다), `entries_paused`(새 진입 정지), `paused`(정지하고 즉시 매도), `order_failed`(mock에서 KIS 주문이 실패해 오늘은 새로 사지 않음, #405), `daily_limit`(하루 손실 한도로 오늘 멈춤), `cumulative_limit`(누적 손실 한도로 `rearm`까지 멈춤). 여럿이 맞으면 `cumulative_limit`, `daily_limit`, `paused`, `entries_paused`, `order_failed` 순서로 앞의 것이다. `champion`·`gate`·`policies`는 어느 모드에서도 paper의 기록이다(mock에서는 챔피언의 그림자 장부의 것, #405). **바뀜** (2026-10-30, #422): `mode`는 `paper`뿐이었고 `order_failed`가 없었다 → mock과 그 주문 실패가 들어왔다. 이유: #405. `started_at`: 이번 시작.
 - `capital`: 운용 상한(원). `cash`: 주문 가능 현금(모의: 운용 상한 + 청산한 매매의 순손익 − 열린 포지션의 매수 금액과 수수료).
 - `position`: 열린 포지션, 없으면 `null`. `bid`·`bid_at`은 평가에 쓴 매수 1호가와 그 받은 시각(산 뒤의 호가가 아직 없으면 `null`), `unrealized`는 그 매수 1호가에 지금 팔면 받을 순손익(매수·매도 수수료와 매도세를 뺀다), `selling`은 정지·한도가 팔게 해서 다음 호가를 기다리는지, mock(#405)에서는 KIS에 팔고 있는지(손절·시간·정지·한도의 팔기가 시작됐다)다. mock의 `unrealized`는 이미 판 몫(익절 매도의 일부 체결, 팔고 있는 매도)을 그 체결 금액으로, 남은 주식만 그 매수 1호가로 센다.
