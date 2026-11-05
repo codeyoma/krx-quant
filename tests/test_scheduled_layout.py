@@ -25,6 +25,8 @@ FIRST = (
     "probe-sample-keys-565-again",
     "trader-report",
     "recording-quality-570",
+    "night-book-bytes-605",
+    "night-book-verdict-605",
     "signal-review-206-1201",
     "probe-live-account-408",
     "error-holdout-447",
