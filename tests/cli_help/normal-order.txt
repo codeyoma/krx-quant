@@ -1,0 +1,5 @@
+usage: krx-quant normal-order [-h] [--days DAYS]
+
+options:
+  -h, --help   show this help message and exit
+  --days DAYS  recorded trading days to predict (default: 20)

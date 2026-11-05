@@ -14,8 +14,9 @@ import sys
 import pytest
 
 # What the server's processes run: ``krx-quant collect`` runs the collector, which serves the engine
-# API, and ``krx-quant trade`` the trader. ``cli`` itself imports every probe for its commands.
-ENTRY_POINTS = ("krx_quant.collector", "krx_quant.engine", "krx_quant.trader.run")
+# API, and ``krx-quant trade`` the trader, both through ``cli``. ``cli`` imported every probe for its
+# commands; since #578 a command imports its modules only as it runs.
+ENTRY_POINTS = ("krx_quant.cli", "krx_quant.collector", "krx_quant.engine", "krx_quant.trader.run")
 
 
 def probes_loaded_by(module: str) -> list[str]:
@@ -34,6 +35,6 @@ def test_a_live_entry_point_loads_no_probe_module(entry: str) -> None:
     assert probes_loaded_by(entry) == []
 
 
-def test_the_check_sees_the_probes_the_cli_loads() -> None:
-    # The same check finds the probes where they are imported: its pattern still names them.
-    assert probes_loaded_by("krx_quant.cli")
+def test_the_check_sees_a_probe_once_one_is_imported() -> None:
+    # The same check finds a probe where one is imported: its pattern still names them.
+    assert "krx_quant.nav_probe" in probes_loaded_by("krx_quant.nav_probe")

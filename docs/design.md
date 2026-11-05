@@ -54,9 +54,15 @@
 
 ### 모듈 지도
 
-코드는 `src/krx_quant/`에 있다. 명령은 `cli.py`의 `krx-quant <명령>`이다(README의 "명령"). 명령마다 그 parser가 처리 함수를 `set_defaults(run=...)`로 가지고, `main`은 명령을 고르지 않고 그 처리 함수를 부른다(#499). 새 명령은 `_parser`에 parser와 처리 함수를 더하고 README의 "명령" 표에 줄을 더한다. 처리 함수가 없는 명령은 종료 코드 1로 끝난다: 전에는 `main`의 `elif`에서 가지를 빠뜨린 명령이 아무것도 하지 않고 0으로 끝나, 그 명령을 부른 예약 작업이 성공으로 보고될 수 있었다.
+코드는 `src/krx_quant/`에 있다. 명령은 `cli/` 패키지의 `krx-quant <명령>`이다(README의 "명령"). 명령은 묶음마다 모듈 하나에 있다(#578): `engine`(수집기, 알고리즘의 재생·재채점·학습·사전 검증·수습 시뮬레이션·되돌리기·은퇴), `trader`(자동 매매와 그 제어, 정책 다시 맞추기, 리포트, 모의·실전 서버 확인과 프로브), `data`(KIS 구독 한도와 REST 대체 조회, 1분봉 백필, 업로드, 그날 기록 품질, 매크로), `probes`(바깥 출처 데이터의 뜻을 재는 프로브와 마감 흐름 확인), `research`(검토와 실험), `tools`(서버 요약, 서버 상태의 백업·복원·복원 연습, 텔레그램 알림, 가짜 KIS, 데모 엔진). 묶음마다 `add(sub)`가 자기 명령을 `krx-quant`의 parser에 더하고, `cli/__init__.py`의 `_parser`가 `FAMILIES` 순서로 묶음을 부른다. 그래서 `krx-quant --help`는 명령을 묶음 순서로 보여 준다. 명령마다 그 parser가 처리 함수를 `set_defaults(run=...)`로 가지고, `main`은 명령을 고르지 않고 그 처리 함수를 부른다(#499). 새 명령은 그 묶음의 `add`에 parser와 처리 함수를 더하고, README의 "명령" 표에 줄을 더하고, `uv run python -m tests.test_cli_help`로 그 도움말을 `tests/cli_help/`에 쓴다. 그 테스트는 `krx-quant --help`와 명령마다 `--help`가 그 파일과 같은지 본다(리뷰에서 도움말이 바뀐 것이 보인다). 처리 함수가 없는 명령은 종료 코드 1로 끝난다: 전에는 `main`의 `elif`에서 가지를 빠뜨린 명령이 아무것도 하지 않고 0으로 끝나, 그 명령을 부른 예약 작업이 성공으로 보고될 수 있었다.
 
-실전 진입점(수집기 `collector.py`, 엔진 `engine.py`, trader `trader/run.py`)은 프로브 모듈(`*_probe.py`)을 하나도 가져오지 않는다(#552, `tests/test_probe_imports.py`). 그래야 결론이 난 프로브를 고치거나 지워도 장 마감 흐름과 trader가 깨지지 않는다. 실전 코드와 프로브가 같이 쓰는 것은 실전 모듈에 두고 프로브가 거기서 가져온다: 녹화한 결측 구간 읽기(`read_gaps`)는 `health.py`에, KIS ETF/ETN 현재가와 NAV 비교추이(일)의 조회와 답 읽기(`PRICE`, `DAILY`, `one_object`, `row_list`)는 `net_assets.py`에, KRX ETF 일별매매정보의 주소, 필드, 값 읽기(`PATH`, `TOTAL`, `number`)는 `krx_net_assets.py`에 있다. `cli.py`는 명령을 위해 모든 프로브를 가져오므로 검사하지 않는다. 프로브의 도우미 `probe_fields.py`(필드의 모양, 값 있음, 날 읽기)는 프로브가 아니고 실전 코드도 쓴다. 밤마다 도는 기록 품질 리포트(`recording_quality.py`, #570)는 프로브가 아니지만 `gaps_probe.py`와 `night_probe.py`의 읽기를 다시 쓴다. 그래서 `cli.py`만 가져오고, 예약 작업(`scheduled/probes.py`)은 명령 이름과 라벨 규칙(`trader.report.calls_agent`)만 둔다. 수집기는 그 모듈을 불러오지 않는다.
+명령은 자기가 돌 때 쓰는 모듈만 불러온다(#578, `tests/test_cli_imports.py`). 묶음 모듈은 맨 위에서 모든 명령이 어차피 불러오는 것(설정, `KST`)만 불러오고, 처리 함수가 나머지를 돌 때 불러온다. 인자의 기본값이 그런 모듈에서 오는 명령(`prevalidate --days`의 `prevalidation.PREVALIDATION_DAYS` 같은)은 인자를 parser를 만들 때가 아니라 그 명령을 읽거나 도움말을 낼 때 더한다(`cli/core.py`의 `Command`, `arguments`). Loki로 보내는 줄을 가릴 비밀값은 `config.lenient_settings`로 읽는다(전에는 `doctor.py`의 `doctor_settings`라서 모든 명령이 doctor가 읽는 모듈을 불러왔다). macOS의 저장소 venv에서 잰 최대 RSS는 `krx-quant trade` 시작 139 → 106 MB(`trader.run`만 불러온 것과 같다), `notify` 140 → 75 MB, `krx-quant --help` 140 → 75 MB다. LightGBM과 SciPy는 그것을 쓰는 학습·실험 명령만 불러온다.
+
+> **바뀜** (2026-11-06, #586): 명령은 모두 `cli.py` 한 파일에 있었고, 이 파일이 실행될 때 모든 명령의 모듈을 한꺼번에 불러왔다 → 명령은 `cli/` 패키지에 묶음마다 모듈 하나로 나뉘고, 명령마다 돌 때 쓰는 모듈만 불러온다. `krx-quant --help`가 명령을 보여 주는 순서는 묶음 순서가 됐다. 명령의 이름, 인자, 도움말, 종료 코드는 그대로다. 이유: `krx-quant trade`가 trader가 쓰지 않는 LightGBM과 SciPy까지 메모리에 올렸고(서버 메모리 2GB), `cli.py`는 커밋 408개 중 83개가 고친 파일이라 여러 PR이 동시에 고치다 자주 충돌했다(#578).
+
+실전 진입점(수집기 `collector.py`, 엔진 `engine.py`, trader `trader/run.py`)은 프로브 모듈(`*_probe.py`)을 하나도 가져오지 않는다(#552, `tests/test_probe_imports.py`). 그래야 결론이 난 프로브를 고치거나 지워도 장 마감 흐름과 trader가 깨지지 않는다. 실전 코드와 프로브가 같이 쓰는 것은 실전 모듈에 두고 프로브가 거기서 가져온다: 녹화한 결측 구간 읽기(`read_gaps`)는 `health.py`에, KIS ETF/ETN 현재가와 NAV 비교추이(일)의 조회와 답 읽기(`PRICE`, `DAILY`, `one_object`, `row_list`)는 `net_assets.py`에, KRX ETF 일별매매정보의 주소, 필드, 값 읽기(`PATH`, `TOTAL`, `number`)는 `krx_net_assets.py`에 있다. 명령의 진입점 `cli`도 프로브를 가져오지 않는다: 프로브는 그 명령이 돌 때만 불러온다(#578). 프로브의 도우미 `probe_fields.py`(필드의 모양, 값 있음, 날 읽기)는 프로브가 아니고 실전 코드도 쓴다. 밤마다 도는 기록 품질 리포트(`recording_quality.py`, #570)는 프로브가 아니지만 `gaps_probe.py`와 `night_probe.py`의 읽기를 다시 쓴다. 그래서 `recording-quality` 명령만 돌 때 그 모듈을 가져오고, 예약 작업(`scheduled/probes.py`)은 명령 이름과 라벨 규칙(`trader.report.calls_agent`)만 둔다. 수집기는 그 모듈을 불러오지 않는다.
+
+> **바뀜** (2026-11-06, #586): "`cli.py`는 명령을 위해 모든 프로브를 가져오므로 검사하지 않는다" → `cli`도 실전 진입점과 같이 검사한다. 이유: 명령이 돌 때만 자기 모듈을 불러오게 됐다(#578).
 
 | 모듈 | 하는 일 |
 |---|---|
@@ -88,7 +94,8 @@
 | `flow.py` | `/v1/symbols/{symbol}/flow`의 답(#306): 녹화한 프로그램매매, 회원사, 외국인·기관 추정 가집계를 그날 1분마다(앞 값을 끌어오지 않는다), 추정 구간, 상위 5개 창구, 지금까지의 합과 전 거래일 같은 시각의 합, 확정 일별 수급 |
 | `cost_map.py`, `base_rates.py` | `/v1/cost-map`의 답(#307): 종목마다 왕복 비용(매도세·수수료·스프레드 1틱, 지정가·시장가, 인버스, 틱 구간 경계), 방향이 있는 종류마다 폭·비용·손익분기 맞힘률 p*와 최종 합의·순위 1위·가장 센 기준 예측의 맞힘률(순위표와 같은 통계). 기간 기준율(`structure-check` 3절의 4분 도달 정답 비율)을 이력 작업이 밤마다 계산해 `state/base_rates.json`에 둔다 |
 | `briefing.py` | `/v1/briefing`의 답(#304): 장전 브리핑의 밤사이 미국, 야간선물, 종목마다 장 마감 뒤·프리마켓·예상 시가·수급, 08:50 시가→종가 예측과 그 입력, 그날 일정. 파일만 읽고 `cox`의 입력과 같은 규칙을 쓴다 |
-| `replay.py`, `demo.py`, `fake_kis.py`, `notify.py`, `cli.py` | 재생, 화면 개발용 데모 엔진, 가짜 KIS, 텔레그램 알림, 명령 |
+| `replay.py`, `demo.py`, `fake_kis.py`, `notify.py` | 재생, 화면 개발용 데모 엔진, 가짜 KIS, 텔레그램 알림 |
+| `cli/` (`__init__.py`, `core.py`, `engine.py`, `trader.py`, `data.py`, `probes.py`, `research.py`, `tools.py`) | 명령(#578): `main`과 parser, 명령 묶음이 같이 쓰는 것(`Command`, `positive`), 묶음마다 그 명령과 처리 함수. `python -m krx_quant.cli`는 `__main__.py`다 |
 | `prevalidation.py` | 새 알고리즘 사전 검증: 최근 20거래일 재생과 엔진의 등록 관문(#24) |
 | `simulation.py` | 수습 시뮬레이션(#298): 수습이 시작될 때 최근 거래일을 수습으로 재생해 바로 판정한다(`krx-quant simulate`, 예약 작업). 하루 한 번 종류는 날마다 다시 학습한다 |
 | `diagnose.py` | 읽기 전용 진단 명령: 남은 결정에 필요한 실측(#82) |

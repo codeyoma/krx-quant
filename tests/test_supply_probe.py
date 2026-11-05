@@ -396,6 +396,6 @@ def test_the_command_exits_1_only_when_nothing_answered(
     async def stand_in(settings: Any, today: date) -> tuple[int, int]:
         return next(answers)
 
-    monkeypatch.setattr(cli, "probe_supply", stand_in)
+    monkeypatch.setattr(supply_probe, "probe_supply", stand_in)  # the command imports it as it runs (#578)
     assert cli.main(["probe-supply"]) == 0
     assert cli.main(["probe-supply"]) == 1

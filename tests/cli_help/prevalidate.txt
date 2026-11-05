@@ -1,0 +1,10 @@
+usage: krx-quant prevalidate [-h] [--days DAYS] [--revision] algorithm
+
+positional arguments:
+  algorithm    e.g. kalman
+
+options:
+  -h, --help   show this help message and exit
+  --days DAYS  recorded trading days to replay (default: 20)
+  --revision   judge the running algorithm's changed code on the recorded days
+               after the change (#454)

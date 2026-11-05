@@ -1,0 +1,6 @@
+usage: krx-quant probe-sample-keys [-h] [--day DAY]
+
+options:
+  -h, --help  show this help message and exit
+  --day DAY   the latest day looked at, YYYY-MM-DD (default: the store's
+              latest)
