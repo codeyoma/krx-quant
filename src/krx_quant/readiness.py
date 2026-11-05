@@ -19,17 +19,18 @@ again. The deploy, the swap and the jobs now send nothing of their own when all 
   is older than ``trader.store.ALIVE_SECONDS``.
 - **한도 여유**: what the daily and the cumulative loss limits leave (``GET /v1/trader``'s ``limits``),
   and the trader's status when it does not buy.
-- **예약 작업**: the scheduled jobs' runs since the last line went (``state/scheduled.json``), the failed
-  ones named (a pre-validation's refusal is a verdict, not a failure), the ones a restart cut (끊김:
-  they run again the next night), and the results not on their issues yet. Each result is on its
-  issue as before.
+- **예약 작업**: the scheduled jobs' runs no line that went has told (the scheduler tells each run's end,
+  ``Readiness.ran``, kept in ``STATE_FILE`` until a line that told it has gone: the scheduler's own
+  state keeps a job's last run alone), the failed ones named (a pre-validation's refusal is a verdict,
+  not a failure), the ones a restart cut (끊김: they run again the next night), those running and the
+  results not on their issues yet (``state/scheduled.json``). Each result is on its issue as before.
 
 It is a report: its ``alert:`` line is INFO (``Alerts.deliver``, as the night's summary's, #580), and
 the ``telegram sent:`` line is the same as every message's (#358). It goes once a trading day: the
 day is kept in the state folder (``STATE_FILE``), so a restart after it does not send it again. It
 waits for the day's swap until the open (an engine started at 08:39 swaps half a minute after it
-starts). An engine started after the open sends none that day; the next line counts the jobs from the
-last line that went.
+starts). An engine started after the open sends none that day; the next line tells the runs this one
+would have.
 
 It holds nothing back: every problem is still sent at once (docs/operations.md 6장 "텔레그램 알림이 가는
 길"): the trader's notices (loss limits, failed orders, the broker's last check withholding one,
@@ -43,8 +44,8 @@ import asyncio
 import json
 import logging
 import sqlite3
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,7 @@ from typing import Any
 from krx_quant.clock import SessionClock
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.scheduled.core import FAILED, INTERRUPTED, REFUSED, RUNNING
+from krx_quant.scheduled.core import FAILED, INTERRUPTED, REFUSED, RUNNING, JobRecord
 from krx_quant.scheduled.core import STATE_FILE as JOBS_FILE
 from krx_quant.swap import MorningSwap
 from krx_quant.trader.db import reading
@@ -63,6 +64,7 @@ log = logging.getLogger(__name__)
 READY_AT = time(8, 40)  # after the 08:00 swap and the trader's 08:30 pick, before the open
 STATE_FILE = "readiness.json"
 NAMED = 3  # the failed jobs named at most; the rest counted
+KEPT = 200  # the runs not told yet kept at most: a line that never goes lets them grow no further
 _SHORT = 7  # a commit's characters told
 
 # The trader's status (``GET /v1/trader``'s ``status``) when it does not buy as it would.
@@ -86,12 +88,14 @@ _NO_CELL = {
 @dataclass(frozen=True)
 class Told:
     """The last line, as kept in ``STATE_FILE``: the day it was for (sent or not), and of the last one
-    that went, when, the commit and the night it told."""
+    that went, when, the commit and the night it told; and the scheduled jobs' runs no line that went
+    has told yet (``Readiness.ran``), oldest first, ``KEPT`` at most."""
 
     day: date | None = None
     sent_at: datetime | None = None
     commit: str | None = None
     night: date | None = None
+    runs: tuple[dict[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -99,6 +103,7 @@ class Told:
             "sent_at": None if self.sent_at is None else self.sent_at.isoformat(),
             "commit": self.commit,
             "night": None if self.night is None else self.night.isoformat(),
+            "runs": list(self.runs),
         }
 
     @classmethod
@@ -112,6 +117,7 @@ class Told:
                 None if data.get("sent_at") is None else datetime.fromisoformat(data["sent_at"]),
                 None if data.get("commit") is None else str(data["commit"]),
                 _day(data.get("night")),
+                tuple(dict(r) for r in data.get("runs") or () if isinstance(r, Mapping)),
             )
         except FileNotFoundError:
             return cls()
@@ -163,6 +169,22 @@ class Readiness:
         changed, self._changed = self._changed, asyncio.Event()
         changed.set()
 
+    def ran(self, name: str, record: JobRecord) -> None:
+        """A scheduled job's run ended, or was found cut (``Scheduler``'s ``ran``): kept in the state
+        folder until a line that tells it has gone (#614). The scheduler's state keeps a job's last run
+        alone, so a failure followed by a success before the next line went would be lost there."""
+        if record.outcome == RUNNING:
+            return
+        run = {
+            "job": name,
+            "day": record.day.isoformat(),
+            "started_at": record.started_at.isoformat(),
+            "outcome": record.outcome,
+            "verdict": record.verdict,
+        }
+        self.told = replace(self.told, runs=(*self.told.runs, run)[-KEPT:])
+        self.told.save(self._path)
+
     async def wait_for_swap(self, day: date, until: datetime, clock: SessionClock) -> None:
         """Until the swap of ``day`` is told, or ``until`` (the open) comes."""
         if self._swaps and (self._swap is None or self._swap.day != day):
@@ -179,31 +201,33 @@ class Readiness:
                 changed.cancel()
                 timer.cancel()
 
-    def line(self, day: date, now: datetime) -> str:
-        """The line of ``day`` at ``now``; it reads the trader's store and the jobs' state (a worker
-        thread's work)."""
+    def line(self, day: date, now: datetime, runs: Sequence[Mapping[str, Any]] | None = None) -> str:
+        """The line of ``day`` at ``now``, telling the jobs' ``runs`` (by default those not told yet);
+        it reads the trader's store and the jobs' state (a worker thread's work)."""
         swap = self._swap if self._swap is not None and self._swap.day == day else None
-        since = self.told.sent_at or now - timedelta(days=1)
         parts = [
             commit_said(self._commit, self.told.commit),
             model_said(swap, self.told.night, swaps=self._swaps),
             *trader_said(self._trader, now),
-            jobs_said(self._jobs, since),
+            jobs_said(self.told.runs if runs is None else runs, self._jobs),
         ]
         return f"준비 {day:%m-%d}: " + " · ".join(parts)
 
     async def send(self, day: date, now: datetime) -> bool:
         """Send the line of ``day``, once: whether it went. The day is kept either way; the commit,
-        the night and the time only when it went, so that the next line tells what this one could not."""
-        text = await asyncio.to_thread(self.line, day, now)
+        the night, the time, and that the runs it told are told, only when it went: the next line tells
+        what this one could not (a run that ended meanwhile waits for it too)."""
+        told_runs = self.told.runs
+        text = await asyncio.to_thread(self.line, day, now, told_runs)
         went = await self._send(text)
         swap = self._swap if self._swap is not None and self._swap.day == day else None
-        told = self.told
+        told = self.told  # with the runs that ended while it was sent
         if went:
             night = swap.night if swap is not None and swap.night is not None and swap.applied else told.night
-            self.told = Told(day, now, self._commit, night)
+            left = tuple(r for r in told.runs if r not in told_runs)
+            self.told = Told(day, now, self._commit, night, left)
         else:
-            self.told = Told(day, told.sent_at, told.commit, told.night)
+            self.told = replace(told, day=day)
         self.told.save(self._path)
         return went
 
@@ -316,27 +340,13 @@ def limits_said(body: Mapping[str, Any]) -> str:
     return f"{said}({status})" if status else said
 
 
-def jobs_said(path: Path, since: datetime) -> str:
-    """The scheduled jobs' runs started since ``since``: how many, the failed ones named, those still
-    running; and the results not posted on their issues yet. Read as the scheduler last wrote it, never
-    set aside (``JobState.load`` does that for the scheduler alone)."""
-    try:
-        data = json.loads(path.read_text())
-        jobs = data.get("jobs") or {}
-        unposted = len(data.get("unposted") or [])
-        runs = [
-            (name, record)
-            for name, record in jobs.items()
-            if isinstance(record, Mapping) and datetime.fromisoformat(str(record["started_at"])) >= since
-        ]
-    except FileNotFoundError:
-        return "예약 작업 없음"
-    except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:
-        log.warning("could not read %s for the readiness line: %s", path, e)
-        return "예약 작업 상태를 읽지 못함"
-    failed = [name for name, r in runs if r.get("outcome") == FAILED and r.get("verdict") != REFUSED]
-    cut = [name for name, r in runs if r.get("outcome") == INTERRUPTED]
-    running = sum(1 for _, r in runs if r.get("outcome") == RUNNING)
+def jobs_said(runs: Sequence[Mapping[str, Any]], path: Path) -> str:
+    """The scheduled jobs' ``runs`` no line has told yet: how many, the failed ones named, those a
+    restart cut; then from their state at ``path`` those still running and the results not posted on
+    their issues yet, read as the scheduler last wrote it, never set aside (``JobState.load`` does that
+    for the scheduler alone)."""
+    failed = [str(r.get("job")) for r in runs if r.get("outcome") == FAILED and r.get("verdict") != REFUSED]
+    cut = [str(r.get("job")) for r in runs if r.get("outcome") == INTERRUPTED]
     if not runs:
         said = "예약 작업 없음"
     elif failed or cut:
@@ -347,6 +357,16 @@ def jobs_said(path: Path, since: datetime) -> str:
             said += f", 끊김 {len(cut)}({_named(cut)})"
     else:
         said = f"예약 작업 {len(runs)}개, 실패 없음"
+    try:
+        data = json.loads(path.read_text())
+        jobs = data.get("jobs") or {}
+        unposted = len(data.get("unposted") or [])
+        running = sum(1 for r in jobs.values() if isinstance(r, Mapping) and r.get("outcome") == RUNNING)
+    except FileNotFoundError:
+        return said
+    except (OSError, ValueError, TypeError, AttributeError) as e:
+        log.warning("could not read %s for the readiness line: %s", path, e)
+        return said + ", 예약 작업 상태를 읽지 못함"
     if running:
         said += f", 도는 중 {running}"
     if unposted:
@@ -355,8 +375,12 @@ def jobs_said(path: Path, since: datetime) -> str:
 
 
 def _named(names: list[str]) -> str:
-    """The first ``NAMED`` names, the rest counted."""
-    return ", ".join(names[:NAMED]) + (f" 외 {len(names) - NAMED}개" if len(names) > NAMED else "")
+    """The first ``NAMED`` names, a name failed more than once with its count, the rest counted."""
+    counts: dict[str, int] = {}
+    for name in names:
+        counts[name] = counts.get(name, 0) + 1
+    said = [f"{n} ×{k}" if k > 1 else n for n, k in counts.items()]
+    return ", ".join(said[:NAMED]) + (f" 외 {len(said) - NAMED}개" if len(said) > NAMED else "")
 
 
 async def keep_ready(ready: Readiness, calendar: MarketCalendar, clock: SessionClock) -> None:

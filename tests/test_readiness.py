@@ -94,25 +94,22 @@ def trader(
         store.close()
 
 
-def jobs(state: Path) -> None:
-    """The scheduled jobs' state: the night's runs, and one from before the last line."""
+def run(started: datetime, outcome: str, verdict: str | None = None) -> JobRecord:
+    return JobRecord(kst_day(started - timedelta(hours=6)), outcome, started, OLD, 0, 9.0, verdict=verdict)
 
-    def run(started: datetime, outcome: str, verdict: str | None = None) -> JobRecord:
-        return JobRecord(
-            kst_day(started - timedelta(hours=6)), outcome, started, OLD, 0, 9.0, verdict=verdict
-        )
 
-    JobState(
-        state / JOBS_FILE,
-        {
-            "trader-report": run(at("22:31", NIGHT), OK),
-            "prevalidate-ulam": run(at("23:10", NIGHT), FAILED),  # killed: a failure
-            "prevalidate-bishop": run(at("02:00"), FAILED, REFUSED),  # a verdict, not a failure
-            "smt-discovery-519": run(at("03:00"), INTERRUPTED),  # cut by a restart
-            "neyman-backfill-532": run(at("22:30", date(2026, 11, 3)), FAILED),  # before the last line
-        },
-        [Unposted("trader-report", NIGHT, 417, "body", (), ())],
-    ).save()
+def jobs(state: Path, line: Readiness) -> None:
+    """The night's runs as the scheduler tells them (``Readiness.ran``), and its state, which keeps a
+    job's last run alone, with a result not posted yet."""
+    runs = {
+        "trader-report": run(at("22:31", NIGHT), OK),
+        "prevalidate-ulam": run(at("23:10", NIGHT), FAILED),  # killed: a failure
+        "prevalidate-bishop": run(at("02:00"), FAILED, REFUSED),  # a verdict, not a failure
+        "smt-discovery-519": run(at("03:00"), INTERRUPTED),  # cut by a restart
+    }
+    for name, record in runs.items():
+        line.ran(name, record)
+    JobState(state / JOBS_FILE, runs, [Unposted("trader-report", NIGHT, 417, "body", (), ())]).save()
 
 
 def ready(state: Path, sent: list[tuple[datetime, str]], clock: FakeClock, **kwargs: Any) -> Readiness:
@@ -134,9 +131,9 @@ def test_the_line_tells_the_deploy_the_models_the_champion_s_cells_the_limits_an
 ) -> None:
     Told(NIGHT, at("08:40", NIGHT), OLD, date(2026, 11, 4)).save(tmp_path / STATE_FILE)
     trader(tmp_path)
-    jobs(tmp_path)
     clock = FakeClock(at("08:40"))
     line = ready(tmp_path, [], clock)
+    jobs(tmp_path, line)
     line.swapped(swap())
 
     assert line.line(DAY, at("08:40")) == (
@@ -206,20 +203,58 @@ def test_the_commit_is_told_after_the_one_the_last_line_told() -> None:
     assert commit_said(NEW, None) == "커밋 5d6e7f8"
 
 
-def test_the_jobs_since_the_last_line_alone_and_none_without_a_state(tmp_path: Path) -> None:
+def test_the_jobs_part_counts_the_runs_told_and_reads_the_state_for_the_rest(tmp_path: Path) -> None:
     path = tmp_path / JOBS_FILE
-    assert jobs_said(path, at("08:40", NIGHT)) == "예약 작업 없음"
-    jobs(tmp_path)
-    assert (
-        jobs_said(path, at("23:00", NIGHT))
-        == "예약 작업 3개, 실패 1(prevalidate-ulam), 끊김 1(smt-discovery-519), 이슈에 못 올린 결과 1개"
-    )
-    record = JobRecord(DAY, RUNNING, at("08:35"), NEW)
-    JobState(path, {"probe-kis-orders-403": record}).save()
-    assert jobs_said(path, at("08:40", NIGHT)) == "예약 작업 1개, 실패 없음, 도는 중 1"
+    failed = {"job": "prevalidate-ulam", "outcome": FAILED, "verdict": None}
+    assert jobs_said([], path) == "예약 작업 없음"
+    assert jobs_said([failed, {**failed, "day": "x"}], path) == "예약 작업 2개, 실패 2(prevalidate-ulam ×2)"
+    JobState(path, {"probe-kis-orders-403": JobRecord(DAY, RUNNING, at("08:35"), NEW)}).save()
+    assert jobs_said([], path) == "예약 작업 없음, 도는 중 1"
     path.write_text("{")
-    assert jobs_said(path, at("08:40", NIGHT)) == "예약 작업 상태를 읽지 못함"
+    assert jobs_said([], path) == "예약 작업 없음, 예약 작업 상태를 읽지 못함"
     assert path.read_text() == "{", "never set aside: the scheduler's file"
+
+
+async def test_a_failure_is_told_by_the_next_line_that_goes_though_its_job_ran_well_since(
+    tmp_path: Path,
+) -> None:
+    """Codex on #616: the scheduler's state keeps each job's last run alone. Thursday night's failure,
+    Friday's line missed (Telegram did not take it), Friday night's success of the same job: Monday's
+    line still tells the failure, and a line after it no more."""
+    went = [False, True, True]
+
+    async def send(text: str) -> bool:
+        sent.append(text)
+        return went[len(sent) - 1]
+
+    sent: list[str] = []
+    line = Readiness(tmp_path, tmp_path / TRADER_DB, NEW, send)
+    line.ran("prevalidate-ulam", run(at("23:10", date(2026, 11, 5)), FAILED))
+    assert not await line.send(DAY, at("08:40"))  # Friday's line did not go
+    friday = run(at("23:10"), OK)
+    line.ran("prevalidate-ulam", friday)
+    JobState(tmp_path / JOBS_FILE, {"prevalidate-ulam": friday}).save()  # the success alone
+
+    again = Readiness(tmp_path, tmp_path / TRADER_DB, NEW, send)  # the 07:20 restart: kept on disk
+    assert await again.send(MONDAY, at("08:40", MONDAY))
+    again.ran("trader-report", run(at("22:31", MONDAY), OK))
+    assert await again.send(date(2026, 11, 10), at("08:40", date(2026, 11, 10)))
+
+    assert sent[0].endswith(" · 예약 작업 1개, 실패 1(prevalidate-ulam)"), sent[0]
+    assert sent[1].endswith(" · 예약 작업 2개, 실패 1(prevalidate-ulam)"), sent[1]
+    assert sent[2].endswith(" · 예약 작업 1개, 실패 없음"), "told once it went"
+    assert Told.load(tmp_path / STATE_FILE).runs == ()
+
+
+async def test_a_run_that_ends_while_the_line_goes_waits_for_the_next(tmp_path: Path) -> None:
+    async def send(text: str) -> bool:
+        line.ran("trader-report", run(at("08:40"), OK))  # ends meanwhile
+        return True
+
+    line = Readiness(tmp_path, tmp_path / TRADER_DB, NEW, send)
+    line.ran("prevalidate-ulam", run(at("23:10", NIGHT), FAILED))
+    assert await line.send(DAY, at("08:40"))
+    assert [r["job"] for r in Told.load(tmp_path / STATE_FILE).runs] == ["trader-report"]
 
 
 async def test_the_line_goes_once_a_trading_day_at_08_40_and_not_again_after_a_restart(
@@ -309,9 +344,11 @@ async def test_a_line_that_did_not_go_leaves_the_commit_night_and_jobs_to_the_ne
     Told(NIGHT, at("08:40", NIGHT), OLD, NIGHT).save(tmp_path / STATE_FILE)
     line.told = Told.load(tmp_path / STATE_FILE)
     line.swapped(swap(night=DAY))
+    line.ran("trader-report", run(at("22:31", NIGHT), OK))
 
     assert not await line.send(DAY, at("08:40"))
-    assert Told.load(tmp_path / STATE_FILE) == Told(DAY, at("08:40", NIGHT), OLD, NIGHT)
+    assert Told.load(tmp_path / STATE_FILE) == Told(DAY, at("08:40", NIGHT), OLD, NIGHT, line.told.runs)
+    assert len(line.told.runs) == 1
 
 
 # What is never held for the line: sent at once, as before (#614 "바꾸지 않는다").

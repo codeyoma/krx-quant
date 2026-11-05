@@ -39,7 +39,8 @@ nightly report; #570: the recording's quality) changes the labels only on the ru
 an agent. Without ``KRX_GITHUB_TOKEN``, or when
 GitHub fails, the result waits in the state and is posted at the next night or start. The log
 gets a line per run, with the comments' addresses; the trading morning's readiness line counts the
-runs since the last one and names the failed ones (#614, ``readiness.py``). The line and the
+runs no line has told yet, each told it as it ends (``Scheduler``'s ``ran``), and names the failed
+ones (#614, ``readiness.py``). The line and the
 comment's first line say what came of it (``_what``, #440): 성공 (a pre-validation's 통과), 거부, 실패
 (a pre-validation's 예외), 시간 초과 or 신호로 죽음. A refusal's exit code is 1, as an error's is: it is
 told apart by the report the run wrote.
@@ -62,7 +63,7 @@ names other modules import from ``krx_quant.scheduled`` are exported here (``__a
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
 
 import aiohttp
@@ -246,8 +247,10 @@ async def keep_jobs(
     training: NightTraining,
     engine: PredictionEngine,
     jobs: Sequence[Job] | None = None,
+    ran: Callable[[str, JobRecord], None] | None = None,
 ) -> None:
-    """The collector's scheduled jobs (``KRX_JOBS_AT``), until cancelled."""
+    """The collector's scheduled jobs (``KRX_JOBS_AT``), until cancelled; each run's end told to
+    ``ran`` (the readiness line, #614)."""
     assert settings.jobs_at is not None
     github = GitHub(session, settings.github_token, settings.github_repo, settings.github_api_url)
     if not github.configured:
@@ -266,6 +269,7 @@ async def keep_jobs(
         training=training,
         facts=partial(read_facts, settings, calendar, clock, engine),
         session_facts=partial(session_facts, settings),
+        ran=ran,
     )
     await scheduler.run()
 

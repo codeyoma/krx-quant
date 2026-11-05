@@ -567,7 +567,15 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                 # catches up is due before the jobs look.
                 background.append(
                     asyncio.create_task(
-                        keep_jobs(settings, session, calendar.calendar, session_clock, training, engine)
+                        keep_jobs(
+                            settings,
+                            session,
+                            calendar.calendar,
+                            session_clock,
+                            training,
+                            engine,
+                            ran=readiness.ran,  # kept until the readiness line tells them (#614)
+                        )
                     )
                 )
             if settings.calendar_every is not None:
