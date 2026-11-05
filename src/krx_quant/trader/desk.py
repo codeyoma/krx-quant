@@ -18,9 +18,10 @@ same cells' predictions and the same quotes, in one process.
   retired: its book buys nothing more and is let go once it holds nothing. A champion that cannot be read
   trades nothing until the next pick (``NO_POLICY``); a challenger that cannot be read does not
   run until then.
-- **Predictions** (``on_signal``): each to every book trading its cell; one of a cell no book
-  trades (the picks changed while it was read) to the champion's, which keeps it ``not_picked``.
-  The reader follows every book's cells (``cells``).
+- **Predictions** (``on_signal``): each to every book trading its cell, or holding it off because
+  its predictor is not active (#603: skipped ``predictor_inactive``); one of a cell no book reads (the
+  picks changed while it was read) to the champion's, which keeps it ``not_picked``. The reader
+  follows every book's cells (``cells``).
 - **Quotes, special windows, the clock**: to every book. **Controls** (pauses, resumes, re-arms):
   to the champion's alone.
 - **A stall of the quotes** (#407, ``stall.QuoteWatch``): the desk watches the stream once for every
@@ -45,7 +46,9 @@ same cells' predictions and the same quotes, in one process.
   cell kept for the review cycle in force (#474, ``practice.frozen``: chosen by the nightly job, at
   its θ) one share at a time; none while no cell is kept for the cycle (``practice.NOT_FROZEN``), nor
   for the rest of the cycle once a pick finds its predictor gone (``GONE``, ``practice.rest``: never
-  another cell). Not after ``NO_COST_MAP`` nor ``NO_POLICY``. The KIS book stays
+  another cell) or not active (``PREDICTOR_INACTIVE``, #603). Not after ``NO_COST_MAP`` nor
+  ``NO_POLICY``. While it practises, the champion's cells not active are read by its shadow alone. The
+  KIS book stays
   the one owner of the account's orders: no second book orders on KIS, and one position or buy waits
   at a time whichever cell it is of. Once a pick finds a champion cell again, the practice cell is
   picked no more (a rise of it waiting is ``not_picked``); a practice position is sold by its own
@@ -90,7 +93,12 @@ written after the market alone (``promotion.in_market``); since #469 on a review
 review cycle in force (``review.cycle_at``), and each policy's cells with whether they trade
 (``Selection.cells``). A cell whose predictor is gone (``cells.gone``: the engine's database, at
 ``engine``) trades no more for the rest of that cycle, whatever later picks find
-(``TraderStore.gone``): never another cell in its place.
+(``TraderStore.gone``): never another cell in its place. Nor does one whose predictor is not active
+(#603, ``cells.inactive``: on probation, on the bench, retired, a clone; ``TraderStore.inactive``),
+of the champion, its shadow, a challenger or the practice alike: its book reads its predictions and
+buys none (``predictor_inactive``), and sells what it holds by its own barriers. Never the clone's
+original in its place. A final consensus follows its active members alone (the engine's), and a
+baseline has no status: neither is ever inactive.
 """
 
 from __future__ import annotations
@@ -108,12 +116,20 @@ from krx_quant.kis_orders import Broker
 from krx_quant.market_calendar import Session
 from krx_quant.special import Window
 from krx_quant.trader import KIS_MODES, LIVE, MOCK, PAPER, SYMBOL, live, policy, practice, review
-from krx_quant.trader.cells import Cell, Signal, gone
+from krx_quant.trader.cells import Cell, Signal, gone, inactive
 from krx_quant.trader.limits import RUNNING, Notify
 from krx_quant.trader.mock import MockTrader, Timing
 from krx_quant.trader.paper import PaperTrader, Rules
 from krx_quant.trader.quotes import BestQuote
-from krx_quant.trader.selection import GONE, NO_CHAMPION, NO_PASS, NO_POLICY, NOT_IN_POLICY, Selection
+from krx_quant.trader.selection import (
+    GONE,
+    NO_CHAMPION,
+    NO_PASS,
+    NO_POLICY,
+    NOT_IN_POLICY,
+    PREDICTOR_INACTIVE,
+    Selection,
+)
 from krx_quant.trader.stall import STALL_AFTER, QuoteWatch
 from krx_quant.trader.store import CUMULATIVE_LIMIT, DAILY_LIMIT, TraderStore
 
@@ -123,14 +139,19 @@ log = logging.getLogger(__name__)
 RUN_OR_LIMIT = (RUNNING, DAILY_LIMIT, CUMULATIVE_LIMIT)
 
 
+# A policy's cells that trade no more in the review cycle (#469, ``Desk._rested``): those whose
+# predictor is gone, and those whose predictor is not active (#603), which buy nothing.
+Rested = tuple[Collection[Cell], Collection[Cell]]
+
+
 def under_champion(
     store: TraderStore,
     selection: Selection,
-    gone_of: Callable[[policy.Policy], Collection[Cell]] | None = None,
+    rested_of: Callable[[policy.Policy], Rested] | None = None,
 ) -> Selection:
-    """``selection`` under the champion policy kept now (#399), its cells ``gone_of`` it trading
-    none (#469); with no cell before the first (``NO_CHAMPION``, #469) and when the champion cannot
-    be read (``NO_POLICY``)."""
+    """``selection`` under the champion policy kept now (#399), its cells ``rested_of`` it trading
+    none (#469: gone; #603: not active, read and never bought); with no cell before the first
+    (``NO_CHAMPION``, #469) and when the champion cannot be read (``NO_POLICY``)."""
     try:
         champion = store.champion()
     except (policy.PolicyError, sqlite3.Error) as e:
@@ -145,7 +166,8 @@ def under_champion(
         champion.created_at.strftime("%Y-%m-%d %H:%M"),
         len(champion.cells),
     )
-    return policy.apply(champion, selection, () if gone_of is None else gone_of(champion))
+    gone, inactive = ((), ()) if rested_of is None else rested_of(champion)
+    return policy.apply(champion, selection, gone, inactive)
 
 
 def practice_state(enabled: bool, kept: practice.Frozen | None = None) -> dict[str, Any]:
@@ -338,10 +360,10 @@ class Desk:
         if cycle is not None:
             selection = replace(selection, evaluation=cycle.evaluation, cycle=cycle.number)
 
-        def gone_of(kept: policy.Policy) -> set[Cell]:
-            return self._gone(kept, cycle, at)
+        def rested_of(kept: policy.Policy) -> Rested:
+            return self._rested(kept, cycle, at)
 
-        under = under_champion(self.store, selection, gone_of)
+        under = under_champion(self.store, selection, rested_of)
         chosen, self.champion.practice_state = self._practising(under, cycle, at)
         self.champion.select(chosen, at)
         if self.mode in KIS_MODES and self.shadow is not None:
@@ -363,7 +385,7 @@ class Desk:
             book = self.challengers.get(version)
             if book is None:
                 book = self.challengers[version] = self._book(version, at)
-            book.select(policy.apply(challenger, selection, gone_of(challenger)), at)
+            book.select(policy.apply(challenger, selection, *rested_of(challenger)), at)
         for version in sorted(self._running - set(running)):
             log.info("trader: challenger %s runs no more", version)
             self.challengers[version].retire(at)
@@ -380,21 +402,29 @@ class Desk:
             log.error("trader: cannot tell the review cycle (%s): the pick is kept without it", e)
             return None
 
-    def _gone(self, kept: policy.Policy, cycle: review.Cycle | None, at: datetime) -> set[Cell]:
-        """The cells of ``kept`` that trade no more in ``cycle`` (#469, module doc): their predictor
-        gone now in the engine's database, or found gone by a pick earlier in the cycle."""
+    def _rested(self, kept: policy.Policy, cycle: review.Cycle | None, at: datetime) -> Rested:
+        """The cells of ``kept`` that trade no more in ``cycle`` (module doc): their predictor gone now
+        in the engine's database, or found gone by a pick earlier in the cycle (#469); and those whose
+        predictor is not active now, or was found so by a pick earlier in the cycle (#603)."""
         found: set[Cell] = set()
+        statuses: dict[Cell, str] = {}
         cells = [c.cell for c in kept.cells]
         if self.engine is not None:
             try:
                 found = gone(self.engine, SYMBOL, cells, at)
             except sqlite3.Error as e:
                 log.warning("trader: cannot tell if policy %s's predictors predict (%s)", kept.version, e)
+            try:
+                statuses = inactive(self.engine, cells, at)
+            except sqlite3.Error as e:
+                log.warning("trader: cannot tell if policy %s's predictors are active (%s)", kept.version, e)
+        held: set[Cell] = set(statuses)
         if cycle is not None:
             try:
                 found |= self.store.gone(kept.version, cycle.evaluation, cycle.number)
+                held |= self.store.inactive(kept.version, cycle.evaluation, cycle.number)
             except (sqlite3.Error, ValueError, KeyError, TypeError) as e:
-                log.warning("trader: cannot read policy %s's cells gone this cycle (%s)", kept.version, e)
+                log.warning("trader: cannot read policy %s's cells rested this cycle (%s)", kept.version, e)
         for cell in sorted(found & set(cells), key=lambda c: (c.kind, c.predictor)):
             log.warning(
                 "trader: policy %s's cell %s %s is %s: its predictor no longer predicts; it trades no"
@@ -404,7 +434,18 @@ class Desk:
                 cell.predictor,
                 GONE,
             )
-        return found
+        for cell in sorted((held - found) & set(cells), key=lambda c: (c.kind, c.predictor)):
+            now = statuses.get(cell)
+            log.warning(
+                "trader: policy %s's cell %s %s is %s: its predictor %s; it buys nothing until the next"
+                " review, its position sold by its own rules, and no other cell takes its place",
+                kept.version,
+                cell.kind,
+                cell.predictor,
+                PREDICTOR_INACTIVE,
+                f"is {now}, not active" if now is not None else "was not active at a pick earlier this cycle",
+            )
+        return found, held
 
     def _practising(
         self, under: Selection, cycle: review.Cycle | None, at: datetime
@@ -428,39 +469,48 @@ class Desk:
                 " no practice until one is",
                 "?" if cycle is None else cycle.number,
             )
-        elif kept.gone_at is not None:
-            why = GONE
+        elif kept.rested:
+            why = GONE if kept.gone_at is not None else PREDICTOR_INACTIVE
             log.info(
-                "trader: the practice cell %s %s is gone: no practice until review cycle %s ends",
+                "trader: the practice cell %s %s is %s: no practice until review cycle %s ends",
                 kept.pick.kind,
                 kept.pick.predictor,
+                why,
                 kept.cycle,
             )
         if why is not None or kept is None:
             return under, state | {"why": why}
-        return replace(under, picks=(kept.pick,)), state | {"active": True, "cell": kept.pick.as_json()}
+        # The champion's cells not active are the shadow's to read (#603): the practice pick is its own.
+        practised = replace(under, picks=(kept.pick,), inactive=())
+        return practised, state | {"active": True, "cell": kept.pick.as_json()}
 
     def _frozen(self, cycle: review.Cycle | None, at: datetime) -> practice.Frozen | None:
         """The practice cell kept for ``cycle`` (#474), found gone at ``at`` if its predictor no longer
-        predicts (``cells.gone``, as a policy's cell, #469: kept, so that it rests for the rest of the
-        cycle); None without one, or when the store cannot say (logged)."""
+        predicts (``cells.gone``, as a policy's cell, #469), or not active if it is not (#603,
+        ``cells.inactive``): kept, so that it rests for the rest of the cycle; None without one, or when
+        the store cannot say (logged)."""
         if cycle is None:
             return None
         try:
             kept = practice.frozen(self.store.db, cycle.evaluation, cycle.number)
-            if kept is None or kept.gone_at is not None or self.engine is None:
+            if kept is None or kept.rested or self.engine is None:
                 return kept
-            if kept.cell not in gone(self.engine, SYMBOL, [kept.cell], at):
+            if kept.cell in gone(self.engine, SYMBOL, [kept.cell], at):
+                why, said = GONE, "no longer predicts"
+            elif (status := inactive(self.engine, [kept.cell], at).get(kept.cell)) is not None:
+                why, said = PREDICTOR_INACTIVE, f"is {status}, not active"
+            else:
                 return kept
             log.warning(
-                "trader: the practice cell %s %s is %s: its predictor no longer predicts; no practice until"
-                " review cycle %s ends, and no other cell takes its place",
+                "trader: the practice cell %s %s is %s: its predictor %s; no practice until review cycle %s"
+                " ends, and no other cell takes its place",
                 kept.pick.kind,
                 kept.pick.predictor,
-                GONE,
+                why,
+                said,
                 cycle.number,
             )
-            practice.rest(self.store.db, cycle.evaluation, cycle.number, at)
+            practice.rest(self.store.db, cycle.evaluation, cycle.number, at, why)
             return practice.frozen(self.store.db, cycle.evaluation, cycle.number)
         except (sqlite3.Error, ValueError, KeyError, TypeError) as e:
             log.error("trader: cannot read the practice cell of review cycle %s (%s): none", cycle.number, e)

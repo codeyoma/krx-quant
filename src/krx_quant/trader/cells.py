@@ -24,6 +24,14 @@ gone (``gone``, #469) when the latest trading day before a pick's day that its k
 of 005930 on has none of it (any status): it was retired or taken out of the engine. Whole days
 alone: the pick's own day may have only the bar closes a slower predictor has not finished yet. A
 day the engine made none of the kind proves nothing, and nothing is gone then.
+
+A cell's predictor is inactive (``inactive``, #603) at a time when its latest lifecycle status at or
+before it (the engine's ``statuses``, ``lifecycle.py``) is not ``active``: on probation, on the bench,
+retired, a clone. A predictor without a status (the final consensus, whose members are the active
+algorithms alone; a baseline) is never inactive. The statuses change after a day's close (the
+lifecycle's review, a simulation's, a target's or a code change's restart, ``krx-quant retire``), so a
+pick before the open sees the day's. The re-fit's replay reads each day's status at its pick
+(``statuses``, ``status_at``, ``replay.py``).
 """
 
 from __future__ import annotations
@@ -31,7 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from pathlib import Path
@@ -44,6 +52,11 @@ from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
 
 log = logging.getLogger(__name__)
+
+# The lifecycle's status in which a predictor may buy (#603, module doc): ``lifecycle.Status.ACTIVE``.
+ACTIVE = "active"
+# A predictor's status changes, oldest first: when each began, and the status.
+History = Sequence[tuple[datetime, str]]
 
 
 @dataclass(frozen=True)
@@ -270,6 +283,54 @@ def _gone(db: sqlite3.Connection, cell: Cell, symbol: str, before: str) -> bool:
         return False  # no prediction of the kind at all: nothing to tell from
     day = datetime.combine(datetime.fromisoformat(last).astimezone(KST).date(), time(), KST)
     return db.execute(its, (cell.predictor, *keys, day.isoformat(), before)).fetchone() is None
+
+
+def inactive(path: Path, cells: Collection[Cell], at: datetime) -> dict[Cell, str]:
+    """The ``cells`` whose predictor is inactive at ``at`` (#603, module doc), each with its status
+    then; none without the engine's database (read-only, at once)."""
+    if not cells or not path.exists():
+        return {}
+    db = open_engine_db(path)
+    try:
+        found = statuses(db, {c.predictor for c in cells})
+    finally:
+        db.close()
+    out = {}
+    for cell in cells:
+        status = status_at(found.get(cell.predictor, ()), at)
+        if status is not None and status != ACTIVE:
+            out[cell] = status
+    return out
+
+
+def statuses(db: sqlite3.Connection, predictors: Iterable[str]) -> dict[str, History]:
+    """Each of ``predictors``' lifecycle status changes in the engine's database ``db``, oldest first
+    (#603); none of one without a status, nor in a database from before the lifecycle."""
+    wanted = sorted(set(predictors))
+    if not wanted:
+        return {}
+    marks = ", ".join("?" * len(wanted))
+    try:
+        rows = db.execute(
+            f"SELECT algorithm, at, status FROM statuses WHERE algorithm IN ({marks}) ORDER BY id", wanted
+        ).fetchall()
+    except sqlite3.OperationalError as e:  # no such table
+        log.warning("trader: no lifecycle statuses in the engine's database (%s)", e)
+        return {}
+    out: dict[str, list[tuple[datetime, str]]] = {}
+    for algorithm, began, status in rows:
+        out.setdefault(algorithm, []).append((datetime.fromisoformat(began), status))
+    return dict(out)
+
+
+def status_at(history: History, at: datetime) -> str | None:
+    """The status in force at ``at``: the latest change at or before it; None before the first."""
+    status = None
+    for began, found in history:
+        if began > at:
+            break
+        status = found
+    return status
 
 
 def special_windows(db: sqlite3.Connection, symbol: str, since: datetime) -> list[Window]:

@@ -75,6 +75,7 @@ import pyarrow.parquet as pq
 from krx_quant.backfill import BAR_SCHEMA, BARS_FINAL_AT, MINUTE_BARS_TR, stock_bars_path
 from krx_quant.collector import SHORT_FRAMES_EXPECTED
 from krx_quant.config import Settings
+from krx_quant.contracts import NIGHT_OPEN
 from krx_quant.doctor import Status, api_candidates, fetch_status
 from krx_quant.feeds import KRX_TRADE, NIGHT_FUTURES, RAW_SCHEMA, TRADE, WS_FEEDS, Feed
 from krx_quant.feeds.base import KST
@@ -83,7 +84,7 @@ from krx_quant.gaps_probe import UNPARSED, Group, group_line, groups_of
 from krx_quant.health import Gap, GapKind, Unread, read_batches, read_gaps
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 from krx_quant.night_probe import FEEDS as NIGHT_FEEDS
-from krx_quant.night_probe import LATE, NIGHT_OPEN, acknowledgements, evening, night_window, subscribed_nights
+from krx_quant.night_probe import LATE, acknowledgements, evening, night_window, subscribed_nights
 from krx_quant.object_store import open_store
 from krx_quant.poll_outages import SUSTAINED_FAILURES
 from krx_quant.raw_days import RawDays

@@ -55,8 +55,17 @@ once promoted (#400). An empty champion trades nothing. Before the first champio
 review to the next. A cell is its predictor's name (``Cell``: kind and predictor), never the cost
 map's role: when the cost map's ``top`` of a kind becomes another algorithm, the champion's cell
 stays its own (and trades, #472: never the other algorithm), and one whose predictor stopped
-predicting (``GONE``, ``cells.gone``) trades no more until the next review. Each pick keeps every
-cell of the policy and why it does not trade (``Selection.cells``).
+predicting (``GONE``, ``cells.gone``) trades no more until the next review. Nor does one whose
+predictor is not active (#603, ``PREDICTOR_INACTIVE``, ``cells.inactive``: on probation, on the
+bench, retired, a clone), even should it be active again before the review; its predictions are read
+and each skipped so, its position sold by its own barriers, and no other cell (a clone's original
+neither) takes its place. Each pick keeps every cell of the policy and why it does not trade
+(``Selection.cells``).
+
+> **바뀜** (2026-11-06, #611): a cell whose predictor left the active status (a bench, #545) traded on
+> until the review, its predictor still predicting → it buys nothing from the next pick to the review.
+> 이유: the frozen policy's cells are its predictors' names, and only an active algorithm's evidence
+> still holds (the user's choice of 2026-11-06, the recommendation and a second opinion alike).
 
 > **바뀜** (2026-11-02, #476): before the first champion the trader traded the cost map's cells at
 > ``KRX_TRADER_THRESHOLD`` and ``KELLY_FRACTION`` → nothing. 이유: spec #468 "챔피언 전 기본 매매는
@@ -88,6 +97,7 @@ from krx_quant.trader.selection import (
     NO_CHAMPION,
     NO_COST_MAP,
     NOT_IN_POLICY,
+    PREDICTOR_INACTIVE,
     Pick,
     Selection,
 )
@@ -221,13 +231,21 @@ class Policy:
     dropped_at: datetime | None = None  # a challenger dropped unpromoted (#400)
 
 
-def apply(policy: Policy | None, selection: Selection, gone: Collection[Cell] = ()) -> Selection:
+def apply(
+    policy: Policy | None,
+    selection: Selection,
+    gone: Collection[Cell] = (),
+    inactive: Collection[Cell] = (),
+) -> Selection:
     """``selection`` (today's cost map) under ``policy`` (module doc): its cells, by their predictors'
     names, in its order, each at its θ, whatever the cost map's verdict (#472), with the cost map's
     figures where it names them; the cells the cost map passes that it does not have marked as not in
     it. Each of its cells kept with whether it trades and why not (``Selection.cells``, #469):
-    ``GONE`` (in ``gone``: its predictor stopped predicting), ``NO_COST_MAP``. Without a policy
-    nothing trades (``NO_CHAMPION``, #469), and a cost map that could not be read stays as it is."""
+    ``GONE`` (in ``gone``: its predictor stopped predicting), ``PREDICTOR_INACTIVE`` (#603, in
+    ``inactive``: its predictor is not active; read, never bought, ``Selection.inactive``; so even
+    when the cost map could not be read, so that the pick keeps it for the cycle), ``NO_COST_MAP``.
+    Without a policy nothing trades (``NO_CHAMPION``, #469), and a cost map that could not be read
+    stays as it is."""
     if policy is None:
         if selection.reason == NO_COST_MAP:
             return selection
@@ -239,16 +257,22 @@ def apply(policy: Policy | None, selection: Selection, gone: Collection[Cell] = 
     # The cost map's figures of each cell it names: its passing picks are among them.
     named = {p.cell: p for p in (*selection.picks, *selection.named)}
     picks: list[Pick] = []
+    held: list[Cell] = []
+    whys: dict[Cell, str | None] = {}
     cells = []
     for cell in policy.cells:
         why = None
-        if selection.reason == NO_COST_MAP:
-            why = NO_COST_MAP
-        elif cell.cell in gone:
+        if selection.reason != NO_COST_MAP and cell.cell in gone:
             why = GONE
+        elif cell.cell in inactive:  # #603: before the cost map, so that the pick keeps it for the cycle
+            why = PREDICTOR_INACTIVE
+            held.append(cell.cell)
+        elif selection.reason == NO_COST_MAP:
+            why = NO_COST_MAP
         else:
             found = named.get(cell.cell) or Pick.unmapped(cell.kind, cell.role, cell.predictor)
             picks.append(replace(found, threshold=cell.threshold))
+        whys[cell.cell] = why
         cells.append(
             {
                 "kind": cell.kind,
@@ -260,14 +284,13 @@ def apply(policy: Policy | None, selection: Selection, gone: Collection[Cell] = 
             }
         )
     kept = {p.cell for p in picks}
-    mine = {c.cell for c in policy.cells}
     considered = []
     for seen in selection.considered:
         named_cell = Cell(seen["kind"], seen.get("predictor") or "")
         if named_cell in kept:  # #472: a champion's cell trades whatever its verdict
             seen = {**seen, "picked": True}
         elif seen.get("picked"):
-            why = GONE if named_cell in mine else f"not in policy {policy.version}"
+            why = whys.get(named_cell) or f"not in policy {policy.version}"
             seen = {**seen, "picked": False, "why": why}
         considered.append(seen)
     reason = None if picks else selection.reason or NOT_IN_POLICY
@@ -279,6 +302,7 @@ def apply(policy: Policy | None, selection: Selection, gone: Collection[Cell] = 
         policy=policy.version,
         cells=tuple(cells),
         named=(),
+        inactive=tuple(held),
     )
 
 

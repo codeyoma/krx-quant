@@ -85,6 +85,10 @@ NO_CHAMPION = "no_champion"  # no champion yet (#469): nothing trades before the
 # Why a policy's cell does not trade (#469, ``policy.apply``): its predictor stopped predicting (for
 # the rest of the review cycle), or (#472) the cost map could not be read (``NO_COST_MAP``).
 GONE = "gone"
+# Why a policy's cell buys nothing (#603, ``policy.apply``): its predictor is not active (on probation,
+# on the bench, retired, a clone: ``cells.inactive``), for the rest of the review cycle. Its predictions
+# are read all the same, each skipped so (``paper.py``).
+PREDICTOR_INACTIVE = "predictor_inactive"
 # Why it did not trade before #472, kept by the picks of then: the cost map did not name it that day
 # (another predictor held its role). Since #472 such a cell trades (``Pick.unmapped``).
 OFF_MAP = "not_on_cost_map"
@@ -183,8 +187,12 @@ class Selection:
     # the nightly job freezes one for a review cycle (#474, ``practice.py``).
     practisable: tuple[Pick, ...] = ()
     # Under a policy (#469, ``policy.apply``): each of its cells in its order, whether it trades and,
-    # if not, why (``GONE``, ``NO_COST_MAP``; ``OFF_MAP`` or the cost map's verdict before #472).
+    # if not, why (``GONE``, ``PREDICTOR_INACTIVE``, ``NO_COST_MAP``; ``OFF_MAP`` or the cost map's
+    # verdict before #472).
     cells: tuple[dict[str, Any], ...] = ()
+    # Under a policy (#603): its cells whose predictor is not active (``PREDICTOR_INACTIVE``), in its
+    # order. The book reads their predictions and buys none (``paper.py``); they rank nothing.
+    inactive: tuple[Cell, ...] = ()
     # The evaluation version and the review cycle the pick is made in (#469, ``review.py``); None
     # before the evaluation was begun.
     evaluation: int | None = None
@@ -231,7 +239,7 @@ class Selection:
         return "none passes: " + "; ".join(seen) + self._missing()
 
     def _missing(self) -> str:
-        """The policy's cells gone (#469), for the log line."""
+        """The policy's cells not traded (gone, #469; inactive, #603), for the log line."""
         found = [f"{c['kind']} {c['predictor']} {c['why']}" for c in self.cells if not c["traded"]]
         return f" (policy {self.policy}: " + "; ".join(found) + ")" if found else ""
 

@@ -6,7 +6,9 @@ mock record the live gate reads, its mock KIS order numbers included: the user d
 the pre-validation reports and their history (``prevalidations/``) and the scheduled jobs' state
 (``scheduled.json``). The models the engine runs (``models/``) go too: a collector started on an
 empty ``state/models`` publishes the defaults as ``live.json`` and prunes the store's models it no
-longer names (``swap.keep_models``), so a new server needs them back before its first start.
+longer names (``swap.keep_models``), so a new server needs them back before its first start. And the
+experiments' reports their writers name (``EXPERIMENT_REPORTS``, #604): neyman's holds the window's N
+and plan, fixed before the window and never computed again; the user decided on 2026-11-06.
 
 **Backup** (``back_up``). Every night at ``BACKUP_AT`` (05:35 KST: the scheduled jobs' night ends at
 05:30, the 06:00 deploy comes after) the collector packs them into one ``tar.gz`` in a scratch folder
@@ -27,11 +29,15 @@ needs no new delete right for the engine, which can delete only ``engine/models/
 leaked key cannot delete the backups. And 30 days is the drill's month: a backup the drill finds
 broken still has older nights to go back to.
 
-**Never exported**: the backup takes the files named here (``DATABASES``, ``FILES``, ``FOLDERS``)
-and nothing else. ``state/fill_notices.sqlite3`` (and its ``-wal``, ``-shm``) stays on the server as
-the docs require: ``NEVER`` names it, a backup that would hold it is refused, a restore takes none
-from a pack, and no symbolic link is followed. The state folder's other files (the KRX Open API's
-values in ``closing_flow/``, Toss's in ``supply/``, the KIS token caches) are not named, so not taken.
+**Never exported**: the backup takes the files named here (``DATABASES``, ``FILES``, ``FOLDERS``,
+``EXPERIMENT_REPORTS``) and nothing else. ``state/fill_notices.sqlite3`` (and its ``-wal``, ``-shm``)
+stays on the server as the docs require: ``NEVER`` names it, a backup that would hold it is refused, a
+restore takes none from a pack, and no symbolic link is followed. The state folder's other files (the
+KRX Open API's values in ``closing_flow/``, Toss's in ``supply/``, the KIS token caches) are not
+named, so not taken. An experiment report its pattern names is still left out when a word of its name
+or of a key of its JSON is an account's, an order's, a fill notice's or a secret's
+(``REFUSED_WORDS``), or when it is not JSON: the manifest lists it under ``refused``, and the drill
+fails on it.
 
 **Restore** (``restore``, ``krx-quant restore-state``): the latest backup (or a pack given, such as an
 older version fetched from S3) is downloaded into a scratch folder and checked as the drill checks
@@ -46,9 +52,10 @@ rescore's engine lock refuses it too.
 **Drill** (``drill``, ``krx-quant restore-drill``, the monthly scheduled job ``restore-drill-577``):
 the latest backup downloaded and unpacked into a scratch folder and checked: the object's SHA-256
 against the store's, each file's against the list, ``PRAGMA integrity_check`` on each database, its
-tables' row counts against those counted at the backup (shown beside the live database's now), and
-the backup's age. Its output holds counts, sizes, times and ok or fail only. True when every check
-passed.
+tables' row counts against those counted at the backup (shown beside the live database's now), each
+experiment report read as JSON (their count shown beside the live folder's now), no experiment report
+refused at the backup, and the backup's age. Its output holds counts, sizes, times and ok or fail
+only. True when every check passed.
 
 The scratch folders (``state/.state-backup-work/<kind>-<random>/``) are removed when their run ends;
 one a killed run left is removed by the next run once it is older than ``STALE_SCRATCH``.
@@ -62,6 +69,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import tarfile
@@ -73,6 +81,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from datetime import time as clock_time
+from fnmatch import fnmatchcase
+from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import IO, Any
 
@@ -98,6 +108,59 @@ FORMAT = 1
 DATABASES = (ENGINE_DB, TRADER_DB)
 FILES = ("scheduled.json",)
 FOLDERS = ("prevalidations", "models")
+# The experiments' reports a backup holds too (#604), files directly under ``EXPERIMENTS``: by the
+# module that writes them, the pattern (``fnmatch``) of their names. Each writes one report,
+# ``experiments/<its scheduled job's name>.json`` (its ``REPORT``), so each pattern is that name. A
+# file no pattern names is not taken: the reports of the experiments #566 removed with their code
+# (``poisson-link-439.json``, ``turing-prior-448.json``) among them, which nothing reads or writes any
+# more and whose results are in their issues (#439, #448). ``tests/test_state_backup.py`` checks that
+# every module naming a file under ``experiments/`` has its pattern here.
+EXPERIMENTS = "experiments"
+EXPERIMENT_REPORTS = {
+    "krx_quant.climate_prior": "climate-prior-429.json",
+    "krx_quant.normal_order": "normal-order-529.json",
+    "krx_quant.neyman_variants": "neyman-variants-283.json",
+    "krx_quant.neyman_backfill": "neyman-backfill-532.json",
+}
+# Refused though its pattern names it (#604): an experiment report with one of these words in its
+# name or in a key of its JSON, at any depth. A name or a key is split into words at anything but a
+# letter or a digit and where a lower case letter meets an upper case one, then lowered; each word is
+# matched alone, and each two in a row joined by "_". KIS's fields are among them: CANO and
+# ACNT_PRDT_CD (the account), ODNO (the order number), CNTG_* (a fill); and the trader's (``orders``,
+# ``fills``, ``broker_id``). The writers write none: one that did would keep its report on the server,
+# out of the backup, and fail the drill.
+REFUSED_WORDS = frozenset(
+    {
+        # an account's
+        "account",
+        "accounts",
+        "acnt",
+        "cano",
+        # an order's
+        "orders",
+        "odno",
+        "order_id",
+        "order_no",
+        "order_number",
+        "broker",
+        # a fill notice's
+        "fill",
+        "fills",
+        "notice",
+        "notices",
+        "cntg",
+        # the trader's, and the brokers' keys
+        "trader",
+        "kis",
+        "token",
+        "secret",
+        "app_key",
+        "app_secret",
+        "password",
+    }
+)
+# The same in Korean, found anywhere in a name or a key: account, order, fill, notice.
+REFUSED_KOREAN = ("계좌", "주문", "체결", "통보")
 # Never in a backup (docs/operations.md 8장): the trader's fill notice records stay on the server.
 NEVER = ("fill_notices.sqlite3",)
 # Each night at this time (KST), after the scheduled jobs' night (05:30) and before the 06:00 deploy.
@@ -115,6 +178,10 @@ ASIDE = "before-restore-"
 SIDE_FILES = ("-wal", "-shm", "-journal")
 _LOCK = ".state-backup.lock"
 _ALERT = "state-backup"
+# Why an experiment report was refused, as the manifest lists it, and as the drill says it.
+_BY_NAME, _BY_KEY, _NOT_JSON = "name", "key", "not json"
+_REFUSED_FOR = {_BY_NAME: "이름", _BY_KEY: "JSON 키", _NOT_JSON: "JSON이 아님"}
+_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
 # gzip's fastest level: on a database of made-up predictions, a tenth more bytes than the default
 # level 6 at less than half its CPU time, which the server's burstable vCPUs pay for.
 _GZIP_LEVEL = 1
@@ -134,12 +201,16 @@ class RestoreRefused(Exception):
 
 @dataclass(frozen=True)
 class Backup:
-    """A backup made: when, how many files, the object's bytes and the seconds it took."""
+    """A backup made: when, how many files, the object's bytes and the seconds it took; of the
+    files, the experiment reports and their bytes, and the experiment reports refused."""
 
     made_at: datetime
     files: int
     size: int
     seconds: float
+    experiments: int = 0
+    experiment_bytes: int = 0
+    refused: int = 0
 
 
 @dataclass(frozen=True)
@@ -178,6 +249,10 @@ class Checked:
     digest: bool | None = None  # its SHA-256 against the store's; None: no store's to compare with
     files: dict[str, bool] = field(default_factory=dict)  # each listed file: its SHA-256 as listed
     databases: list[Database] = field(default_factory=list)
+    experiments: dict[str, bool] = field(default_factory=dict)  # each experiment report: read as JSON
+    experiment_bytes: int = 0
+    refused: dict[str, str] = field(default_factory=dict)  # the experiment reports refused, and why
+    live_experiments: int | None = None  # in the drill, those the live folder holds now
     problems: list[str] = field(default_factory=list)
     seconds: dict[str, float] = field(default_factory=dict)  # by step
 
@@ -211,22 +286,25 @@ async def keep_backed_up(
             )
         else:
             log.info(
-                "backed up the server state: %d files, %.1f MB in %.1fs",
+                "backed up the server state: %d files, %.1f MB in %.1fs (experiment reports: %d, %.1f KB)",
                 made.files,
                 made.size / _MB,
                 made.seconds,
+                made.experiments,
+                made.experiment_bytes / 1024,
             )
             alerts.resolve(_ALERT, "서버 상태 백업(#576)이 다시 됩니다.")
 
 
 def back_up(state_dir: Path, store: ObjectStore, now: datetime, *, commit: str = "unknown") -> Backup:
-    """Pack the state's files (``DATABASES``, ``FILES``, ``FOLDERS``) with their list and counts and
-    upload the pack as ``KEY``, encrypted; note it in ``MARK``. Raises if it cannot, and stores
-    nothing then: the store keeps the last backup."""
+    """Pack the state's files (``DATABASES``, ``FILES``, ``FOLDERS``, ``EXPERIMENT_REPORTS`` but those
+    refused) with their list and counts and upload the pack as ``KEY``, encrypted; note it in
+    ``MARK``. Raises if it cannot, and stores nothing then: the store keeps the last backup."""
     began = time.monotonic()
     with _locked(state_dir), _scratch(state_dir, "backup") as work:
         files: dict[str, dict[str, Any]] = {}
         databases: dict[str, dict[str, Any]] = {}
+        refused: dict[str, str] = {}
         pack = work / "state.tar.gz"
         with tarfile.open(pack, "w:gz", compresslevel=_GZIP_LEVEL) as tar:
             for name in DATABASES:
@@ -246,19 +324,40 @@ def back_up(state_dir: Path, store: ObjectStore, now: datetime, *, commit: str =
                 shutil.copyfile(path, copy)
                 files[name] = _add(tar, copy, name, now)
                 copy.unlink()
+            for path in _experiment_files(state_dir):
+                name = path.relative_to(state_dir).as_posix()
+                _refuse_never(name)
+                copy = work / "copy"
+                shutil.copyfile(path, copy)  # checked as copied: what is packed is what was read
+                if why := _refusal(name, copy):
+                    log.warning("left %s out of the backup of the server state: refused (%s)", name, why)
+                    refused[name] = why
+                else:
+                    files[name] = _add(tar, copy, name, now)
+                copy.unlink()
             manifest = {
                 "format": FORMAT,
                 "made_at": now.astimezone(KST).isoformat(),
                 "commit": commit,
                 "files": files,
                 "databases": databases,
+                "refused": refused,
             }
             listing = work / MANIFEST
             listing.write_text(json.dumps(manifest, indent=1, ensure_ascii=False))
             _add(tar, listing, MANIFEST, now)
         size = pack.stat().st_size
         store.put(KEY, pack, file_digest(pack), encrypted=True)
-    made = Backup(now, len(files), size, round(time.monotonic() - began, 1))
+    experiments = [entry for name, entry in files.items() if _experiment(name)]
+    made = Backup(
+        now,
+        len(files),
+        size,
+        round(time.monotonic() - began, 1),
+        experiments=len(experiments),
+        experiment_bytes=sum(int(entry["size"]) for entry in experiments),
+        refused=len(refused),
+    )
     _write_mark(state_dir, made)
     return made
 
@@ -276,7 +375,9 @@ def check(store: ObjectStore | None, root: Path, *, source: Path | None = None) 
     """Download the latest backup from ``store`` (or take ``source``, a pack a backup made) into
     ``root``, unpack it into ``root / "files"`` and check it: the object's SHA-256 against the
     store's, each file's against the list, each database's ``PRAGMA integrity_check`` and its tables'
-    row counts against those counted at the backup. What fails is in ``problems``."""
+    row counts against those counted at the backup, each experiment report read as JSON. What fails
+    is in ``problems``. The experiment reports the backup refused are in ``refused``: the drill fails
+    on them, a restore does not (they are not in the backup)."""
     checked = Checked(root)
     pack = root / "state.tar.gz"
     began = time.monotonic()
@@ -304,13 +405,15 @@ def check(store: ObjectStore | None, root: Path, *, source: Path | None = None) 
     listed: dict[str, Any] = manifest.get("databases") or {}
     for name in sorted(listed):
         checked.databases.append(_check_database(root / "files" / name, name, listed[name], checked))
+    _check_experiments(root / "files", manifest, checked)
     checked.seconds["검사"] = round(time.monotonic() - began, 1)
     return checked
 
 
 def drill(state_dir: Path, store: ObjectStore, now: datetime, say: Callable[[str], None] = print) -> bool:
     """The restore drill: the latest backup checked in a scratch folder, beside the live databases'
-    counts now, its report said a line at a time. Whether every check passed."""
+    counts and experiment reports now, its report said a line at a time; an experiment report the
+    backup refused fails it. Whether every check passed."""
     with _scratch(state_dir, "drill") as work:
         checked = check(store, work)
         for database in checked.databases:
@@ -318,6 +421,13 @@ def drill(state_dir: Path, store: ObjectStore, now: datetime, say: Callable[[str
             database.tables = [
                 Table(t.name, t.backed_up, t.restored, live.get(t.name)) for t in database.tables
             ]
+        checked.live_experiments = len(_experiment_files(state_dir))
+        if refused := sorted(checked.refused.items()):
+            checked.problems.append(
+                f"백업이 실험 파일 {len(refused)}개를 넣지 않았다(이름이나 JSON 키에 "
+                "계좌·주문·체결 통보·비밀값의 말이 있거나 JSON이 아니다): "
+                + ", ".join(f"{name}({_REFUSED_FOR.get(why, why)})" for name, why in refused)
+            )
         if checked.made_at is not None and now - checked.made_at > STALE_AFTER:
             checked.problems.append(
                 f"가장 최근 백업이 {_age(now - checked.made_at)} 전이다: 밤 백업이 돌지 않았다"
@@ -408,6 +518,14 @@ def report(checked: Checked, now: datetime, *, title: str, live: bool) -> list[s
     if checked.files:
         same = sum(checked.files.values())
         lines.append(f"파일 {len(checked.files)}개 중 SHA-256이 백업 때와 같은 파일 {same}개")
+        held, read = len(checked.experiments), sum(checked.experiments.values())
+        line = (
+            f"실험 파일 {held}개({checked.experiment_bytes / 1024:,.1f} KB): "
+            f"JSON 파싱 ok {read}개, fail {held - read}개"
+        )
+        if checked.live_experiments is not None:
+            line += f". 지금 서버에 허용 목록의 실험 파일 {checked.live_experiments}개"
+        lines.append(line)
     for database in checked.databases:
         if database.problems is None:
             integrity = "열지 못함"
@@ -508,6 +626,86 @@ def _plain_files(state_dir: Path) -> list[Path]:
     return found
 
 
+def _experiment_files(state_dir: Path) -> list[Path]:
+    """The files directly under ``EXPERIMENTS`` that a pattern of ``EXPERIMENT_REPORTS`` names, those
+    a backup refuses (``_refusal``) among them: regular files, no symbolic link followed."""
+    root = state_dir / EXPERIMENTS
+    if root.is_symlink() or not root.is_dir():
+        return []
+    return [path for path in sorted(root.iterdir()) if _named(path.name) and _regular(path)]
+
+
+def _named(name: str) -> bool:
+    """Whether a pattern of ``EXPERIMENT_REPORTS`` names the file ``name``; never one whose name
+    starts with a dot (a file being written)."""
+    return not name.startswith(".") and any(fnmatchcase(name, p) for p in EXPERIMENT_REPORTS.values())
+
+
+def _experiment(name: str) -> bool:
+    """Whether ``name`` (under the state folder) is an experiment report a backup may hold: directly
+    under ``EXPERIMENTS``, named by a pattern, no refused word in its name."""
+    parts = PurePosixPath(name).parts
+    return len(parts) == 2 and parts[0] == EXPERIMENTS and _named(parts[1]) and not has_refused_word(parts[1])
+
+
+def has_refused_word(text: str) -> bool:
+    """Whether ``text`` (a file's name, a JSON key) has a word of ``REFUSED_WORDS`` or
+    ``REFUSED_KOREAN``."""
+    if any(word in text for word in REFUSED_KOREAN):
+        return True
+    words = [word.lower() for word in _WORD.findall(text)]
+    return not REFUSED_WORDS.isdisjoint([*words, *(f"{a}_{b}" for a, b in pairwise(words))])
+
+
+def _refusal(name: str, copy: Path) -> str | None:
+    """Why the experiment report ``name``, copied to ``copy``, is refused: a refused word in its
+    name or in a key of its JSON at any depth, or no JSON. None when it is taken."""
+    if has_refused_word(PurePosixPath(name).name):
+        return _BY_NAME
+    try:
+        data = json.loads(copy.read_bytes())
+    except (ValueError, RecursionError):  # a UnicodeDecodeError is a ValueError
+        return _NOT_JSON
+    if any(has_refused_word(key) for key in _keys(data)):
+        return _BY_KEY
+    return None
+
+
+def _keys(data: Any) -> Iterator[str]:
+    """Every key of every object in ``data``, at any depth."""
+    stack = [data]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            yield from (str(key) for key in item)
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+
+
+def _check_experiments(files: Path, manifest: dict[str, Any], checked: Checked) -> None:
+    """Each experiment report unpacked under ``files``, read as JSON; those the backup refused (its
+    manifest's ``refused``)."""
+    for name in sorted(checked.files):
+        path = files / name
+        if not _experiment(name) or not path.is_file():
+            continue
+        checked.experiment_bytes += path.stat().st_size
+        try:
+            json.loads(path.read_bytes())
+        except (ValueError, RecursionError):
+            checked.experiments[name] = False
+        else:
+            checked.experiments[name] = True
+    if failed := [name for name, read in checked.experiments.items() if not read]:
+        checked.problems.append(f"실험 파일 {len(failed)}개를 JSON으로 읽지 못했다")
+    refused = manifest.get("refused") or {}
+    if isinstance(refused, dict):
+        checked.refused = {str(name): str(why) for name, why in refused.items()}
+    else:
+        checked.problems.append(f"백업의 목록({MANIFEST})의 refused를 읽지 못했다")
+
+
 def _regular(path: Path) -> bool:
     return path.is_file() and not path.is_symlink()
 
@@ -517,9 +715,10 @@ def _never(name: str) -> bool:
 
 
 def _held(name: str) -> bool:
-    """Whether a backup holds ``name``: a database or a file named, or a file under a folder named."""
+    """Whether a backup holds ``name``: a database or a file named, a file under a folder named, or
+    an experiment report a pattern names (``_experiment``)."""
     parts = PurePosixPath(name).parts
-    return name in DATABASES or name in FILES or (len(parts) > 1 and parts[0] in FOLDERS)
+    return name in DATABASES or name in FILES or (len(parts) > 1 and parts[0] in FOLDERS) or _experiment(name)
 
 
 def _refuse_never(name: str) -> None:

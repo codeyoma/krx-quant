@@ -19,7 +19,7 @@ digit + month (``A01603``, ``A01703``). KIS answers nothing for the other format
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
@@ -54,7 +54,9 @@ def front_month(product: Product, day: date, calendar: MarketCalendar) -> str:
     return contract_code(product, year, month)
 
 
-# The night session ends at 06:00: until then, the night going on is the previous evening's.
+# The night session opens at 18:00 and ends at 06:00 the next morning: until then, the night going on
+# is the previous evening's.
+NIGHT_OPEN = time(18, 0)
 NIGHT_END = timedelta(hours=6)
 
 

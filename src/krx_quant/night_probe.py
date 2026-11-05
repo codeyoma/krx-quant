@@ -42,7 +42,7 @@ import aiohttp
 from krx_quant import kis
 from krx_quant.archive import partition_batches
 from krx_quant.config import Settings
-from krx_quant.contracts import KOSPI200, NIGHT_END, night_front_month
+from krx_quant.contracts import KOSPI200, NIGHT_END, NIGHT_OPEN, night_front_month
 from krx_quant.feeds import KOSPI200_FUTURES, NIGHT_FUTURES, NIGHT_FUTURES_BOOK, Feed
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
@@ -50,7 +50,6 @@ from krx_quant.masters import MasterError, download
 from krx_quant.object_store import open_store
 from krx_quant.raw_days import RawDays
 
-NIGHT_OPEN = time(18, 0)
 # Records received this long after 06:00 still count as the night's (a closing record).
 LATE = timedelta(minutes=10)
 LOOK_BACK_DAYS = 7  # the nights looked for before the one probed

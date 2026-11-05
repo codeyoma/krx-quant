@@ -3331,8 +3331,8 @@
                   "oneOf": [{"type": "null"}, {"$ref": "#/$defs/trader_practice_frozen"}]
                 },
                 "why": {
-                  "description": "#474: why the champion's book does not practise at the last pick, the practice on: champion (a champion cell trades), not_frozen (no practice cell kept for the review cycle in force yet: the nightly job chooses one), gone (the cell's predictor no longer predicts: none until the cycle ends), or the pick's own reason (no_cost_map, no_policy). Null while it practises, and with the practice off; absent in a state written before #474.",
-                  "oneOf": [{"type": "null"}, {"enum": ["champion", "not_frozen", "gone", "no_cost_map", "no_policy"]}]
+                  "description": "#474: why the champion's book does not practise at the last pick, the practice on: champion (a champion cell trades), not_frozen (no practice cell kept for the review cycle in force yet: the nightly job chooses one), gone (the cell's predictor no longer predicts: none until the cycle ends), predictor_inactive (#603: the cell's predictor is not active: none until the cycle ends), or the pick's own reason (no_cost_map, no_policy). Null while it practises, and with the practice off; absent in a state written before #474.",
+                  "oneOf": [{"type": "null"}, {"enum": ["champion", "not_frozen", "gone", "predictor_inactive", "no_cost_map", "no_policy"]}]
                 }
               }
             }
@@ -3870,7 +3870,7 @@
       }
     },
     "trader_practice_frozen": {
-      "description": "#474: the mock practice cell kept for a review cycle: chosen by the nightly job once for the cycle (chosen_at), of the cells with a verdict at a market order's round trip (pass or fail), the cell and θ (threshold) whose net per signal replayed alone a share (#470) has the greatest day-level 95% lower bound (per_signal, in ticks; it may be below 0) of those that bought at least 20 times. signals and bought: its signals and buys on the replay; wins: those that netted above 0; measured: the cell × θ measured that night; eligible: those that bought enough. gone_at: when a pick found its predictor gone (no practice until the cycle ends), else null.",
+      "description": "#474: the mock practice cell kept for a review cycle: chosen by the nightly job once for the cycle (chosen_at), of the cells with a verdict at a market order's round trip (pass or fail), the cell and θ (threshold) whose net per signal replayed alone a share (#470) has the greatest day-level 95% lower bound (per_signal, in ticks; it may be below 0) of those that bought at least 20 times. signals and bought: its signals and buys on the replay; wins: those that netted above 0; measured: the cell × θ measured that night; eligible: those that bought enough. gone_at: when a pick found its predictor gone (no practice until the cycle ends), else null. inactive_at (#603): when a pick found its predictor not active (on probation, on the bench, retired or a clone: no practice until the cycle ends), else null; absent in a state written before #603.",
       "type": "object",
       "required": ["evaluation", "cycle", "chosen_at", "kind", "role", "predictor", "threshold", "per_signal", "signals", "bought", "wins", "measured", "eligible", "gone_at"],
       "additionalProperties": false,
@@ -3898,7 +3898,8 @@
         "wins": {"type": "integer", "minimum": 0},
         "measured": {"type": "integer", "minimum": 1},
         "eligible": {"type": "integer", "minimum": 1},
-        "gone_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}
+        "gone_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "inactive_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}
       }
     },
     "trader_calibration": {
