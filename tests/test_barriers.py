@@ -79,6 +79,7 @@ from krx_quant.replay import replay_into
 from krx_quant.rescore import fill_kind_answers
 from krx_quant.touch import MISSING_MID, REST_QUOTES, RESTARTED, SILENT, TARGET_VERSION
 from krx_quant.training import bar_answers, training_day
+from tests.api_doubles import listening
 from tests.api_schema import check
 from tests.replay_doubles import END_OF_DAY, NEXT_MORNING, busy_morning, record, stored
 from tests.replay_events import CALENDAR, DAY, FEE, SYMBOL, api, at, get_json, run, steady_book, trade
@@ -949,7 +950,7 @@ async def test_a_barrier_prediction_keeps_its_bar_close_s_mid_point_and_tick_aft
             client, f"/v1/symbols/{SYMBOL}/kinds/barrier/predictions?bar_close=2026-10-12T09:33:00%2B09:00"
         )
         symbols = await get_json(client, "/v1/symbols")
-        ws = await client.ws_connect("/v1/stream")
+        ws = await listening(client)
         assert isinstance(engine.clock, FakeClock)
         rest = [e for e in events if e[1]["received_at"] > split]
         await replay_into(engine, engine.clock, rest, until=at("09:36:00"))
