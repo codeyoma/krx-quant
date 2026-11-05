@@ -1,11 +1,12 @@
 """The simulated probations give way to a pre-validation that would miss its last start (#376).
 
 The 2026-10-23 and 2026-10-25 nights: ``simulate-bar-close-298`` ran first (1 h 24 min, then
-2 h 22 min) and the night's pre-validation, which must start by 05:30 less its limit (00:30, the
+2 h 22 min) and the night's pre-validation, which must start by 05:30 less its limit (then 00:30, the
 Breimans 23:30), went to the next night. The decision of 2026-10-26: the pre-validation runs first
 when the simulation, run first to its time limit, would carry it past its last start; the simulation
 runs after it, that night if it can still start, else the next; both fitting, the simulation stays
-first. A simulation that gave way on two nights runs first.
+first. A simulation that gave way on two nights runs first. The limits since #546: a direction
+algorithm's 3 hours (last start 02:30), another bar-close kind's 4 h 30 min (01:00).
 
 The jobs are the real ones; their processes are stand-ins that take time on the fake clock.
 """
@@ -133,12 +134,13 @@ async def test_a_pre_validation_that_would_miss_its_last_start_goes_first_and_th
         clock.set(at(FRIDAY, "22:30"))
         await until(lambda: runs.names() == ["prevalidate kalman"])
         assert told.saying("simulate-bar-close-298") == [
-            gave_way("simulate-bar-close-298", "prevalidate-kalman", FRIDAY, "00:30", "5시간", "00:30", 1)
+            gave_way("simulate-bar-close-298", "prevalidate-kalman", FRIDAY, "02:30", "5시간", "00:30", 1)
         ]
         assert gave_way_on(tmp_path) == {"simulate-bar-close-298": [FRIDAY.isoformat()]}
 
         clock.set(at(SATURDAY, "00:20"))  # kalman took 1 h 50 min: the simulation still starts by 00:30
-        await until(lambda: runs.ended == ["prevalidate kalman", BAR_CLOSE])
+        # Then the night is quiet: shannon, waiting too, is its second pre-validation (#546).
+        await until(lambda: runs.ended == ["prevalidate kalman", BAR_CLOSE, "prevalidate shannon"])
         assert runs.started[1] == (BAR_CLOSE, at(SATURDAY, "00:20"))
         assert state.gave_way == {}  # it ran: the night it gave way counts no more
         assert gave_way_on(tmp_path) == {}
@@ -155,7 +157,7 @@ async def test_a_simulation_that_cannot_start_after_it_runs_the_next_night(tmp_p
         clock.set(at(SATURDAY, "00:50"))
         await until(lambda: bool(told.saying("지금 시작하면")))
         assert told.saying("simulate-bar-close-298") == [
-            gave_way("simulate-bar-close-298", "prevalidate-kalman", FRIDAY, "00:30", "5시간", "00:30", 1),
+            gave_way("simulate-bar-close-298", "prevalidate-kalman", FRIDAY, "02:30", "5시간", "00:30", 1),
             put_off("simulate-bar-close-298", FRIDAY, "5시간"),
         ]
         assert runs.names() == ["prevalidate kalman"]
@@ -179,16 +181,17 @@ async def test_a_simulation_that_cannot_start_after_it_runs_the_next_night(tmp_p
 @pytest.mark.parametrize(
     ("start", "breiman_first"),
     [
-        ("22:30", True),  # by the simulation's 5 hours 03:30, past 23:30
-        ("23:30", True),  # its last start: it still starts
-        ("23:31", False),  # it cannot start anyway: giving way would gain nothing
+        ("22:30", True),  # by the simulation's 5 hours 03:30, past 01:00
+        ("00:30", True),  # the simulation's last start: by 05:30, past 01:00
+        ("01:01", False),  # past its last start too: neither starts
     ],
 )
-async def test_a_breiman_has_6_hours_and_must_start_by_23_30(
+async def test_a_breiman_has_4_hours_and_a_half_and_must_start_by_01_00(
     tmp_path: Path, start: str, breiman_first: bool
 ) -> None:
-    """The training ends at ``start`` (a collector started inside the night runs its jobs at once)."""
-    clock = FakeClock(at(FRIDAY, start))
+    """The training ends at ``start`` (a collector started inside the night runs its jobs at once).
+    Its limit was 6 hours, its last start 23:30, before #546."""
+    clock = FakeClock(at(FRIDAY if start > "12:00" else SATURDAY, start))
     runs = Takes(clock, {"prevalidate breiman": timedelta(hours=3)})
     async with scheduling(
         tmp_path,
@@ -202,24 +205,25 @@ async def test_a_breiman_has_6_hours_and_must_start_by_23_30(
             await until(lambda: runs.names() == ["prevalidate breiman"])
             assert told.saying("자리를 내준") == [
                 gave_way(
-                    "simulate-bar-close-298", "prevalidate-breiman", FRIDAY, "23:30", "5시간", "00:30", 1
+                    "simulate-bar-close-298", "prevalidate-breiman", FRIDAY, "01:00", "5시간", "00:30", 1
                 )
             ]
             return
         await until(lambda: bool(told.saying("prevalidate-breiman")))
-        assert runs.names() == [BAR_CLOSE]
-        assert told.saying("prevalidate-breiman") == [put_off("prevalidate-breiman", FRIDAY, "6시간")]
+        assert runs.names() == []
+        assert told.saying("prevalidate-breiman") == [put_off("prevalidate-breiman", FRIDAY, "4시간 30분")]
+        assert told.saying("simulate-bar-close-298") == [put_off("simulate-bar-close-298", FRIDAY, "5시간")]
         assert not told.saying("자리를 내준")
 
 
 @pytest.mark.parametrize(
     ("algorithm", "start", "gives_way"),
     [
-        ("mandelbrot", "22:30", False),  # 23:30 by its hour, before 00:30
-        ("mandelbrot", "23:30", False),  # 00:30 at the latest: the pre-validation still starts
-        ("mandelbrot", "23:31", True),
-        ("breiman", "22:30", False),  # 23:30 at the latest: just in time
-        ("breiman", "22:31", True),
+        ("mandelbrot", "22:30", False),  # 23:30 by its hour, before 01:00
+        ("mandelbrot", "00:00", False),  # 01:00 at the latest: the pre-validation still starts
+        ("mandelbrot", "00:01", True),
+        ("kalman", "01:30", False),  # 02:30 at the latest: just in time
+        ("kalman", "01:31", True),
     ],
 )
 async def test_the_daily_simulation_stays_first_when_both_fit(
@@ -228,9 +232,9 @@ async def test_the_daily_simulation_stays_first_when_both_fit(
     """The daily simulation's hour (it took 40 s on 2026-10-20) against a bar-close pre-validation's
     last start: both fit, it goes first, as #298 listed it; else it gives way, and runs once the
     pre-validation is over (it can start until 04:30)."""
-    clock = FakeClock(at(FRIDAY, start))
+    clock = FakeClock(at(FRIDAY if start > "12:00" else SATURDAY, start))
     prevalidation = f"prevalidate {algorithm}"
-    runs = Takes(clock, {prevalidation: timedelta(hours=3)})
+    runs = Takes(clock, {prevalidation: timedelta(hours=2)})
     facts = waiting(algorithm, simulating=(), daily=("cox",))
     async with scheduling(
         tmp_path, clock.now(), SIMULATIONS_AND_PREVALIDATIONS, runs=runs, facts=facts, clock=clock
@@ -240,11 +244,11 @@ async def test_the_daily_simulation_stays_first_when_both_fit(
             assert not told.saying("자리를 내준")
             return
         await until(lambda: runs.names() == [prevalidation])
-        last = "23:30" if algorithm == "breiman" else "00:30"
+        last = "01:00" if algorithm == "mandelbrot" else "02:30"
         assert told.saying("자리를 내준") == [
             gave_way("simulate-daily-298", f"prevalidate-{algorithm}", FRIDAY, last, "1시간", "04:30", 1)
         ]
-        ended = at(FRIDAY, start) + timedelta(hours=3)
+        ended = clock.now() + timedelta(hours=2)
         clock.set(ended)
         await until(lambda: runs.ended == [prevalidation, DAILY])
         assert runs.started[1] == (DAILY, ended)
@@ -252,28 +256,29 @@ async def test_the_daily_simulation_stays_first_when_both_fit(
 
 
 async def test_both_simulations_give_way_and_run_after_it_in_the_list_s_order(tmp_path: Path) -> None:
-    clock = FakeClock(at(FRIDAY, "23:45"))
-    runs = Takes(clock, {"prevalidate mandelbrot": timedelta(minutes=30)})
+    clock = FakeClock(at(SATURDAY, "00:10"))  # the daily one's hour would carry mandelbrot past 01:00
+    runs = Takes(clock, {"prevalidate mandelbrot": timedelta(minutes=15)})
     facts = waiting("mandelbrot", simulating=("breiman",), daily=("cox",))
     async with scheduling(
         tmp_path, clock.now(), SIMULATIONS_AND_PREVALIDATIONS, runs=runs, facts=facts, clock=clock
     ) as (_, _, told, state):
         await until(lambda: runs.names() == ["prevalidate mandelbrot"])
         assert len(told.saying("자리를 내준")) == 2
-        clock.set(at(SATURDAY, "00:15"))
+        clock.set(at(SATURDAY, "00:25"))  # the bar-close one still starts by 00:30
         await until(lambda: runs.ended == ["prevalidate mandelbrot", DAILY, BAR_CLOSE])
         assert state.gave_way == {}
 
 
 async def test_a_simulation_that_gave_way_on_two_nights_runs_first_on_the_third(tmp_path: Path) -> None:
     """Pre-validations due every night, each past the simulation's last start: it waits two nights,
-    then runs first, and that night's pre-validation waits a night as before #376 (2026-10-25)."""
+    then runs first, and that night's pre-validation waits a night as before #376 (2026-10-25). Each
+    of another kind's (4 h 30 min, #546): none fits as a quiet night's second after a 3-hour one."""
     took = {
         "prevalidate mandelbrot": timedelta(hours=3),
         "prevalidate breiman": timedelta(hours=3),
-        BAR_CLOSE: timedelta(hours=2, minutes=22),
+        BAR_CLOSE: timedelta(hours=2, minutes=31),
     }
-    facts = waiting("mandelbrot", "breiman", "kalman")
+    facts = waiting("mandelbrot", "breiman", "breiman-15m")
 
     async def gives_way(day: date, prevalidation: str, last_start: str, count: int) -> None:
         # The collector restarts every morning: the nights it gave way on are on disk.
@@ -292,8 +297,8 @@ async def test_a_simulation_that_gave_way_on_two_nights_runs_first_on_the_third(
             await until(lambda: bool(told.saying(put_off("simulate-bar-close-298", day, "5시간"))))
             assert runs.names() == [prevalidation]
 
-    await gives_way(FRIDAY, "prevalidate mandelbrot", "00:30", 1)
-    await gives_way(SATURDAY, "prevalidate breiman", "23:30", 2)
+    await gives_way(FRIDAY, "prevalidate mandelbrot", "01:00", 1)
+    await gives_way(SATURDAY, "prevalidate breiman", "01:00", 2)
     assert gave_way_on(tmp_path) == {"simulate-bar-close-298": [FRIDAY.isoformat(), SATURDAY.isoformat()]}
 
     clock = FakeClock(at(SUNDAY, "06:00"))
@@ -305,12 +310,12 @@ async def test_a_simulation_that_gave_way_on_two_nights_runs_first_on_the_third(
         await until(lambda: runs.names() == [BAR_CLOSE])
         assert told.saying("먼저 돕니다") == [
             "예약 작업 simulate-bar-close-298(2026-10-18 밤): 사전 검증에 이미 2밤 자리를 내줘 이번에는 "
-            "먼저 돕니다. prevalidate-kalman은 마지막 시작 시각(00:30)까지 시작하지 못하면 다음 밤으로 "
+            "먼저 돕니다. prevalidate-breiman-15m은 마지막 시작 시각(01:00)까지 시작하지 못하면 다음 밤으로 "
             "미뤄집니다."
         ]
         assert state.gave_way == {}
-        clock.set(at(MONDAY, "00:52"))  # 2 h 22 min, as on 2026-10-25
-        await until(lambda: bool(told.saying(put_off("prevalidate-kalman", SUNDAY, "5시간"))))
+        clock.set(at(MONDAY, "01:01"))  # 2 h 31 min, past its last start
+        await until(lambda: bool(told.saying(put_off("prevalidate-breiman-15m", SUNDAY, "4시간 30분"))))
         assert runs.names() == [BAR_CLOSE]
     assert gave_way_on(tmp_path) == {}
 

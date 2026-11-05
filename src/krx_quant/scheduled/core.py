@@ -344,6 +344,10 @@ class Job:
     # state directory. Exit 0 passes; exit 1 refuses only if the run wrote it whole, made since it
     # started (``_refused_since``): else it is an error, which exits 1 too. None: no verdict.
     report: str | None = None
+    # Its condition on a quiet night (#546, a second pre-validation's): asked again once every job of
+    # the night had its turn, in the list's order; one due then runs if its time limit still ends by
+    # 05:30. None: asked once a night, in its turn.
+    quiet: Callable[[Night], bool] | None = None
 
 
 # A job that gave way on this many nights since it last ran gives way no more: it runs first (#376).
@@ -414,6 +418,8 @@ class Scheduler:
     took 1 h 24 min on 2026-10-23 and 2 h 22 min on 2026-10-25). It then runs after that job, that
     night if it can still start by its own last start, else the next night. Once a night; and once it
     gave way on ``GIVE_WAY_NIGHTS`` nights since it last ran (while it stayed due) it runs first.
+    Once every job had its turn, those with a condition for a quiet night (``Job.quiet``, #546: a
+    second pre-validation) are asked it, and one due runs if it can still end by 05:30.
 
     The session jobs (``Job.session``, #403) run apart from the nights: on each trading day, in the
     list's order, each from its time if it can still end by ``SESSION_UNTIL``, asked its condition
@@ -551,7 +557,7 @@ class Scheduler:
     async def run_night(self, day: date) -> None:
         """The night of ``day``: the results earlier nights could not post, then each due job
         in turn, once the night's training is over; a job that gives way after the job it gives
-        way to."""
+        way to; then the quiet night's turn (``_quiet_turn``, #546)."""
         _, end = window(day, self._at)
         await self._post_unposted()
         facts: Facts | None = None
@@ -587,20 +593,48 @@ class Scheduler:
                 queue.insert(at, job)
             else:
                 await self._run(job, day)
+        await self._quiet_turn(day)
+
+    async def _quiet_turn(self, day: date) -> None:
+        """The night of ``day`` once every job had its turn (#546): the jobs with a condition for a
+        quiet night (``Job.quiet``) are asked it, in the list's order, on the facts read again (a run
+        tonight may have changed them); one due runs if its time limit still ends by 05:30. One that
+        would not is only logged: it had its turn, and waits for the next night's."""
+        asked = [j for j in self._night_jobs if j.quiet is not None and not self._cut(j, day)]
+        if not asked:
+            return
+        _, end = window(day, self._at)
+        facts = await self._read_facts()
+        for job in asked:
+            if not self._due(job, day, facts, quiet=True):
+                continue
+            latest = end - job.timeout
+            if self._clock.now() > latest or not await self._training_done(latest):
+                log.info(
+                    "scheduled job %s: due on the quiet night of %s, but its time limit (%s) would pass %s",
+                    job.name,
+                    day,
+                    job.timeout,
+                    f"{JOBS_UNTIL:%H:%M}",
+                )
+                continue
+            await self._run(job, day)
 
     def _cut(self, job: Job, day: date) -> bool:
         """Whether a restart cut ``job``'s run on the night of ``day``."""
         record = self._state.jobs.get(job.name)
         return record is not None and record.outcome == INTERRUPTED and record.day == day
 
-    def _due(self, job: Job, day: date, facts: Facts) -> bool | None:
-        """Whether ``job`` is due on the night of ``day``, asked now; None if its condition failed."""
+    def _due(self, job: Job, day: date, facts: Facts, *, quiet: bool = False) -> bool | None:
+        """Whether ``job`` is due on the night of ``day``, asked now (``quiet``: by its condition on a
+        quiet night, ``Job.quiet``); None if its condition failed."""
         record = self._state.jobs.get(job.name)
         night = Night(
             day, self._calendar.is_trading_day(day), self._commit, record, dict(self._state.jobs), facts
         )
+        condition = job.quiet if quiet and job.quiet is not None else job.due
         try:
-            return job.due(night)
+            return condition(night)
         except Exception:
             log.exception("the condition of the scheduled job %s failed", job.name)
             return None

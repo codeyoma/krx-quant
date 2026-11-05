@@ -262,10 +262,9 @@ NO_TOUCH = "no touch label"
 def prediction_json(row: dict[str, Any]) -> dict[str, Any]:
     """A stored prediction as the API shows it.
 
-    Its outcome is scored on the bar close's touch label (#170, ``touch``). For one release
-    ``class_a`` and ``class_b`` both carry that label too, and ``unscorable`` why it has none,
-    so a screen from before reads the new label where it read the old bases; the mid-points
-    stay as stored."""
+    Its outcome is scored on the bar close's touch label (#170, ``touch``), and ``unscorable``
+    says why it has none; the mid-points stay as stored. The old bases' classes stay in the DB
+    alone (#592: ``class_a`` and ``class_b`` carried the touch label for one release)."""
     scored = row["scored_at"] is not None
     label = row.get("touch_class")
     why = row.get("touch_unscorable") if row.get("touch_path") is not None else NO_TOUCH
@@ -292,8 +291,6 @@ def prediction_json(row: dict[str, Any]) -> dict[str, Any]:
             "mid_display": row["mid_display"],
             "mid_target": row["mid_target"],
             "flat_ticks": row["flat_ticks"],
-            "class_a": label,
-            "class_b": label,
             "special": bool(row["special"]),
             "unscorable": None if label is not None else why,
             "scored_at": row["scored_at"],

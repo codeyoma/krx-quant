@@ -305,7 +305,7 @@
     "outcome": {
       "type": "object",
       "required": [
-        "mid_close", "mid_display", "mid_target", "flat_ticks", "class_a", "class_b",
+        "mid_close", "mid_display", "mid_target", "flat_ticks",
         "special", "unscorable", "scored_at", "touch"],
       "additionalProperties": false,
       "properties": {
@@ -313,14 +313,6 @@
         "mid_display": {"$ref": "#/$defs/price"},
         "mid_target": {"$ref": "#/$defs/price"},
         "flat_ticks": {"type": ["integer", "null"], "minimum": 1},
-        "class_a": {
-          "description": "For one release (#170): the bar close's touch label, as touch.class (no longer basis A's class, which stays in the DB).",
-          "$ref": "#/$defs/class"
-        },
-        "class_b": {
-          "description": "For one release (#170): the touch label too, as class_a.",
-          "$ref": "#/$defs/class"
-        },
         "special": {"type": "boolean"},
         "unscorable": {
           "description": "Why the touch label is missing (#170): touch.unscorable, or 'no touch label' where the bar close has none; null when it is there.",
@@ -1184,10 +1176,6 @@
         "symbol": {"type": "string"},
         "period": {"enum": ["today", "5d", "20d"]},
         "days": {"type": "array", "items": {"$ref": "#/$defs/day"}},
-        "basis": {
-          "description": "Gone with #170 (every prediction is scored on its touch label): for one release the basis a screen from before sent, echoed back as sent; absent when none was sent.",
-          "enum": ["a", "b"]
-        },
         "special": {"enum": ["exclude", "include"]},
         "min_sample": {"type": "integer", "minimum": 1}
       }
@@ -3816,6 +3804,69 @@
         "exit_reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", null]},
         "net": {"type": ["number", "null"]},
         "practice": {"type": "boolean", "description": "#427: the mock book's practice trade (the trader's own, of no policy)."}
+      }
+    },
+    "trader_decisions": {
+      "description": "GET /v1/trader/decisions?day=YYYY-MM-DD&book=B&before=T&limit=N (#584): what the trader's books did with each prediction of a picked cell they read on day (KST, today by default), each book apart (book: the one asked, null for every book that decided that day), read from its store (state/trader.sqlite3); none before its first decision. No price.",
+      "type": "object",
+      "required": ["day", "book", "books"],
+      "additionalProperties": false,
+      "properties": {
+        "day": {"$ref": "#/$defs/day"},
+        "book": {"enum": ["champion", "practice", "shadow", "challenger", null]},
+        "books": {"type": "array", "items": {"$ref": "#/$defs/trader_decision_book"}}
+      }
+    },
+    "trader_decision_book": {
+      "description": "A book's decisions of the day (#584): the champion's book (the trader's own, of its mode), the mock practice's (#427, of no policy), the champion policy's paper shadow beside a KIS book (#405) or a challenger's paper book (#400, each policy its own), of one mode and one policy (null: before the first champion, or the practice). totals: the whole day's; decisions: the last N decided before T if given, newest first, and any more decided at the moment of the last of them; more: earlier ones are left for the next page.",
+      "type": "object",
+      "required": ["book", "mode", "policy", "totals", "decisions", "more"],
+      "additionalProperties": false,
+      "properties": {
+        "book": {"enum": ["champion", "practice", "shadow", "challenger"]},
+        "mode": {"enum": ["paper", "mock", "live"]},
+        "policy": {"type": ["integer", "null"], "minimum": 1},
+        "totals": {"$ref": "#/$defs/trader_decision_totals"},
+        "decisions": {"type": "array", "items": {"$ref": "#/$defs/trader_decision"}},
+        "more": {"type": "boolean"}
+      }
+    },
+    "trader_decision_totals": {
+      "description": "A book's decisions of the day (#584): how many, the buys filled (bought), a buy waiting for its quote (waiting), the buys that did not fill by why (unfilled) and the skips by why (skipped), the commonest first.",
+      "type": "object",
+      "required": ["decisions", "bought", "waiting", "unfilled", "skipped"],
+      "additionalProperties": false,
+      "properties": {
+        "decisions": {"type": "integer", "minimum": 0},
+        "bought": {"type": "integer", "minimum": 0},
+        "waiting": {"type": "integer", "minimum": 0},
+        "unfilled": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}},
+        "skipped": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}}
+      }
+    },
+    "trader_decision": {
+      "description": "A prediction of a picked cell a book read, and what it did (#584): when it decided, the prediction (its cell, id in the engine's database, bar close and display time), the rise's probability (null without a forecast), the cell's θ and p* in its pick then (null for a cell not in it; θ the trader's KRX_TRADER_THRESHOLD for a pick without one, null if its start did not keep it), buy or skip and why (a skip's reason; a buy's why it did not fill, null once filled or while it waits for its quote), its trade once filled, and once the engine answered the prediction its answer's class (up: the kind's rise, flat: its middle, down: its fall) and whether the rise came (right). No price.",
+      "type": "object",
+      "required": ["id", "decided_at", "symbol", "kind", "predictor", "prediction_id", "bar_close", "displayed_at",
+                   "probability", "threshold", "p_star", "action", "reason", "trade_id", "answer", "right"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "integer"},
+        "decided_at": {"$ref": "#/$defs/time"},
+        "symbol": {"type": "string"},
+        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+        "predictor": {"type": "string"},
+        "prediction_id": {"type": "integer"},
+        "bar_close": {"$ref": "#/$defs/time"},
+        "displayed_at": {"$ref": "#/$defs/time"},
+        "probability": {"$ref": "#/$defs/probability"},
+        "threshold": {"$ref": "#/$defs/probability"},
+        "p_star": {"type": ["number", "null"]},
+        "action": {"enum": ["buy", "skip"]},
+        "reason": {"type": ["string", "null"]},
+        "trade_id": {"type": ["integer", "null"]},
+        "answer": {"enum": ["up", "flat", "down", null]},
+        "right": {"type": ["boolean", "null"]}
       }
     },
     "trader_practice_frozen": {
