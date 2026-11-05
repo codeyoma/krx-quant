@@ -11,11 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from krx_quant import probe_calls, supply_probe
+from krx_quant import probe_calls
 from krx_quant.fake_kis import FakeKis
-from krx_quant.net_buys_probe import MAX_FAILED_IN_A_ROW, probe_net_buys
 from krx_quant.probe_calls import Calls
-from krx_quant.supply import INVESTORS
+from krx_quant.supply_probe import MAX_FAILED_IN_A_ROW, PACE, probe_supply
 from tests.collector_doubles import settings_for
 
 
@@ -81,18 +80,13 @@ def test_calls_without_a_limit_never_stop() -> None:
 async def test_a_probe_s_calls_go_its_pace_apart_and_stop_at_its_limit_of_failures_in_a_row(
     kis: FakeKis, tmp_path: Path, clock: Clock
 ) -> None:
-    """``probe-net-buys`` against a KIS whose every answer lacks the row list (#297: a failure):
-    the first call at once, each next one ``supply_probe.PACE`` later, none after its limit."""
-    kis.rest_responses[INVESTORS.tr] = lambda params: {
-        "rt_cd": "0",
-        "msg_cd": "MCA00000",
-        "output2": {"x": "1"},
-    }
+    """``probe-supply`` against a KIS that refuses every query (an unknown TR: a failure): the first
+    call at once, each next one ``supply_probe.PACE`` later, none after its limit."""
     settings = replace(settings_for(kis, tmp_path), symbols=("005930",), rest_max_per_second=1000)
     lines: list[str] = []
 
-    calls, failed = await probe_net_buys(settings, date(2026, 10, 20), lines.append)
+    calls, failed = await probe_supply(settings, date(2026, 10, 20), lines.append)
 
     assert calls == failed == MAX_FAILED_IN_A_ROW == len(kis.rest_requests)
-    assert clock.waits == [supply_probe.PACE] * (MAX_FAILED_IN_A_ROW - 1)
-    assert f"KIS: {calls}번 조회, {failed}번 실패" in lines
+    assert clock.waits == [PACE] * (MAX_FAILED_IN_A_ROW - 1)
+    assert f"KIS: {calls} calls, {failed} failed" in lines

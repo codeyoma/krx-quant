@@ -25,12 +25,10 @@ from krx_quant import loki
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, RegistrationError
 from krx_quant.archive import run_archive
 from krx_quant.backfill import run_backfill
-from krx_quant.candle_probe import probe_candles
 from krx_quant.climate_gate import climate_gate
 from krx_quant.climate_prior import REPORT as CLIMATE_PRIOR_REPORT
 from krx_quant.climate_prior import climate_prior_experiment
 from krx_quant.climate_prior import lines as climate_prior_lines
-from krx_quant.close_probe import probe_close
 from krx_quant.closing_flow_check import check_closing_flow, check_krx_net_assets
 from krx_quant.collector import check_fallbacks, measure_subscription_limit, run_collector
 from krx_quant.config import Settings, SettingsError, read_values
@@ -41,13 +39,10 @@ from krx_quant.daily_check import daily_check
 from krx_quant.daily_training import daily_algorithm, fit_daily, prevalidate_daily
 from krx_quant.demo import demo_app, demo_morning
 from krx_quant.diagnose import DEFAULT_DAYS, diagnose
-from krx_quant.dividend_probe import probe_dividends
 from krx_quant.doctor import doctor, doctor_settings
 from krx_quant.error_breakdown import DEFAULT_ALGORITHM as ERROR_ALGORITHM
 from krx_quant.error_breakdown import DEFAULT_DAYS as ERROR_DAYS
 from krx_quant.error_breakdown import error_breakdown
-from krx_quant.expected_open_probe import DAYS as EXPECTED_OPEN_DAYS
-from krx_quant.expected_open_probe import probe_expected_open
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.gaps_probe import probe_gaps
@@ -59,10 +54,8 @@ from krx_quant.lifecycle import Status
 from krx_quant.live_probe import probe_live_account
 from krx_quant.macro import run_macro
 from krx_quant.market_calendar import calendar_store, first_whole_day
-from krx_quant.member_frames_probe import probe_member_frames
 from krx_quant.model_shelf import Shelf
 from krx_quant.nav_probe import probe_nav
-from krx_quant.net_buys_probe import probe_net_buys
 from krx_quant.neyman_backfill import neyman_backfill
 from krx_quant.neyman_variants import neyman_variants
 from krx_quant.night_probe import probe_night
@@ -279,28 +272,13 @@ def _registry_password() -> int:
     return 0
 
 
-async def _probe_candles() -> int:
-    await probe_candles(Settings.from_env(), datetime.now(KST).date())
-    return 0
-
-
 async def _probe_night(day: date | None) -> int:
     print(await probe_night(Settings.from_env(require_kis=False), datetime.now(KST), day))
     return 0
 
 
-def _probe_expected_open(days: int) -> int:
-    print(probe_expected_open(Settings.from_env(require_kis=False), datetime.now(KST), days))
-    return 0
-
-
 def _probe_gaps() -> int:
     print(probe_gaps(Settings.from_env(require_kis=False), datetime.now(KST)))
-    return 0
-
-
-def _probe_member_frames() -> int:
-    print(probe_member_frames(Settings.from_env(require_kis=False), datetime.now(KST)))
     return 0
 
 
@@ -326,21 +304,6 @@ def _check_krx_net_assets() -> int:
 
 async def _probe_supply() -> int:
     calls, failed = await probe_supply(Settings.from_env(), datetime.now(KST).date())
-    return 1 if failed == calls else 0  # nothing answered
-
-
-async def _probe_net_buys() -> int:
-    calls, failed = await probe_net_buys(Settings.from_env(), datetime.now(KST).date())
-    return 1 if failed == calls else 0  # nothing answered
-
-
-async def _probe_close() -> int:
-    calls, failed = await probe_close(Settings.from_env(), datetime.now(KST).date())
-    return 1 if failed == calls else 0  # nothing answered
-
-
-async def _probe_dividends() -> int:
-    calls, failed = await probe_dividends(Settings.from_env(), datetime.now(KST).date())
     return 1 if failed == calls else 0  # nothing answered
 
 
@@ -1035,28 +998,9 @@ def _parser() -> argparse.ArgumentParser:
         help="ask each feed's REST fallback once and print what it would record (safe beside the collector)",
     ).set_defaults(run=lambda args: asyncio.run(_check_fallbacks()))
     sub.add_parser(
-        "probe-candles",
-        help="measure what KIS's day/week/month/year chart query gives, read-only (safe beside collect)",
-    ).set_defaults(run=lambda args: asyncio.run(_probe_candles()))
-    sub.add_parser(
         "probe-supply",
         help="ask where KIS gives the daily supply indicators (#226), read-only; prints no market value",
     ).set_defaults(run=lambda args: asyncio.run(_probe_supply()))
-    sub.add_parser(
-        "probe-net-buys",
-        help="compare KIS's KRX (J) and integrated (UN) investor net buys by era and count the stored"
-        " ones (#264), read-only; prints no market value",
-    ).set_defaults(run=lambda args: asyncio.run(_probe_net_buys()))
-    sub.add_parser(
-        "probe-close",
-        help="compare the KRX day candle's close with KRX's one-minute bars and the recorded closing"
-        " auction (#264), read-only; prints no market value",
-    ).set_defaults(run=lambda args: asyncio.run(_probe_close()))
-    sub.add_parser(
-        "probe-dividends",
-        help="compare KIS's adjusted and as-traded KRX day candles and count their ex-date flags (#310),"
-        " read-only; prints no market value",
-    ).set_defaults(run=lambda args: asyncio.run(_probe_dividends()))
     sub.add_parser(
         "probe-nav",
         help="ask where KIS gives the single-stock leveraged and inverse ETFs' net assets (#305),"
@@ -1077,29 +1021,11 @@ def _parser() -> argparse.ArgumentParser:
         help="the evening whose night to read, YYYY-MM-DD (default: the latest one subscribed for)",
     )
     night_cmd.set_defaults(run=lambda args: asyncio.run(_probe_night(args.day)))
-    expected_cmd = sub.add_parser(
-        "probe-expected-open",
-        help="count what the recorded books carried of the auctions' expected fill (#304), read-only;"
-        " prints no market value",
-    )
-    expected_cmd.add_argument(
-        "--days",
-        type=_positive,
-        default=EXPECTED_OPEN_DAYS,
-        help=f"the latest recorded trading days to read (default {EXPECTED_OPEN_DAYS})",
-    )
-    expected_cmd.set_defaults(run=lambda args: _probe_expected_open(args.days))
     sub.add_parser(
         "probe-gaps",
         help="summarize every recorded day's gaps and the closing auction window's frames, trades and"
         " bars (#344), read-only; prints no market value",
     ).set_defaults(run=lambda args: _probe_gaps())
-    sub.add_parser(
-        "probe-member-frames",
-        help="count the member feed's raw frames whose field count is not 78 (#381), with each one's"
-        " field shapes beside the next full frame's and the other feeds' frames around it, read-only;"
-        " prints no field value",
-    ).set_defaults(run=lambda args: _probe_member_frames())
     sub.add_parser(
         "probe-live-account",
         help="read the trader's live account with KRX_TRADER_LIVE_KIS_* by inquiry calls alone (#408): the"
