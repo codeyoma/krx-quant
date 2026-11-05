@@ -32,8 +32,9 @@ leave out (a VI, a special situation) are left out.
   barriers' width the one fixed at the bar close, as the engine fixes it; a window with no class
   (unscorable, or a special situation over its horizon) is not scored. Its baselines are its kind's
   own (its climate table, its persistence of the window one horizon back), never the direction's
-  touch labels. A baseline is given nothing of the window it predicts (``flat_ticks`` none: the
-  range's persistence takes the previous window's own).
+  touch labels. A baseline is given what the engine gives it at the bar close (``_kind_inputs``):
+  of the window it predicts, only the figures fixed when it opened (the reference mid-point, the
+  tick and the flat band k, by which the range's persistence classes the previous window's range).
 
 **Order** (``order_queue``): those passed over on ``MAX_PUSHED_NIGHTS`` nights first (the bound),
 earliest come first; then a seat by score (highest first) and a seat by arrival, alternately
@@ -227,14 +228,36 @@ def kind_calls(
             else:
                 right = most_likely(f.probabilities) == truth
                 calls[candidate.name].append(Call(s.symbol, s.bar_close, right))
-            previous: Answer | None = answers.get((s.symbol, s.bar_close - kind.horizon))
-            inputs = KindInputs(s.symbol, s.bar_close, None, None, None, previous, seen)
+            previous = answers.get((s.symbol, s.bar_close - kind.horizon))
+            inputs = _kind_inputs(s, previous, seen)
             for b in baselines:
                 g = b.predict(inputs)
                 if g is not None:
                     calls[b.name].append(Call(s.symbol, s.bar_close, most_likely(g.probabilities) == truth))
         over.add(s.symbol, s.bar_close, label)
     return calls, errors
+
+
+def _kind_inputs(s: KindSample, previous: Answer | None, seen: Mapping[str, int]) -> KindInputs:
+    """What a kind's baseline knows at ``s``'s bar close, as the engine gives it (``_predict_kinds``):
+    the bar close's reference mid-point, tick and flat band k (the figures of the answer's path fixed
+    when the window opened at the bar close, nothing it saw after), the answer of the window over at
+    the bar close if it has a class, and the classes of the windows over by then."""
+    path = {} if s.answer is None else s.answer.path
+    k = path.get("k")
+    return KindInputs(
+        symbol=s.symbol,
+        bar_close=s.bar_close,
+        mid=_number(path.get("anchor")),
+        tick=_number(path.get("tick")),
+        flat_ticks=k if isinstance(k, int) and not isinstance(k, bool) else None,
+        previous=previous if previous is not None and previous.label is not None else None,
+        day_classes=seen,
+    )
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
 
 
 class _Over:

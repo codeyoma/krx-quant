@@ -40,7 +40,7 @@ from krx_quant.features import FeatureVector, Leaders
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.github import GitHub
 from krx_quant.kind_registry import kind_named
-from krx_quant.kinds import Answer, Kind, KindForecast, KindInputs
+from krx_quant.kinds import Answer, Kind, KindForecast, KindInputs, most_likely
 from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import calendar_store
 from krx_quant.predictions import DB_NAME, PredictionStore
@@ -279,7 +279,33 @@ def test_a_barrier_s_baselines_know_only_its_windows_over_at_each_bar_close() ->
     assert inputs.previous == next(
         s.answer for s in day if (s.symbol, s.bar_close) == ("005930", at("09:45"))
     )
-    assert inputs.flat_ticks is None and inputs.mid is None, "nothing of the window it predicts"
+    now = next(s.answer for s in day if (s.symbol, s.bar_close) == ("005930", cut))
+    assert now is not None and inputs.flat_ticks == now.path["k"], "the bar close's band, as live"
+    assert inputs.mid is None and inputs.tick is None, "its path has no reference mid-point nor tick"
+
+
+def test_the_range_s_persistence_classes_the_last_range_by_the_bar_close_s_band() -> None:
+    """As live (``engine._predict_kinds``): a range of 3 ticks under the last window's k = 2 is medium,
+    under this bar close's k = 4 small, and that is what the persistence calls."""
+    kind = kind_named("range")
+    assert kind is not None
+
+    def answered(hhmm: str, label: str, r: float, k: int) -> KindSample:
+        path = {"r": r, "k": k, "tick": 5, "anchor": 1000.0}
+        answer = Answer(label, None, path)
+        return KindSample("005930", at(hhmm), features(), answer, kind.answer_version, "mid")
+
+    day = [answered("09:05", "medium", 3, 2), answered("09:09", "small", 1, 4)]
+    recorded = replace(kind, baselines=tuple(Recording(b) for b in kind.baselines))
+    candidate = SteadyBarrier("steady", kind.name)
+
+    calls, _ = kind_calls(recorded, candidate, candidate.default_model(), {}, day)
+
+    persist = next(b for b in recorded.baselines if b.name == "range-persist")
+    inputs, said = persist.given[("005930", at("09:09"))]  # type: ignore[attr-defined]
+    assert (inputs.flat_ticks, inputs.tick, inputs.mid) == (4, 5.0, 1000.0)
+    assert inputs.previous == day[0].answer and kind.classes[most_likely(said.probabilities)] == "small"
+    assert [(c.bar_close, c.correct) for c in calls["range-persist"]] == [(at("09:09"), True)]
 
 
 # The folds: trained on the days before each, the day's own answers never
