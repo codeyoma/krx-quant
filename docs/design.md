@@ -56,13 +56,15 @@
 
 코드는 `src/krx_quant/`에 있다. 명령은 `cli.py`의 `krx-quant <명령>`이다(README의 "명령"). 명령마다 그 parser가 처리 함수를 `set_defaults(run=...)`로 가지고, `main`은 명령을 고르지 않고 그 처리 함수를 부른다(#499). 새 명령은 `_parser`에 parser와 처리 함수를 더하고 README의 "명령" 표에 줄을 더한다. 처리 함수가 없는 명령은 종료 코드 1로 끝난다: 전에는 `main`의 `elif`에서 가지를 빠뜨린 명령이 아무것도 하지 않고 0으로 끝나, 그 명령을 부른 예약 작업이 성공으로 보고될 수 있었다.
 
+실전 진입점(수집기 `collector.py`, 엔진 `engine.py`, trader `trader/run.py`)은 프로브 모듈(`*_probe.py`)을 하나도 가져오지 않는다(#552, `tests/test_probe_imports.py`). 그래야 결론이 난 프로브를 고치거나 지워도 장 마감 흐름과 trader가 깨지지 않는다. 실전 코드와 프로브가 같이 쓰는 것은 실전 모듈에 두고 프로브가 거기서 가져온다: 녹화한 결측 구간 읽기(`read_gaps`)는 `health.py`에, KIS ETF/ETN 현재가와 NAV 비교추이(일)의 조회와 답 읽기(`PRICE`, `DAILY`, `one_object`, `row_list`)는 `net_assets.py`에, KRX ETF 일별매매정보의 주소, 필드, 값 읽기(`PATH`, `TOTAL`, `number`)는 `krx_net_assets.py`에 있다. `cli.py`는 명령을 위해 모든 프로브를 가져오므로 검사하지 않는다. 프로브의 도우미 `probe_fields.py`(필드의 모양, 값 있음, 날 읽기)는 프로브가 아니고 실전 코드도 쓴다.
+
 | 모듈 | 하는 일 |
 |---|---|
 | `config.py` | 환경 변수와 `.env`에서 설정을 읽는다. 변수 목록은 [operations.md](operations.md#설정-값-전체) |
 | `kis.py`, `auth.py`, `ratelimit.py` | KIS 인증, WebSocket 형식, REST 클라이언트, 접근 토큰 캐시, 초당 호출 제한 |
 | `feeds/` (`base.py`, `stock.py`, `market.py`) | 피드별 KIS 형식과 정규화한 이벤트 스키마. 주식 피드와 시장 피드(지수, 선물, 미국, 옵션) |
 | `masters.py`, `contracts.py` | KIS 마스터 파일에서 최근월물 코드 찾기, 만기 규칙으로 월물 정하기(백필) |
-| `collector.py`, `polling.py`, `poll_outages.py`, `recorder.py`, `health.py` | 구독과 REST 조회, REST 조회의 피드·키별 호출·실패·장애 수와 그 알림(#441), Parquet 녹화, 결측·지연 판정과 알림, 피드·키마다 그날 필드가 모자란 프레임 수(#381) |
+| `collector.py`, `polling.py`, `poll_outages.py`, `recorder.py`, `health.py` | 구독과 REST 조회, REST 조회의 피드·키별 호출·실패·장애 수와 그 알림(#441), Parquet 녹화, 결측·지연 판정과 알림, 피드·키마다 그날 필드가 모자란 프레임 수(#381), 녹화한 결측 구간 읽기(`read_gaps`: `probe-gaps`와 trader 재생, #552) |
 | `market_calendar.py`, `backfill.py`, `archive.py`, `object_store.py` | 거래 일정, 1분봉 백필(과 엔진·학습이 읽는 전 거래일 시간대 범위 #181, 앞선 20거래일의 시간대 수익률 #265), 장 마감 업로드, Object Store(로컬·S3) |
 | `clock.py`, `reference.py`, `pricing.py`, `special.py`, `touch.py` | 엔진 시계, 1분봉과 기준가(통합 중간가), 호가단위와 보합 범위, VI·서킷브레이커·사이드카, 도달 정답(호가 규칙과 1분봉 규칙, #167, #169) |
 | `engine.py`, `market_view.py`, `baselines.py`, `climate.py`, `features.py`, `algorithms/`, `consensus.py` | 예측 엔진, 엔진과 학습이 같이 보는 1분봉·기준가, 기준 예측(도달 정답의 시간대 기후 표 포함, #169), 피처 저장소, 알고리즘 규약과 알고리즘, 합의 |

@@ -20,9 +20,10 @@ import pytest
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.nav_probe import DAILY, PRICE
 from krx_quant.net_assets import (
+    DAILY,
     KIS,
+    PRICE,
     UNIT,
     NetAssetKeeper,
     keep_net_assets,
