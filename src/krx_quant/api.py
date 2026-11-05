@@ -1719,20 +1719,28 @@ async def _kind_algorithm_stats(request: web.Request, name: str, kind: Predictio
 async def _cost_map(request: web.Request) -> web.Response:
     """``/v1/cost-map`` (#307, ``cost_map.py``): the symbols' cost cards, a row each kind with
     a direction, from its leaderboard's statistics for the query (each kind's days its own,
-    computed and kept as the leaderboard's), and the period base rates kept
-    (``base_rates.py``)."""
+    computed and kept as the leaderboard's) and the algorithms' statuses (#594), and the period
+    base rates kept (``base_rates.py``)."""
     engine = request.app[ENGINE_KEY]
     query = _query(request, engine)
     min_sample = request.app[MIN_SAMPLE_KEY]
     fee = engine.fee_rate
 
+    # The algorithms active now, the only ones a row's ``top`` may name (#594), read at each request on
+    # the event loop (the store's own connection). They are part of each row's question: a status set
+    # by another process (``krx-quant retire``) does not change this store's version, which alone keeps
+    # a row computed.
+    active = tuple(sorted(name for name, s in engine.store.statuses().items() if s.status is Status.ACTIVE))
+    question = ("cost-map", *active)
+
     def direction(
         algorithms: dict[str, list[Scored]], baselines: dict[str, list[Scored]], excluded: dict[str, Excluded]
     ) -> dict[str, Any]:
         board = leaderboard(algorithms, baselines, min_sample, fee)
-        return direction_row(DIRECTION_KIND, board, {**algorithms, **baselines}, fee, min_sample, query.days)
+        records = {**algorithms, **baselines}
+        return direction_row(DIRECTION_KIND, board, records, fee, min_sample, query.days, active=active)
 
-    rows = [await _stats(request, ("cost-map",), query, direction)]
+    rows = [await _stats(request, question, query, direction)]
     for kind in [*engine.kinds, *engine.daily_kinds]:
         if kind.sides is None:
             continue  # no direction: no long nor short to cost (the range)
@@ -1746,9 +1754,9 @@ async def _cost_map(request: web.Request) -> web.Response:
             days: tuple[date, ...] = of_kind.days,
         ) -> dict[str, Any]:
             board = kind_leaderboard(algorithms, baselines, min_sample, kind, engine.calendar)
-            return kind_row(kind, board, {**algorithms, **baselines}, fee, min_sample, days)
+            return kind_row(kind, board, {**algorithms, **baselines}, fee, min_sample, days, active=active)
 
-        rows.append(await _kind_stats(request, kind, ("cost-map",), of_kind, build))
+        rows.append(await _kind_stats(request, kind, question, of_kind, build))
     names = request.app[NAMES_KEY]
     symbols = []
     for symbol in [query.symbol] if query.symbol is not None else engine.symbols:
