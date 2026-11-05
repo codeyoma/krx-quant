@@ -72,6 +72,15 @@ def _probe_sample_keys(day: date | None) -> int:
     return code
 
 
+def _bar_close_times(day: date | None) -> int:
+    """How long a trading day's bar closes took, against the days before (#589)."""
+    from krx_quant.bar_close_times import bar_close_times
+
+    report, code = bar_close_times(Settings.from_env(require_kis=False), datetime.now(KST), day)
+    print(report)
+    return code
+
+
 def add(sub: Commands) -> None:
     """The probes' commands, each with its handler (``cli._parser``)."""
     sub.add_parser(
@@ -127,3 +136,15 @@ def add(sub: Commands) -> None:
         help="the latest day looked at, YYYY-MM-DD (default: the store's latest)",
     )
     sample_keys_cmd.set_defaults(run=lambda args: _probe_sample_keys(args.day))
+    times_cmd = sub.add_parser(
+        "bar-close-times",
+        help="how long a trading day's bar closes took, against the five trading days before (#589): each"
+        " bar close's first record, final consensus and last record, each algorithm's time after the first"
+        " record, the bar closes that held the event loop, the trader's quote stalls; read-only, no price",
+    )
+    times_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the trading day, YYYY-MM-DD (default: the latest day with predictions, through today)",
+    )
+    times_cmd.set_defaults(run=lambda args: _bar_close_times(args.day))
