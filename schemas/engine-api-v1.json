@@ -3873,7 +3873,7 @@
         "displayed_at": {"$ref": "#/$defs/time"},
         "probability": {"$ref": "#/$defs/probability"},
         "threshold": {"$ref": "#/$defs/probability"},
-        "p_star": {"$ref": "#/$defs/probability"},
+        "p_star": {"type": ["number", "null"]},
         "action": {"enum": ["buy", "skip"]},
         "reason": {"type": ["string", "null"]},
         "trade_id": {"type": ["integer", "null"]},
