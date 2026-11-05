@@ -21,7 +21,7 @@ from krx_quant.cli import main
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.demo import DEMO_SYMBOLS, demo_app
 from krx_quant.macro import INDICATORS
-from tests.api_doubles import receive_until
+from tests.api_doubles import listening, receive_until
 from tests.api_schema import check
 from tests.replay_events import get_json
 
@@ -427,15 +427,19 @@ async def test_a_paced_demo_streams_its_last_half_hour_as_it_goes(
     paced = await demo_app(tmp_path / "paced.sqlite3", pace=0.05)
 
     async with TestClient(TestServer(paced)) as client:
-        ws = await client.ws_connect("/v1/stream")
+        ws = await listening(client)
         events = await receive_until(ws, _a_final_consensus_and_an_outcome_seen(), timeout=30)
         await ws.close()
-        status = await _until_the_demo_ends(client)
         made = await _until_the_morning_is_stored(client)
+        # Once 10:30's predictions are stored: the clock reaches a bar close before they are
+        # made, and on a busy runner the status read then still had 10:29 (#574).
+        status = await get_json(client, "/v1/status")
 
     assert any(e["type"] == "prediction" for e in events)
     assert all(e["at"] >= "2026-10-12T10:00:00+09:00" for e in events if e["type"] != "health"), "after 10:00"
-    assert status["last_bar_close"] == "2026-10-12T10:30:00+09:00", "it goes on to 10:30, then stays"
+    assert (status["now"], status["last_bar_close"]) == ("2026-10-12T10:30:00+09:00",) * 2, (
+        "it goes on to 10:30, then stays"
+    )
     assert await get_json(demo, "/v1/symbols/005930/predictions?limit=40&algorithm=newton") == made, (
         "the same morning as without the pace"
     )
@@ -478,15 +482,6 @@ def _a_final_consensus_and_an_outcome_seen() -> Callable[[dict[str, Any]], bool]
         return {("consensus", "final"), ("outcome", None)} <= seen
 
     return done
-
-
-async def _until_the_demo_ends(client: TestClient[Any, Any]) -> dict[str, Any]:
-    async with asyncio.timeout(30):
-        while True:
-            status: dict[str, Any] = await get_json(client, "/v1/status")
-            if status["now"] >= "2026-10-12T10:30:00+09:00":
-                return status
-            await asyncio.sleep(0.05)
 
 
 async def _until_the_morning_is_stored(client: TestClient[Any, Any]) -> dict[str, Any]:
