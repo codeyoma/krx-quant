@@ -1,10 +1,28 @@
 usage: krx-quant [-h]
-                 {collect,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,measure-subscriptions,check-fallbacks,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-live-account,probe-kis-orders,check-closing-flow,check-krx-net-assets,backfill,archive,replay,smt,sample-profile,rescore,fit,prevalidate,climate-prior,normal-order,neyman-variants,train,simulate,rollback,retire,unretire,test-alert,macro,diagnose,doctor,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,measure-subscriptions,check-fallbacks,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-live-account,probe-kis-orders,check-closing-flow,check-krx-net-assets,backfill,archive,replay,smt,sample-profile,rescore,fit,prevalidate,climate-prior,normal-order,neyman-variants,train,simulate,rollback,retire,unretire,test-alert,macro,diagnose,doctor,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,smt,sample-profile,climate-prior,normal-order,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,test-alert,doctor,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
+    replay              replay a recorded day through the engine into its own
+                        database (no KIS needed)
+    rescore             label every recorded day's bar closes again with the
+                        touch target (stop the engine first)
+    fit                 train an algorithm on the latest recorded or
+                        backfilled days and save its model
+    prevalidate         replay a new algorithm on the latest recorded days;
+                        the engine starts it only if it passes
+    train               train every algorithm on KRX_OBJECT_STORE's latest
+                        days and store the promotion list
+    simulate            replay the latest trading days as the probation of
+                        each algorithm that waits for it (#298), and judge it
+                        at once (safe beside the engine)
+    rollback            put an algorithm back one step, on the model it ran
+                        before (only that one is kept, #361)
+    retire              retire an algorithm: it is no longer run; its records
+                        stay
+    unretire            put a retired algorithm back on probation
     trade               trade 005930 on the cells the cost map passes, in
                         paper (#394, #395), on KIS's mock server
                         (KRX_TRADER_MODE=mock, #405) or on the live account
@@ -34,24 +52,6 @@ positional arguments:
                         order inquiry (KRX_TRADER_KIS_*, read-only): each
                         column's shape, lengths, values' count and matches; no
                         value, order number, account or price
-    measure-subscriptions
-                        count how many real-time registrations KIS allows per
-                        session (stop the collector first)
-    check-fallbacks     ask each feed's REST fallback once and print what it
-                        would record (safe beside the collector)
-    probe-supply        ask where KIS gives the daily supply indicators
-                        (#226), read-only; prints no market value
-    probe-nav           ask where KIS gives the single-stock leveraged and
-                        inverse ETFs' net assets (#305), read-only; prints no
-                        market value
-    probe-krx-etf       ask what the KRX Open API's ETF daily trading service
-                        gives for the single-stock ETFs (#305), against KIS,
-                        read-only; prints no market value
-    probe-night         summarize a recorded KOSPI200 night session (#264),
-                        read-only; prints no market value
-    probe-gaps          summarize every recorded day's gaps and the closing
-                        auction window's frames, trades and bars (#344), read-
-                        only; prints no market value
     probe-live-account  read the trader's live account with
                         KRX_TRADER_LIVE_KIS_* by inquiry calls alone (#408):
                         the price, the balance, the orderable cash and the
@@ -67,6 +67,30 @@ positional arguments:
                         any server but the mock one and runs only in the KRX
                         session; prints the answers' codes and field shapes,
                         no key, account, order number or market value
+    measure-subscriptions
+                        count how many real-time registrations KIS allows per
+                        session (stop the collector first)
+    check-fallbacks     ask each feed's REST fallback once and print what it
+                        would record (safe beside the collector)
+    backfill            fill missing one-minute bars for the past year and
+                        exit (stop the collector first)
+    archive             merge recorded part files and upload every day to
+                        KRX_OBJECT_STORE (safe to rerun)
+    macro               read today's macro indicators and decide the regime,
+                        once
+    probe-supply        ask where KIS gives the daily supply indicators
+                        (#226), read-only; prints no market value
+    probe-nav           ask where KIS gives the single-stock leveraged and
+                        inverse ETFs' net assets (#305), read-only; prints no
+                        market value
+    probe-krx-etf       ask what the KRX Open API's ETF daily trading service
+                        gives for the single-stock ETFs (#305), against KIS,
+                        read-only; prints no market value
+    probe-night         summarize a recorded KOSPI200 night session (#264),
+                        read-only; prints no market value
+    probe-gaps          summarize every recorded day's gaps and the closing
+                        auction window's frames, trades and bars (#344), read-
+                        only; prints no market value
     check-closing-flow  summarize what the closing flow kept (#305): the net
                         assets by day and when they came, the 15:20 rows, the
                         days, and the integrated and KRX one-minute bars'
@@ -78,12 +102,6 @@ positional arguments:
                         API (#305): the days, when they came, which day's
                         listed units the net asset total matches, KRX against
                         KIS; reads the state file only, prints no value
-    backfill            fill missing one-minute bars for the past year and
-                        exit (stop the collector first)
-    archive             merge recorded part files and upload every day to
-                        KRX_OBJECT_STORE (safe to rerun)
-    replay              replay a recorded day through the engine into its own
-                        database (no KIS needed)
     smt                 count a day's SMT divergences (#520), made again from
                         its recording or backfilled bars, beside the engine's
                         live ones; reads only, no price
@@ -91,12 +109,6 @@ positional arguments:
                         as a night does, and time each stage and the top
                         functions (#512); reads only, into a temporary
                         directory, no price
-    rescore             label every recorded day's bar closes again with the
-                        touch target (stop the engine first)
-    fit                 train an algorithm on the latest recorded or
-                        backfilled days and save its model
-    prevalidate         replay a new algorithm on the latest recorded days;
-                        the engine starts it only if it passes
     climate-prior       compare the climate baseline, shannon and shannon with
                         each slot's class frequencies on the pre-validation's
                         folds (#429; reads the training samples, replays
@@ -109,25 +121,8 @@ positional arguments:
                         window's N, then the verdict on the window after
                         2026-11-02 once it is full (reads the training
                         samples, replays nothing)
-    train               train every algorithm on KRX_OBJECT_STORE's latest
-                        days and store the promotion list
-    simulate            replay the latest trading days as the probation of
-                        each algorithm that waits for it (#298), and judge it
-                        at once (safe beside the engine)
-    rollback            put an algorithm back one step, on the model it ran
-                        before (only that one is kept, #361)
-    retire              retire an algorithm: it is no longer run; its records
-                        stay
-    unretire            put a retired algorithm back on probation
-    test-alert          send a test message to the Telegram chat that receives
-                        alerts
-    macro               read today's macro indicators and decide the regime,
-                        once
     diagnose            print the measurements the open decisions need; reads
                         only, writes nothing
-    doctor              print the server's state, masked (engine, KIS,
-                        PINGPONG, scheduled jobs, disk, memory, #322); reads
-                        only, prints no market value
     signal-review       print what choosing the Telegram signal settings needs
                         (#206); reads only, writes nothing
     error-breakdown     print where an algorithm errs (#431): confusion
@@ -158,6 +153,11 @@ positional arguments:
                         days (#264); reads only, writes nothing
     structure-check     measure the research's market-structure claims on the
                         stored bars and candles; reads only
+    test-alert          send a test message to the Telegram chat that receives
+                        alerts
+    doctor              print the server's state, masked (engine, KIS,
+                        PINGPONG, scheduled jobs, disk, memory, #322); reads
+                        only, prints no market value
     notify              send a notice to the Telegram chat that receives
                         alerts
     fake-kis            run a local fake KIS server for offline testing

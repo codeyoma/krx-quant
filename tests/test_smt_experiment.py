@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from krx_quant import cli, smt_experiment
+from krx_quant import smt_experiment
 from krx_quant.baselines import Forecast
 from krx_quant.cli import main
 from krx_quant.climate import CLIMATE
@@ -389,7 +389,9 @@ def test_the_holdout_command_judges_the_window_once_it_is_full(
     data, state = env
     clock = [at(HOLDOUT[0], "23:00")]
     made = smt_experiment.smt_experiment
-    monkeypatch.setattr(cli, "smt_experiment", lambda s, c, now, holdout: made(s, c, clock[0], holdout))
+    monkeypatch.setattr(
+        smt_experiment, "smt_experiment", lambda s, c, now, holdout: made(s, c, clock[0], holdout)
+    )
     assert main(["smt-experiment", "--holdout"]) == 0
     assert capsys.readouterr().out.strip().endswith("엔진 DB가 없다: 판정하지 않는다.")
     rows = []
