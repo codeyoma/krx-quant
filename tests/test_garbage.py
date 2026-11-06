@@ -104,7 +104,7 @@ def test_a_rest_lets_go_releases_and_freezes_again_and_says_so(caplog: pytest.Lo
         return {"book updates": 1, "trades": 0, "bars": 3}
 
     with caplog.at_level(logging.INFO, logger="krx_quant.garbage"):
-        garbage.rest(let_go, held, reviewed=False)
+        assert garbage.rest(let_go, held, reviewed=False) is None
         assert not asked and not garbage.frozen and not caplog.records
 
         cyclic = Thing()
@@ -112,9 +112,11 @@ def test_a_rest_lets_go_releases_and_freezes_again_and_says_so(caplog: pytest.Lo
         cyclic_ref = weakref.ref(cyclic)
         garbage.settle()
         del cyclic
-        garbage.rest(let_go, held, reviewed=False)
+        figures = garbage.rest(let_go, held, reviewed=False)
 
         assert asked == ["let go"]
+        assert figures is not None and figures["after"] == "the session"
+        assert (figures["let_go"], figures["kept"]) == ({"book updates": 5}, {"bars": 3})
         assert cyclic_ref() is None, "released: the full pass freed the cycle"
         assert garbage.frozen and gc.get_freeze_count() > 0, "what stays is frozen again"
         garbage.rest(let_go, held, reviewed=False)

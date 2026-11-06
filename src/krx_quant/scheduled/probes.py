@@ -274,6 +274,42 @@ BAR_CLOSE_TIMES = Job(
 )
 
 
+# What the engine's memory did after the close on the first trading day with its rest (#623,
+# ``garbage.Garbage.rest``, ``session_memory_probe.py``): each rest's counts let go and kept and the
+# engine's memory before and after (the engine keeps them in its store's ``runs``), and the server's
+# and the engine's memory by hour from 15:00 (``memory_hours.py``, from the heartbeat's readings):
+# the server cannot read Loki. Whether the engine is to restart after the close waits for it. On the
+# first trading night after the deploy that brings it, of that night's day (``--tonight``); a run
+# that fails (no rest that day: the engine was down at the close) or is cut runs again the next
+# trading night, on the same code too, until one ends ok. It reads the engine's database and a
+# state file, in a second; five minutes is a bound. Its output holds times, counts, MB and seconds,
+# no price.
+SESSION_MEMORY_ISSUE = 623
+
+SESSION_MEMORY = Job(
+    name="session-memory-623",
+    due=_bar_close_times_due,
+    command=("session-memory", "--tonight"),
+    timeout=timedelta(minutes=5),
+    targets=(
+        Target(
+            SESSION_MEMORY_ISSUE,
+            note=(
+                "장이 끝난 뒤 엔진이 쉬는 배포(#623) 뒤 첫 거래일 저녁의 메모리다. 1절: 엔진이 쉴 때마다"
+                "(마지막 정답 뒤, 하루 점검 뒤) 놓은 것과 남긴 것의 개수, 쉬기 전과 뒤의 엔진 RSS, 할당자가 "
+                "가진 것. 2절: 15시부터 시간마다 서버의 여유 메모리 최소·swap 최대, 엔진의 RSS·스왑 최대. "
+                "3절: 실행 때 서버의 값. 견줄 값(2026-11-06, 쉬기 전): 15:40에 엔진 906 MB, 16:20–20:20에 "
+                "852–861 MB, 21–23시에 여유 최소 203 MB·swap 최대 828 MB. 에이전트가 견준 결과를 이 이슈에 "
+                '적고, 모자라면 장 마감 뒤 다시 시작을 이슈로 연다(docs/operations.md "장 마감 뒤 메모리 '
+                '(#623)"). 다시 보기(읽기만, 엔진 옆에서 돌아도 된다): '
+                "`docker compose exec engine krx-quant session-memory --day <날>`. "
+                "출력에는 시세 값이 없다(시각, 개수, MB, 초만)."
+            ),
+        ),
+    ),
+)
+
+
 # The inverse ETF's KRX book (#606, ``inverse_book_probe.py``): the collector registers 0193L0's
 # ``H0STASP0`` in the session's last slot and records it raw only. Before the replay of down calls
 # through the ETF is built on it, the frames' layout, times and best quotes, the gaps and what

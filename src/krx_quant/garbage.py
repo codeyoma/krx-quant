@@ -55,6 +55,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping
 from datetime import timedelta
+from typing import Any
 
 from krx_quant import footprint
 
@@ -64,6 +65,9 @@ log = logging.getLogger(__name__)
 # the frozen objects go). The session's bar closes and answers come a minute apart; this is past
 # them.
 IDLE = timedelta(minutes=10)
+# The ``runs`` kind of a rest (#623): its detail is JSON, ``Garbage.rest``'s figures. For the night's
+# report of the memory after the close (``session_memory_probe.py``), which cannot read Loki.
+REST_RUN = "memory_rest"
 
 
 class Garbage:
@@ -87,14 +91,15 @@ class Garbage:
         held: Callable[[], Mapping[str, int]],
         *,
         reviewed: bool,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Out of the session (#623): ``let_go`` drops what the session kept and says how many of
         each; then the frozen are released, the memory freed is handed back to the system, and
         what stays is frozen again. One INFO line says what went, what ``held`` counts now, and
-        the process's memory before and after. Nothing when no bar close came since the last rest
-        and no review ran (``reviewed``): there is nothing new to give back."""
+        the process's memory before and after; the same figures are returned, for the engine to
+        keep (``REST_RUN``). Nothing, and None, when no bar close came since the last rest and no
+        review ran (``reviewed``): there is nothing new to give back."""
         if not (self._settled or reviewed):
-            return
+            return None
         started = time.perf_counter()
         before = footprint.resident_mb()
         gone = let_go()
@@ -105,23 +110,36 @@ class Garbage:
         footprint.hand_back()
         gc.freeze()
         self.frozen, self._settled = True, False
-        kept = {name: n for name, n in held().items() if name not in gone}
         python, malloc, free, arrow = footprint.allocated()
+        figures: dict[str, Any] = {
+            "after": "the review" if reviewed else "the session",
+            "let_go": {name: n for name, n in gone.items() if n},
+            "kept": {name: n for name, n in held().items() if name not in gone},
+            "rss_before_mb": before,
+            "rss_mb": footprint.resident_mb(),
+            "swapped_mb": footprint.swapped_mb(),
+            "python_blocks": python,
+            "malloc_mb": malloc,
+            "malloc_free_mb": free,
+            "arrow_mb": arrow,
+            "seconds": round(time.perf_counter() - started, 2),
+        }
         log.info(
             "memory handed back after %s: let go of %s; kept %s; engine rss %s -> %s MB, swapped %s MB;"
             " python %d blocks, malloc %s MB in use and %s MB free, arrow %s MB; %.2fs",
-            "the review" if reviewed else "the session",
-            _counts({name: n for name, n in gone.items() if n}) or "nothing",
-            _counts(kept) or "nothing",
+            figures["after"],
+            _counts(figures["let_go"]) or "nothing",
+            _counts(figures["kept"]) or "nothing",
             _mb(before),
-            _mb(footprint.resident_mb()),
-            _mb(footprint.swapped_mb()),
+            _mb(figures["rss_mb"]),
+            _mb(figures["swapped_mb"]),
             python,
             _mb(malloc),
             _mb(free),
             _mb(arrow),
-            time.perf_counter() - started,
+            figures["seconds"],
         )
+        return figures
 
     def release(self) -> None:
         """Let the frozen objects go and pass over everything once; nothing if none are frozen."""

@@ -11,6 +11,7 @@ while a window waits; a log that forgot answers the same from that time on.
 from __future__ import annotations
 
 import gc
+import json
 import logging
 import re
 import sqlite3
@@ -24,7 +25,7 @@ import pytest
 from krx_quant.clock import FakeClock
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.features import FEATURES, Leaders
-from krx_quant.garbage import Garbage
+from krx_quant.garbage import REST_RUN, Garbage
 from krx_quant.kind_registry import KINDS
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.market_view import MarketView, _Book, _Running
@@ -150,7 +151,8 @@ async def test_the_next_morning_is_the_same_after_the_session_s_memory_is_let_go
     15:20 and after its review at 15:40) and through one that never does. Output: the features the
     algorithm read at each bar close, and every prediction, score, touch label and kind answer
     stored, are the same on both days; the resting engine said its two lines, the first with the
-    first day's book updates, kinds' quotes, trades and flows it let go of."""
+    first day's book updates, kinds' quotes, trades and flows it let go of, and kept both rests'
+    figures in its store's runs."""
     with caplog.at_level(logging.INFO, logger="krx_quant.garbage"):
         resting, read_resting = await replayed(tmp_path / "resting.db", Garbage())
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("memory handed back")]
@@ -171,6 +173,10 @@ async def test_the_next_morning_is_the_same_after_the_session_s_memory_is_let_go
     assert set(gone) == set(LET_GO) and all(int(n) > 0 for n in gone.values()), lines[0]
     assert re.fullmatch(r"reference quotes \d+, bars \d+, touch windows \d+", told[0][3] if told[0] else "")
     assert told[1] and told[1][2] == "nothing", "the after-market starts after the review"
+    kept = [json.loads(run.detail) for run in resting.store.runs(REST_RUN, at("13:55:00"))]
+    assert [k["after"] for k in kept] == ["the session", "the review"], "kept for the night's report"
+    assert kept[0]["let_go"] == {name: int(n) for name, n in gone.items()} and kept[1]["let_go"] == {}
+    assert holding.store.runs(REST_RUN, at("13:55:00")) == []
     resting.store.close()
     holding.store.close()
 

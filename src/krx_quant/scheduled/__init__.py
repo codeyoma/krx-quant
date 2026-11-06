@@ -137,6 +137,7 @@ from krx_quant.scheduled.probes import (
     RECORDING_QUALITY,
     SAMPLE_KEYS,
     SAMPLE_KEYS_AGAIN,
+    SESSION_MEMORY,
     recording_quality_calls,
 )
 from krx_quant.scheduled.research import (
@@ -187,6 +188,7 @@ __all__ = [
     "RESTORE_DRILL",
     "RUNNING",
     "SAMPLE_PROFILE",
+    "SESSION_MEMORY",
     "SESSION_UNTIL",
     "SIGNAL_REVIEW_FIXED",
     "SIGNAL_REVIEW_FIXED_DAYS",
@@ -293,6 +295,7 @@ JOBS: tuple[Job, ...] = (
     NIGHT_BOOK_BYTES,
     NIGHT_BOOK_VERDICT,
     BAR_CLOSE_TIMES,
+    SESSION_MEMORY,
     INVERSE_BOOK,
     MARKET_HALT,
     SIGNAL_REVIEW_FIXED,

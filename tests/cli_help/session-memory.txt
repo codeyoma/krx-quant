@@ -1,0 +1,8 @@
+usage: krx-quant session-memory [-h] [--day DAY | --tonight]
+
+options:
+  -h, --help  show this help message and exit
+  --day DAY   the day, YYYY-MM-DD (default: today)
+  --tonight   the day of the night it runs in (the date, or the one before
+              until 06:00), as the scheduled job runs it; exit 1 when the
+              engine stored no rest that day

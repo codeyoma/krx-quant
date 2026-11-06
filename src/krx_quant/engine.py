@@ -206,7 +206,7 @@ from krx_quant.feeds import (
     VI_STATUS,
 )
 from krx_quant.feeds.base import KST, LEVELS
-from krx_quant.garbage import IDLE, Garbage
+from krx_quant.garbage import IDLE, REST_RUN, Garbage
 from krx_quant.kind_registry import DAILY_KINDS, KINDS
 from krx_quant.kind_stats import kind_scoring
 from krx_quant.kinds import (
@@ -1065,7 +1065,11 @@ class PredictionEngine:
         if self.garbage is not None:  # out of the session, its memory handed back (#621, #623)
             ahead = self.next_due()
             if reviewed or ahead is None or ahead - self.clock.now() > IDLE:
-                self.garbage.rest(self._let_go, partial(session_memory.held, self._market), reviewed=reviewed)
+                rested = self.garbage.rest(
+                    self._let_go, partial(session_memory.held, self._market), reviewed=reviewed
+                )
+                if rested is not None:  # for the night's report, which cannot read Loki
+                    self.store.add_run(REST_RUN, self.clock.now(), None, json.dumps(rested))
 
     def _let_go(self) -> Mapping[str, int]:
         """Drop from the Market View what the next session's bar closes do not read (#623,
