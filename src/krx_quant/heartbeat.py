@@ -22,6 +22,9 @@ to 2026-11-05 23:24 (1,440 of them the engine's heartbeats). The line:
   within ``store.ALIVE_SECONDS``) or its store not read within ``READ_SECONDS``, a process that
   ended meanwhile.
 
+Each reading also goes into its clock hour's extremes in ``state/memory-hours.json`` (#623,
+``memory_hours.py``): a scheduled job reads them there, since the server cannot read Loki.
+
 The ``/proc`` files are read on the event loop (the kernel answers them from memory, in
 microseconds); the trader's store in a worker thread, as the Engine API reads it.
 """
@@ -33,8 +36,8 @@ from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 
-from krx_quant import process_log
-from krx_quant.footprint import PROCS, resident_mb, server_mb
+from krx_quant import memory_hours, process_log
+from krx_quant.footprint import PROCS, resident_mb, server_mb, swapped_mb
 from krx_quant.trader.store import DB_NAME, read_resident
 
 READ_SECONDS = 10.0  # the trader's figure is left out (``?``) when its store takes longer
@@ -52,6 +55,8 @@ async def readings(state_dir: Path | None, now: Callable[[], datetime], proc: Pa
             )
         except TimeoutError:
             trader = None
+    if state_dir is not None:  # each hour's extremes, for the jobs that cannot read Loki (#623)
+        memory_hours.note(state_dir, now(), *server_mb(proc), resident_mb(None, proc), swapped_mb(None, proc))
     return line(trader, children, proc)
 
 

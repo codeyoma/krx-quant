@@ -82,6 +82,17 @@ def _bar_close_times(day: date | None, night: bool) -> int:
     return code
 
 
+def _session_memory(day: date | None, night: bool) -> int:
+    """What the engine's memory did after a day's close (#623)."""
+    from krx_quant.bar_close_times import tonight
+    from krx_quant.session_memory_probe import session_memory
+
+    now = datetime.now(KST)
+    report, code = session_memory(Settings.from_env(require_kis=False), now, tonight(now) if night else day)
+    print(report)
+    return code
+
+
 def _probe_inverse_book(day: date | None) -> int:
     """What the collector recorded of the inverse ETF's KRX book (#606)."""
     from krx_quant.inverse_book_probe import probe_inverse_book
@@ -174,6 +185,21 @@ def add(sub: Commands) -> None:
         " job runs it; exit 1 when that day has no predictions",
     )
     times_cmd.set_defaults(run=lambda args: _bar_close_times(args.day, args.tonight))
+    memory_cmd = sub.add_parser(
+        "session-memory",
+        help="what the engine's memory did after a day's close (#623): each rest's counts let go and kept"
+        " and the engine's memory before and after, the server's and the engine's memory by hour from"
+        " 15:00, the server's now; read-only, no price",
+    )
+    memory_day = memory_cmd.add_mutually_exclusive_group()
+    memory_day.add_argument("--day", type=date.fromisoformat, help="the day, YYYY-MM-DD (default: today)")
+    memory_day.add_argument(
+        "--tonight",
+        action="store_true",
+        help="the day of the night it runs in (the date, or the one before until 06:00), as the scheduled"
+        " job runs it; exit 1 when the engine stored no rest that day",
+    )
+    memory_cmd.set_defaults(run=lambda args: _session_memory(args.day, args.tonight))
     inverse_cmd = sub.add_parser(
         "probe-inverse-book",
         help="summarize a recorded day of the inverse ETF's KRX book (#606): KIS's answers, the frames'"

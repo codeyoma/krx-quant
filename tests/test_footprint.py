@@ -129,8 +129,28 @@ def test_a_replayed_day_s_figures_that_cannot_be_read_are_marked(tmp_path: Path)
 def test_giving_back_the_memory_freed_runs_wherever_the_engine_does() -> None:
     """``malloc_trim`` on glibc (the server's Linux, CI's); nothing to trim elsewhere (macOS)."""
     footprint.give_back()  # never raises
+    footprint.hand_back()  # nor the return alone, the live engine's (#623)
     trim = footprint._malloc_trim()
     assert (trim is not None) == (sys.platform.startswith("linux") and platform.libc_ver()[0] == "glibc")
+
+
+def test_what_the_allocators_hold_and_what_is_in_swap(tmp_path: Path) -> None:
+    """#623: Python's blocks everywhere; glibc's ``malloc`` on glibc alone (the server's Linux,
+    CI's), where what is in use grows by a buffer made; a process's ``VmSwap``."""
+    before = footprint.allocated()
+    buffer = bytearray(64 * 1024 * 1024)
+    after = footprint.allocated()
+
+    assert before.python_blocks > 0
+    glibc = sys.platform.startswith("linux") and platform.libc_ver()[0] == "glibc"
+    assert (after.malloc_mb is not None and after.malloc_free_mb is not None) == glibc
+    if after.malloc_mb is not None and before.malloc_mb is not None:
+        assert after.malloc_mb - before.malloc_mb >= len(buffer) / 2**20 - 1
+    proc = tmp_path / "proc"
+    (proc / "77").mkdir(parents=True)
+    (proc / "77" / "status").write_text("Name:\tpython\nVmRSS:\t  307200 kB\nVmSwap:\t  20480 kB\n")
+    assert footprint.swapped_mb(77, proc) == 20.0
+    assert footprint.swapped_mb(78, proc) is None, "a process that ended"
 
 
 def test_the_server_s_memory_and_a_process_s_resident_memory_for_the_heartbeat(tmp_path: Path) -> None:
