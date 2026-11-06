@@ -1,0 +1,8 @@
+usage: krx-quant probe-market-halt [-h] --day DAY [--from START]
+                                   [--until UNTIL]
+
+options:
+  -h, --help     show this help message and exit
+  --day DAY      the day to read, YYYY-MM-DD
+  --from START   the window's start by receipt, HH:MM in KST (default: 09:00)
+  --until UNTIL  the window's end by receipt, HH:MM in KST (default: 09:40)
