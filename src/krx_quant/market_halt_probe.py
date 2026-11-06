@@ -135,9 +135,11 @@ def _layout(
 
 
 def _trades(feed: Feed) -> Layout:
-    """The trades' fields, as KIS names them: the market-operation code (신 장운영 구분), the halt
-    flag (거래정지 여부), the time code (시간 구분), the early-close code (임의종료 구분), the venue
-    code and the trade's side code (체결 구분: 1 a buy, 3 before the open, 5 a sell)."""
+    """The trades' fields: the market-operation code (신 장운영 구분), the halt flag (거래정지
+    여부), the time code (시간 구분), ``MRKT_TRTM_CLS_CODE`` (KIS's example of the market-operation
+    feed, where the same name is, glosses it 임의연장 구분), the venue code and the trade's side
+    code (체결 구분: 1 a buy, 3 before the open, 5 a sell). What their values mean is not measured:
+    this probe is the first look."""
     return _layout(
         feed,
         own_time="STCK_CNTG_HOUR",

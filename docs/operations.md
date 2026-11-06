@@ -1329,11 +1329,11 @@ docker compose run --rm engine probe-market-halt --day 2026-11-06 --from 09:20 -
 
 - 읽는 것: 그날 raw의 모든 피드 폴더에서 받은 시각이 `--from`부터 `--until` 전까지인 행, 그리고 raw `_system`(그날의 구독 응답 전체). WebSocket 피드는 수집기의 배치(`feeds.WS_FEEDS`, `feeds.RAW_FEEDS`)의 필드 이름으로 읽는다. archive가 서버에서 정리한 raw 날(#607, 30일 전)은 Object Store에서 받아 읽는다(`raw_days.RawDays`, 다른 probe와 같다). 쓰는 것은 없고 KIS API를 부르지 않는다. 엔진이 도는 중에 돌려도 된다.
 - 절:
-  1. 구독: KIS가 성공으로 답한 구독의 TR별 키 수와 거절된 구독. 장운영정보(`H0STMKO0` KRX, `H0UNMKO0` 통합, `H0NXMKO0` NXT)의 구독 응답과 raw 폴더가 있는지. 구독 계획에는 없다(41건을 다 쓴다, [kis-feeds.md](kis-feeds.md#구독-계획)).
+  1. 구독: KIS가 성공으로 답한 구독의 TR별 키 수와 거절된 구독. 장운영정보(`H0STMKO0` KRX, `H0UNMKO0` 통합, `H0NXMKO0` NXT)의 구독 응답과 raw 폴더가 있는지. 구독 계획에는 없다(41건을 다 쓴다, [kis-feeds.md](kis-feeds.md#구독-계획)). KIS 예제(`examples_llm/domestic_stock/market_status_krx`, 2026-11-07에 읽음)의 `H0STMKO0`은 종목코드가 키이고 필드는 11개다: `mksc_shrn_iscd`, `trht_yn`(거래정지 여부), `tr_susp_reas_cntt`(거래정지 사유), `mkop_cls_code`(장운영 구분), `antc_mkop_cls_code`(예상 장운영 구분), `mrkt_trtm_cls_code`, `divi_app_cls_code`, `iscd_stat_cls_code`(종목 상태 구분), `vi_cls_code`, `ovtm_vi_cls_code`, `EXCH_CLS_CODE`. 받아 본 적은 없다 ⚠.
   2. 분마다 받은 레코드 수: 피드별로 키를 합쳐서. 어느 피드가 언제 멈추고 돌아왔는지, 정지 동안에도 온 피드(지수)가 무엇인지 본다.
   3. 키마다 레코드 수와 창 안의 가장 긴 침묵: 침묵 앞뒤 레코드의 받은 시각(밀리초)과 그 레코드에 실린 시각(`STCK_CNTG_HOUR`, `BSOP_HOUR`, `bsop_hour`). 창의 시작과 끝도 침묵의 끝으로 센다. 배치가 다르거나 데이터 프레임이 아닌 행, 수집기가 해석하지 못한 프레임(`_unparsed`)의 수.
   4. 코드 필드의 값: 필드마다 키별로, 받은 순서로 같은 값이 이어진 구간(값, 첫·마지막 받은 시각, 레코드 수). 구간이 12개를 넘으면 값별 수와 첫·마지막 시각, 값이 바뀐 횟수만 낸다. 모든 키에서 값이 하나뿐인 필드는 한 줄이다.
-     - 체결(`H0UNCNT0`, `H0STCNT0`, `H0NXCNT0`): `NEW_MKOP_CLS_CODE`(장운영 구분), `TRHT_YN`(거래정지 여부), `HOUR_CLS_CODE`(시간 구분), `MRKT_TRTM_CLS_CODE`(임의종료 구분), `MARKET_CLS_CODE`, `CNTG_CLS_CODE`(체결 구분).
+     - 체결(`H0UNCNT0`, `H0STCNT0`, `H0NXCNT0`): `NEW_MKOP_CLS_CODE`(장운영 구분), `TRHT_YN`(거래정지 여부), `HOUR_CLS_CODE`(시간 구분), `MRKT_TRTM_CLS_CODE`(KIS의 장운영정보 예제는 같은 이름을 임의연장 구분이라고 적는다), `MARKET_CLS_CODE`, `CNTG_CLS_CODE`(체결 구분). 값의 뜻은 잰 적이 없다 ⚠([events.md](events.md) "체결").
      - 호가(`H0UNASP0`, 인버스 ETF의 `H0STASP0`): `HOUR_CLS_CODE`, `STCK_DEAL_CLS_CODE`, 중간가 구분(`KMID_CLS_CODE`, `NMID_CLS_CODE`, KRX 호가는 `MIDP_CLS_CODE`), `ANTC_EXCH_CLS_CODE`, KRX 호가의 `MARKET_CLS_CODE`.
      - 선물·옵션(`H0IFCNT0`, `H0CFCNT0`, `H0IOCNT0`): `dynm_prc_limt_yn`(실시간 가격제한 여부). 지수(`H0UPCNT0`), 프로그램매매, 회원사에는 상태 필드가 없어 2·3절의 개수와 침묵만 본다.
      - 만든 값 둘(가격은 내지 않는다): 체결과 호가의 `1호가`(매도·매수 1호가가 `양쪽`, `맞닿음`, `뒤집힘`, `한쪽`, `없음`), 호가의 `예상 체결가`(`ANTC_CNPR`이 `있음`, `없음`). trader가 받는 1호가(`trader/quotes.py`의 `quote_of`)가 단일가 동안 어떤 모양인지 본다.
