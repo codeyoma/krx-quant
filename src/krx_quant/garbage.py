@@ -17,8 +17,9 @@ the permanent generation that no pass walks. The oldest generation then never ho
 hour of quotes, and its passes stay short. A frozen object is still freed as soon as nothing refers
 to it (the quotes a log forgets): only an object in a reference cycle that was alive at a freeze
 and dies later stays, until ``release``, which unfreezes everything and makes one full pass, logged
-with how many objects it let go and freed and how long it took. The engine releases once its next
-work is over ``IDLE`` away (after the session's last answers), and the collector when it stops.
+with how many objects it let go and freed and how long it took. The engine releases when it rests
+(below: after the session's last answers and after the daily review), and the collector when it
+stops.
 
 Measured on GitHub's runners, 6 mornings against 5 (#621): the oldest generation's passes from
 0.41-0.66 s at 10:00-10:31 to 2-6 ms each after a bar close (the day's first, over everything
@@ -59,8 +60,9 @@ from krx_quant import footprint
 
 log = logging.getLogger(__name__)
 
-# The engine's next work at least this far away: the frozen objects are let go (``release``). The
-# session's bar closes and answers come a minute apart; this is past them.
+# The engine's next work at least this far away after a bar close: it rests (``rest``, which lets
+# the frozen objects go). The session's bar closes and answers come a minute apart; this is past
+# them.
 IDLE = timedelta(minutes=10)
 
 

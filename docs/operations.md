@@ -1827,7 +1827,7 @@ mock으로 시작한 날부터 비용 지도에서 시장가 왕복으로 통과
 - Loki: `{service="krx-quant", process="engine"} |= "held the event loop"`. 하루 수: `sum(count_over_time({service="krx-quant", process="engine"} |= "held the event loop" [1d]))`. 끊김과 함께 보려면 `{service="krx-quant"} |~ "held the event loop|quotes stalled"`.
 - 할 일: 하루 몇 번이고 1–2초면 없다. 5초 가까운 줄이 잦으면 가장 큰 단계를 이슈로 남긴다(무엇을 루프 밖으로 옮기거나 가볍게 할지). 알림 기준(trader의 5초)은 바꾸지 않는다(#538).
 - **봉 마감 뒤의 GC (#621).** 장중 엔진은 예측한 봉 마감마다 끝에(단계 `garbage collection`) 얼리지 않은 객체만 GC로 한 번 훑고 살아 있는 객체를 모두 얼린다(`gc.collect()` 뒤 `gc.freeze()`, `garbage.py`). 언 객체는 어떤 GC도 다시 훑지 않는다. 장중에 엔진이 가진 것은 대부분 호가 기록(Market View의 호가 갱신, 다른 종류의 한 시간 호가)인데, 파이썬은 named tuple을 GC 대상에서 빼지 않아서 가장 오래된 세대의 GC가 그것을 모두 훑으며 루프를 0.4–0.66초 쥐었다(GitHub 러너의 재생, 아침마다 12번). 이제 한 번에 몇 ms다. 잰 값과 고른 까닭은 [design.md](design.md) 5장 "시간 예산"의 "GC(#621)"에 있다.
-  - 언 객체도 가리키는 것이 없어지면 바로 풀린다(호가 기록이 잊은 호가). 얼었을 때 살아 있다가 나중에 버려진 참조 순환만 남는데, 엔진은 다음 일이 10분(`garbage.IDLE`) 넘게 남았을 때(그날 마지막 정답 뒤) 한 번, 그리고 수집기가 멈출 때 모두 녹이고 전체를 한 번 훑는다. 그때 INFO 한 줄을 남긴다:
+  - 언 객체도 가리키는 것이 없어지면 바로 풀린다(호가 기록이 잊은 호가). 얼었을 때 살아 있다가 나중에 버려진 참조 순환만 남는데, 엔진은 쉴 때마다(봉 마감 뒤 다음 일이 10분(`garbage.IDLE`) 넘게 남았을 때, 곧 그날 마지막 정답 뒤와 하루 점검 뒤. 아래 "장 마감 뒤 메모리 (#623)"), 그리고 수집기가 멈출 때 모두 녹이고 전체를 한 번 훑는다. 그때 INFO 한 줄을 남긴다:
 
     ```
     garbage collection: let go of 1273649 frozen objects; a full pass freed 412 in 0.71s
