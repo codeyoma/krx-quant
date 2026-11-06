@@ -55,8 +55,6 @@ from krx_quant.feeds import (
     KOSPI200_FUTURES,
     KRX_BOOK,
     KRX_TRADE,
-    NIGHT_FUTURES,
-    NIGHT_FUTURES_BOOK,
     NXT_TRADE,
     OPTION,
     PROGRAM,
@@ -161,7 +159,8 @@ def _derivatives(feed: Feed, change: str | None = None) -> Layout:
 
 
 # Every feed recorded from the WebSocket (``feeds.WS_FEEDS``, ``feeds.RAW_FEEDS``), in the order
-# shown. A feed without code fields is counted only.
+# shown. A feed without code fields is counted only; one not named here (the member flow, the night
+# futures, which send nothing in the day session) is counted without the time its records carry.
 LAYOUTS: dict[str, Layout] = {
     TRADE.tr_id: _trades(TRADE),
     KRX_TRADE.tr_id: _trades(KRX_TRADE),
@@ -193,8 +192,6 @@ LAYOUTS: dict[str, Layout] = {
     OPTION.tr_id: _derivatives(OPTION),
     PROGRAM.tr_id: _layout(PROGRAM, own_time="STCK_CNTG_HOUR"),
     US_TRADE.tr_id: _layout(US_TRADE, own_time="KHMS"),
-    NIGHT_FUTURES.tr_id: _layout(NIGHT_FUTURES, own_time="bsop_hour"),
-    NIGHT_FUTURES_BOOK.tr_id: _layout(NIGHT_FUTURES_BOOK, own_time="bsop_hour"),
 }
 _RECORDED: tuple[Feed | RawFeed, ...] = (*WS_FEEDS.values(), *RAW_FEEDS.values())
 for _feed in _RECORDED:
