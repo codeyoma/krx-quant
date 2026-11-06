@@ -25,9 +25,9 @@ same cells' predictions and the same quotes, in one process.
 - **Quotes, special windows, the clock**: to every book. **Controls** (pauses, resumes, re-arms):
   to the champion's alone.
 - **A stall of the quotes** (#407, ``stall.QuoteWatch``): the desk watches the stream once for every
-  book, keeps each stall and sends it and the quotes' return to Telegram once each; every book is
-  told (``on_stall``, ``on_recover``: no new buy meanwhile; the mock champion reads KIS's REST
-  quotes, the paper books wait), and so is a book made during one.
+  book, keeps each stall and sends one thirty seconds long and its return to Telegram once each
+  (#624); every book is told (``on_stall``, ``on_recover``: no new buy meanwhile; the mock champion
+  reads KIS's REST quotes, the paper books wait), and so is a book made during one.
 - **Mock mode** (#405): the champion's book (``mock.MockTrader``) is the execution layer alone: its
   KIS orders, its trades of mode ``mock``, the limits and pauses, the state and ledger. At the start
   (``start``, #406) it reconciles the KIS account with the ledger before any book trades. Beside it
