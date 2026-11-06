@@ -1,8 +1,9 @@
 """The collector's quotes stalled (#407, #393 "호가"): more than five seconds without a quote in
 continuous trading buys nothing new; the mock book keeps its open position's stop and time barrier
 on KIS's REST quotes, read on the trader's key within its call limit; a paper book waits for the
-stream and keeps that wait on its trade; both go back to the stream once it returns, and Telegram
-hears of the stall and of the return once each.
+stream and keeps that wait on its trade; both go back to the stream once it returns. Telegram hears
+of a stall once its silence is thirty seconds long, counted from the last quote, and then of its
+return, once each (#624); a shorter stall is kept and logged alone.
 
 The quotes are made up and come a second apart while they flow (005930's stream brings several a
 second); a stall is a gap of more than five seconds. KIS is the fake one (``tests/test_trader_mock.py``):
@@ -37,7 +38,7 @@ from krx_quant.trader.mock import LIVE_REST_SECONDS, REST_SECONDS, Timing
 from krx_quant.trader.paper import STALLED, STOP_LOSS, TIME, Rules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Selection
-from krx_quant.trader.stall import STALL_AFTER, QuoteWatch
+from krx_quant.trader.stall import ALERT_AFTER, STALL_AFTER, QuoteWatch
 from krx_quant.trader.store import (
     DB_NAME,
     QUOTE,
@@ -93,7 +94,7 @@ def rows(state: Path, table: str) -> list[dict[str, Any]]:
 
 
 # What a notice is: a stall, the quotes back (``stall.py``), or another (``limits.py``).
-STALL_SAID, BACK_SAID = "호가가 5초 넘게 오지 않습니다", "호가가 다시 옵니다"
+STALL_SAID, BACK_SAID = "호가가 30초 이상 오지 않습니다", "호가가 다시 옵니다"
 
 
 def said(notices: list[str]) -> list[str]:
@@ -122,9 +123,10 @@ def test_a_stall_is_said_once_and_the_paper_book_sells_on_the_first_quote_after_
     tmp_path: Path,
 ) -> None:
     """Bought at 10:00:02.5, the quotes stop after 10:01:00: the stall is seen at 10:01:05.5 and said
-    once, however long it lasts. The time barrier (10:04) passes in it with no quote to sell on; the
-    first quote after it (10:05:00, bid 69,900) sells by the time barrier, and the trade keeps the
-    stall and that its exit waited for it."""
+    once, at the first tick thirty seconds after the last quote (10:02:00 here), however long it
+    lasts. The time barrier (10:04) passes in it with no quote to sell on; the first quote after it
+    (10:05:00, bid 69,900) sells by the time barrier, and the trade keeps the stall and that its exit
+    waited for it."""
     day = paper_day(tmp_path)
 
     [trade] = day.run(
@@ -153,8 +155,9 @@ def test_a_stall_is_said_once_and_the_paper_book_sells_on_the_first_quote_after_
     ]
     [stall] = stalls(tmp_path)
     assert (stall["mode"], stall["ended_by"], stall["rest_reads"]) == (PAPER, QUOTE, 0)
+    assert stall["alerted_at"] == "2026-10-14T10:02:00+09:00"
     assert day.notices == [
-        "자동 매매(paper): 수집기의 호가가 5초 넘게 오지 않습니다(마지막 호가 10:01:00)."
+        "자동 매매(paper): 수집기의 호가가 30초 이상 오지 않습니다(마지막 호가 10:01:00)."
         " 호가가 돌아올 때까지 새로 사지 않습니다."
         " 열린 포지션은 호가가 돌아오면 그 호가로 목표가·손절가·시간 규칙을 봅니다.",
         "자동 매매(paper): 호가가 다시 옵니다(10:05:00, 끊긴 지 240초). 스트림의 호가로 돌아갑니다.",
@@ -210,13 +213,15 @@ def test_a_pause_selling_at_once_asked_in_a_stall_sells_on_the_first_quote_after
 
     assert trade["exit"] == {"at": "2026-10-14T10:02:30+09:00", "price": 69_950, "reason": "pause"}
     assert [s["effect"] for s in trade["stalls"]] == [WAITED]
-    assert said(day.notices) == [STALL_SAID, "정지하고 즉시 매도 요청을 받았습니다", BACK_SAID]
+    # The pause is asked twenty seconds into the silence, before the stall is sent (#624).
+    assert said(day.notices) == ["정지하고 즉시 매도 요청을 받았습니다", STALL_SAID, BACK_SAID]
 
 
 def test_no_stall_outside_continuous_trading_nor_before_five_seconds_from_the_start(tmp_path: Path) -> None:
     """The watch begins at the trader's start or the open, whichever is later, and holds until the
     closing auction (15:20): no quote before the open, at the start, or after 15:20 makes a stall;
-    nor any on a day that does not trade."""
+    nor any on a day that does not trade. The thirty seconds of its notice are counted from there
+    too (#624)."""
     store = TraderStore(tmp_path / DB_NAME)
     notices: list[str] = []
     try:
@@ -225,6 +230,10 @@ def test_no_stall_outside_continuous_trading_nor_before_five_seconds_from_the_st
         assert early.on_time(at("09:00:05")) is None, "five seconds from the open"
         assert early.on_time(at("09:00:05.25")) is not None, "more than five"
         assert early.stall is not None
+        early.on_time(at("09:00:29.75"))
+        assert notices == [], "not thirty seconds from the open yet"
+        early.on_time(at("09:00:30"))
+        assert len(notices) == 1 and "(이번 시작 뒤 받은 호가 없음)" in notices[0]
         store.end_stall(early.stall.id, at("09:00:06"), QUOTE)
         late = QuoteWatch(store, PAPER, CALENDAR.session, at("15:19:00"), notices.append)
         assert late.on_time(at("15:19:05")) is None
@@ -243,7 +252,7 @@ def test_the_book_as_it_stood_does_not_end_a_stall_and_a_restart_takes_up_the_da
 ) -> None:
     """A quote received more than five seconds before the clock (the book as it stood when the stream
     came back) is not the stream back. A trader started again the same day goes on with the stall it
-    stopped in, without a second notice; one of another day ends at the start."""
+    stopped in, without a second notice; one of another day ends at the start, without one."""
     store = TraderStore(tmp_path / DB_NAME)
     notices: list[str] = []
     try:
@@ -251,15 +260,17 @@ def test_the_book_as_it_stood_does_not_end_a_stall_and_a_restart_takes_up_the_da
         watch.on_quote(quote("10:00:01", 70_000, 70_100))
         stall = watch.on_time(at("10:00:06.25"))
         assert stall is not None and stall.last_quote_at == at("10:00:01")
-        assert watch.on_time(at("10:00:30")) is None, "said once"
+        assert watch.on_time(at("10:00:30")) is None and notices == [], "29 seconds of silence"
         watch.on_time(at("10:01:00"))
+        assert said(notices) == [STALL_SAID]
         assert watch.on_quote(quote("10:00:50", 70_000, 70_100)) is None, "ten seconds old"
         assert watch.stalled
 
         again = QuoteWatch(store, PAPER, CALENDAR.session, at("10:02:00"), notices.append)
-        assert again.stall is not None and again.stall.id == stall.id, "taken up, not said again"
+        assert again.stall is not None and again.stall.id == stall.id, "taken up"
         assert again.on_quote(quote("10:01:50", 70_000, 70_100)) is None, "as it stood, before a tick"
         again.on_time(at("10:02:00.25"))
+        assert said(notices) == [STALL_SAID], "not said again"
         ended = again.on_quote(quote("10:02:00.5", 70_000, 70_100))
         assert ended is not None and ended.id == stall.id and not again.stalled
 
@@ -273,7 +284,169 @@ def test_the_book_as_it_stood_does_not_end_a_stall_and_a_restart_takes_up_the_da
         (QUOTE, "2026-10-14T10:02:00.500000+09:00"),
         (RESTART, "2026-10-15T09:00:00+09:00"),
     ]
-    assert said(notices) == [STALL_SAID, BACK_SAID, STALL_SAID]
+    assert said(notices) == [STALL_SAID, BACK_SAID], "the third, not thirty seconds long, is not said"
+
+
+# The notice (#624): at thirty seconds of silence, once, and then the return's.
+
+
+def test_the_stall_is_sent_at_thirty_seconds_from_the_last_quote_once_and_then_its_return_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The last quote at 10:00:01 and the clock ticking every quarter second: the stall is seen at
+    10:00:06.25 and kept, and sent at 10:00:31, thirty seconds after the last quote (not after it was
+    seen), once; the quote of 10:00:40 ends it, and the return is sent once."""
+    caplog.set_level("WARNING", logger="krx_quant.trader.stall")
+    store = TraderStore(tmp_path / DB_NAME)
+    notices: list[str] = []
+    sent: list[tuple[datetime, str]] = []  # the tick each notice was sent at
+    try:
+        watch = QuoteWatch(store, PAPER, CALENDAR.session, at("10:00:00"), notices.append)
+        watch.on_quote(quote("10:00:01", 70_000, 70_100))
+        tick = at("10:00:01")
+        while tick < at("10:00:40"):
+            tick += timedelta(seconds=0.25)
+            said_before = len(notices)
+            watch.on_time(tick)
+            sent += [(tick, text) for text in notices[said_before:]]
+        assert watch.stalled
+        assert [(when, *said([text])) for when, text in sent] == [(at("10:00:31"), STALL_SAID)]
+        assert watch.on_quote(quote("10:00:40.1", 70_000, 70_100)) is not None
+        watch.on_quote(quote("10:00:40.3", 70_000, 70_100))
+        watch.on_time(at("10:00:40.5"))
+    finally:
+        store.close()
+
+    assert at("10:00:31") - at("10:00:01") == ALERT_AFTER
+    assert notices == [
+        "자동 매매(paper): 수집기의 호가가 30초 이상 오지 않습니다(마지막 호가 10:00:01)."
+        " 호가가 돌아올 때까지 새로 사지 않습니다."
+        " 열린 포지션은 호가가 돌아오면 그 호가로 목표가·손절가·시간 규칙을 봅니다.",
+        "자동 매매(paper): 호가가 다시 옵니다(10:00:40, 끊긴 지 39초). 스트림의 호가로 돌아갑니다.",
+    ]
+    [stall] = stalls(tmp_path)
+    assert (stall["began_at"], stall["alerted_at"], stall["ended_by"]) == (
+        "2026-10-14T10:00:06.250000+09:00",
+        "2026-10-14T10:00:31+09:00",
+        QUOTE,
+    )
+    assert [r.getMessage() for r in caplog.records] == [
+        "trader: the collector's quotes stalled: none for more than 5s (the last at 10:00:01): no new entry"
+        " until they return",
+        "trader: the quotes are back at 10:00:40, 39s after the last: on the stream again",
+    ]
+
+
+def test_a_stall_that_ends_within_thirty_seconds_is_kept_and_logged_and_tells_telegram_nothing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stall of 29.9 seconds (the last quote at 10:00:01, the next at 10:00:30.9, the clock ticking
+    every quarter second) is seen and kept, and neither it nor its return is sent."""
+    caplog.set_level("WARNING", logger="krx_quant.trader.stall")
+    store = TraderStore(tmp_path / DB_NAME)
+    notices: list[str] = []
+    try:
+        watch = QuoteWatch(store, PAPER, CALENDAR.session, at("10:00:00"), notices.append)
+        watch.on_quote(quote("10:00:01", 70_000, 70_100))
+        tick = at("10:00:01")
+        while tick < at("10:00:30.75"):
+            tick += timedelta(seconds=0.25)
+            watch.on_time(tick)
+        assert watch.stalled
+        ended = watch.on_quote(quote("10:00:30.9", 70_000, 70_100))
+        assert ended is not None and not watch.stalled
+        watch.on_time(at("10:00:31"))
+        watch.on_time(at("10:00:35"))
+    finally:
+        store.close()
+
+    assert notices == []
+    [stall] = stalls(tmp_path)
+    assert (stall["alerted_at"], stall["ended_at"], stall["ended_by"]) == (
+        None,
+        "2026-10-14T10:00:30.900000+09:00",
+        QUOTE,
+    )
+    assert [r.getMessage() for r in caplog.records] == [
+        "trader: the collector's quotes stalled: none for more than 5s (the last at 10:00:01): no new entry"
+        " until they return",
+        "trader: the quotes are back at 10:00:30, 30s after the last: on the stream again"
+        " (the stall was not sent to Telegram, #624)",
+    ]
+
+
+def test_a_trader_started_again_sends_the_day_s_stall_once_whichever_start_sees_its_thirty_seconds(
+    tmp_path: Path,
+) -> None:
+    """A stall sent before the trader stopped is not sent again by the one started after it, which
+    sends its return. A stall the trader stopped in before its thirty seconds is sent by the next
+    start, thirty seconds after its last quote, and by no later one."""
+    store = TraderStore(tmp_path / DB_NAME)
+    notices: list[str] = []
+    try:
+        first = QuoteWatch(store, PAPER, CALENDAR.session, at("10:00:00"), notices.append)
+        first.on_quote(quote("10:00:01", 70_000, 70_100))
+        first.on_time(at("10:00:06.25"))
+        first.on_time(at("10:00:31"))
+        assert said(notices) == [STALL_SAID]
+
+        second = QuoteWatch(store, PAPER, CALENDAR.session, at("10:01:00"), notices.append)
+        assert second.stalled
+        second.on_time(at("10:01:00.25"))
+        second.on_time(at("10:02:00"))
+        assert said(notices) == [STALL_SAID], "sent by the trader before it: not again"
+        second.on_quote(quote("10:02:00.1", 70_000, 70_100))
+        assert said(notices) == [STALL_SAID, BACK_SAID]
+
+        # The next stall: the trader stops ten seconds into its silence.
+        second.on_quote(quote("10:03:00", 70_000, 70_100))
+        second.on_time(at("10:03:00.25"))
+        assert second.on_time(at("10:03:05.25")) is not None
+        second.on_time(at("10:03:10"))
+        third = QuoteWatch(store, PAPER, CALENDAR.session, at("10:03:20"), notices.append)
+        third.on_time(at("10:03:20.25"))
+        third.on_time(at("10:03:29.75"))
+        assert said(notices) == [STALL_SAID, BACK_SAID], "not thirty seconds from its last quote yet"
+        third.on_time(at("10:03:30"))
+        assert said(notices) == [STALL_SAID, BACK_SAID, STALL_SAID]
+        assert "(마지막 호가 10:03:00)" in notices[-1]
+        fourth = QuoteWatch(store, PAPER, CALENDAR.session, at("10:04:00"), notices.append)
+        fourth.on_time(at("10:04:00.25"))
+        fourth.on_time(at("10:05:00"))
+        assert said(notices) == [STALL_SAID, BACK_SAID, STALL_SAID], "not again"
+        fourth.on_quote(quote("10:05:00.1", 70_000, 70_100))
+    finally:
+        store.close()
+    assert said(notices) == [STALL_SAID, BACK_SAID, STALL_SAID, BACK_SAID]
+    assert [(s["alerted_at"], s["ended_by"]) for s in stalls(tmp_path)] == [
+        ("2026-10-14T10:00:31+09:00", QUOTE),
+        ("2026-10-14T10:03:30+09:00", QUOTE),
+    ]
+
+
+def test_a_store_of_before_the_notice_s_time_keeps_its_stall_and_sends_it_once(tmp_path: Path) -> None:
+    """A store written before #624 has no ``alerted_at``: opened again it has, null for the stall the
+    trader stopped in, which is then sent once."""
+    store = TraderStore(tmp_path / DB_NAME)
+    store.add_stall(PAPER, at("10:00:06.25"), at("10:00:01"))
+    store.close()
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db:
+        db.execute("ALTER TABLE stalls DROP COLUMN alerted_at")
+        db.commit()
+
+    store = TraderStore(tmp_path / DB_NAME)
+    notices: list[str] = []
+    try:
+        kept = store.open_stall()
+        assert kept is not None and kept.alerted_at is None
+        watch = QuoteWatch(store, PAPER, CALENDAR.session, at("10:00:20"), notices.append)
+        watch.on_time(at("10:00:31"))
+        watch.on_time(at("10:00:31.25"))
+        again = store.open_stall()
+        assert again is not None and again.alerted_at == at("10:00:31")
+    finally:
+        store.close()
+    assert said(notices) == [STALL_SAID]
 
 
 # Mock: the champion keeps its stop and time barrier on KIS's REST quotes.
@@ -470,6 +643,53 @@ async def test_in_a_stall_the_mock_book_sells_at_its_stop_on_kis_s_rest_quote_an
     )
 
 
+async def test_a_stall_of_six_seconds_stops_the_entries_of_the_mock_desk_and_tells_telegram_nothing(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The stream stops after 10:00:57 and is back at 10:01:03, six seconds later (#624). The stall is
+    seen at 10:01:02.25: the 10:01 rise read in it buys nothing, on KIS or in paper. Neither the
+    stall nor its return is sent to Telegram: both are kept and logged. The stream back, the 10:02
+    rise buys."""
+    caplog.set_level("WARNING", logger="krx_quant.trader.stall")
+    fake, account = kis_mock
+    desk = StallDesk(tmp_path, fake, account)
+
+    await desk.run(
+        [
+            *flowing("10:00:00", "10:00:57"),
+            Tick("10:01:02.25"),
+            Read("10:01:02.3", [Barrier("10:01:00")]),
+            quote("10:01:03", 70_000, 70_100),
+            *flowing("10:01:04", "10:02:05"),
+            Read("10:02:02.3", [Barrier("10:02:00")]),
+        ]
+    )
+
+    assert decided(tmp_path, MOCK) == [("10:01", "skip", STALLED), ("10:02", "buy", None)]
+    assert decided(tmp_path, PAPER) == [("10:01", "skip", STALLED), ("10:02", "buy", None)]
+    assert desk.notices == []
+    [kept] = stalls(tmp_path)
+    assert kept == {
+        "id": 1,
+        "mode": MOCK,
+        "began_at": "2026-10-14T10:01:02.250000+09:00",
+        "last_quote_at": "2026-10-14T10:00:57+09:00",
+        "ended_at": "2026-10-14T10:01:03+09:00",
+        "ended_by": QUOTE,
+        "rest_reads": 0,
+        "alerted_at": None,
+    }
+    assert [r.getMessage() for r in caplog.records] == [
+        "trader: the collector's quotes stalled: none for more than 5s (the last at 10:00:57): no new entry"
+        " until they return",
+        "trader: the quotes are back at 10:01:03, 6s after the last: on the stream again"
+        " (the stall was not sent to Telegram, #624)",
+    ]
+    [bought] = desk.trades()
+    assert (bought["mode"], bought["entry"]["at"]) == (MOCK, "2026-10-14T10:02:03+09:00")
+    assert bought["stalls"] == [], "bought after the stall"
+
+
 async def test_in_a_stall_the_mock_book_sells_at_its_time_barrier_on_kis_s_rest_quote(
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
@@ -531,7 +751,8 @@ async def test_a_pause_selling_at_once_asked_in_a_stall_sells_on_kis_s_next_rest
     assert [s["effect"] for s in trade["stalls"]] == [REST]
     assert resting_sells(account) == [] and account.holdings[SYMBOL] == 0
     assert desk.rest_reads() == 2
-    assert said(desk.notices) == [STALL_SAID, "정지하고 즉시 매도 요청을 받았습니다"]
+    # The stall, ten seconds of silence so far, is not sent (#624).
+    assert said(desk.notices) == ["정지하고 즉시 매도 요청을 받았습니다"]
 
 
 async def test_a_live_lost_sell_settled_in_a_night_s_stall_sells_once_krx_takes_orders_not_on_a_rest_quote(

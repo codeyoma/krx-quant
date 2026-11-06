@@ -64,10 +64,11 @@ by the nightly re-fit (#399, from the engine's container).
   how many and the cumulative one), which the limits do not count;
 - ``stalls`` (#407, ``stall.py``): each stall of the collector's quotes: when the trader saw it
   (more than five seconds with no quote in the session), the last quote before it, when a quote
-  came again (or the trader started again instead), and the REST quotes the mock book read
-  meanwhile; ``trade_stalls``: each stall a trade was open through, and what it did to the exit
-  (``effect``: ``waited``, the exit made on the first quote after it; ``rest``, the sale decided on
-  a REST quote during it; null, none);
+  came again (or the trader started again instead), the REST quotes the mock book read meanwhile,
+  and when it was sent to Telegram (``alerted_at``, #624: once its silence was thirty seconds
+  long; null: not sent); ``trade_stalls``: each stall a trade was open through, and what it did to
+  the exit (``effect``: ``waited``, the exit made on the first quote after it; ``rest``, the sale
+  decided on a REST quote during it; null, none);
 - ``gate_checks`` (#408, ``promotion.check_gate``): each checkpoint of the live gate, evaluated once
   by the nightly job: its number, its day, the champion then and its record's figures, its α and
   level, whether it passed, and with one extra adverse tick a leg;
@@ -431,6 +432,10 @@ _ADDED = {
     # A pick found the practice cell's predictor not active (#603): no practice until the cycle ends.
     # Null: not found so, and before #603.
     "practice_cycles": (("inactive_at", "TEXT"),),
+    # When a stall's notice was sent to Telegram (#624, ``stall.py``): once its silence was thirty
+    # seconds long, so that a trader started again does not send it twice. Null: not sent (the quotes
+    # came again before); before #624, sent when the trader saw it (``began_at``).
+    "stalls": (("alerted_at", "TEXT"),),
 }
 # A day's ledger's columns of the mock book's practice trades (#533), beside the limits' count.
 _PRACTICE_DAY = tuple(name for name, _ in _ADDED["days"])
@@ -626,13 +631,15 @@ class Failure:
 
 @dataclass(frozen=True)
 class Stall:
-    """A stall of the collector's quotes (#407): when the trader saw it, and the last quote received
-    before it (None: none since the trader started)."""
+    """A stall of the collector's quotes (#407): when the trader saw it, the last quote received
+    before it (None: none since the trader started), and when it was sent to Telegram, as kept when
+    it was read (#624; None: not sent)."""
 
     id: int
     mode: str
     began_at: datetime
     last_quote_at: datetime | None
+    alerted_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -1650,13 +1657,21 @@ class TraderStore:
         ).fetchone()
         if row is None:
             return None
-        last = row["last_quote_at"]
+        last, alerted = row["last_quote_at"], row["alerted_at"]
         return Stall(
             row["id"],
             row["mode"],
             datetime.fromisoformat(row["began_at"]),
             None if last is None else datetime.fromisoformat(last),
+            None if alerted is None else datetime.fromisoformat(alerted),
         )
+
+    def alert_stall(self, stall: int, at: datetime) -> None:
+        """``stall`` sent to Telegram at ``at`` (#624); kept once."""
+        with self._db:
+            self._db.execute(
+                "UPDATE stalls SET alerted_at = ? WHERE id = ? AND alerted_at IS NULL", (iso(at), stall)
+            )
 
     def read_rest(self, stall: int) -> None:
         """One more REST quote read during ``stall`` (the mock book's, #407)."""
