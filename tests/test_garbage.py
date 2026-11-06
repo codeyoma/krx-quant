@@ -1,8 +1,10 @@
-"""The live engine's garbage collection after each bar close (#621, ``garbage.py``).
+"""The live engine's garbage collection after each bar close (#621, ``garbage.py``), and its rest
+once the session is over (#623).
 
 Input: objects made before a freeze, one of them in a reference cycle; an engine given the policy
-on a replayed morning, then one idle after the session. Output: what is frozen and what is freed,
-and when the engine freezes and lets go.
+on a replayed morning, then one idle after the session; a rest with and without a bar close or a
+review before it. Output: what is frozen and what is freed, when the engine freezes and rests, and
+the rest's line.
 """
 
 from __future__ import annotations
@@ -86,13 +88,63 @@ def engine_on(db: Path, clock: FakeClock, garbage: Garbage) -> PredictionEngine:
     )
 
 
-async def test_the_engine_freezes_after_each_bar_close_and_lets_go_once_idle(
+def test_a_rest_lets_go_releases_and_freezes_again_and_says_so(caplog: pytest.LogCaptureFixture) -> None:
+    """Input: a rest with no bar close before it; a bar close with a reference cycle alive, then a
+    rest whose session let go of 5 book updates and keeps 3 bars; a rest after a review alone, with
+    nothing to let go. Output: the first does nothing (its session is not asked); the second frees
+    the cycle, leaves what stays frozen and says one line; the third says ``after the review``."""
+    garbage = Garbage()
+    asked: list[str] = []
+
+    def let_go() -> dict[str, int]:
+        asked.append("let go")
+        return {"book updates": 5, "trades": 0}
+
+    def held() -> dict[str, int]:
+        return {"book updates": 1, "trades": 0, "bars": 3}
+
+    with caplog.at_level(logging.INFO, logger="krx_quant.garbage"):
+        garbage.rest(let_go, held, reviewed=False)
+        assert not asked and not garbage.frozen and not caplog.records
+
+        cyclic = Thing()
+        cyclic.me = cyclic
+        cyclic_ref = weakref.ref(cyclic)
+        garbage.settle()
+        del cyclic
+        garbage.rest(let_go, held, reviewed=False)
+
+        assert asked == ["let go"]
+        assert cyclic_ref() is None, "released: the full pass freed the cycle"
+        assert garbage.frozen and gc.get_freeze_count() > 0, "what stays is frozen again"
+        garbage.rest(let_go, held, reviewed=False)
+        assert asked == ["let go"], "no bar close since: nothing new to give back"
+        garbage.rest(dict, held, reviewed=True)
+
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("memory handed back")]
+    figures = (
+        r"engine rss (\d+|\?) -> (\d+|\?) MB, swapped (\d+|\?) MB; python \d+ blocks,"
+        r" malloc (\d+|\?) MB in use and (\d+|\?) MB free, arrow (\d+|\?) MB; \d+\.\d\ds"
+    )
+    assert len(lines) == 2, lines
+    assert re.fullmatch(
+        rf"memory handed back after the session: let go of book updates 5; kept bars 3; {figures}", lines[0]
+    ), lines[0]
+    assert re.fullmatch(
+        r"memory handed back after the review: let go of nothing;"
+        rf" kept book updates 1, trades 0, bars 3; {figures}",
+        lines[1],
+    ), lines[1]
+
+
+async def test_the_engine_freezes_after_each_bar_close_and_rests_once_idle(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Input: an engine given the policy, replayed from 09:00 to the first bar close (09:01) and on
     to 09:03; then an engine of the same policy at 15:50, its next work over ``IDLE`` away (the next
     day's first bar close: no answer or review left that day). Output: nothing frozen before the
-    first bar close, frozen after it, and let go by the idle engine's run."""
+    first bar close, frozen after it; the idle engine's run releases the frozen, says what it handed
+    back and leaves what stays frozen."""
     garbage = Garbage()
     clock = FakeClock(at("09:00:00"))
     engine = engine_on(tmp_path / "engine.db", clock, garbage)
@@ -112,6 +164,10 @@ async def test_the_engine_freezes_after_each_bar_close_and_lets_go_once_idle(
     with caplog.at_level(logging.INFO, logger="krx_quant.garbage"):
         await idle.run_due()
 
-    assert not garbage.frozen and gc.get_freeze_count() == 0
-    assert any(r.getMessage().startswith("garbage collection: let go of ") for r in caplog.records)
+    said = [r.getMessage() for r in caplog.records]
+    assert any(line.startswith("garbage collection: let go of ") for line in said), said
+    assert any(line.startswith("memory handed back after the session: ") for line in said), said
+    assert garbage.frozen and gc.get_freeze_count() > 0
+    await idle.run_due()
+    assert len([r for r in caplog.records if r.getMessage().startswith("memory handed back")]) == 1
     idle.store.close()

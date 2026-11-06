@@ -22,6 +22,12 @@ its database grows), and Arrow's pool, which read the day's files. Measured on m
 shaped like the recorded ones, the process grew by about 50 MB a replayed day while the Python
 objects alive stayed the same; glibc held most of it as free memory. ``malloc_trim`` (glibc only)
 and the pool's ``release_unused`` return it.
+
+``hand_back`` is that return alone, for the live engine out of the session (#623, ``garbage.py``),
+and ``allocated`` what the allocators hold then, for its line: Python's own allocator keeps the
+small objects (under 512 bytes: the engine's quotes, the rows a review reads) in 1 MB arenas
+it returns only when a whole one is free, which neither ``malloc_trim`` nor anything else here
+changes; glibc and Arrow hold the rest.
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 PROC = Path("/proc/self")
 PROCS = Path("/proc")  # every process's folder, and the server's ``meminfo``
@@ -181,9 +187,14 @@ def server_mb(proc: Path = PROCS) -> tuple[float | None, float | None]:
 
 def give_back() -> None:
     """Free what a replayed day left (its engine's reference cycles) and hand the memory freed
-    back to the system: Arrow's pool's, then glibc's (``malloc_trim``; another C library has none,
-    and nothing is done there)."""
+    back to the system (``hand_back``)."""
     gc.collect()
+    hand_back()
+
+
+def hand_back() -> None:
+    """Hand the memory already freed back to the system: Arrow's pool's, then glibc's
+    (``malloc_trim``; another C library has none, and nothing is done there)."""
     try:
         import pyarrow
 
@@ -193,6 +204,74 @@ def give_back() -> None:
     trim = _malloc_trim()
     if trim is not None:
         trim(0)
+
+
+def swapped_mb(pid: int | None = None, proc: Path = PROCS) -> float | None:
+    """Process ``pid``'s memory in swap now (``VmSwap``), this process's if None: what its resident
+    memory no longer counts. None where it cannot be read."""
+    kb = _kb(proc / ("self" if pid is None else str(pid)) / "status", "VmSwap")
+    return None if kb is None else round(kb / 1024, 1)
+
+
+class Allocated(NamedTuple):
+    """What the process's allocators hold (``allocated``): a figure that cannot be read is None."""
+
+    python_blocks: int  # the blocks Python's own allocator has handed out (its small objects)
+    malloc_mb: float | None  # glibc's: in use, in every arena and mapped apart
+    malloc_free_mb: float | None  # glibc's: freed and kept for later (what ``malloc_trim`` returns)
+    arrow_mb: float | None  # Arrow's default pool: in use
+
+
+def allocated() -> Allocated:
+    """What Python's allocator, glibc's ``malloc`` (``mallinfo2``, glibc 2.33 and later) and
+    Arrow's pool hold now."""
+    arrow = None
+    try:
+        import pyarrow
+
+        arrow = round(pyarrow.total_allocated_bytes() / _MB, 1)
+    except (ImportError, AttributeError, OSError):
+        pass
+    used = free = None
+    info = _mallinfo()
+    if info is not None:
+        held = info()
+        used, free = round((held.uordblks + held.hblkhd) / _MB, 1), round(held.fordblks / _MB, 1)
+    return Allocated(sys.getallocatedblocks(), used, free, arrow)
+
+
+class _Mallinfo(ctypes.Structure):
+    """glibc's ``struct mallinfo2``."""
+
+    _fields_ = [  # noqa: RUF012  # ctypes reads the class attribute
+        (name, ctypes.c_size_t)
+        for name in (
+            "arena",
+            "ordblks",
+            "smblks",
+            "hblks",
+            "hblkhd",
+            "usmblks",
+            "fsmblks",
+            "uordblks",
+            "fordblks",
+            "keepcost",
+        )
+    ]
+
+
+@functools.cache
+def _mallinfo() -> Any:
+    """glibc's ``mallinfo2``; None elsewhere (macOS, musl, Windows, a glibc before 2.33)."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        info = ctypes.CDLL(None).mallinfo2
+    except (OSError, AttributeError):
+        return None
+    info.argtypes = []
+    info.restype = _Mallinfo
+    return info
 
 
 @functools.cache

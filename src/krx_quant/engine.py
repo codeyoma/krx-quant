@@ -78,7 +78,11 @@ that loop also reads KIS and streams the best quotes to the trader. A bar close 
 a second without a turn logs one WARNING with how long, which of its steps ran then and how much
 garbage collection (#621). Live, each bar close also ends with a garbage collection that freezes
 what is alive, so that Python's full collections no longer walk the session's quote logs
-(``garbage``, ``garbage.py``); the engine lets the frozen go once it is idle.
+(``garbage``, ``garbage.py``). Once its next work is over ``IDLE`` away after a bar close (the
+session's last answers), and after each daily review, the live engine rests (#623,
+``Garbage.rest``): the Market View lets go of what the session kept and the next one does not read
+(``session_memory.let_go``), the frozen are released, the memory freed goes back to the system, and
+one INFO line says what went and what the process holds.
 
 The prediction window is continuous trading, from the first bar close after the open
 until the last bar close whose target (t + 4 minutes) is still in continuous trading:
@@ -142,6 +146,7 @@ from datetime import date, datetime, time, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from krx_quant import session_memory
 from krx_quant.algorithms import (
     ALGORITHMS,
     KIND_ALGORITHMS,
@@ -1036,6 +1041,7 @@ class PredictionEngine:
     async def run_due(self) -> None:
         """Score, predict and review everything due by now, in time order."""
         now = self.clock.now()
+        reviewed = False
         while (due := self.next_due()) is not None and due <= now:
             self._watch = LoopWatch() if self._watch_loop else None
             predicted = False
@@ -1048,6 +1054,7 @@ class PredictionEngine:
                 if due == self._next_review(self._reviewed_through):
                     self._reviewed_through = due
                     await self._review(due)
+                    reviewed = True
                 if self._daily is not None and due == self._daily.next_due():
                     await self._daily.run(due)
                 if predicted and self.garbage is not None:
@@ -1055,10 +1062,20 @@ class PredictionEngine:
                         self.garbage.settle()
             finally:
                 self._tell_held(due, predicted)
-        if self.garbage is not None:  # out of the session, the frozen let go (#621)
+        if self.garbage is not None:  # out of the session, its memory handed back (#621, #623)
             ahead = self.next_due()
-            if ahead is None or ahead - self.clock.now() > IDLE:
-                self.garbage.release()
+            if reviewed or ahead is None or ahead - self.clock.now() > IDLE:
+                self.garbage.rest(self._let_go, partial(session_memory.held, self._market), reviewed=reviewed)
+
+    def _let_go(self) -> Mapping[str, int]:
+        """Drop from the Market View what the next session's bar closes do not read (#623,
+        ``session_memory.let_go``), and say how many of each went: nothing while that session opens
+        within ``IDLE`` (the pre-market's events are few), or none is in sight."""
+        ahead = next_bar_close(self.calendar, self._last_tick)
+        session = None if ahead is None else self.calendar.session(ahead.astimezone(KST).date())
+        if session is None or session.open - self.clock.now() <= IDLE:
+            return {}
+        return session_memory.let_go(self._market, session.open, {k.horizon for k in self.kinds})
 
     def _step(self, name: str) -> contextlib.AbstractContextManager[None]:
         """Time a synchronous step of the bar close on the event loop, when it is watched (#538)."""
