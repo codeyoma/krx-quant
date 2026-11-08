@@ -314,7 +314,7 @@ SESSION_MEMORY = Job(
 # frames the collector recorded raw of 0193L0's ``H0STASP0`` on the first trading night after the
 # deploy that brought it (2026-11-06: 37,469 records, all of the example's 63 fields, the burden within
 # #606's bounds), posted on #606 and left ``JOBS`` (#505) in the PR that makes events of them and
-# replays the down calls on them (#PRNUM, ``scheduled.research``'s ``INVERSE_REPLAY``). ``krx-quant
+# replays the down calls on them (#634, ``scheduled.research``'s ``INVERSE_REPLAY``). ``krx-quant
 # probe-inverse-book`` stays for a run by hand.
 
 

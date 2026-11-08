@@ -43,7 +43,7 @@
 
 인버스 ETF의 KRX 호가(`H0STASP0`, 키 `0193L0`, #606)는 raw와 함께 1호가 이벤트로도 남는다(아래 "events: 인버스 ETF 호가").
 
-> **바뀜** (2026-11-09, #PRNUM): raw에만 있고 events는 없었다(프레임의 배치를 서버에서 확인하기 전) → 1호가 이벤트도 남긴다. 이유: 2026-11-06 밤 `probe-inverse-book-606`이 배치를 확인했다([kis-feeds.md](kis-feeds.md#인버스-etf-호가-606)).
+> **바뀜** (2026-11-09, #634): raw에만 있고 events는 없었다(프레임의 배치를 서버에서 확인하기 전) → 1호가 이벤트도 남긴다. 이유: 2026-11-06 밤 `probe-inverse-book-606`이 배치를 확인했다([kis-feeds.md](kis-feeds.md#인버스-etf-호가-606)).
 
 ## events: 체결 (`H0UNCNT0` 통합, `H0STCNT0` KRX, `H0NXCNT0` NXT)
 
