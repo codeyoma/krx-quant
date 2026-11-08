@@ -32,9 +32,10 @@ from 2026-11-02 to 11-06, 42 were over within thirty seconds (the median 5 s); a
 nobody, since the entries are stopped whatever is sent and come back by themselves.
 
 **A market halt** (#625): a stall while the engine knows of a market-wide halt that the stall's
-silence began in (``on_special``: its window from the halted trade to a minute after the reopening)
-is the halt, which the engine sends one notice of: kept and logged as any stall, sent to Telegram
-neither when it lasts thirty seconds nor when the quotes return.
+silence began in, or at most ``HALT_LEAD`` (five seconds) before (``on_special``: its window from the
+halted trade to a minute after the reopening), is the halt, which the engine sends one notice of:
+kept and logged as any stall, sent to Telegram neither when it lasts thirty seconds nor when the
+quotes return. One whose silence began earlier is a stall of its own and is sent as any.
 
 A stall the trader stopped during is taken up again when it starts on the same day in the same
 mode: one already sent is not sent again (the next quote ends it, with its notice); one not sent
@@ -51,7 +52,7 @@ from datetime import date, datetime, timedelta
 
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import Session
-from krx_quant.special import Window, in_halt
+from krx_quant.special import Kind, Window
 from krx_quant.trader import MOCK
 from krx_quant.trader.limits import Notify
 from krx_quant.trader.quotes import BestQuote
@@ -64,6 +65,10 @@ STALL_AFTER = timedelta(seconds=5)
 # A stall whose silence is this long is sent to Telegram (#624): counted like ``STALL_AFTER``, from
 # the last quote.
 ALERT_AFTER = timedelta(seconds=30)
+# A stall whose silence began at most this long before a market halt's start is the halt's (#625): the
+# stall's own five seconds. On 2026-11-06 the last quote came 0.8 s after the first halted trade; a
+# book can come last a moment before it.
+HALT_LEAD = STALL_AFTER
 
 
 def _hms(at: datetime) -> str:
@@ -122,6 +127,13 @@ class QuoteWatch:
         """The special windows the engine knows now: a market halt's explains a stall (#625)."""
         self._windows = list(windows)
 
+    def _in_halt(self) -> bool:
+        """Whether the stall that lasts is a market halt's (#625): its silence began in a halt the engine
+        knows now, or at most ``HALT_LEAD`` before its start (the last quotes come just before the
+        halted trade that confirms it)."""
+        since = self._silent_since
+        return any(w.kind is Kind.MARKET_HALT and w.start - HALT_LEAD <= since < w.end for w in self._windows)
+
     @property
     def stalled(self) -> bool:
         return self.stall is not None
@@ -159,7 +171,7 @@ class QuoteWatch:
         stall = self.stall
         if stall is None or self._alerted or now - self._silent_since < self.alert_after:
             return
-        if in_halt(self._windows, self._silent_since) is not None:
+        if self._in_halt():
             if not self._halted:
                 self._halted = True
                 log.warning("trader: the quotes stalled in a market halt: the engine tells it (#625)")

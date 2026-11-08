@@ -39,7 +39,7 @@ from tests.test_calendar_health import health_checks
 from tests.test_market_halt import halt_morning, market
 from tests.test_resilience import with_telegram
 from tests.test_trader_replay import as_paper, models, of_paper, record_gap, replayed
-from tests.test_trader_stall import BOUGHT, TEN, flowing, paper_day, stalls
+from tests.test_trader_stall import BACK_SAID, BOUGHT, STALL_SAID, TEN, flowing, paper_day, said, stalls
 from tests.trader_doubles import (
     BARRIER,
     FEE,
@@ -335,3 +335,41 @@ def test_no_time_exit_by_the_clock_in_a_halt(tmp_path: Path) -> None:
     assert paper == replay_
     [(_, _, _, _, exit_at, exit_price, reason, _)] = paper
     assert (exit_at, exit_price, reason) == (tat("10:04:00"), 70_000, TIME)
+
+
+def test_a_stall_whose_silence_began_just_before_the_halt_is_the_halts(tmp_path: Path) -> None:
+    """The last quote at 10:00:29, the halt known from 10:00:30: the silence began a second before the
+    halt (within ``stall.HALT_LEAD``), so it is the halt's: nothing sent."""
+    day = paper_day(tmp_path)
+
+    day.run(
+        [
+            *flowing("10:00:00", "10:00:29"),
+            halted_from("10:00:30", "10:05:00"),
+            Tick("10:00:34.5"),
+            Tick("10:01:00"),
+            Tick("10:03:00"),
+            quote("10:05:00", 70_000, 70_100),
+        ]
+    )
+
+    assert day.notices == []
+
+
+def test_a_stall_begun_well_before_the_halt_is_sent_as_its_own(tmp_path: Path) -> None:
+    """The last quote at 10:00:20, the halt known from 10:00:30: the quotes had stopped ten seconds
+    before it (more than ``stall.HALT_LEAD``): a stall of its own, sent at 30 s and on the quotes' return."""
+    day = paper_day(tmp_path)
+
+    day.run(
+        [
+            *flowing("10:00:00", "10:00:20"),
+            Tick("10:00:25.5"),
+            halted_from("10:00:30", "10:05:00"),
+            Tick("10:00:50"),
+            Tick("10:03:00"),
+            quote("10:05:00", 70_000, 70_100),
+        ]
+    )
+
+    assert said(day.notices) == [STALL_SAID, BACK_SAID]
