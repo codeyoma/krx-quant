@@ -313,6 +313,15 @@ def _daily_check_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _inverse_replay(day: date | None) -> int:
+    """The down calls replayed through the inverse ETF's recorded quotes (#606): counts, ticks and won."""
+    from krx_quant.inverse_replay import inverse_replay
+
+    report, code = inverse_replay(Settings.from_env(require_kis=False), datetime.now(KST), day)
+    print(report)
+    return code
+
+
 def add(sub: Commands) -> None:
     """The research's commands, each with its handler (``cli._parser``)."""
     smt_cmd = sub.add_parser(
@@ -413,3 +422,15 @@ def add(sub: Commands) -> None:
         help="the latest N trading days with one-minute bars (default: all)",
     )
     structure_cmd.set_defaults(run=lambda args: _structure_check(args.days))
+    inverse_cmd = sub.add_parser(
+        "inverse-replay",
+        help="replay the explicit down calls through the inverse ETF's recorded KRX quotes (#606): one"
+        " share at the first ask after the call, sold at the bid on the stock's barrier or expiry; net"
+        " won after the commissions; reads only, places no order, no price",
+    )
+    inverse_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the last day replayed, YYYY-MM-DD (default: the latest trading day whose session is over)",
+    )
+    inverse_cmd.set_defaults(run=lambda args: _inverse_replay(args.day))

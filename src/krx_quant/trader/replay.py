@@ -242,8 +242,11 @@ def newer(quotes: Quotes) -> Quotes:
     return Quotes(times[keep], quotes.bids[keep], quotes.asks[keep])
 
 
-def day_gaps(data_dir: Path, day: date, feeds: frozenset[str]) -> tuple[tuple[int, int | None], ...]:
-    """The recorded gaps of 005930's ``feeds`` overlapping ``day`` (microseconds). A gap is kept
+def day_gaps(
+    data_dir: Path, day: date, feeds: frozenset[str], key: str = SYMBOL
+) -> tuple[tuple[int, int | None], ...]:
+    """The recorded gaps of ``feeds`` of ``key`` (005930's, or another key's: the inverse ETF's book,
+    #606) overlapping ``day`` (microseconds). A gap is kept
     under the day it started on (``health.FeedHealth``), so the ``GAP_LOOKBACK`` days before are read
     too: an outage that began the evening before may run into the session. A gap without an end was
     still open when its collector stopped; it ended, at the latest, at that feed's first row received
@@ -254,19 +257,19 @@ def day_gaps(data_dir: Path, day: date, feeds: frozenset[str]) -> tuple[tuple[in
     found: list[tuple[int, int | None]] = []
     for back in range(GAP_LOOKBACK + 1):
         for gap in read_gaps(data_dir, day - timedelta(days=back), unread):
-            if gap.feed not in feeds or gap.key != SYMBOL:
+            if gap.feed not in feeds or gap.key != key:
                 continue
             began = micros(gap.start)
-            ended = _back_at(data_dir, day, gap.feed, began) if gap.end is None else micros(gap.end)
+            ended = _back_at(data_dir, day, gap.feed, key, began) if gap.end is None else micros(gap.end)
             if began < end and (ended is None or ended > start):
                 found.append((began, ended))
     return tuple(sorted(found, key=lambda g: g[0]))
 
 
-def _back_at(data_dir: Path, day: date, feed: str, after: int) -> int | None:
-    """The first receipt time on ``day`` of ``feed``'s rows of 005930 after ``after``; None without
+def _back_at(data_dir: Path, day: date, feed: str, key: str, after: int) -> int | None:
+    """The first receipt time on ``day`` of ``feed``'s rows of ``key`` after ``after``; None without
     one."""
-    partition = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}" / f"symbol={SYMBOL}"
+    partition = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}" / f"symbol={key}"
     table = read_partition(partition, ("received_at",))
     if table is None or table.num_rows == 0:
         return None

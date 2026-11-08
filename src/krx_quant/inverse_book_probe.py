@@ -20,7 +20,7 @@ For a trading day it prints:
 4. the time field: its form, the values that are not a time of day, the record's time against its
    receipt;
 5. the best quotes in the continuous session: both sides quoted, the spread in the ETF's ticks
-   (``ETF_TICK``, checked here), levels out of order, how often the best quote changed, the longest
+   (``products.etf_tick``, checked here), levels out of order, how often the best quote changed, the longest
    silence, and how much of the session, and how many bar closes, had no record within the last 5
    seconds (``FRESH_SECONDS``: the replay leaves such quotes out);
 6. the gaps the collector recorded for it;
@@ -65,9 +65,10 @@ from krx_quant.feeds.base import EVENT_TIME, KST, RECEIVED_AT, kst
 from krx_quant.feeds.stock import KRX_BOOK_OLD_WIDTH
 from krx_quant.footprint import PEAK_STEP, Meter, give_back
 from krx_quant.health import Unread, read_gaps
+from krx_quant.inverse_replay import probed_day
 from krx_quant.market_calendar import MarketCalendar, Phase, Session, calendar_store
 from krx_quant.object_store import open_store
-from krx_quant.products import INVERSE_PRODUCTS
+from krx_quant.products import ETF_TICK_FROM, INVERSE_PRODUCTS, etf_tick
 from krx_quant.raw_days import RawDays
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.trader import SYMBOL as TRADED
@@ -90,25 +91,6 @@ FRESH_SECONDS = 5.0
 # #606's bounds on what recording the book may cost the engine: resident memory and one core's CPU.
 RSS_BOUND_MB = 32.0
 CPU_BOUND = 0.05
-# The tick an ETF's price moves by, as this probe takes it (KRX: 1 won below 2,000 won, 5 won from
-# 2,000 won; the stock table, ``pricing.tick_size``, does not cover ETFs). Checked here: section 5
-# counts the best quotes that are not a whole number of these ticks.
-ETF_TICK_FROM = 2_000
-
-
-def etf_tick(price: int) -> int:
-    return 5 if price >= ETF_TICK_FROM else 1
-
-
-def probed_day(calendar: MarketCalendar, now: datetime) -> date:
-    """The trading day a run at ``now`` reads: today's once its session is over, else the trading
-    day before; a run after midnight (the scheduled jobs run until 05:30) reads the evening's."""
-    local = now.astimezone(KST)
-    day = (local - timedelta(hours=6)).date()
-    session = calendar.session(day)
-    if session is not None and local >= session.close:
-        return day
-    return calendar.previous_trading_day(day)
 
 
 @dataclass(frozen=True)
@@ -555,8 +537,8 @@ def gap_lines(data_dir: Path, day: date) -> list[str]:
 
 # The burden.
 
-# What a best-quote event of the book could hold (#606): the columns are decided once this probe's
-# result is in; here they stand in for the cost of making and recording one per record.
+# A best-quote event of the book (#606), as the probe of 2026-11-06 measured its cost: the columns the
+# collector's events have since (``feeds.KRX_BOOK``), made here as they were then.
 _EVENT_SCHEMA = pa.schema(
     [
         ("symbol", pa.string()),

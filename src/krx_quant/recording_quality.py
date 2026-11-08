@@ -25,7 +25,11 @@ the day's files and the engine's own status, in five sections:
    trade, extra the other way, and where both traded its volume or close may differ; each is
    counted, and those outside every gap of the trade feed's symbol apart: those are losses nothing
    recorded. A row that repeats an earlier one's exchange time, price, quantity and cumulative
-   volume (an increasing count, so two trades never share it) may be one trade recorded twice.
+   volume (an increasing count, so two trades never share it) may be one trade recorded twice. The
+   minutes that differ outside the gaps are counted by the causes they show (``CAUSES``, #631): a
+   minute's edge, an auction, a trade of another hour or session code, trades KIS's cumulative
+   volume counts that never came, the order within a second; with the day's cumulative-volume chain
+   (the trades in its order, each adding its own quantity, and where it does not).
 3. **Frames** (``raw``, the day's): those the collector could not parse (``_unparsed``), and the
    data frames of a known WebSocket feed whose fields are fewer than their records need (kept raw
    only, ``kis.ShortFrame``, #381) or more, counted by feed with arrow's string kernels (the header's
@@ -50,17 +54,21 @@ than 30 days (#607), is read back from the Object Store (``raw_days.RawDays``): 
 (``--day``) downloads its frames, and fails if they cannot be read back.
 
 **Memory and time.** A day's files are read a batch at a time (arrow's batches of a file), a
-symbol's trades at a time for the bars, and a night's frames for their counts alone; what stays is
-counts and a day's bars of one symbol. The run's peak resident memory and its seconds are the last
-section, and a peak over ``MEMORY_MB`` calls an agent. The job's time limit is its bound
-(``scheduled.probes``).
+symbol's trades at a time for the bars, held as arrow columns and numpy arrays (#631), and a night's
+frames for their counts alone; what stays is counts and a day's bars of one symbol. The run's peak
+resident memory, each section's and its seconds are the last section. Its peak is checked after each
+batch read (``Budget``): once over ``MEMORY_MB`` the run stops in that section, leaves the rest
+unread and says so, a reason that calls an agent, so that the job does not push the engine into swap.
+The job's time limit is its bound (``scheduled.probes``).
 """
 
 from __future__ import annotations
 
+import functools
 import statistics
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -68,6 +76,7 @@ from time import monotonic
 from typing import Any
 
 import aiohttp
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -79,7 +88,7 @@ from krx_quant.contracts import NIGHT_OPEN
 from krx_quant.doctor import Status, api_candidates, fetch_status
 from krx_quant.feeds import KRX_TRADE, NIGHT_FUTURES, RAW_SCHEMA, TRADE, WS_FEEDS, Feed
 from krx_quant.feeds.base import KST
-from krx_quant.footprint import Meter, give_back
+from krx_quant.footprint import PEAK_START, Meter, give_back
 from krx_quant.gaps_probe import UNPARSED, Group, group_line, groups_of
 from krx_quant.health import Gap, GapKind, Unread, read_batches, read_gaps
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
@@ -130,8 +139,14 @@ POLL_FAILURES = 10
 # night differs from the next is not measured yet, so a quarter. Records not normalized: any (the
 # probed night, 2026-10-19, had none of 796,849, #264).
 NIGHT_SHARE = 0.25
-# The run's peak resident memory. The server has 2 GB and the jobs run one at a time beside the
-# collector; the CLI's imports alone hold about 125 MB (#470).
+# The run's peak resident memory: over it, the run stops where it is (``Budget``, #631). The server has
+# 2 GB and the jobs run one at a time beside the collector; the CLI's imports alone hold about 125 MB
+# (#470). 2026-11-06's run peaked at 1,279 MB. On a made-up day of its size (the trades of 005930,
+# 000660 and 009150: 1.2 million, 670,000 and 255,000 rows; 3.1 million raw frames; the night's book
+# of 2 million records and two nights before of 1 million), in the server's image (Linux), the bars
+# raised the peak by 476 MB over the imports' 139 (a Python tuple a row, and a set of them for the
+# repeats), the frames by 149 and the night by 140; with the trades held as columns, the bars by 236:
+# a peak of 375 MB.
 MEMORY_MB = 500.0
 
 # Raw frames are read this many rows a batch. On a made-up day of 1.7 million frames (the book's 570,000
@@ -155,11 +170,69 @@ _RECEIVED = RAW_SCHEMA.field("received_at").name
 _MESSAGE = RAW_SCHEMA.field("message").name
 _TRADE_COLUMNS = tuple(TRADE.schema.field(c).name for c in ("event_time", "received_at", "price", "qty"))
 _CUM_VOLUME = TRADE.schema.field("cum_volume").name
+_CODES = tuple(TRADE.schema.field(c).name for c in ("hour_cls", "session_code"))
+_TRADE_OPTIONAL = (_CUM_VOLUME, *_CODES)
+# The trades as the bars read them, a file's own types cast to these (``_trades_of``).
+_TRADES = pa.schema([TRADE.schema.field(c) for c in (*_TRADE_COLUMNS, *_TRADE_OPTIONAL)])
+_BUILD_ROWS = 65_536  # the trades turned into Python objects at once, for the bar builder
 _BAR_COLUMNS = tuple(BAR_SCHEMA.field(c).name for c in ("bar_time", "venue", "close", "volume"))
 # The bars' venue -> the recorded trades they are built from (``backfill.MARKETS``).
 TRADES_OF_VENUE = {"UN": TRADE, "KRX": KRX_TRADE}
 # A data frame's header (``kis.parse_message``): ``<encrypted>|<tr_id>|<records>|``.
 _HEADER = r"^(?P<encrypted>[01])\|(?P<tr_id>[^|]*)\|(?P<records>[0-9]+)\|"
+
+
+class OverMemory(Exception):
+    """The run's peak resident memory went over its bound: it stops reading (#631)."""
+
+    def __init__(self, peak_mb: float, bound_mb: float) -> None:
+        super().__init__(f"peak {peak_mb:.0f} MB over {bound_mb:.0f} MB")
+        self.peak_mb = peak_mb
+
+
+class Budget:
+    """The run's memory (#631): each section's peak resident memory (``Meter``, reset at the section's
+    start where the system lets it be), and the bound ``check`` holds the reading to, after each batch
+    read. Without a bound (the default, as a test or another caller reads a day) it measures nothing."""
+
+    def __init__(self, bound_mb: float | None = None, meter: Meter | None = None) -> None:
+        self.bound_mb = bound_mb
+        self._meter = meter if meter is not None else Meter()
+        self.peaks: dict[str, float | None] = {}  # by section, in the order read
+
+    def check(self) -> None:
+        """Raise ``OverMemory`` once the peak is over the bound."""
+        if self.bound_mb is None:
+            return
+        peak = self._meter.peak_mb()
+        if peak is not None and peak > self.bound_mb:
+            raise OverMemory(peak, self.bound_mb)
+
+    @contextmanager
+    def section(self, name: str) -> Iterator[None]:
+        """Keep ``name``'s own peak (the process's since it started where the peak cannot be reset), and
+        hold it to the bound once the section is read, before the next section's reset forgets it: what
+        the section's last batch took after its check counts too."""
+        if self.bound_mb is None:
+            yield
+            return
+        self.peaks.setdefault("시작", self._meter.peak_mb())  # the imports and what came before
+        self._meter.reset()
+        try:
+            yield
+        finally:
+            self.peaks[name] = self._meter.peak_mb()
+        self.check()
+
+    @property
+    def since_start(self) -> bool:
+        """Whether each peak is the process's since it started, not its section's own."""
+        return self._meter.peak_since == PEAK_START
+
+    def peak_mb(self) -> float | None:
+        """The run's peak: the highest of its sections' and before them, else the process's."""
+        known = [p for p in self.peaks.values() if p is not None]
+        return max(known) if known else self._meter.peak_mb()
 
 
 @dataclass
@@ -171,6 +244,8 @@ class Found:
     reasons: list[str] = field(default_factory=list)
     sections: list[tuple[str, list[str]]] = field(default_factory=list)
     unread: Unread = field(default_factory=Unread)
+    budget: Budget = field(default_factory=Budget)
+    stopped: str | None = None  # the section the memory bound stopped the run in
 
 
 # 1. Disconnects in the session.
@@ -320,42 +395,161 @@ def kis_bars(path: Path, unread: Unread) -> dict[str, dict[datetime, KisBar]] | 
 
 
 @dataclass
+class Signs:
+    """What a recorded minute's trades show of why its bar may differ from KIS's (#631)."""
+
+    skipped: int = 0  # shares the cumulative volume rose by beyond the trades' own quantities
+    overlapped: int = 0  # shares the quantities hold beyond what the cumulative volume rose by
+    odd: int = 0  # trades whose hour or session code is not the day's in continuous trading
+    last_second: int = 0  # trades in the minute's last traded second
+
+
+@dataclass
+class Chain:
+    """The day's trades in the order of their cumulative volume: each should add its own quantity."""
+
+    rows: int = 0
+    skips: int = 0  # steps over the trade's quantity: shares counted with no trade received for them
+    overlaps: int = 0  # steps under it
+
+
+@dataclass
 class Recorded:
     """A symbol's recorded trades of a day: its bars as the engine builds them, and its rows."""
 
     bars: dict[datetime, Bar]  # by minute
     rows: int
     duplicates: int | None  # None: the files hold no cumulative volume to tell
+    signs: dict[datetime, Signs] = field(default_factory=dict)  # by minute, those with any
+    chain: Chain | None = None  # None: no cumulative volume
+    coded: bool = False  # every file holds the hour and session codes
 
 
-def recorded_bars(data_dir: Path, day: date, feed: str, symbol: str, unread: Unread) -> Recorded:
-    """``symbol``'s ``feed`` trades of ``day``, built into bars in the order they were received."""
+def _trades_of(batch: Any, unread: Unread, label: str) -> pa.Table | None:
+    """A batch's trades in ``_TRADES``' types (a column the file lacks all null), the rows with a
+    time, receipt, price and quantity; None if a column cannot be read so (counted in ``unread``)."""
+    names = batch.schema.names
+    columns = []
+    for column in _TRADES:
+        if column.name not in names:
+            columns.append(pa.nulls(batch.num_rows, column.type))
+            continue
+        values = batch.column(names.index(column.name))
+        try:
+            columns.append(pc.cast(values, column.type))
+        except (pa.ArrowInvalid, pa.ArrowNotImplementedError):
+            unread.files[f"{label} {column.name} 타입 {values.type}(읽지 않음)"] += 1
+            return None
+    table = pa.Table.from_arrays(columns, schema=_TRADES)
+    valid = [pc.is_valid(table.column(c)) for c in _TRADE_COLUMNS]
+    return table.filter(functools.reduce(pc.and_, valid))
+
+
+def recorded_bars(
+    data_dir: Path, day: date, feed: str, symbol: str, unread: Unread, budget: Budget | None = None
+) -> Recorded:
+    """``symbol``'s ``feed`` trades of ``day``, built into bars in the order they were received.
+
+    The trades stay arrow columns, not Python rows: a row a tuple of five objects, with a set of them
+    for the rows recorded twice, held 2026-11-06's 1.2 million trades of 005930 in about 480 MB (#631).
+    They go through the builder a slice at a time; ``budget`` is checked after each batch and slice."""
+    budget = budget or Budget()
     partition = data_dir / "events" / f"date={day.isoformat()}" / f"feed={feed}" / f"symbol={symbol}"
-    trades: list[tuple[datetime, datetime, int, int, int | None]] = []
-    counted = True
-    for batch in read_batches(partition, _TRADE_COLUMNS, unread, optional=(_CUM_VOLUME,)):
+    tables: list[pa.Table] = []
+    counted = coded = True
+    for batch in read_batches(partition, _TRADE_COLUMNS, unread, optional=_TRADE_OPTIONAL):
         names = batch.schema.names
-        columns = [batch.column(names.index(c)).to_pylist() for c in _TRADE_COLUMNS]
-        if _CUM_VOLUME in names:
-            cums: list[int | None] = batch.column(names.index(_CUM_VOLUME)).to_pylist()
-        else:
-            counted, cums = False, [None] * batch.num_rows
-        for at, received, price, qty, cum in zip(*columns, cums, strict=True):
-            if at is None or received is None or price is None or qty is None:
-                continue
-            trades.append((received, at, int(price), int(qty), cum))
-    trades.sort(key=lambda t: t[0])  # stable: a frame's records keep their order
+        counted = counted and _CUM_VOLUME in names
+        coded = coded and all(c in names for c in _CODES)
+        table = _trades_of(batch, unread, f"events {feed}")
+        if table is not None:
+            tables.append(table)
+        budget.check()
+    trades = pa.concat_tables(tables) if tables else _TRADES.empty_table()
+    del tables
+    # By receipt, stable as ``list.sort`` was: a frame's records keep their order. The builder's
+    # columns are taken in that order a slice at a time, not the whole table copied.
+    received = pc.sort_indices(trades.column("received_at"))
+    built = trades.select(["event_time", "price", "qty"]).combine_chunks()
     builder = BarBuilder()
-    seen: set[tuple[datetime, int, int, int]] = set()
-    duplicates = 0
-    for _, at, price, qty, cum in trades:
-        builder.trade(symbol, at, price, qty)
-        if cum is not None and cum > 0:
-            key = (at, price, qty, cum)
-            duplicates += key in seen
-            seen.add(key)
+    for start in range(0, trades.num_rows, _BUILD_ROWS):
+        piece = built.take(received.slice(start, _BUILD_ROWS))
+        times, prices, qtys = (piece.column(c).to_pylist() for c in ("event_time", "price", "qty"))
+        for at, price, qty in zip(times, prices, qtys, strict=True):
+            builder.trade(symbol, at, price, qty)
+        budget.check()
+    del received, built
     closed = builder.closed(symbol, datetime.combine(day, DAY_END, KST))
-    return Recorded({b.start: b for b in closed}, len(trades), duplicates if counted else None)
+    chain, signs, duplicates = _signs(trades, counted, coded)
+    budget.check()
+    return Recorded(
+        {b.start: b for b in closed}, trades.num_rows, duplicates, signs, chain, counted and coded
+    )
+
+
+def _signs(
+    trades: pa.Table, counted: bool, coded: bool
+) -> tuple[Chain | None, dict[datetime, Signs], int | None]:
+    """Each minute's ``Signs``, the day's ``Chain`` and the rows that repeat an earlier row's exchange
+    time, price, quantity and cumulative volume (of those with a cumulative volume over 0); the chain
+    and the repeats None without a cumulative volume. In numpy over the exchange times' seconds, not
+    a Python object a row (a hash of the four columns held about 100 MB more)."""
+    signs: dict[datetime, Signs] = {}
+    if not trades.num_rows:
+        return (Chain(), signs, 0) if counted else (None, signs, None)
+
+    def sign(minute: int) -> Signs:
+        return signs.setdefault(datetime.fromtimestamp(minute, KST), Signs())
+
+    seconds = pc.cast(trades.column("event_time"), pa.int64()).to_numpy()
+    minutes = seconds - seconds % 60
+    # The trades of each minute's last traded second.
+    traded, many = np.unique(seconds, return_counts=True)
+    ends = np.append(traded[1:] // 60 != traded[:-1] // 60, True)
+    for second, n in zip(traded[ends].tolist(), many[ends].tolist(), strict=True):
+        sign(second - second % 60).last_second = n
+    if coded:
+        odd = np.zeros(trades.num_rows, dtype=bool)
+        for code in _CODES:
+            values = trades.column(code)
+            odd |= pc.fill_null(pc.not_equal(values, _usual(values)), True).to_numpy(zero_copy_only=False)
+        at, n = np.unique(minutes[odd], return_counts=True)
+        for minute, count in zip(at.tolist(), n.tolist(), strict=True):
+            sign(minute).odd = count
+    if not counted:
+        return None, signs, None
+    cums = pc.fill_null(trades.column(_CUM_VOLUME), 0).to_numpy()
+    qtys = trades.column("qty").to_numpy()
+    prices = trades.column("price").to_numpy()
+    keyed = np.flatnonzero(cums > 0)
+    # By cumulative volume, then time, price and quantity (a repeat lies next to what it repeats),
+    # then the order read.
+    order = keyed[np.lexsort((keyed, qtys[keyed], prices[keyed], seconds[keyed], cums[keyed]))]
+    chain = Chain(rows=len(order))
+    duplicates = 0
+    if len(order) > 1:
+        cum = cums[order]
+        same = (cum[1:] == cum[:-1]) & (seconds[order[1:]] == seconds[order[:-1]])
+        same &= (prices[order[1:]] == prices[order[:-1]]) & (qtys[order[1:]] == qtys[order[:-1]])
+        duplicates = int(same.sum())
+        steps = cum[1:] - cum[:-1] - qtys[order[1:]]
+        chain.skips, chain.overlaps = int((steps > 0).sum()), int((steps < 0).sum())
+        moved = steps != 0
+        for minute, step in zip(minutes[order[1:]][moved].tolist(), steps[moved].tolist(), strict=True):
+            if step > 0:
+                sign(minute).skipped += step
+            else:
+                sign(minute).overlapped -= step
+    return chain, signs, duplicates
+
+
+def _usual(values: Any) -> pa.Scalar:
+    """The most common of a string column's values (the first seen of those as common), null if none."""
+    counts = pc.value_counts(pc.drop_null(values))
+    if not len(counts):
+        return pa.scalar(None, pa.string())
+    best = int(pc.index(counts.field("counts"), pc.max(counts.field("counts"))).as_py())
+    return counts.field("values")[best]
 
 
 @dataclass
@@ -364,7 +558,9 @@ class Compared:
 
     minutes: int = 0  # both traded
     minutes_outside: int = 0  # both traded, outside the gaps
-    differing: int = 0  # of those, the minutes whose volume or close differ
+    differing: list[datetime] = field(
+        default_factory=list
+    )  # of those, the minutes whose volume or close differ
     missing: list[bool] = field(default_factory=list)  # in a gap, for each
     extra: list[bool] = field(default_factory=list)
     short: list[bool] = field(default_factory=list)  # recorded volume under KIS's
@@ -419,7 +615,61 @@ def compare(
             out.close.append(in_gap)
             differs = True
         if differs and not in_gap:
-            out.differing += 1
+            out.differing.append(minute)
+    return out
+
+
+# Why a minute's bar may differ (#631). A differing minute outside the gaps is counted under each
+# one it shows, and under "어느 것도 아님" if it shows none; the report says the counts only.
+# - swapped: its volume is short (or over) by what a minute beside it is over (or short) by: a trade
+#   on the edge of two minutes, put in the other by one side.
+# - auction: the session's first minute (the opening auction's trade is in it), or a minute after one
+#   KIS's bars have no trade in (a halt, such as a circuit breaker's or a VI's, resumed by an auction).
+# - odd: it holds a trade whose hour code (``HOUR_CLS_CODE``) or session code (``NEW_MKOP_CLS_CODE``)
+#   is not the day's most common: a trade of another kind than continuous trading's.
+# - skipped: its volume is short by exactly what the trades' cumulative volume (``ACML_VOL``, in its
+#   order) rose by beyond their quantities in it: trades KIS counted that never came as a record.
+# - overlapped: over by exactly what the quantities hold beyond the cumulative volume's rise.
+# - last_second: the volumes agree and the closes do not, with trades in the minute's last second:
+#   the order of trades within a second.
+CAUSES = (
+    ("swapped", "분 경계(옆 분과 맞바뀜)"),
+    ("auction", "단일가(개장 분, 멈춘 뒤 연 분)"),
+    ("odd", "다른 시간·장운영 구분의 체결"),
+    ("skipped", "누적 거래량에만 있는 체결"),
+    ("overlapped", "누적 거래량보다 더 센 체결"),
+    ("last_second", "같은 초의 순서(종가만)"),
+    ("none", "어느 것도 아님"),
+)
+
+
+def causes(
+    seen: Compared, kis: Mapping[datetime, KisBar], recorded: Recorded, session: Session
+) -> Counter[str]:
+    """The differing minutes outside the gaps, counted by the causes they show (``CAUSES``)."""
+    start, end = session.open, session.closing_auction
+    traded = {m: b for m, b in kis.items() if start <= m < end and b.volume > 0}
+
+    def gap(minute: datetime) -> int | None:
+        ours, theirs = recorded.bars.get(minute), traded.get(minute)
+        return None if ours is None or theirs is None else ours.volume - theirs.volume
+
+    out: Counter[str] = Counter()
+    for minute in seen.differing:
+        ours, theirs = recorded.bars[minute], traded[minute]
+        signs = recorded.signs.get(minute, Signs())
+        diff = ours.volume - theirs.volume
+        shown = {
+            "swapped": diff != 0 and any(gap(minute + d) == -diff for d in (-BAR, BAR)),
+            "auction": minute == start or minute - BAR not in traded,
+            "odd": signs.odd > 0,
+            "skipped": diff < 0 and recorded.chain is not None and signs.skipped == -diff,
+            "overlapped": diff > 0 and recorded.chain is not None and signs.overlapped == diff,
+            "last_second": diff == 0 and signs.last_second > 1,
+        }
+        out.update(k for k, v in shown.items() if v)
+        if not any(shown.values()):
+            out["none"] += 1
     return out
 
 
@@ -429,7 +679,8 @@ def _counted(kind: list[bool]) -> str:
 
 
 def bars_section(found: Found, data_dir: Path, symbols: Sequence[str], gaps: Sequence[Gap]) -> list[str]:
-    """Section 2: each symbol's recorded bars against KIS's; their reasons to call an agent."""
+    """Section 2: each symbol's recorded bars against KIS's, the differing minutes by cause; their
+    reasons to call an agent."""
     day, session = found.day, found.session
     lines: list[str] = []
     no_bars: list[str] = []
@@ -447,10 +698,12 @@ def bars_section(found: Found, data_dir: Path, symbols: Sequence[str], gaps: Seq
             if feed is None:
                 lines.append(f"{symbol}: KIS 1분봉의 시장 '{venue}'(견줄 체결 피드를 모른다)")
                 continue
-            recorded = recorded_bars(data_dir, day, feed.tr_id, symbol, found.unread)
+            recorded = recorded_bars(data_dir, day, feed.tr_id, symbol, found.unread, found.budget)
             spans = [(g.start, g.end) for g in gaps if g.feed == feed.tr_id and g.key == symbol]
             seen = compare(by_venue[venue], recorded.bars, session, spans)
             lines.append(_bars_line(symbol, venue, feed.tr_id, recorded, seen))
+            if seen.differing:
+                lines.append(_causes_line(seen, causes(seen, by_venue[venue], recorded, session), recorded))
             _bars_reasons(found, symbol, recorded, seen)
     if no_bars:
         found.reasons.append(f"KIS 1분봉 없음: {' '.join(no_bars)}")
@@ -469,11 +722,29 @@ def _bars_line(symbol: str, venue: str, tr_id: str, recorded: Recorded, seen: Co
     )
 
 
+def _causes_line(seen: Compared, counted: Counter[str], recorded: Recorded) -> str:
+    """The differing minutes outside the gaps by cause (#631), and the day's cumulative-volume chain."""
+    chain = recorded.chain
+    known = {
+        "skipped": chain is not None,
+        "overlapped": chain is not None,
+        "odd": recorded.coded,
+    }
+    shown = " · ".join(f"{label} {counted[key] if known.get(key, True) else '모름'}" for key, label in CAUSES)
+    line = f"  다른 분 {len(seen.differing)}개의 원인 후보(한 분이 여럿에 들 수 있다): {shown}"
+    if chain is None:
+        return line + " · 누적 거래량 사슬: 모름(누적 거래량 열 없음)"
+    return (
+        line + f" · 누적 거래량 사슬(누적 거래량 순으로 늘어놓은 체결 {chain.rows:,}행): 체결량보다 더 뛴 곳"
+        f" {chain.skips:,} · 덜 늘어난 곳 {chain.overlaps:,}"
+    )
+
+
 def _bars_reasons(found: Found, symbol: str, recorded: Recorded, seen: Compared) -> None:
     missing = seen.outside(seen.missing)
     if missing >= MISSING_MINUTES:
         found.reasons.append(f"{symbol} 결측 구간 밖의 빠진 분 {missing}개(기준 {MISSING_MINUTES}개 이상)")
-    compared, differing = seen.minutes_outside, seen.differing
+    compared, differing = seen.minutes_outside, len(seen.differing)
     if compared and differing / compared > DIFFERING:
         found.reasons.append(
             f"{symbol} 결측 구간 밖에서 거래량이나 종가가 다른 분 {differing}/{compared}"
@@ -545,9 +816,12 @@ def _true(mask: Any) -> int:
     return int(pc.sum(pc.cast(mask, pa.int64())).as_py() or 0)
 
 
-def frames_of_day(raw: RawDays, day: date, unread: Unread) -> tuple[dict[str, FeedFrames], int, Any]:
+def frames_of_day(
+    raw: RawDays, day: date, unread: Unread, budget: Budget | None = None
+) -> tuple[dict[str, FeedFrames], int, Any]:
     """The day's WebSocket frames by feed (``WS_FEEDS``' partitions of ``raw``), and the frames the
     collector could not parse (``_unparsed``): how many and the first's receipt."""
+    budget = budget or Budget()
     by_feed: dict[str, FeedFrames] = {}
     unparsed, first_unparsed = 0, None
     for tr_id in raw.feeds(day):
@@ -557,6 +831,7 @@ def frames_of_day(raw: RawDays, day: date, unread: Unread) -> tuple[dict[str, Fe
         for partition in sorted(raw.feed(day, tr_id).glob("symbol=*")):
             key = partition.name.removeprefix("symbol=")
             for batch in read_batches(partition, (_RECEIVED, _MESSAGE), unread, batch_rows=RAW_BATCH_ROWS):
+                budget.check()
                 received = _timestamps(batch, _RECEIVED, unread, f"raw {tr_id}")
                 if received is None:
                     continue
@@ -588,7 +863,7 @@ def frames_of_day(raw: RawDays, day: date, unread: Unread) -> tuple[dict[str, Fe
 
 def frames_section(found: Found, raw: RawDays) -> list[str]:
     """Section 3: the day's frames by shape; their reasons to call an agent."""
-    by_feed, unparsed, first_unparsed = frames_of_day(raw, found.day, found.unread)
+    by_feed, unparsed, first_unparsed = frames_of_day(raw, found.day, found.unread, found.budget)
     day = found.day
     total = sum(f.frames for f in by_feed.values())
     lines = [f"읽은 데이터 프레임 {total:,}개(피드 {len(by_feed)}개)"]
@@ -727,16 +1002,24 @@ class Night:
 
 
 def read_night(
-    data_dir: Path, raw: RawDays, evening_of: date, feed: Feed, unread: Unread, events: bool
+    data_dir: Path,
+    raw: RawDays,
+    evening_of: date,
+    feed: Feed,
+    unread: Unread,
+    events: bool,
+    budget: Budget | None = None,
 ) -> Night:
     """The frames and records of ``feed`` received in the night after ``evening_of`` (both days'
     partitions, ``night_probe.night_window``), and, if asked, its events."""
+    budget = budget or Budget()
     tr_id = feed.tr_id
     start, end = night_window(evening_of)
     seen = Night()
     for partition_day in (evening_of, evening_of + timedelta(days=1)):
         for partition in sorted(raw.feed(partition_day, tr_id).glob("symbol=*")):
             for batch in read_batches(partition, (_RECEIVED, _MESSAGE), unread, batch_rows=RAW_BATCH_ROWS):
+                budget.check()
                 received = _timestamps(batch, _RECEIVED, unread, f"raw {tr_id}")
                 messages = _strings(batch, _MESSAGE, unread, f"raw {tr_id}")
                 if received is None or messages is None:
@@ -750,6 +1033,7 @@ def read_night(
         root = data_dir / "events" / f"date={partition_day.isoformat()}" / f"feed={tr_id}"
         for partition in sorted(root.glob("symbol=*")):
             for batch in read_batches(partition, (_RECEIVED,), unread):
+                budget.check()
                 received = _timestamps(batch, _RECEIVED, unread, f"events {tr_id}")
                 if received is not None:
                     seen.events += _true(_between(received, start, end))
@@ -787,12 +1071,15 @@ def night_section(
     ]
     before = subscribed_nights(raw, calendar, last)
     earlier = {
-        d: {f.tr_id: read_night(data_dir, raw, d, f, unread, events=False) for f in NIGHT_FEEDS}
+        d: {
+            f.tr_id: read_night(data_dir, raw, d, f, unread, events=False, budget=found.budget)
+            for f in NIGHT_FEEDS
+        }
         for d in before
     }
     for feed in NIGHT_FEEDS:
         name = "체결" if feed is NIGHT_FUTURES else "호가"
-        seen = read_night(data_dir, raw, last, feed, unread, events=True)
+        seen = read_night(data_dir, raw, last, feed, unread, events=True, budget=found.budget)
         lost = seen.records - seen.events
         counts = [earlier[d][feed.tr_id].records for d in before if earlier[d][feed.tr_id].records]
         median = statistics.median(counts) if counts else None
@@ -856,37 +1143,73 @@ def measure(
     symbols: Sequence[str],
     polls: Polls,
     raw: RawDays | None = None,
+    budget: Budget | None = None,
 ) -> Found | None:
     """Every section of ``day``'s report, with its reasons; None if ``day`` does not trade. ``raw``
-    reads the raw days (by default the data directory's, a pruned one failing)."""
+    reads the raw days (by default the data directory's, a pruned one failing). With a bound,
+    ``budget`` keeps each section's peak, and a peak over the bound stops the run in the section it
+    reaches it in: the sections before it stay, and a reason says where it stopped (#631)."""
     session = calendar.session(day)
     if session is None:
         return None
     raw = RawDays(data_dir) if raw is None else raw
-    found = Found(day, session)
+    found = Found(day, session, budget=budget or Budget())
     gaps = read_gaps(data_dir, day, found.unread)
     span = f"{session.open:%H:%M}–{session.close:%H:%M}"
-    found.sections.append((f"1. 장중 끊김 (gaps, {span})", disconnects_section(found, gaps)))
     continuous = f"{session.open:%H:%M}–{(session.closing_auction - BAR):%H:%M}"
-    found.sections.append(
+    steps: tuple[tuple[str, Callable[[], tuple[str, list[str]]]], ...] = (
+        ("1", lambda: (f"1. 장중 끊김 (gaps, {span})", disconnects_section(found, gaps))),
         (
-            f"2. 녹화한 1분봉과 KIS 1분봉 (연속매매 {continuous} 봉, 봉 시각은 그 분의 시작)",
-            bars_section(found, data_dir, symbols, gaps),
-        )
+            "2",
+            lambda: (
+                f"2. 녹화한 1분봉과 KIS 1분봉 (연속매매 {continuous} 봉, 봉 시각은 그 분의 시작)",
+                bars_section(found, data_dir, symbols, gaps),
+            ),
+        ),
+        ("3", lambda: ("3. 프레임 (raw, 그날 받은 것)", frames_section(found, raw))),
+        ("4", lambda: ("4. REST 조회 실패 (/v1/status의 kis.polls)", polls_section(found, polls))),
+        ("5", lambda: night_section(found, data_dir, raw, calendar)),
     )
-    give_back()  # a section's memory freed goes back to the system before the next one reads
-    found.sections.append(("3. 프레임 (raw, 그날 받은 것)", frames_section(found, raw)))
-    give_back()
-    found.sections.append(("4. REST 조회 실패 (/v1/status의 kis.polls)", polls_section(found, polls)))
-    found.sections.append(night_section(found, data_dir, raw, calendar))
+    for number, step in steps:
+        done = len(found.sections)
+        try:
+            with found.budget.section(number):
+                found.sections.append(step())
+        except OverMemory as over:
+            read = len(found.sections) > done  # over only once the section was read
+            if read and number == steps[-1][0]:
+                break  # nothing is left unread: the run's own section says the peak (``ran``)
+            found.stopped = number
+            bound = f"기준 {found.budget.bound_mb:.0f} MB"
+            where = f"{number}절을 {'읽은 뒤' if read else '읽다가'} 최대 RSS {over.peak_mb:.0f} MB"
+            unread = "그 뒤 절은" if read else "이 절과 그 뒤 절은"
+            found.sections.append(
+                (
+                    f"{int(number) + 1 if read else number}. 메모리 기준 넘음",
+                    [f"{where}({bound}): {unread} 읽지 않았다"],
+                )
+            )
+            found.reasons.append(f"메모리 기준 넘음: {where}({bound} 넘게), 그 뒤는 읽지 않았다")
+            break
+        give_back()  # a section's memory freed goes back to the system before the next one reads
     return found
 
 
 def ran(found: Found, seconds: float, peak_mb: float | None) -> None:
-    """The run's own section: its time and peak memory, and the reason if that is over its bound."""
+    """The run's own section: its time, peak memory and each section's, and the reason if the peak is
+    over its bound (once: a run the bound stopped has said so)."""
     peak = "모름" if peak_mb is None else f"{peak_mb:.0f} MB"
-    found.sections.append(("6. 실행", [f"{seconds:.1f}초 · 최대 RSS {peak}(기준 {MEMORY_MB:.0f} MB)"]))
-    if peak_mb is not None and peak_mb > MEMORY_MB:
+    lines = [f"{seconds:.1f}초 · 최대 RSS {peak}(기준 {MEMORY_MB:.0f} MB)"]
+    budget = found.budget
+    if budget.peaks:
+        each = " · ".join(
+            f"{name if name == '시작' else name + '절'} {'모름' if mb is None else f'{mb:.0f} MB'}"
+            for name, mb in budget.peaks.items()
+        )
+        whose = "프로세스가 시작한 뒤의 최대라 절마다 나뉘지 않는다" if budget.since_start else "그 절의 최대"
+        lines.append(f"절마다 최대 RSS({whose}): {each}")
+    found.sections.append(("6. 실행", lines))
+    if found.stopped is None and peak_mb is not None and peak_mb > MEMORY_MB:
         found.reasons.append(f"최대 메모리 {peak_mb:.0f} MB(기준 {MEMORY_MB:.0f} MB 넘게)")
 
 
@@ -936,9 +1259,10 @@ async def recording_quality(settings: Settings, now: datetime, day: date | None 
     async with aiohttp.ClientSession() as session:
         status = await fetch_status(session, api_candidates(settings))
     symbols = [*settings.symbols, *settings.etf_symbols]
+    budget = Budget(MEMORY_MB)
     with RawDays(settings.data_dir, open_store(settings)) as raw:
-        found = measure(settings.data_dir, calendar, day, symbols, polls_of(status, day), raw)
+        found = measure(settings.data_dir, calendar, day, symbols, polls_of(status, day), raw, budget)
     if found is None:
         return f"{TITLE}: {day}는 거래일이 아니다"
-    ran(found, monotonic() - started, Meter().peak_mb())
+    ran(found, monotonic() - started, budget.peak_mb())
     return render(found)

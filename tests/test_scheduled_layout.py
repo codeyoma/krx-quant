@@ -29,7 +29,7 @@ FIRST = (
     "night-book-verdict-605",
     "bar-close-times-589",
     "session-memory-623",
-    "probe-inverse-book-606",
+    "inverse-replay-606",
     "probe-market-halt-625",
     "signal-review-206-1201",
     "probe-live-account-408",

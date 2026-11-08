@@ -86,3 +86,12 @@ def _inverse_products() -> dict[str, Product]:
 
 # Each symbol's inverse product (#267): 005930's 0193L0 and 000660's 0197X0.
 INVERSE_PRODUCTS: Mapping[str, Product] = _inverse_products()
+
+# The tick an ETF's price moves by (KRX: 1 won below 2,000 won, 5 won from 2,000 won; the stock table,
+# ``pricing.tick_size``, does not cover ETFs). The inverse ETF's book bore it out on 2026-11-06: no
+# best quote nor spread off it in 36,716 records of continuous trading (#606, ``probe-inverse-book``).
+ETF_TICK_FROM = 2_000
+
+
+def etf_tick(price: int) -> int:
+    return 5 if price >= ETF_TICK_FROM else 1
