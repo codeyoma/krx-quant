@@ -58,8 +58,9 @@ left out by reason, the trades replayed, those that netted above 0, the net in w
 a trade with its day-level 95% interval, ``stats.day_mean``), the net in ETF ticks, the median spread
 at the entry in ETF ticks, the exits, and of the trades whose answer the engine stored (the
 direction's touch label, a barrier's answer) how many were the fall. Counts, rates, ticks and won: no
-price. On the night the recorded days first reach ``DAYS`` it adds a line for an agent
-(``AGENT_LINE``): the scheduled job labels the issue then.
+price. On the first report with ``DAYS`` recorded days or more it adds a line for an agent
+(``AGENT_LINE``), once (``TOLD_FILE`` in the state directory keeps that it did, so a night missed
+does not skip it): the scheduled job labels the issue then.
 
 **Memory**: a day's quotes are held at a time (005930's arrays and the ETF's, about 40,000 records
 on 2026-11-06) and let go before the next (``footprint.give_back``); the trades are kept, a few
@@ -68,6 +69,7 @@ numbers each. Its peak resident memory is printed.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import statistics
@@ -79,9 +81,10 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import numpy as np
+import pyarrow as pa
 
 from krx_quant import kis
-from krx_quant.archive import partition_batches, partition_files
+from krx_quant.archive import RawMissing, guarded_files, partition_batches
 from krx_quant.config import Settings
 from krx_quant.entry_delay import Quotes, day_quotes
 from krx_quant.feeds import BOOK, KRX_BOOK, RAW_SCHEMA, TRADE
@@ -169,7 +172,7 @@ def etf_quotes(data_dir: Path, raw: RawDays, day: date) -> EtfQuotes | None:
     """The ETF's quotes of ``day``: its events, else (a day recorded before they were made) its raw
     frames through the same normalization; None without either."""
     partition = data_dir / "events" / f"date={day.isoformat()}" / f"feed={KRX_BOOK.tr_id}" / f"symbol={ETF}"
-    if partition_files(partition):
+    if guarded_files(partition):
         rows: Iterable[tuple[datetime, str, int | None, int | None]] = (
             (record["received_at"], record["hour_cls"], record["bid_px_1"], record["ask_px_1"])
             for _, batch in partition_batches(partition, _COLUMNS)
@@ -237,17 +240,31 @@ class Recording:
 
 def read_day(data_dir: Path, raw: RawDays, day: date) -> Recording | None:
     """``day``'s recording; None without the ETF's quotes or 005930's (logged when a file cannot be
-    read: the day's calls are counted ``no_recording``)."""
+    read, or a pruned raw day cannot be read back: the day's calls are counted ``no_recording``)."""
     try:
         etf = etf_quotes(data_dir, raw, day)
         stock = day_quotes(data_dir, day, SYMBOL)
-    except OSError as e:
+    except (OSError, RawMissing, pa.ArrowException) as e:
         log.warning("inverse replay: cannot read the recording of %s (%s): its calls are left out", day, e)
         return None
     if etf is None or stock is None:
         return None
-    gaps = (*day_gaps(data_dir, day, STOCK_GAP_FEEDS), *day_gaps(data_dir, day, ETF_GAP_FEEDS, ETF))
+    gaps = (
+        *day_gaps(data_dir, day, STOCK_GAP_FEEDS),
+        *(_closed(gap, etf.times) for gap in day_gaps(data_dir, day, ETF_GAP_FEEDS, ETF)),
+    )
     return Recording(etf, stock, tuple(sorted(gaps, key=lambda g: g[0])))
+
+
+def _closed(gap: tuple[int, int | None], times: np.ndarray) -> tuple[int, int | None]:
+    """An ETF gap still open when its collector stopped, ended at the first of the day's records
+    received after its start (``day_gaps`` finds that in the events alone: a day read from its raw
+    frames has none); without one it covers the rest of the day."""
+    start, end = gap
+    if end is not None:
+        return gap
+    later = int(np.searchsorted(times, start, side="right"))
+    return (start, int(times[later])) if later < len(times) else gap
 
 
 # The calls.
@@ -585,13 +602,30 @@ def report(settings: Settings, calendar: MarketCalendar, through: date, raw: Raw
         f"  {clock.monotonic() - started:.1f}초 · 최대 RSS {'-' if peak is None else f'{peak:.0f} MB'}"
         f" · raw에서 다시 읽은 파티션 {raw.restored}",
     ]
-    if len(recorded) == DAYS and recorded[-1] == days[-1]:
+    if len(recorded) >= DAYS and recorded[-1] == days[-1] and not _told(settings.state_dir):
+        _tell(settings.state_dir, days[-1])
         out += [
             "",
             f"{AGENT_LINE} 기록된 날이 {DAYS}거래일이 됐다. 2절과 3절로 아래 호출을 인버스 ETF로 사도 될지"
             " 안을 이 이슈에 남기고 사용자에게 돌린다(매매, 채점, 실전 자격, 승격은 바꾸지 않는다).",
         ]
     return "\n".join(out), 0
+
+
+# Whether the review's line (``AGENT_LINE``) was printed already, and for which day: once, on the
+# first report with ``DAYS`` recorded days or more, so that a night missed does not skip it.
+TOLD_FILE = "inverse-replay.json"  # in the state directory
+
+
+def _told(state_dir: Path) -> bool:
+    return (state_dir / TOLD_FILE).is_file()
+
+
+def _tell(state_dir: Path, day: date) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / TOLD_FILE
+    path.with_suffix(".tmp").write_text(json.dumps({"agent_line": day.isoformat()}) + "\n", encoding="utf-8")
+    path.with_suffix(".tmp").replace(path)
 
 
 def probed_day(calendar: MarketCalendar, now: datetime) -> date:

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from krx_quant import cli
+from krx_quant.archive import PRUNED
 from krx_quant.config import Settings
 from krx_quant.feeds import BOOK, KRX_BOOK, RAW_SCHEMA
 from krx_quant.feeds.base import KST
@@ -247,6 +248,31 @@ def test_a_day_without_the_etf_s_quotes_leaves_its_calls_out(tmp_path: Path) -> 
     assert done.all.left_out == {NO_RECORDING: 1}
 
 
+def test_a_raw_day_pruned_and_not_read_back_leaves_its_calls_out(tmp_path: Path) -> None:
+    # The archive pruned it on the server (#607) and no Object Store is set to read it back from.
+    partition = tmp_path / "data" / "raw" / f"date={TODAY}" / f"feed={KRX_BOOK.tr_id}" / f"symbol={ETF}"
+    partition.mkdir(parents=True)
+    (partition / PRUNED).write_text("{}")
+    predictions(tmp_path, Barrier("10:00:00", FALL))
+    record_quotes(tmp_path / "data", STANDING)
+
+    done = replayed(tmp_path)
+
+    assert done.all.left_out == {NO_RECORDING: 1}
+
+
+def test_a_gap_left_open_on_a_raw_only_day_ends_at_the_etf_s_next_record(tmp_path: Path) -> None:
+    # The collector stopped with the ETF's book gone since 09:50 (no end kept); the day has its raw
+    # frames alone, the first at 09:59:00: the gap ended then, before the 10:00 call's window.
+    record_gap(tmp_path / "data", KRX_BOOK.tr_id, ETF, at("09:50:00"), None)
+    rows: list[EtfRow] = [("09:59:00", 9000, 9005, "0"), *OPEN_BOOK, ("10:03:59", 9010, 9015, "0")]
+
+    done = one_day(tmp_path, [], rows, raw=True)
+
+    assert done.all.left_out == {}
+    assert len(done.all.trades) == 1
+
+
 def test_a_day_recorded_raw_only_is_read_from_its_frames(tmp_path: Path) -> None:
     rows: list[EtfRow] = [*OPEN_BOOK, ("10:00:58", 9040, 9045, "0")]
     done = one_day(tmp_path, [quote("10:01:00", 69_800, 69_850)], rows, raw=True)
@@ -322,21 +348,41 @@ def test_the_report_shows_counts_ticks_and_won_and_no_price(tmp_path: Path) -> N
     assert AGENT_LINE not in out
 
 
-def test_the_night_the_recorded_days_first_reach_twenty_calls_an_agent(tmp_path: Path) -> None:
-    predictions(tmp_path)
-    days = [d for d in (TODAY - timedelta(days=n) for n in range(40)) if CALENDAR.session(d) is not None]
-    for day in days[:DAYS]:
+def recorded(tmp_path: Path, days: Sequence[date]) -> None:
+    for day in days:
         (tmp_path / "data" / "events" / f"date={day}" / f"feed={KRX_BOOK.tr_id}" / f"symbol={ETF}").mkdir(
             parents=True
         )
+
+
+# The trading days up to the test day, latest first.
+TRADING = [d for d in (TODAY - timedelta(days=n) for n in range(40)) if CALENDAR.session(d) is not None]
+
+
+def test_the_first_report_with_twenty_recorded_days_calls_an_agent_once(tmp_path: Path) -> None:
+    predictions(tmp_path)
+    recorded(tmp_path, TRADING[:DAYS])
     with RawDays(tmp_path / "data") as raw:
+        before, _ = report(settings(tmp_path), CALENDAR, TRADING[1], raw)
         out, code = report(settings(tmp_path), CALENDAR, TODAY, raw)
-        before, _ = report(settings(tmp_path), CALENDAR, days[1], raw)
+        again, _ = report(settings(tmp_path), CALENDAR, TODAY, raw)
 
     assert code == 0
     assert f"{DAYS}거래일(기록된 날 모두 {DAYS}일)" in out
+    assert AGENT_LINE not in before, "19 days"
     assert AGENT_LINE in out
-    assert AGENT_LINE not in before
+    assert AGENT_LINE not in again, "told once"
+
+
+def test_a_night_missed_at_twenty_days_calls_an_agent_on_the_next_report(tmp_path: Path) -> None:
+    # The job did not run (or failed) the night the twentieth day came: the next report says it.
+    predictions(tmp_path)
+    recorded(tmp_path, TRADING[: DAYS + 1])
+    with RawDays(tmp_path / "data") as raw:
+        out, _ = report(settings(tmp_path), CALENDAR, TODAY, raw)
+
+    assert f"{DAYS}거래일(기록된 날 모두 {DAYS + 1}일)" in out
+    assert AGENT_LINE in out
 
 
 def test_no_recorded_day_exits_3(tmp_path: Path) -> None:

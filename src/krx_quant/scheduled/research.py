@@ -156,7 +156,8 @@ NIGHTLY_HIT_RATES = Job(
 # on the latest 20 recorded trading days, a day's recording at a time: 005930's quotes of a day are read
 # in about a second, the ETF's 40,000 records and the day's predictions in less; the quarter hour is a
 # bound. Each night's comment on #606 is a record and changes no label; ``ready-for-agent`` comes on a
-# failed run and on the night the recorded days first reach 20 (``inverse_replay.AGENT_LINE``), when an
+# failed run and on the first report with 20 recorded days or more, once (``inverse_replay.AGENT_LINE``,
+# kept in ``state/inverse-replay.json`` so that a night missed does not skip it), when an
 # agent proposes on #606 whether down calls should be bought through the ETF and the user decides. Its
 # output holds counts, rates, ticks and won, no price.
 INVERSE_REPLAY_ISSUE = 606
@@ -191,9 +192,9 @@ INVERSE_REPLAY = Job(
                 "호가에서 1주를 사고, 005930이 장벽에 닿거나 만기가 오면 ETF 매수 호가에서 판다. 결측 구간과 "
                 "5초보다 오래된 호가는 뺀다. 순손익은 기록된 호가와 양쪽 수수료로 잰다(ETF는 거래세가 없고, "
                 "비용표의 하한은 쓰지 않는다). 최근 20거래일. 1절 날마다, 2절 모든 호출, 3절 종류별, 4절 "
-                "칸별. 밤마다의 댓글은 기록이고 라벨을 바꾸지 않는다. 실패한 밤과 기록된 날이 처음 20일이 된 "
-                "밤(`에이전트 차례:` 줄)에만 `ready-for-agent`를 붙인다. 그때 에이전트가 이 이슈에 안을 "
-                "남기고 사용자가 정한다. 다시 돌리기(읽기만): "
+                "칸별. 밤마다의 댓글은 기록이고 라벨을 바꾸지 않는다. 실패한 밤과 기록된 날이 20일 이상인 첫 "
+                "보고(`에이전트 차례:` 줄, 한 번)에만 `ready-for-agent`를 붙인다. "
+                "그때 에이전트가 이 이슈에 안을 남기고 사용자가 정한다. 다시 돌리기(읽기만): "
                 "`docker compose run --rm engine inverse-replay --day <날>`. 출력에는 가격이 없다(개수, "
                 "비율, 틱, 원만)."
             ),
