@@ -12,10 +12,13 @@ windows for the cases around it.
 from __future__ import annotations
 
 import asyncio
+import random
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from krx_quant.engine import Event
 from krx_quant.feeds import BOOK, TRADE
@@ -312,3 +315,85 @@ async def test_the_status_and_the_special_windows_show_a_market_halt_within_the_
         "2026-10-12T09:35:10+09:00",
         "재개",
     )
+
+
+# --- Event orders (Codex's review of #632): when the halted trades come against the breaker's call.
+# The breaker is called at 09:03:30 (received then) with its rules' window to 09:33:30; each case lists
+# the halted trades' receipts and the halt's start and when it was learned (None: not confirmed).
+ORDERS = [
+    ("one just after the call", ["09:03:32"], ("09:03:32", "09:03:32")),
+    ("one a second before", ["09:03:29"], ("09:03:29", "09:03:30")),
+    ("one a minute before, to the second", ["09:02:30"], ("09:02:30", "09:03:30")),
+    ("one too early", ["09:02:29"], None),
+    ("one too early, one in the minute", ["09:02:29", "09:03:28"], ("09:03:28", "09:03:30")),
+    ("one too early, one after", ["09:02:00", "09:03:33"], ("09:03:33", "09:03:33")),
+    ("two in the minute", ["09:02:45", "09:03:20"], ("09:02:45", "09:03:30")),
+    ("one late in the window", ["09:30:00"], ("09:30:00", "09:30:00")),
+    ("one past the window", ["09:33:30"], None),
+    ("long before, then just after", ["08:59:00", "09:03:40"], ("09:03:40", "09:03:40")),
+]
+
+
+@pytest.mark.parametrize(("flags", "expected"), [(f, e) for _, f, e in ORDERS], ids=[n for n, _, _ in ORDERS])
+def test_the_halted_trades_against_the_breakers_call(
+    flags: list[str], expected: tuple[str, str] | None
+) -> None:
+    morning = [e for e in halt_morning(flagged=False) if e[1]["received_at"] < at("09:03:00")]
+    morning += [coded(trade(at(t), 81_300), "0", halted=True) for t in flags]
+
+    learned = situations([*morning, *market()])
+
+    found = [(w.start, r) for r, w in learned if w.kind is Kind.MARKET_HALT]
+    assert found == ([] if expected is None else [(at(expected[0]), at(expected[1]))])
+
+
+def test_a_later_stage_after_the_reopening_is_confirmed_again() -> None:
+    # The first stage's halt reopens at 09:35:10; the KOSPI then falls 15.4%: the second stage at
+    # 10:21:00, its halted trade at 10:21:02.
+    morning = [e for e in halt_morning() if e[1]["received_at"] < at("10:00:00")]
+    morning += [*quotes("10:00:00", "10:20:55", "0"), coded(trade(at("10:21:02"), 81_300), "0", halted=True)]
+    kospi_ = [*market(), *index("10:00:05", "10:19:55", -6.0), *index("10:20:00", "10:30:00", -15.4)]
+
+    learned = situations([*morning, *kospi_])
+
+    assert [(w.start, w.detail) for _, w in learned if w.kind is Kind.MARKET_HALT][-1] == (
+        at("10:21:02"),
+        "정지",
+    )
+
+
+def test_continuous_trading_seen_without_the_auctions_frames_still_reopens() -> None:
+    # The auction's book and trades lost: the next frames say continuous trading at 09:34:10.
+    missed = [e for e in halt_morning() if not at("09:23:00") <= e[1]["received_at"] < at("09:34:10")]
+
+    learned = situations([*missed, *market()])
+
+    assert [p for _, _, _, p in halts(learned)] == ["정지", "단일가", "재개"]
+    # The minute counts from the first trade with the book, at 09:34:11: no trade came before it.
+    assert halts(learned)[-1][2] == at("09:35:11")
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_the_order_of_a_seconds_trades_and_books_does_not_move_the_reopening_past_a_frame(seed: int) -> None:
+    # Two symbols' frames of one receipt second in any order: the reopening still ends within the
+    # 5 seconds between their frames of 09:35:10, and the phases are the same.
+    events = sorted([*halt_morning(), *halt_morning(OTHER), *market()], key=lambda e: e[1]["received_at"])
+    shuffled = random.Random(seed)
+    by_second: dict[datetime, list[Event]] = {}
+    for e in events:
+        by_second.setdefault(e[1]["received_at"].replace(microsecond=0), []).append(e)
+    ordered = []
+    for second in sorted(by_second):
+        group = by_second[second]
+        shuffled.shuffle(group)
+        ordered += group
+    special = SpecialSituations(CALENDAR)
+    learned = [
+        (r, w)
+        for f, row in ordered
+        for r, w in ((row["received_at"], w) for w in special.event(f, row, (SYMBOL, OTHER)))
+    ]
+
+    phases = halts(learned)
+    assert [p for _, _, _, p in phases] == ["정지", "단일가", "재개"]
+    assert at("09:35:10") <= phases[-1][2] <= at("09:35:16")
