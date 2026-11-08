@@ -53,7 +53,7 @@
             "required": ["kind", "symbol", "start", "end"],
             "additionalProperties": false,
             "properties": {
-              "kind": {"enum": ["vi", "circuit_breaker", "sidecar"]},
+              "kind": {"enum": ["vi", "circuit_breaker", "sidecar", "market_halt"]},
               "symbol": {"type": ["string", "null"]},
               "start": {"$ref": "#/$defs/time"},
               "end": {"$ref": "#/$defs/time"}
@@ -483,7 +483,7 @@
     },
 
     "special": {
-      "description": "GET /v1/symbols/{symbol}/special?from=YYYY-MM-DD&to=YYYY-MM-DD: the special situations' windows the engine kept (#236) that start on the days from to to (KST dates, both included; default the last five trading days to today, at most 60 days): the symbol's VIs and the whole market's circuit breakers and sidecars, by start.",
+      "description": "GET /v1/symbols/{symbol}/special?from=YYYY-MM-DD&to=YYYY-MM-DD: the special situations' windows the engine kept (#236) that start on the days from to to (KST dates, both included; default the last five trading days to today, at most 60 days): the symbol's VIs and the whole market's circuit breakers, sidecars and halts (#625), by start.",
       "type": "object",
       "required": ["symbol", "from", "to", "special"],
       "additionalProperties": false,
@@ -495,7 +495,7 @@
       }
     },
     "special_window": {
-      "description": "A special situation's window (#12, #236). end is the release; a VI whose release is not known yet lasts start + 3 minutes, and a third breaker stage to the end of the day. detail is a breaker's stage, a VI's type when known (static, dynamic, both), else null.",
+      "description": "A special situation's window (#12, #236). end is the release; a VI whose release is not known yet lasts start + 3 minutes, and a third breaker stage to the end of the day; a breaker whose halt was confirmed ends at the real reopening. A market halt (#625, confirmed from KIS's fields) lasts to the session's close until a minute of fresh quotes and trades after the reopening ends it. detail is a breaker's stage, a VI's type when known (static, dynamic, both), a market halt's phase (정지, 단일가, 재개), else null.",
       "oneOf": [
         {
           "type": "object",
@@ -531,6 +531,18 @@
             "start": {"$ref": "#/$defs/time"},
             "end": {"$ref": "#/$defs/time"},
             "detail": {"type": "null"}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "symbol", "start", "end", "detail"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"const": "market_halt"},
+            "symbol": {"type": "null"},
+            "start": {"$ref": "#/$defs/time"},
+            "end": {"$ref": "#/$defs/time"},
+            "detail": {"enum": ["정지", "단일가", "재개"]}
           }
         }
       ]
@@ -2478,7 +2490,7 @@
         "agree": {"type": ["boolean", "null"]},
         "next_gap_bp": {"type": ["number", "null"]},
         "next_close_bp": {"type": ["number", "null"]},
-        "special": {"type": "array", "items": {"enum": ["vi", "circuit_breaker", "sidecar"]}}
+        "special": {"type": "array", "items": {"enum": ["vi", "circuit_breaker", "sidecar", "market_halt"]}}
       }
     },
     "closing_flow_denominator_sources": {

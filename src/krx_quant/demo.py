@@ -4,7 +4,7 @@
 server or KIS. It replays the same made-up events every time: three symbols wandering
 from 09:00 to 10:30 on 2026-10-12, KOSPI and KOSPI200 futures ticks, and a VI on one
 symbol, forecast and scored on the touch target as the server's default (#170: its four
-baselines). The KOSPI falls 8.5% at 09:04, so a circuit breaker's first stage halts the
+baselines). The KOSPI falls 8.5% at 09:05, so a circuit breaker's first stage halts the
 market from 09:06 to 09:36 (#236): nothing trades nor quotes then, and the minute bars skip
 those 30 minutes. The VI is 000660's, from 09:40:10 to 09:42:20 (dynamic). The KOSPI200
 futures do not fall: no sidecar. Every registered algorithm is set active, so the consensus
@@ -188,10 +188,10 @@ _CALENDAR = MarketCalendar(
     {d: True for d in PAST_DAYS}
     | {date(2026, 10, 9): False, date(2026, 10, 10): False, date(2026, 10, 11): False, DEMO_DAY: True}
 )
-# The morning's crash (#236): the KOSPI this far (%) below its wander from CRASH_FROM. No breaker
-# is called in the first 5 minutes, so the minute held starts at 09:05 and the first stage is
-# called at 09:06, halting trading 20 minutes and a 10-minute single-price auction after: HALT.
-CRASH, CRASH_FROM = 8.5, time(9, 4)
+# The morning's crash (#236): the KOSPI this far (%) below its wander from CRASH_FROM. Held a minute,
+# the first stage is called at 09:06, halting trading 20 minutes and a 10-minute single-price
+# auction after: HALT. The trades carry no halt flag: the breaker's window alone (#625).
+CRASH, CRASH_FROM = 8.5, time(9, 5)
 HALT = (time(9, 6), time(9, 36))
 _PACED_FROM = time(10, 0)  # a paced demo opens here and goes on a minute at a time…
 _STEPS = 6  # …in steps of 10 seconds
