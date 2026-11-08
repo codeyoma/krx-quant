@@ -34,14 +34,15 @@ operation feed ``H0STMKO0`` is not, #625's probe), but the integrated trades and
   10 minutes later (09:33:38);
 - continuous trading is back once the book or the trades of every symbol say '0' (09:34:10).
 
-A halt is confirmed when a trade of one of the engine's symbols flagged halted is received a
-minute before a breaker stage is called or later (a halted trade with no breaker is one stock's
-halt): a ``MARKET_HALT`` window from that trade's exchange time, learned then, to the end of the
-day while the reopening is not known (detail ``정지``). A trade or book of the symbols in the
+A halt is confirmed when a trade of one of the engine's symbols flagged halted is received from a
+minute before a breaker stage is called to the end of that stage's window by the rules (a halted
+trade with no breaker, or outside its window, is one stock's halt): a ``MARKET_HALT`` window from
+that trade's exchange time, learned then, to the end of the day while the reopening is not known
+(detail ``정지``). A trade or book of the symbols in the
 auction ('C'), received at least a minute after, makes it ``단일가``. Once every symbol's latest
 trade or book says '0' (continuous trading), the breaker's window ends there (the real
 reopening, a later version of it), and once each symbol's trades and book have then kept coming
-(each within ``FRESH`` of the moment) for a full ``REOPEN_HOLD``, the halt's window ends there
+(each within ``FRESH`` of the one before) for a full ``REOPEN_HOLD``, the halt's window ends there
 (``재개``): the engine predicts again, the trader buys again (#625's stage 3). A halt whose
 trades carry no flag is not confirmed: the breaker's window is all there is.
 
@@ -309,7 +310,9 @@ class SpecialSituations:
         if feed == TRADE.tr_id and row.get("halted"):
             if halt.flagged is None or received - halt.flagged[1] > HOLD:
                 halt.flagged = (row["event_time"], received)  # the first of the halted trades
-            if halt.window is None and halt.breaker is not None:
+            breaker = halt.breaker
+            # Of the breaker's halt alone: a stock's halted trade outside its window is that stock's.
+            if halt.window is None and breaker is not None and breaker.start - HOLD <= received < breaker.end:
                 return self._one(self._confirm(halt.flagged[0], received, session))
         window = halt.window
         if window is None:
@@ -323,17 +326,18 @@ class SpecialSituations:
                 out += self._one(self._halt_version(received, window.end, AUCTION))
             else:
                 return ()
-        # In the auction or after: each symbol's latest time code, trade and book.
-        if feed == TRADE.tr_id:
-            halt.trade_at[symbol] = received
-        else:
-            halt.book_at[symbol] = received
+        # In the auction or after: each symbol's latest time code, trade and book. A trade or book
+        # more than ``FRESH`` after the one before it is a gap: the minute of fresh quotes starts again.
+        seen = halt.trade_at if feed == TRADE.tr_id else halt.book_at
+        before = seen.get(symbol)
+        gap = before is not None and received - before > FRESH
+        seen[symbol] = received
         if halt.continuous_at is None:
             if code in (AUCTION_CODE, CONTINUOUS_CODE):
                 halt.codes[symbol] = code
             if all(halt.codes.get(s) == CONTINUOUS_CODE for s in symbols):
                 halt.continuous_at = received
-                halt.fresh_since = received if halt.fresh(received, symbols) else None
+                halt.fresh_since = received if halt.fresh(received, symbols) and not gap else None
                 breaker = halt.breaker
                 if breaker is not None and breaker.detail != f"{len(BREAKER_STAGES)}단계":
                     # The breaker ends at the real reopening, not the rules' 30 minutes.
@@ -341,7 +345,7 @@ class SpecialSituations:
             return tuple(out)
         if not halt.fresh(received, symbols):
             halt.fresh_since = None
-        elif halt.fresh_since is None:
+        elif gap or halt.fresh_since is None:
             halt.fresh_since = received
         elif received - halt.fresh_since >= REOPEN_HOLD:
             out += self._one(self._halt_version(received, received, REOPENED))

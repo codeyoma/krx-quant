@@ -21,8 +21,9 @@ from krx_quant.engine import Event
 from krx_quant.feeds import BOOK, TRADE
 from krx_quant.rescore import fill_special_windows
 from krx_quant.special import Kind, SpecialSituations, Window
+from tests.api_schema import check
 from tests.replay_doubles import NEXT_MORNING, record
-from tests.replay_events import CALENDAR, SYMBOL, at, book, every, kospi, run, trade
+from tests.replay_events import CALENDAR, SYMBOL, api, at, book, every, get_json, kospi, run, trade
 from tests.test_rescore import settings
 from tests.test_special_windows import before_236
 
@@ -265,3 +266,49 @@ def test_the_fill_decides_a_recorded_halt_as_the_engine_kept_it(tmp_path: Path) 
 
     assert (filled.labeled, filled.failed) == (2, None)
     assert kept(db) == KEPT
+
+
+def test_a_halted_trade_after_the_breakers_window_is_one_stocks_halt() -> None:
+    # A breaker called at 09:03:30 that no flagged trade confirmed; at 11:00, long after its window
+    # (to 09:33:30), one stock's trade is flagged halted: not the market's.
+    morning = [*halt_morning(flagged=False), coded(trade(at("11:00:00"), 81_300), "0", halted=True)]
+
+    learned = situations([*morning, *market(), *index("10:00:05", "11:30:00", -6.0)])
+
+    assert halts(learned) == []
+
+
+def test_quotes_further_apart_than_fresh_never_make_the_fresh_minute() -> None:
+    # After the reopening the book comes every 11 seconds and the trades a second after it: each
+    # symbol's trades and book are never each within 10 seconds of the one before, so the halt holds.
+    sparse = [e for e in halt_morning() if e[1]["received_at"] < at("09:34:10")]
+    when = at("09:34:10")
+    while when <= at("10:00:00"):
+        sparse += [
+            coded(book(when, 81_200, 81_300), "0"),
+            coded(trade(when + timedelta(seconds=1), 81_300), "0"),
+        ]
+        when += timedelta(seconds=11)
+
+    learned = situations([*sparse, *market()])
+
+    assert [p for _, _, _, p in halts(learned)] == ["정지", "단일가"]
+
+
+async def test_the_status_and_the_special_windows_show_a_market_halt_within_the_contract(
+    tmp_path: Path,
+) -> None:
+    engine = await run(tmp_path / "engine.db", [*halt_morning(), *market()], until=at("09:50:00"))
+
+    async with api(engine) as client:
+        status = await get_json(client, "/v1/status")
+        special = await get_json(client, f"/v1/symbols/{SYMBOL}/special?from=2026-10-12&to=2026-10-12")
+    check("status", status)
+    check("special", special)
+    assert {w["kind"] for w in status["special"]} == {"circuit_breaker", "market_halt"}
+    [halt] = [w for w in special["special"] if w["kind"] == "market_halt"]
+    assert (halt["start"], halt["end"], halt["detail"]) == (
+        "2026-10-12T09:03:32+09:00",
+        "2026-10-12T09:35:10+09:00",
+        "재개",
+    )
