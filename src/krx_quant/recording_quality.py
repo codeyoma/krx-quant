@@ -210,7 +210,9 @@ class Budget:
 
     @contextmanager
     def section(self, name: str) -> Iterator[None]:
-        """Keep ``name``'s own peak (the process's since it started where the peak cannot be reset)."""
+        """Keep ``name``'s own peak (the process's since it started where the peak cannot be reset), and
+        hold it to the bound once the section is read, before the next section's reset forgets it: what
+        the section's last batch took after its check counts too."""
         if self.bound_mb is None:
             yield
             return
@@ -220,6 +222,7 @@ class Budget:
             yield
         finally:
             self.peaks[name] = self._meter.peak_mb()
+        self.check()
 
     @property
     def since_start(self) -> bool:
@@ -1168,17 +1171,22 @@ def measure(
         ("5", lambda: night_section(found, data_dir, raw, calendar)),
     )
     for number, step in steps:
+        done = len(found.sections)
         try:
             with found.budget.section(number):
                 found.sections.append(step())
         except OverMemory as over:
+            read = len(found.sections) > done  # over only once the section was read
+            if read and number == steps[-1][0]:
+                break  # nothing is left unread: the run's own section says the peak (``ran``)
             found.stopped = number
             bound = f"기준 {found.budget.bound_mb:.0f} MB"
-            where = f"{number}절을 읽다가 최대 RSS {over.peak_mb:.0f} MB"
+            where = f"{number}절을 {'읽은 뒤' if read else '읽다가'} 최대 RSS {over.peak_mb:.0f} MB"
+            unread = "그 뒤 절은" if read else "이 절과 그 뒤 절은"
             found.sections.append(
                 (
-                    f"{number}. 메모리 기준 넘음",
-                    [f"{where}({bound}): 이 절과 그 뒤 절은 읽지 않았다"],
+                    f"{int(number) + 1 if read else number}. 메모리 기준 넘음",
+                    [f"{where}({bound}): {unread} 읽지 않았다"],
                 )
             )
             found.reasons.append(f"메모리 기준 넘음: {where}({bound} 넘게), 그 뒤는 읽지 않았다")

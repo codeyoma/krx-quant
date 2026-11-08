@@ -650,6 +650,34 @@ def test_a_run_over_its_memory_bound_stops_in_the_section_and_says_where(recorde
     assert "절마다 최대 RSS(그 절의 최대): 시작 300 MB · 1절 300 MB · 2절 300 MB · 3절 600 MB" in text
 
 
+def test_a_section_s_peak_over_the_bound_once_it_is_read_stops_the_next(recorded: Path) -> None:
+    """#631: the fourth section reads no batch to check after; its peak over the bound, held to it once
+    the section is read and before the fifth's reset forgets it, still stops the run."""
+    budget = quality.Budget(500, Peaks(300, 600, over_at=4))
+    found = quality.measure(recorded, CALENDAR, DAY, [STOCK], POLLS, budget=budget)
+    assert found is not None
+
+    headings = [heading for heading, _ in found.sections]
+    assert headings[3:] == ["4. REST 조회 실패 (/v1/status의 kis.polls)", "5. 메모리 기준 넘음"]
+    assert found.sections[-1][1] == ["4절을 읽은 뒤 최대 RSS 600 MB(기준 500 MB): 그 뒤 절은 읽지 않았다"]
+    assert "메모리 기준 넘음: 4절을 읽은 뒤 최대 RSS 600 MB(기준 500 MB 넘게), 그 뒤는 읽지 않았다" in (
+        found.reasons
+    )
+
+
+def test_a_peak_over_the_bound_after_the_last_section_is_said_by_the_run_s_own_section(
+    tmp_path: Path,
+) -> None:
+    record_gaps(tmp_path)  # no night recorded: the fifth section reads no batch
+    budget = quality.Budget(500, Peaks(300, 600, over_at=5))
+    found = quality.measure(tmp_path, CALENDAR, DAY, [], POLLS, budget=budget)
+    assert found is not None
+    quality.ran(found, 1.0, budget.peak_mb())
+
+    assert found.stopped is None and found.sections[4][0].startswith("5. 야간 기록량")
+    assert "최대 메모리 600 MB(기준 500 MB 넘게)" in found.reasons
+
+
 def test_a_run_within_its_bound_reads_every_section_and_gives_the_same_report(recorded: Path) -> None:
     unbounded = report(recorded, CALENDAR, DAY, [STOCK, ETF], POLLS)
     budget = quality.Budget(500, Peaks(300, 600, over_at=99, resets=False))
