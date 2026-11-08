@@ -2607,7 +2607,7 @@ Newton, Gauss, Granger, Markov, Kalman은 4분 변화의 정규분포(평균 μ,
   > **바뀜** (2026-11-04, #530): "공통 함수를 바꾸면 다섯 모두 코드가 바뀐 리비전으로 수습에 돌아간다" → `forecasts.py`는 다섯의 코드 digest(각자의 패키지와 `code_from`)에 들어 있지 않아, 함수를 고쳐도 저절로 수습에 돌아가지 않고 실시간 예측만 바뀐다. 바꿀 때 `forecasts.py`를 다섯의 `code_from`에 넣어야 수습에 돌아간다. 이유: #529를 준비하며 `prevalidation.code_digest`를 다시 읽고 바로잡았다.
 - **정답 순서 스위치(`label_order`, #529).**
 
-  > **삭제됨** (2026-11-09, #PRNUM): `forecasts.label_order()`(그 안에서만 `normal_forecast`가 도달 정답을 정답의 순서대로, `ordered_forecast`와 같이 내던 스위치)와 `normal_forecast`의 그 갈래. 엔진, 밤 학습, 사전 검증은 이 안에 들어가지 않았으므로 다섯의 예측은 바뀌지 않는다. `forecasts.py`는 어느 알고리즘의 코드 digest(각자의 패키지와 `code_from`)에도, 표본의 코드 digest(`sample_store._WHOLE`, `_PARTS`)에도 들어 있지 않아 digest도 그대로다. 이유: 결론이 났다(다섯 모두 후보 아님, #529 2026-11-08 밤 결과). 대신: 지금의 독립 근사를 그대로 쓴다. 앞으로 `normal_forecast`를 바꾸면 `forecasts.py`를 다섯의 `code_from`에 넣어 다섯이 수습으로 돌아가게 한다(위 바뀜 #530).
+  > **삭제됨** (2026-11-09, #642): `forecasts.label_order()`(그 안에서만 `normal_forecast`가 도달 정답을 정답의 순서대로, `ordered_forecast`와 같이 내던 스위치)와 `normal_forecast`의 그 갈래. 엔진, 밤 학습, 사전 검증은 이 안에 들어가지 않았으므로 다섯의 예측은 바뀌지 않는다. `forecasts.py`는 어느 알고리즘의 코드 digest(각자의 패키지와 `code_from`)에도, 표본의 코드 digest(`sample_store._WHOLE`, `_PARTS`)에도 들어 있지 않아 digest도 그대로다. 이유: 결론이 났다(다섯 모두 후보 아님, #529 2026-11-08 밤 결과). 대신: 지금의 독립 근사를 그대로 쓴다. 앞으로 `normal_forecast`를 바꾸면 `forecasts.py`를 다섯의 `code_from`에 넣어 다섯이 수습으로 돌아가게 한다(위 바뀜 #530).
 - Shannon, Poisson, Turing은 정답과 방향별 움직임에서 직접 배우므로 이 함수를 쓰지 않는다. 학습 정답이 바뀌면 그대로 새 정답을 배운다.
 - 카드의 "예측 방식" 글(`NORMAL_CLASSES`)은 도달 정답(닿을 확률)의 글이다(#170).
 
@@ -2939,7 +2939,7 @@ docker compose run --rm --no-deps engine neyman-variants --backfill   # 백필 �
 
 #### 정답 순서 실험 (#529)
 
-> **삭제됨** (2026-11-09, #PRNUM): 이 실험. 명령 `normal-order`, 모듈 `src/krx_quant/normal_order.py`, 스위치 `forecasts.label_order`(위 "정답 순서 스위치"), 그 테스트, 리포트 `state/experiments/normal-order-529.json`을 쓰는 일. 공통 정규분포 함수를 쓰는 다섯(Newton, Gauss, Granger, Markov, Kalman)을 지금 그대로(`independent`)와 같은 표본으로 정답의 순서대로 학습하고 예측한 팔(`ordered`)로 사전 검증의 겹(최근 20 녹화일)에서 견줬다. 판정(돌리기 전에 고정): 순서 팔의 맞힘률 lift(봉 마감 짝) > 0이고 평균 log loss가 낮으면 후보. 예약 작업 `normal-order-529`가 2026-11-08 밤에 돌아 결과를 #529에 올렸다. 이유: 결론이 났다(다섯 모두 후보 아님, #529 2026-11-08 밤 결과). 대신: 지금의 독립 근사를 그대로 쓴다. 결론 난 실험은 지운다(사용자 결정 2026-11-05, #559와 같은 방식). 리포트는 서버에 기록으로 남고 밤마다 서버 상태 백업에 들어간다(`state_backup.KEPT_REPORTS`, #604). 결과는 #529의 댓글에 있다.
+> **삭제됨** (2026-11-09, #642): 이 실험. 명령 `normal-order`, 모듈 `src/krx_quant/normal_order.py`, 스위치 `forecasts.label_order`(위 "정답 순서 스위치"), 그 테스트, 리포트 `state/experiments/normal-order-529.json`을 쓰는 일. 공통 정규분포 함수를 쓰는 다섯(Newton, Gauss, Granger, Markov, Kalman)을 지금 그대로(`independent`)와 같은 표본으로 정답의 순서대로 학습하고 예측한 팔(`ordered`)로 사전 검증의 겹(최근 20 녹화일)에서 견줬다. 판정(돌리기 전에 고정): 순서 팔의 맞힘률 lift(봉 마감 짝) > 0이고 평균 log loss가 낮으면 후보. 예약 작업 `normal-order-529`가 2026-11-08 밤에 돌아 결과를 #529에 올렸다. 이유: 결론이 났다(다섯 모두 후보 아님, #529 2026-11-08 밤 결과). 대신: 지금의 독립 근사를 그대로 쓴다. 결론 난 실험은 지운다(사용자 결정 2026-11-05, #559와 같은 방식). 리포트는 서버에 기록으로 남고 밤마다 서버 상태 백업에 들어간다(`state_backup.KEPT_REPORTS`, #604). 결과는 #529의 댓글에 있다.
 
 ### 확률 과정 넷 (#518)
 

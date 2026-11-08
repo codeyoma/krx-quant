@@ -282,7 +282,7 @@ uv run python -c "import glob, pyarrow.parquet as pq; d = sorted(glob.glob('data
 | `fake-kis [--port 18080] [--host 127.0.0.1] [--trades]` | 가짜 KIS 서버(아래 "키 없이 확인하기") | 없어도 된다 |
 | `demo-engine [--port 8090] [--host 127.0.0.1] [--db state/demo.sqlite3] [--pace 초]` | 데모 엔진 API(아래 "화면을 만들 때"). `--pace`는 10:00부터 이어 재생하며 스트림을 보낸다 | 없어도 된다 |
 
-> **삭제됨** (2026-11-09, #PRNUM): 정답 순서 실험의 명령 `normal-order [--days N]`(공통 정규분포 함수를 쓰는 다섯(Newton, Gauss, Granger, Markov, Kalman)을 위·아래 목표를 독립으로 본 지금 그대로와 정답의 순서로 견주던 실험, #529). 그 예약 작업 `normal-order-529`도 지웠다. 이유: 결론이 났다(다섯 모두 후보 아님, #529 2026-11-08 밤 결과). 대신: 지금의 독립 근사를 그대로 쓴다. 리포트 `state/experiments/normal-order-529.json`은 서버에 기록으로 남는다. 결과는 #529의 댓글에 있다.
+> **삭제됨** (2026-11-09, #642): 정답 순서 실험의 명령 `normal-order [--days N]`(공통 정규분포 함수를 쓰는 다섯(Newton, Gauss, Granger, Markov, Kalman)을 위·아래 목표를 독립으로 본 지금 그대로와 정답의 순서로 견주던 실험, #529). 그 예약 작업 `normal-order-529`도 지웠다. 이유: 결론이 났다(다섯 모두 후보 아님, #529 2026-11-08 밤 결과). 대신: 지금의 독립 근사를 그대로 쓴다. 리포트 `state/experiments/normal-order-529.json`은 서버에 기록으로 남는다. 결과는 #529의 댓글에 있다.
 
 > **삭제됨** (2026-11-05, #566): 결론이 난 실험 넷의 명령. `measure-passive-entry [--engine-url 주소]`(대기 매수를 녹화로 재던 측정, #432), `cost-map-audit [--engine-url 주소]`(비용 지도 감사, #438), `poisson-link [--days N]`(Poisson의 비대칭 확률 연결 실험, #439), `turing-prior [--days N]`(Turing의 종목과 기후 사전 확률 실험, #448). 그 예약 작업은 #506에서 `JOBS`에서 뺐고, 명령은 손으로 돌릴 수 있게 남겼었다(#505). 이유: 결론이 났다(#432, #438, #439, #448). 14일 동안 손으로 돌린 기록이 없어 사용자가 2026-11-05에 코드와 함께 지우기로 정했다(#559). 대신: git 이력. 결과는 각 이슈의 댓글에 있다.
 
