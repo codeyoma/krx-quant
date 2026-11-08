@@ -245,7 +245,8 @@ CREATE TABLE IF NOT EXISTS special_windows (  -- a special situation's window, a
     start TEXT NOT NULL,
     end TEXT NOT NULL,                -- the release, or the least it lasts while that is not known
     detail TEXT,                      -- a breaker's stage (1단계), a VI's type (static); else null
-    learned_at TEXT NOT NULL          -- when this version of it was received
+    learned_at TEXT NOT NULL,         -- when this version of it was received
+    first_learned_at TEXT             -- when its first version was (#625); null: kept before it
 );
 CREATE UNIQUE INDEX IF NOT EXISTS special_windows_key ON special_windows (kind, ifnull(symbol, ''), start);
 CREATE INDEX IF NOT EXISTS special_windows_by_start ON special_windows (start);
@@ -381,6 +382,7 @@ _ADDED_COLUMNS = (
     ("statuses", "simulated", "INTEGER NOT NULL DEFAULT 0"),
     ("smt_events", "a_extreme", "TEXT"),
     ("smt_events", "b_extreme", "TEXT"),
+    ("special_windows", "first_learned_at", "TEXT"),
 )
 
 
@@ -1544,12 +1546,14 @@ class PredictionStore:
 
     def keep_special(self, window: Window, learned_at: datetime) -> None:
         """Keep a special window the engine learned at ``learned_at``: a new one, or a later
-        version of one kept (the same kind, symbol and start: a VI's release)."""
+        version of one kept (the same kind, symbol and start: a VI's release), which keeps when the
+        first was learned (``first_learned_at``, #625)."""
         with self._db:
             self._keep_special(window, learned_at)
 
-    def _keep_special(self, window: Window, learned_at: datetime) -> int:
-        """Store ``window`` in the transaction open; the rows written."""
+    def _keep_special(self, window: Window, learned_at: datetime, first: datetime | None = None) -> int:
+        """Store ``window`` in the transaction open, its first version learned at ``first`` (a new
+        one: ``learned_at`` if None); the rows written."""
         key = (window.kind.value, window.symbol or "", iso(window.start))
         values = (iso(window.end), window.detail, iso(learned_at))
         cursor = self._db.execute(
@@ -1560,9 +1564,9 @@ class PredictionStore:
         if cursor.rowcount:
             return cursor.rowcount
         self._db.execute(
-            "INSERT INTO special_windows (kind, symbol, start, end, detail, learned_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (window.kind.value, window.symbol, iso(window.start), *values),
+            "INSERT INTO special_windows (kind, symbol, start, end, detail, learned_at, first_learned_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (window.kind.value, window.symbol, iso(window.start), *values, iso(first or learned_at)),
         )
         return 1
 
@@ -1640,13 +1644,17 @@ class PredictionStore:
         return days
 
     def decide_special_day(
-        self, day: date, windows: Sequence[tuple[datetime, Window]], source: str | None, decided_at: datetime
+        self,
+        day: date,
+        windows: Sequence[tuple[datetime, Window, datetime]],
+        source: str | None,
+        decided_at: datetime,
     ) -> int:
         """Keep the windows of a past ``day`` decided from its recording (read from ``source``;
-        None: recorded nowhere), each with when it was learned, and mark the day decided, in one
-        transaction; nothing if the day was decided already. The replay is the whole day, so it
-        replaces the windows the live engine kept that day (part of it, if it restarted); a day
-        recorded nowhere keeps them. The rows written."""
+        None: recorded nowhere), each with when it was learned and when its first version was, and
+        mark the day decided, in one transaction; nothing if the day was decided already. The replay
+        is the whole day, so it replaces the windows the live engine kept that day (part of it, if it
+        restarted); a day recorded nowhere keeps them. The rows written."""
         first, last = iso(_midnight(day)), iso(_midnight(day + timedelta(days=1)))
         with self._db:
             taken = self._db.execute(
@@ -1656,7 +1664,7 @@ class PredictionStore:
                 return 0
             if source is not None:
                 self._db.execute("DELETE FROM special_windows WHERE start >= ? AND start < ?", (first, last))
-            written = sum(self._keep_special(w, learned_at) for learned_at, w in windows)
+            written = sum(self._keep_special(w, learned_at, first) for learned_at, w, first in windows)
             self._db.execute(
                 "INSERT INTO special_days (day, source, windows, decided_at) VALUES (?, ?, ?, ?)",
                 (day.isoformat(), source, len(windows), iso(decided_at)),

@@ -242,8 +242,9 @@ async def test_answers_whose_window_meets_the_halt_are_special(tmp_path: Path) -
                 "SELECT substr(bar_close, 12, 5), max(special) FROM kind_answers GROUP BY bar_close"
             ).fetchall()
         )
-    for close in ("09:01", "09:02", "09:20", "09:35"):
+    for close in ("09:01", "09:02"):
         assert outcomes[close] == 1, close
+    for close in ("09:01", "09:02", "09:20", "09:35"):  # 09:20 and 09:35 not predicted (the halt), answered
         assert answers[close] == 1, close
     assert outcomes["09:36"] == 0
     assert answers["09:36"] == 0

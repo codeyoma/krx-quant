@@ -382,6 +382,11 @@ class SpecialSituations:
             latest[(w.kind, w.symbol, w.start)] = (received_at, w)
         return list(latest.values())
 
+    def first_learned(self, window: Window) -> datetime:
+        """When the first version of ``window`` (its kind, symbol and start) was received (#625)."""
+        key = (window.kind, window.symbol, window.start)
+        return next(r for r, w in self._learned if (w.kind, w.symbol, w.start) == key)
+
     def learned_since(self, at: datetime) -> list[Window]:
         """The windows learned at or after ``at``, each version (a VI's end changes when it is
         released): the engine marks what they touch special when it learns them.

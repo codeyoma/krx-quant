@@ -16,7 +16,8 @@ write-ahead-log mode, so a reader sees each commit as it is made.
   #183).
 - The special situations' windows the engine kept as it learned them (``special_windows``, #236,
   ``special.py``): 005930's VIs and the whole market's circuit breakers and sidecars, each with
-  its start and end (a VI's end, while its release is not known, the least it lasts).
+  its start and end (a VI's end, while its release is not known, the least it lasts), and when the
+  engine first learned it (``Kept.learned_at``, #625: the replay knows it from then).
 
 Each prediction comes with its model version (``model_version``, #469): the nightly training goes on
 within a frozen policy version, and each trade keeps the model that bought it. A cell's predictor is
@@ -333,15 +334,23 @@ def status_at(history: History, at: datetime) -> str | None:
     return status
 
 
+@dataclass(frozen=True)
+class Kept(Window):
+    """A special window as the engine kept it, with when it first learned it (#625); None: kept before
+    the engine noted that."""
+
+    learned_at: datetime | None = None
+
+
 def special_windows(db: sqlite3.Connection, symbol: str, since: datetime) -> list[Window]:
     """The special windows the engine kept (#236) of ``symbol`` or the whole market that end after
-    ``since``, by start."""
+    ``since``, by start, each with when it was first learned (``Kept``)."""
     rows = db.execute(
-        "SELECT kind, symbol, start, end, detail FROM special_windows"
+        "SELECT kind, symbol, start, end, detail, first_learned_at FROM special_windows"
         " WHERE end > ? AND (symbol IS NULL OR symbol = ?) ORDER BY start",
         (since.astimezone(KST).isoformat(), symbol),
     ).fetchall()
-    windows = []
+    windows: list[Window] = []
     for r in rows:
         try:
             kind = SpecialKind(r["kind"])
@@ -349,5 +358,6 @@ def special_windows(db: sqlite3.Connection, symbol: str, since: datetime) -> lis
             log.warning("trader: a special window of a kind it does not know (%s)", r["kind"])
             continue
         start, end = datetime.fromisoformat(r["start"]), datetime.fromisoformat(r["end"])
-        windows.append(Window(kind, r["symbol"], start, end, r["detail"]))
+        learned = datetime.fromisoformat(r["first_learned_at"]) if r["first_learned_at"] else None
+        windows.append(Kept(kind, r["symbol"], start, end, r["detail"], learned))
     return windows

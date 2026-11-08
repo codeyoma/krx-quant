@@ -17,8 +17,14 @@ what the nightly re-fit fits a policy on (``refit.py``).
   active, or not active at the pick of an earlier trading day of the same review cycle (the trader's
   ``evaluation``, when one is given: the trader holds it off until the next review); such a cell ranks
   below none that day, as in the paper book;
-- the special windows the engine kept (``special_windows``), each known from its start (the engine
-  learns a VI, a circuit breaker or a sidecar as it begins), with the end it kept.
+- the special windows the engine kept (``special_windows``), each known from when the engine first
+  learned it (``cells.Kept.learned_at``, #625: a VI up to 5 seconds after it began, a market halt
+  from its halted trade), or from its start when it was kept before the engine noted that, with the
+  end it kept.
+
+  > **바뀜** (2026-11-09, #NNN): each window was known from its start → from when the engine first
+  > learned it. Why: a window that begins before the engine can know it (a VI, a breaker called a
+  > minute after the drop began) gave the replay what the trader could not have known.
 
 No answer is read for a decision, nor its special flag: nothing the trader could not have known
 then. The calibration alone (#475, below) reads each rise's answer, once it is measured.
@@ -122,6 +128,7 @@ from krx_quant.trader.cells import (
     KIND_COLUMNS,
     Cell,
     History,
+    Kept,
     Signal,
     direction_signal,
     kind_signal,
@@ -379,8 +386,15 @@ def _upper_first(path: str | None) -> bool:
 
 
 def known(windows: Sequence[Window], at: datetime) -> list[Window]:
-    """The special windows known at ``at``: those begun by then (module doc)."""
-    return [w for w in windows if w.start <= at]
+    """The special windows known at ``at``: those the engine had learned by then (module doc)."""
+    return [w for w in windows if _learned(w) <= at]
+
+
+def _learned(window: Window) -> datetime:
+    """When the engine first learned ``window`` (#625); its start if not kept."""
+    if isinstance(window, Kept) and window.learned_at is not None:
+        return window.learned_at
+    return window.start
 
 
 def inactive_days(

@@ -601,16 +601,17 @@ def decide_day(
     calendar: MarketCalendar,
     symbols: Sequence[str],
     halt: threading.Event | None = None,
-) -> list[tuple[datetime, Window]]:
+) -> list[tuple[datetime, Window, datetime]]:
     """A day's special windows decided from its events (in receipt order) as the engine
-    decides them (#236): the VIs of ``symbols``, the circuit breakers and the sidecars, the
-    latest version of each with when it was received, as the engine keeps them."""
+    decides them (#236): the VIs of ``symbols``, the circuit breakers, the sidecars and the market
+    halts, the latest version of each with when it was received and when its first was (#625), as the
+    engine keeps them."""
     special = SpecialSituations(calendar)
     for i, (feed, row) in enumerate(events):
         if halt is not None and i % _HALT_EVERY == 0 and halt.is_set():
             raise _Halted
         special.event(feed, row, symbols)
-    return special.latest()
+    return [(received, w, special.first_learned(w)) for received, w in special.latest()]
 
 
 def fill_special_windows(
