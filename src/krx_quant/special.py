@@ -102,6 +102,10 @@ QUIET_AFTER_HALT = timedelta(minutes=1)
 REOPEN_HOLD = timedelta(minutes=1)
 FRESH = timedelta(seconds=10)
 HALTED, AUCTION, REOPENED = "정지", "단일가", "재개"  # a market halt's phases (``Window.detail``)
+# The version of these rules a past day's windows are decided by (``special_days.rules``): a day
+# decided by an earlier one is decided again from its recording. 2: #625 (the breaker from the open,
+# the market halt).
+RULES = 2
 
 
 class Kind(enum.Enum):
