@@ -97,9 +97,10 @@ SAMPLE_KEYS_AGAIN = Job(
 #
 # It runs right after the trader's report, at about 22:31 (later on the sample-key probes' two
 # nights, #565): the polls' counts are the engine's of today, in memory, and are gone at midnight. A
-# server-sized day read in about 6 s on a Mac, at a peak of 365 MB resident
-# (``recording_quality.MEMORY_MB`` bounds it); fifteen minutes is a bound, short so that the
-# simulations and pre-validations after it keep their starts.
+# made-up day of 2026-11-06's size read in about 8 s in the server's image, at a peak of 375 MB
+# resident (#631; ``recording_quality.MEMORY_MB`` bounds it: over it the run stops and says so);
+# fifteen minutes is a bound, short so that the simulations and pre-validations after it keep their
+# starts.
 #
 # One comment a night on the standing issue #571, which gets ``ready-for-agent`` only on a night past
 # a threshold (its ``에이전트 차례:`` line names why, #402's way) or whose run failed; another night's
