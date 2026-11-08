@@ -2,7 +2,7 @@
 
 Input: a data directory as the collector writes it (``raw`` frames of ``H0STASP0`` in the example's
 63 and 59 fields, KIS's answers in ``_system``, ``gaps``), all values made up. Output: the report's
-sections and its exit code, and the scheduled job that runs it.
+sections and its exit code; the scheduled job that ran it has left ``JOBS``.
 """
 
 from __future__ import annotations
@@ -23,15 +23,14 @@ from krx_quant.inverse_book_probe import (
     RSS_BOUND_MB,
     measure_burden,
     probe_inverse_book,
-    probed_day,
     report,
     verdict,
 )
+from krx_quant.inverse_replay import probed_day
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.raw_days import RawDays
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night
-from krx_quant.scheduled.probes import INVERSE_BOOK, INVERSE_BOOK_ISSUE
+from krx_quant.scheduled import JOBS
 from tests.kis_frames import KRX_BOOK_COLUMNS, krx_book_frame
 
 DAY = date(2026, 10, 8)  # a Thursday: 09:00–15:30, the closing auction from 15:20
@@ -262,25 +261,8 @@ def test_the_command_reads_the_day_asked_for(tmp_path: Path) -> None:
 # --- the job ------------------------------------------------------------------------------------
 
 
-def night(day: date, record: JobRecord | None = None) -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), "new", record, {}, Facts())
-
-
-def ran(day: date, outcome: str = OK, commit: str = "new") -> JobRecord:
-    return JobRecord(day, outcome, datetime(day.year, day.month, day.day, 22, 30, tzinfo=KST), commit, 0)
-
-
-def test_the_job_runs_on_the_first_trading_night_and_again_after_a_failure_on_other_code() -> None:
-    due = INVERSE_BOOK.due
-    assert due(night(DAY))
-    assert not due(night(SATURDAY)), "no session recorded that day"
-    assert not due(night(NEXT, ran(DAY)))
-    assert not due(night(NEXT, ran(DAY, FAILED, "new")))
-    assert due(night(NEXT, ran(DAY, FAILED, "old"))), "no frame came, and the registration was changed"
-
-
-def test_the_job_runs_the_command_and_posts_to_the_issue() -> None:
-    assert INVERSE_BOOK in JOBS
-    assert callable(cli._parser().parse_args(list(INVERSE_BOOK.command)).run)
-    assert [t.issue for t in INVERSE_BOOK.targets] == [INVERSE_BOOK_ISSUE] == [606]
+def test_the_probe_ran_and_left_the_jobs_and_its_command_stays() -> None:
+    # It posted on #606 on 2026-11-06 (#505: a one-off job that has run leaves ``JOBS``).
+    assert "probe-inverse-book-606" not in {job.name for job in JOBS}
+    assert callable(cli._parser().parse_args(["probe-inverse-book"]).run)
     assert cli._parser().parse_args(["probe-inverse-book", "--day", "2026-10-08"]).day == DAY

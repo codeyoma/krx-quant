@@ -161,10 +161,14 @@ SHORT_FRAMES_EXPECTED = frozenset({MEMBER.tr_id})
 
 
 # The symbols whose inverse ETF's KRX book is registered (#606): the traded symbol's, 0193L0, for a
-# replay of down calls through it. It takes the last of KIS's 41 slots with the server's three
-# symbols (they use 40), so a smaller limit cuts it first; it has no REST fallback. 000660's 0197X0
-# joins once another slot is free (#606).
+# replay of down calls through it (``inverse_replay.py``). It takes the last of KIS's 41 slots with the
+# server's three symbols (they use 40), so a smaller limit cuts it first; it has no REST fallback.
+# 000660's 0197X0 joins once another slot is free (#606).
 INVERSE_BOOKS = (TRADED_SYMBOL,)
+
+# Feeds whose events are recorded and nothing live takes: the inverse ETF's best quotes (#606) are for
+# the replay at night alone, so neither the engine nor the trader's quote stream sees them.
+RECORDED_ONLY = frozenset({KRX_BOOK.tr_id})
 
 
 def subscription_plan(
@@ -176,7 +180,7 @@ def subscription_plan(
     then each stock's trades, book and program trading, then the tier-2 feeds. ``night`` is
     the KOSPI200 night futures contract (#264): registered all day like the rest, it
     delivers from 18:00 to 06:00 only, and has no REST fallback. Last, the inverse ETF's KRX
-    book (``INVERSE_BOOKS``), recorded raw only until its probe has read it (#606).
+    book (``INVERSE_BOOKS``, #606), whose best quotes are recorded for the replay alone.
     """
     plan: list[tuple[Feed | RawFeed, str]] = []
     if fronts is not None:
@@ -1307,7 +1311,8 @@ class _Stream:
         parsed or normalized is logged and skipped so one bad frame never stops recording. A
         frame short of fields is also counted for its key, and logged as a WARNING for the
         feeds that send such frames now and then (``SHORT_FRAMES_EXPECTED``, #381). A feed recorded
-        raw only (``RAW_FEEDS``, #606) is counted as delivering and goes no further.
+        raw only (``RAW_FEEDS``) is counted as delivering and goes no further; the events of a feed
+        nothing live takes (``RECORDED_ONLY``, #606) are recorded and not followed.
         """
         at = self._now()
         day = kst_day(at)
@@ -1335,7 +1340,7 @@ class _Stream:
         self._recorder.record("raw", day, message.tr_id, message.symbol, raw_row, RAW_SCHEMA)
         self._health.received((message.tr_id, message.symbol))
         if message.tr_id in RAW_FEEDS:
-            return  # recorded raw only until its probe has read it (#606)
+            return  # recorded raw only until its probe has read it
         feed = WS_FEEDS.get(message.tr_id)
         if feed is None or message.encrypted:
             log.warning(
@@ -1366,7 +1371,8 @@ class _Stream:
             return
         for row in rows:
             self._recorder.record("events", day, feed.tr_id, row["symbol"], row, feed.schema)
-            self._on_event(feed.tr_id, row)
+            if feed.tr_id not in RECORDED_ONLY:
+                self._on_event(feed.tr_id, row)
 
     async def _on_rejected(self, ws: aiohttp.ClientWebSocketResponse, message: kis.SystemMessage) -> None:
         key = (message.tr_id, message.tr_key or "")

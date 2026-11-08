@@ -52,12 +52,13 @@ WS_FEEDS: dict[str, Feed] = {
         NIGHT_FUTURES_BOOK,
         US_TRADE,
         OPTION,
+        KRX_BOOK,
     )
 }
 
-# Registered and recorded raw only, until a probe has read their frames (``RawFeed``): the inverse
-# ETF's KRX book (#606).
-RAW_FEEDS: dict[str, RawFeed] = {f.tr_id: f for f in (KRX_BOOK,)}
+# Registered and recorded raw only, until a probe has read their frames (``RawFeed``): none now. The
+# inverse ETF's KRX book (#606) was until its probe had read it; its best quotes are events since.
+RAW_FEEDS: dict[str, RawFeed] = {}
 
 # When a WebSocket registration is refused for the session limit, poll this REST feed instead.
 FALLBACKS: dict[str, RestFeed] = {
