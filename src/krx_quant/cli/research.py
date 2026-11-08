@@ -61,21 +61,6 @@ def _climate_prior(days: int) -> int:
     return 0
 
 
-def _normal_order(days: int) -> int:
-    """The label-order experiment for normal_forecast's algorithms (#529): its lines; exit 1 without a
-    recorded day."""
-    from krx_quant.normal_order import REPORT, lines, normal_order_experiment
-
-    settings = Settings.from_env(require_kis=False)
-    try:
-        result = normal_order_experiment(settings, days=days)
-    except FileNotFoundError as e:
-        print(e, file=sys.stderr)
-        return 1
-    print("\n".join(lines(result, settings.state_dir / REPORT)))
-    return 0
-
-
 def _neyman_variants(backfill: bool = False) -> int:
     """Neyman's variants experiment (#455): its next step's lines (the discovery, the window's
     progress or its verdict), or with ``backfill`` its verdict on the backfilled days (#532); exit 1
@@ -237,7 +222,7 @@ def _sample_profile_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _prediction_days_arguments(parser: argparse.ArgumentParser) -> None:
-    """``climate-prior``'s and ``normal-order``'s: the pre-validation's days."""
+    """``climate-prior``'s: the pre-validation's days."""
     from krx_quant.prevalidation import PREVALIDATION_DAYS
 
     parser.add_argument(
@@ -343,13 +328,6 @@ def add(sub: Commands) -> None:
         " the pre-validation's folds (#429; reads the training samples, replays nothing)",
         arguments=_prediction_days_arguments,
     ).set_defaults(run=lambda args: _climate_prior(args.days))
-    sub.add_parser(
-        "normal-order",
-        help="compare newton, gauss, granger, markov and kalman with normal_forecast's targets taken as"
-        " independent and in the touch label's order on the pre-validation's folds (#529; reads the"
-        " training samples, replays nothing)",
-        arguments=_prediction_days_arguments,
-    ).set_defaults(run=lambda args: _normal_order(args.days))
     neyman_variants_cmd = sub.add_parser(
         "neyman-variants",
         help="neyman's variants (#455): the discovery that fixes the window's N, then the verdict on the"
