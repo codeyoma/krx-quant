@@ -656,10 +656,14 @@ def _until(condition: Callable[[], bool], timeout: float = 20.0) -> None:
 
 
 def _gone(pid: int) -> bool:
-    """Whether process ``pid`` has ended (reaped, or a zombie no one reaped yet)."""
+    """Whether process ``pid`` has ended (reaped, or a zombie no one reaped yet).
+
+    A process reaped between opening and reading its status file makes the read
+    fail with ESRCH (``ProcessLookupError``) rather than ENOENT, so both mean gone.
+    """
     try:
         status = Path(f"/proc/{pid}/status").read_text()
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return True
     return "\nState:\tZ" in status
 
