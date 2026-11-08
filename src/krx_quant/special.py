@@ -104,6 +104,10 @@ FRESH = timedelta(seconds=10)
 HALTED, AUCTION, REOPENED = "정지", "단일가", "재개"  # a market halt's phases (``Window.detail``)
 # The status of the predictions the engine does not make in a market halt (#625), as ``vi`` in a VI.
 HALT_STATUS = "halt"
+# The version of these rules a past day's windows are decided by (``special_days.rules``): a day
+# decided by an earlier one is decided again from its recording. 2: #625 (the breaker from the open,
+# the market halt).
+RULES = 2
 
 
 class Kind(enum.Enum):

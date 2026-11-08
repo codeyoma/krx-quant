@@ -22,6 +22,7 @@ import pytest
 
 from krx_quant.engine import Event
 from krx_quant.feeds import BOOK, TRADE
+from krx_quant.predictions import DB_NAME
 from krx_quant.rescore import fill_special_windows
 from krx_quant.special import Kind, SpecialSituations, Window
 from tests.api_schema import check
@@ -398,3 +399,42 @@ def test_the_order_of_a_seconds_trades_and_books_does_not_move_the_reopening_pas
     phases = halts(learned)
     assert [p for _, _, _, p in phases] == ["정지", "단일가", "재개"]
     assert at("09:35:10") <= phases[-1][2] <= at("09:35:16")
+
+
+def test_a_day_decided_by_the_rules_before_625_is_decided_again_once(tmp_path: Path) -> None:
+    # An installation's database: the halt morning decided before #625 (its breaker from 09:06, no
+    # halt, ``special_days`` without a rules version). The next fill decides it again, once.
+    s = settings(tmp_path)
+    events = sorted([*halt_morning(), *market()], key=lambda e: e[1]["received_at"])
+    record(s.data_dir, events)
+    replayed = tmp_path / "replayed.sqlite3"
+
+    async def replay() -> None:
+        engine = await run(replayed, events, until=at("11:00:00"))
+        engine.store.close()
+
+    asyncio.run(replay())
+    # The live database as the engine before #625 left it: its special tables kept, with that day's
+    # windows and decision by the old rules (no ``rules`` column yet: an engine adds it as 1).
+    s.state_dir.mkdir(parents=True, exist_ok=True)
+    db = s.state_dir / DB_NAME
+    with sqlite3.connect(replayed) as source, sqlite3.connect(db) as target:
+        source.backup(target)
+    with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE special_days DROP COLUMN rules")
+        conn.execute("DELETE FROM special_windows")
+        conn.execute(
+            "INSERT INTO special_windows (kind, symbol, start, end, detail, learned_at)"
+            " VALUES ('circuit_breaker', NULL, ?, ?, '1단계', ?)",
+            (at("09:06:00").isoformat(), at("09:36:00").isoformat(), at("09:06:00").isoformat()),
+        )
+        conn.execute(
+            "INSERT INTO special_days (day, source, windows, decided_at) VALUES ('2026-10-12', 'old', 1, ?)",
+            (at("06:00:00").isoformat(),),
+        )
+
+    [filled] = fill_special_windows(s, NEXT_MORNING)
+
+    assert (filled.labeled, filled.failed) == (2, None)
+    assert kept(db) == KEPT
+    assert fill_special_windows(s, NEXT_MORNING) == [], "decided by these rules: not read again"

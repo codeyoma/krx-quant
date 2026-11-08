@@ -76,7 +76,7 @@ from krx_quant.kinds import DIRECTION, Answer
 from krx_quant.lifecycle import CODE_CHANGED, Simulated, Standing, Status, starts_simulation
 from krx_quant.pricing import Direction
 from krx_quant.smt import SmtEvent
-from krx_quant.special import Window
+from krx_quant.special import RULES, Window
 from krx_quant.touch import TARGET_VERSION, TouchResult, touch_path
 
 # The engine's database, in the state directory.
@@ -254,7 +254,8 @@ CREATE TABLE IF NOT EXISTS special_days (  -- a past day whose windows were deci
     day TEXT PRIMARY KEY,             -- YYYY-MM-DD (KST)
     source TEXT,                      -- where its events came from; null: recorded nowhere
     windows INTEGER NOT NULL,         -- the windows decided
-    decided_at TEXT NOT NULL
+    decided_at TEXT NOT NULL,
+    rules INTEGER NOT NULL DEFAULT 1  -- the version of the rules it was decided by (special.RULES, #625)
 );
 """
 
@@ -383,6 +384,7 @@ _ADDED_COLUMNS = (
     ("smt_events", "a_extreme", "TEXT"),
     ("smt_events", "b_extreme", "TEXT"),
     ("special_windows", "first_learned_at", "TEXT"),
+    ("special_days", "rules", "INTEGER NOT NULL DEFAULT 1"),
 )
 
 
@@ -1619,14 +1621,15 @@ class PredictionStore:
 
     def special_undecided(self, since: date, before: date) -> dict[date, list[str]]:
         """The days from ``since`` to before ``before`` with predictions, not yet decided from
-        their recording (#236), with the symbols predicted on each. Windows the live engine kept
+        their recording (#236) by the rules as they are now (``special.RULES``, #625), with the
+        symbols predicted on each. Windows the live engine kept
         do not make a day decided: an engine restarted that day learned only part of it (its
         special situations live in memory), so only a whole day's replay does."""
         decided = {
             r[0]
             for r in self._db.execute(
-                "SELECT day FROM special_days WHERE day >= ? AND day < ?",
-                (since.isoformat(), before.isoformat()),
+                "SELECT day FROM special_days WHERE day >= ? AND day < ? AND rules >= ?",
+                (since.isoformat(), before.isoformat(), RULES),
             )
         }
         days: dict[date, list[str]] = {}
@@ -1652,22 +1655,24 @@ class PredictionStore:
     ) -> int:
         """Keep the windows of a past ``day`` decided from its recording (read from ``source``;
         None: recorded nowhere), each with when it was learned and when its first version was, and
-        mark the day decided, in one transaction; nothing if the day was decided already. The replay
-        is the whole day, so it replaces the windows the live engine kept that day (part of it, if it
-        restarted); a day recorded nowhere keeps them. The rows written."""
+        mark the day decided, in one transaction; nothing if the day was decided already by these
+        rules (one decided by earlier rules is decided again, #625). The replay is the whole day, so
+        it replaces the windows the live engine kept that day (part of it, if it restarted); a day
+        recorded nowhere keeps them. The rows written."""
         first, last = iso(_midnight(day)), iso(_midnight(day + timedelta(days=1)))
         with self._db:
             taken = self._db.execute(
-                "SELECT 1 FROM special_days WHERE day = ?", (day.isoformat(),)
+                "SELECT rules FROM special_days WHERE day = ?", (day.isoformat(),)
             ).fetchone()
-            if taken is not None:
+            if taken is not None and taken[0] >= RULES:
                 return 0
+            self._db.execute("DELETE FROM special_days WHERE day = ?", (day.isoformat(),))
             if source is not None:
                 self._db.execute("DELETE FROM special_windows WHERE start >= ? AND start < ?", (first, last))
             written = sum(self._keep_special(w, learned_at, first) for learned_at, w, first in windows)
             self._db.execute(
-                "INSERT INTO special_days (day, source, windows, decided_at) VALUES (?, ?, ?, ?)",
-                (day.isoformat(), source, len(windows), iso(decided_at)),
+                "INSERT INTO special_days (day, source, windows, decided_at, rules) VALUES (?, ?, ?, ?, ?)",
+                (day.isoformat(), source, len(windows), iso(decided_at), RULES),
             )
         return written
 
