@@ -28,7 +28,8 @@ same cells' predictions and the same quotes, in one process.
   to a minute of fresh quotes and trades after the reopening): no book buys (its window touches every
   rise's, ``paper.plan``'s ``special``), and the paper books fill nothing on the quotes received in it
   (the reopening auction's book is not one they could trade on): they take no quote then, as through
-  a stall, and an exit waits for the first quote after it. The KIS book (mock, live) takes them as
+  a stall, make no time exit by the clock, and an exit waits for the first quote after it
+  (``paper.halt_spans``, which the re-fit's replay goes by too). The KIS book (mock, live) takes them as
   ever: its real orders and fills, its stop and time rules, its loss limits are its own. The stall's
   notice is not sent for a halt the engine knows (``QuoteWatch.on_special``): the engine sends the
   halt's.
@@ -122,7 +123,7 @@ from typing import Any
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kis_orders import Broker
 from krx_quant.market_calendar import Session
-from krx_quant.special import Window, in_halt
+from krx_quant.special import Window
 from krx_quant.trader import KIS_MODES, LIVE, MOCK, PAPER, SYMBOL, live, policy, practice, review
 from krx_quant.trader.cells import Cell, Signal, gone, inactive
 from krx_quant.trader.limits import RUNNING, Notify
@@ -281,7 +282,6 @@ class Desk:
             )
         self.champion.practice_state = practice_state(practice)
         self.challengers: dict[int, PaperTrader] = {}
-        self._windows: list[Window] = []  # the special windows the engine knows (``on_special``)
         self._running: set[int] = set()  # the challengers picked, not retired
         self._recorded: dict[tuple[int, date], bool] = {}  # each record kept today, and if stopped
         # A challenger's paper trade left open when the trader stopped: its book goes on with it.
@@ -526,7 +526,6 @@ class Desk:
             return None
 
     def on_special(self, windows: Sequence[Window]) -> None:
-        self._windows = list(windows)
         self.watch.on_special(windows)
         for book in self.books:
             book.on_special(windows)
@@ -539,12 +538,10 @@ class Desk:
 
     def on_quote(self, quote: BestQuote) -> None:
         ended = self.watch.on_quote(quote)  # the quotes back (#407): each book told before it takes it
-        halted = in_halt(self._windows, quote.received_at) is not None  # #625 (module doc)
-        for book in self.books:
+        for book in self.books:  # a paper book takes no quote of a market halt (#625, ``paper.halt_spans``)
             if ended is not None:
                 book.on_recover(ended, quote.received_at)
-            if not halted or isinstance(book, MockTrader):
-                book.on_quote(quote)
+            book.on_quote(quote)
         self._prune()
 
     def on_controls(self, now: datetime) -> None:

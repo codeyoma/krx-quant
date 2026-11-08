@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
 from functools import partial
@@ -24,8 +25,10 @@ from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds import KST
 from krx_quant.special import REOPENED, Kind, Window
 from krx_quant.special import Kind as SpecialKind
+from krx_quant.trader import CAPITAL
 from krx_quant.trader.cells import Kept, special_windows
-from krx_quant.trader.paper import TIME
+from krx_quant.trader.paper import TIME, Rules
+from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.replay import known
 from tests.api_schema import check
 from tests.collector_doubles import FIXED_NOW, TRADE_KEY, Clock, read, settings_for
@@ -35,8 +38,21 @@ from tests.replay_events import SYMBOL, api, at, get_json, run
 from tests.test_calendar_health import health_checks
 from tests.test_market_halt import halt_morning, market
 from tests.test_resilience import with_telegram
+from tests.test_trader_replay import as_paper, models, of_paper, record_gap, replayed
 from tests.test_trader_stall import BOUGHT, TEN, flowing, paper_day, stalls
-from tests.trader_doubles import Read, Special, Tick, quote
+from tests.trader_doubles import (
+    BARRIER,
+    FEE,
+    Day,
+    Read,
+    Special,
+    Tick,
+    first_champion,
+    pick,
+    quote,
+    record_quotes,
+)
+from tests.trader_doubles import at as tat
 from tests.waiting import until
 
 INDEX_KEY = ("H0UPCNT0", "0001")
@@ -257,3 +273,65 @@ def test_a_stall_in_a_halt_the_engine_knows_tells_telegram_nothing(tmp_path: Pat
     [stall] = stalls(tmp_path)
     assert (stall["began_at"], stall["alerted_at"]) == ("2026-10-14T10:01:05.500000+09:00", None)
     assert day.notices == []
+
+
+# --- The paper book and the re-fit's replay through a halt: the same fills (``paper.halt_spans``).
+
+
+def paper_and_replay(state: Path, events: list[Any], gaps: Sequence[tuple[str, str]] = ()) -> tuple[Any, Any]:
+    """The paper trader's trades on ``events`` and the replay's on the database it read, the same quotes
+    and the recorded ``gaps`` of the book (the halt's silence)."""
+    models(state)
+    paper = Day(state, picks=[pick(BARRIER)], rules=Rules(fee_rate=FEE, capital=CAPITAL)).run(events)
+    record_quotes(state / "data", [e for e in events if isinstance(e, BestQuote)])
+    for start, end in gaps:
+        record_gap(state / "data", tat(start), tat(end))
+    _, trades, _ = replayed(state, [pick(BARRIER)])
+    return of_paper(list(reversed(paper))), as_paper(trades)
+
+
+def test_the_replay_holds_a_trade_through_a_halt_as_the_paper_book(tmp_path: Path) -> None:
+    """Bought at 10:00:02.5; the halt known from 10:00:30 to 10:05:00, the auction's quotes in it below
+    the stop, the book's feed recorded silent in it: neither sells in the halt, both on 10:05:00's quote."""
+    events = [
+        *flowing("10:00:00", "10:00:02"),
+        TEN,
+        BOUGHT,
+        *flowing("10:00:03", "10:00:29"),
+        halted_from("10:00:30", "10:05:00"),
+        *flowing("10:03:00", "10:04:59", bid=69_500, ask=69_600),
+        quote("10:05:00", 69_900, 70_000),
+    ]
+
+    paper, replay_ = paper_and_replay(tmp_path, events, gaps=[("10:01:30", "10:03:00")])
+
+    assert paper == replay_
+    [(_, _, _, _, exit_at, exit_price, reason, _)] = replay_
+    assert (exit_at, exit_price, reason) == (tat("10:05:00"), 69_900, TIME)
+
+
+def test_no_time_exit_by_the_clock_in_a_halt(tmp_path: Path) -> None:
+    """The last quote at 10:03:58, the halt known from 10:03:59 to 10:06:00 over the 10:04 barrier: the
+    clock sells nothing in the halt (at 10:05, the trade is still open); once the first quote after it
+    comes, both the book and the replay sell by the time barrier on the quote before it (10:03:58's
+    bid, the last one of continuous trading)."""
+    before: list[Any] = [
+        *flowing("10:00:00", "10:00:02"),
+        TEN,
+        BOUGHT,
+        *flowing("10:00:03", "10:03:58"),
+        halted_from("10:03:59", "10:06:00"),
+        Tick("10:04:01"),
+        Tick("10:05:00"),
+    ]
+    first_champion(tmp_path / "held")
+    [held] = Day(tmp_path / "held", picks=[pick(BARRIER)], rules=Rules(fee_rate=FEE, capital=CAPITAL)).run(
+        before
+    )
+    assert held["exit"] is None, "held through the halt"
+
+    paper, replay_ = paper_and_replay(tmp_path / "both", [*before, quote("10:06:00", 69_900, 70_000)])
+
+    assert paper == replay_
+    [(_, _, _, _, exit_at, exit_price, reason, _)] = paper
+    assert (exit_at, exit_price, reason) == (tat("10:04:00"), 70_000, TIME)

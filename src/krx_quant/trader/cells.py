@@ -342,6 +342,13 @@ class Kept(Window):
     learned_at: datetime | None = None
 
 
+def learned_at(window: Window) -> datetime:
+    """When the engine first learned ``window`` (#625); its start if it was not kept so."""
+    if isinstance(window, Kept) and window.learned_at is not None:
+        return window.learned_at
+    return window.start
+
+
 def special_windows(db: sqlite3.Connection, symbol: str, since: datetime) -> list[Window]:
     """The special windows the engine kept (#236) of ``symbol`` or the whole market that end after
     ``since``, by start, each with when it was first learned (``Kept``)."""
