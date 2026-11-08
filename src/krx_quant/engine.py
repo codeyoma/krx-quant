@@ -140,6 +140,7 @@ import json
 import logging
 import math
 import time as timer
+import weakref
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
@@ -345,6 +346,7 @@ SMT_STEP = "SMT"
 KIND_BASELINES = "the kinds' baselines"
 CONSENSUS = "consensus"
 GARBAGE = "garbage collection"  # the live engine's after each bar close (#621, ``garbage.py``)
+SQLITE = "SQLite writes"  # the store's write transactions, inside the steps that store (#637)
 # Days with predictions a review reads back over: the longest rule counts 60 on the bench,
 # and a status can be older than that.
 _REVIEW_DAYS = MAX_REVIEW_DAY  # prediction days a review reads back
@@ -591,6 +593,12 @@ class PredictionEngine:
         # The bar close's event loop, watched live (#538): the one going on, if any.
         self._watch_loop = watch_loop
         self._watch: LoopWatch | None = None
+        # The store's writes timed as a step of the bar close; its checkpoints off the loop (#637).
+        # Through a weak reference: the store keeps no hold on the engine, which goes with its
+        # last reference (each replayed day's before the next, #383).
+        engine = weakref.ref(self)
+        store.time_writes(lambda: contextlib.nullcontext() if (e := engine()) is None else e._step(SQLITE))
+        store.checkpoint_aside()
         # The live engine's garbage collection after each bar close (#621); without: Python's own.
         self.garbage = garbage
         # The kinds' answers made at the last scoring, by (kind, symbol, bar close): the kinds'
@@ -1079,6 +1087,8 @@ class PredictionEngine:
                         self.garbage.settle()
             finally:
                 self._tell_held(due, predicted)
+            # Once this run's writes are in, the log copied into the database in a thread (#637).
+            self.store.checkpoint_soon()
         if self.garbage is not None:  # out of the session, its memory handed back (#621, #623)
             ahead = self.next_due()
             if reviewed or ahead is None or ahead - self.clock.now() > IDLE:

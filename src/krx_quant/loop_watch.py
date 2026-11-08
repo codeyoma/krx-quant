@@ -10,7 +10,10 @@ for the GIL while the algorithms' threads hold it) stops the quotes with it.
 ``TICK_SECONDS``, and the longest time between two of its turns is the longest the loop went without
 one. The bar close times its steps on the loop (``step``: synchronous code only, never an await);
 those that ran in that longest stretch are what held it, and the rest of it is ``other`` (the loop's
-other work, or the bar close's between its steps). Over ``LIMIT_SECONDS`` the engine logs one
+other work, or the bar close's between its steps). A step may run inside another: its seconds are its
+own, not the outer one's too. The store's SQLite writes are such a step (#637), inside the bar
+close's ``records`` and the others that store something, so the WARNING says how much of a stretch
+waited on SQLite. Over ``LIMIT_SECONDS`` the engine logs one
 WARNING with them (``held``) and keeps them in the store's ``runs`` as ``LOOP_HELD`` (``held_detail``,
 #589), which the night's report of the bar closes' times reads (``bar_close_times.py``): the server
 cannot read Loki. The live engine watches its bar closes (``watch_loop``); replays and
@@ -73,6 +76,7 @@ class LoopWatch:
         self._last = self._time()  # the heartbeat's last turn; the bar close's start at first
         self._longest = (self._last, self._last)
         self._steps: list[tuple[str, float, float]] = []
+        self._open: list[tuple[str, float]] = []  # the steps under way, the innermost last (#637)
         self._passes: list[tuple[int, float, float]] = []  # generation, start, end (#621)
         self._passing = self._last
         gc.callbacks.append(self._collecting)
@@ -99,12 +103,21 @@ class LoopWatch:
 
     @contextlib.contextmanager
     def step(self, name: str) -> Iterator[None]:
-        """Time a synchronous step of the bar close on the loop, by ``name``."""
+        """Time a synchronous step of the bar close on the loop, by ``name``. Inside another step,
+        its time counts in it alone: the outer step's time stops while it runs (#637)."""
         start = self._time()
+        if self._open:
+            outer, began = self._open[-1]
+            self._steps.append((outer, began, start))
+        self._open.append((name, start))
         try:
             yield
         finally:
-            self._steps.append((name, start, self._time()))
+            _, began = self._open.pop()
+            end = self._time()
+            self._steps.append((name, began, end))
+            if self._open:
+                self._open[-1] = (self._open[-1][0], end)
 
     def stop(self) -> None:
         """End the heartbeat and the timing of the garbage collector's passes; the stretch since

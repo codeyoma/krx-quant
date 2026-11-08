@@ -64,7 +64,8 @@ import contextlib
 import json
 import logging
 import sqlite3
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -1003,6 +1004,12 @@ class PredictionStore:
         # With WAL, a power loss can lose the last commits but never corrupts the file;
         # commits then do not wait for the disk, which would hold up the event loop.
         self._db.execute("PRAGMA synchronous=NORMAL")
+        # The owner's timing of each write transaction (``time_writes``, #637); none by default.
+        self._timing: Callable[[], contextlib.AbstractContextManager[None]] = contextlib.nullcontext
+        # Checkpoints run in a thread of their own once the owner asks (``checkpoint_aside``, #637).
+        self._checkpoints: ThreadPoolExecutor | None = None
+        self._checkpointing: Future[None] | None = None
+        self._checkpointer: sqlite3.Connection | None = None
         version = self._db.execute("PRAGMA user_version").fetchone()[0]
         if version > _VERSION:
             raise RuntimeError(f"{path} was written by a newer engine (schema {version})")
@@ -1027,7 +1034,58 @@ class PredictionStore:
         )
 
     def close(self) -> None:
-        self._db.close()
+        if self._checkpoints is not None:  # the checkpoint under way first: the writer closes last
+            self._checkpoints.shutdown(wait=True)
+            if self._checkpointer is not None:
+                self._checkpointer.close()
+        self._db.close()  # the last connection: SQLite checkpoints the log and removes it
+
+    def time_writes(self, timing: Callable[[], contextlib.AbstractContextManager[None]]) -> None:
+        """Run each write transaction, its statements and its commit, inside ``timing()``: the
+        engine's step of the bar close on the event loop, so a WARNING says how long the loop
+        waited on SQLite (#637)."""
+        self._timing = timing
+
+    def checkpoint_aside(self) -> None:
+        """Stop the writes' own checkpoints: from now ``checkpoint_soon`` runs them, in a thread
+        of their own (#637).
+
+        With WAL, SQLite copies the log into the database once it passes 1,000 pages, in the
+        commit that took it there, and waits for the disk twice (the log, then the database) even
+        with ``synchronous=NORMAL``. The engine writes on its event loop, a transaction for each
+        algorithm's records and more (32 a bar close in the tests' replays), so every eighth bar
+        close or so waited for the disk there: on a busy disk up to 2 s (#637). Readers and the
+        writer go on while a checkpoint runs (WAL lets them), and the log starts over once one
+        has copied all of it."""
+        if self._checkpoints is None:  # once: each day's engine may take the same store
+            self._db.execute("PRAGMA wal_autocheckpoint=0")
+            self._checkpoints = ThreadPoolExecutor(1, thread_name_prefix="checkpoint")
+
+    def checkpoint_soon(self) -> Future[None] | None:
+        """Copy the log into the database in the checkpoint thread, unless one is under way
+        (``checkpoint_aside``); that checkpoint, None before ``checkpoint_aside``."""
+        if self._checkpoints is None:
+            return None
+        if self._checkpointing is None or self._checkpointing.done():
+            self._checkpointing = self._checkpoints.submit(self._checkpoint)
+        return self._checkpointing
+
+    def _checkpoint(self) -> None:
+        """A passive checkpoint on the checkpoint thread's connection: it copies what no reader
+        still needs, and waits for no one."""
+        try:
+            if self._checkpointer is None:
+                self._checkpointer = sqlite3.connect(self._path, check_same_thread=False)
+            self._checkpointer.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        except sqlite3.Error:
+            log.exception("checkpoint of %s failed; the next one tries again", self._path)
+
+    @contextlib.contextmanager
+    def _writing(self) -> Iterator[None]:
+        """A write transaction (commit on success, roll back on an exception), timed by the owner
+        (``time_writes``)."""
+        with self._timing(), self._db:
+            yield
 
     def add_all(self, predictions: Sequence[NewPrediction]) -> Added:
         """Store predictions in one transaction; those made are pending until scored."""
@@ -1035,7 +1093,7 @@ class PredictionStore:
         self._algorithms.update(p.algorithm for p in predictions)
         ids: dict[str, list[int]] = {}
         added: list[Pending] = []
-        with self._db:
+        with self._writing():
             for p in predictions:
                 f = p.forecast
                 cursor = self._db.execute(
@@ -1095,7 +1153,7 @@ class PredictionStore:
         self, algorithm: str, at: datetime, previous: Status | None, status: Status, reason: str
     ) -> None:
         self.version += 1
-        with self._db:
+        with self._writing():
             self._db.execute(
                 "INSERT INTO statuses (algorithm, at, previous, status, reason) VALUES (?, ?, ?, ?, ?)",
                 (algorithm, iso(at), previous.value if previous else None, status.value, reason),
@@ -1116,7 +1174,7 @@ class PredictionStore:
         simulated days (#298).
         """
         self.version += 1
-        with self._db:
+        with self._writing():
             return self._change_status(algorithm, at, previous, status, reason, simulated)
 
     def _change_status(
@@ -1172,7 +1230,7 @@ class PredictionStore:
         if its status is still that: a stop between the two never leaves new code recorded on an
         unchanged status, nor a status changed for code not recorded."""
         self.version += 1
-        with self._db:
+        with self._writing():
             cursor = self._db.execute(
                 "INSERT INTO revisions (algorithm, code, target_version, inputs, seen_at, boundary, state,"
                 " mapped_from, verdict, judged_at, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1210,7 +1268,7 @@ class PredictionStore:
         read, the status it goes to and why: a refusal's retirement, a pass's held promotion), make
         it in the same transaction, if its status is still the one read."""
         self.version += 1
-        with self._db:
+        with self._writing():
             self._db.execute(
                 "UPDATE revisions SET verdict = ?, judged_at = ?, detail = ? WHERE id = ?",
                 (verdict, iso(at), detail, revision.id),
@@ -1226,7 +1284,7 @@ class PredictionStore:
     def record_models(self, models: Sequence[tuple[str, str, int | None]]) -> None:
         """Keep which target each model the engine runs was trained on (#170): (algorithm,
         version, target version) entries; a model already known keeps its entry."""
-        with self._db:
+        with self._writing():
             self._db.executemany(
                 "INSERT OR IGNORE INTO model_targets (algorithm, version, target_version) VALUES (?, ?, ?)",
                 models,
@@ -1262,7 +1320,7 @@ class PredictionStore:
         """Keep ``weights`` (replacing a fit of the same version: a review run again)."""
         assert weights.computed_at is not None
         self.version += 1
-        with self._db:
+        with self._writing():
             self._db.execute("DELETE FROM consensus_weights WHERE version = ?", (weights.version,))
             self._db.execute(
                 "INSERT OR REPLACE INTO consensus_fits (version, computed_at) VALUES (?, ?)",
@@ -1371,7 +1429,7 @@ class PredictionStore:
         return [Run(r[0], datetime.fromisoformat(r[1]), r[2], r[3] or "") for r in rows]
 
     def add_run(self, kind: str, at: datetime, algorithm: str | None, detail: str) -> None:
-        with self._db:
+        with self._writing():
             self._db.execute(
                 "INSERT INTO runs (kind, at, algorithm, detail) VALUES (?, ?, ?, ?)",
                 (kind, iso(at), algorithm, detail),
@@ -1398,7 +1456,7 @@ class PredictionStore:
     def score_all(self, scores: Sequence[tuple[int, Score]], scored_at: datetime) -> None:
         """Complete the outcomes of (prediction ID, score) pairs in one transaction."""
         self.version += 1
-        with self._db:
+        with self._writing():
             self._db.executemany(
                 "UPDATE outcomes SET mid_target = ?, class_a = ?, class_b = ?, unscorable = ?,"
                 " scored_at = ? WHERE prediction_id = ?",
@@ -1436,7 +1494,7 @@ class PredictionStore:
         ]
         if not rows:
             return 0
-        with self._db:
+        with self._writing():
             before = self._db.total_changes
             if replace:
                 stored = self._stored_touches(min(r[1] for r in rows), max(r[1] for r in rows))
@@ -1521,7 +1579,7 @@ class PredictionStore:
         where ``kind_horizons`` names it (#263), ``horizon`` otherwise.
         """
         self.version += 1
-        with self._db:
+        with self._writing():
             self._mark_special(symbol, start, end, horizon, kind_horizons)
 
     def _mark_special(
@@ -1599,7 +1657,7 @@ class PredictionStore:
         """Keep a special window the engine learned at ``learned_at``: a new one, or a later
         version of one kept (the same kind, symbol and start: a VI's release), which keeps when the
         first was learned (``first_learned_at``, #625)."""
-        with self._db:
+        with self._writing():
             self._keep_special(window, learned_at)
 
     def _keep_special(self, window: Window, learned_at: datetime, first: datetime | None = None) -> int:
@@ -1625,7 +1683,7 @@ class PredictionStore:
         """Keep SMT events (#520) found at ``recorded_at``. One kept already (the same definition,
         version, bar close, pair, direction, L and source) stays as it was: they are never
         rewritten. The rows written."""
-        with self._db:
+        with self._writing():
             cursor = self._db.executemany(
                 f"INSERT OR IGNORE INTO smt_events ({_SMT_COLUMNS}, recorded_at)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1715,7 +1773,7 @@ class PredictionStore:
         the whole day, so it replaces the windows the live engine kept that day (part of it, if it
         restarted); a day recorded nowhere keeps them. The rows written."""
         first, last = iso(_midnight(day)), iso(_midnight(day + timedelta(days=1)))
-        with self._db:
+        with self._writing():
             taken = self._db.execute(
                 "SELECT rules FROM special_days WHERE day = ?", (day.isoformat(),)
             ).fetchone()
@@ -1793,7 +1851,7 @@ class PredictionStore:
         """Store a kind's predictions in one transaction; their IDs, by predictor."""
         self.version += 1
         ids: dict[str, list[int]] = {}
-        with self._db:
+        with self._writing():
             for p in predictions:
                 cursor = self._db.execute(
                     "INSERT INTO kind_predictions (kind, symbol, algorithm, model_version, bar_close,"
@@ -1834,7 +1892,7 @@ class PredictionStore:
         replay or a fill scores it, #263). One stored already stays. The (symbol, bar close) of
         those written."""
         written: list[tuple[str, datetime]] = []
-        with self._db:
+        with self._writing():
             for symbol, bar_close, answer, special in answers:
                 cursor = self._db.execute(
                     "INSERT OR IGNORE INTO kind_answers (kind, symbol, bar_close, answer_version, class,"
@@ -2135,7 +2193,7 @@ class PredictionStore:
     def add_simulation_run(self, made_at: datetime, cadence: str, days: Sequence[date]) -> int:
         """A new replay of ``days`` (oldest first), by ``cadence`` (``daily``: refitted before each
         day; ``bar_close``: trained once before them); its ID."""
-        with self._db:
+        with self._writing():
             cursor = self._db.execute(
                 "INSERT INTO simulation_runs (made_at, cadence, days) VALUES (?, ?, ?)",
                 (iso(made_at), cadence, json.dumps([d.isoformat() for d in sorted(days)])),
@@ -2148,7 +2206,7 @@ class PredictionStore:
     ) -> None:
         """Keep a replay's predictions of ``kind`` with their answers (of ``answer_version``), in
         one transaction."""
-        with self._db:
+        with self._writing():
             self._db.executemany(
                 "INSERT OR REPLACE INTO sim_kind_predictions (run, kind, symbol, algorithm, model_version,"
                 " model_target, bar_close, status, output, flat_ticks, width_ticks, anchor, tick, band,"
@@ -2184,7 +2242,7 @@ class PredictionStore:
         """Keep a replay's direction predictions (``select_predictions``' rows: each with its
         outcome's ``special`` and its bar close's touch label of ``touch_version``), in one
         transaction."""
-        with self._db:
+        with self._writing():
             self._db.executemany(
                 "INSERT OR REPLACE INTO sim_predictions (run, symbol, algorithm, model_version,"
                 " model_target, bar_close, status, p_up, p_flat, p_down, expected_ticks, special,"
@@ -2259,7 +2317,7 @@ class PredictionStore:
         """Keep ``algorithm``'s simulated probation begun at ``stint``: its replay (``run``; None
         when it was not simulated, ``detail["why"]`` saying why), replacing one kept before."""
         self.version += 1
-        with self._db:
+        with self._writing():
             self._db.execute(
                 "INSERT OR REPLACE INTO simulations (algorithm, stint, kind, run, made_at, detail)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
