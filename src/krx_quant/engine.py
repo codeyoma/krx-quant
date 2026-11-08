@@ -359,11 +359,23 @@ _BOOK_COLUMNS = (
 # The feeds the engine reads, and the columns it uses from each.
 ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     # Integrated trades make the bars; their best quotes are integrated quotes too, and their
-    # aggressor side counts (Shannon's).
-    TRADE.tr_id: ("symbol", "event_time", "received_at", "price", "qty", "ask1", "bid1", "side"),
+    # aggressor side counts (Shannon's). Their halt flag and time code tell a market halt and its
+    # reopening (#625, ``special.py``).
+    TRADE.tr_id: (
+        "symbol",
+        "event_time",
+        "received_at",
+        "price",
+        "qty",
+        "ask1",
+        "bid1",
+        "side",
+        "halted",
+        "hour_cls",
+    ),
     # The book's sizes make the microprice (Kalman's), the order flow imbalance and the
-    # depth imbalance (Shannon's).
-    BOOK.tr_id: _BOOK_COLUMNS,
+    # depth imbalance (Shannon's); its time code tells a halt's reopening auction (#625).
+    BOOK.tr_id: (*_BOOK_COLUMNS, "hour_cls"),
     # The REST book snapshot replaces the integrated book when it is cut by the session limit.
     BOOK_SNAPSHOT.tr_id: _BOOK_COLUMNS,
     # KRX-only trades carry KRX's best quotes, for the 30 seconds before NXT opens; the
@@ -390,6 +402,11 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
     # The options near the money, for their at-the-money implied volatility (Markov's).
     OPTION.tr_id: ("symbol", "received_at", "implied_vol", "delta"),
 }
+
+
+# The special situations that block a final consensus (``_blocked``): a VI, a circuit breaker and a
+# market halt (#625); not a sidecar, which halts program trading alone.
+_BLOCKING = (Kind.VI, Kind.CIRCUIT_BREAKER, Kind.MARKET_HALT)
 
 
 def partitions(feed: str, symbols: Sequence[str], leaders: Leaders) -> list[str] | None:
@@ -1009,19 +1026,19 @@ class PredictionEngine:
 
     def on_event(self, feed: str, row: dict[str, Any]) -> None:
         self._market.on_event(feed, row)
-        self._mark_special(self._special.event(feed, row, self.symbols), row["received_at"])
+        for window in self._special.event(feed, row, self.symbols):
+            self._mark_special(window, row["received_at"])
         if self._daily_events is not None:  # the daily features' pre-market trades (#264)
             self._daily_events(feed, row)
 
-    def _mark_special(self, window: Window | None, learned_at: datetime) -> None:
+    def _mark_special(self, window: Window, learned_at: datetime) -> None:
         """A special window just learned: the predictions it touches are special, scored or not,
         and it is kept (#236)."""
-        if window is not None:
-            log.info("special situation: %s", window)
-            self.store.mark_special(
-                window.symbol, window.start, window.end, HORIZON, {k.name: k.horizon for k in self.kinds}
-            )
-            self.store.keep_special(window, learned_at)
+        log.info("special situation: %s", window)
+        self.store.mark_special(
+            window.symbol, window.start, window.end, HORIZON, {k.name: k.horizon for k in self.kinds}
+        )
+        self.store.keep_special(window, learned_at)
 
     def next_due(self) -> datetime | None:
         """When ``run_due`` next has work: a bar close to predict, an outcome to score, or a review."""
@@ -1869,12 +1886,12 @@ class PredictionEngine:
     def _blocked(
         self, bar_close: datetime, at_close: Mapping[str, _AtClose], pooled: Mapping[str, Forecast]
     ) -> dict[str, Blocked]:
-        """Why each symbol's final consensus is not to be acted on, by what is known now: a VI
-        or circuit breaker touching its four minutes, no reference price at its bar close, or
-        its target time past."""
+        """Why each symbol's final consensus is not to be acted on, by what is known now: a VI,
+        circuit breaker or market halt (#625) touching its four minutes, no reference price at its
+        bar close, or its target time past."""
         now = self.clock.now()
         target_at = bar_close + HORIZON
-        known = [w for w in self._special.known(before=now) if w.kind in (Kind.VI, Kind.CIRCUIT_BREAKER)]
+        known = [w for w in self._special.known(before=now) if w.kind in _BLOCKING]
         blocked: dict[str, Blocked] = {}
         for symbol in pooled:
             if touching(known, symbol, bar_close, target_at):

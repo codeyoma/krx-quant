@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import sqlite3
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -76,8 +77,10 @@ from krx_quant.kinds import DIRECTION, Answer
 from krx_quant.lifecycle import CODE_CHANGED, Simulated, Standing, Status, starts_simulation
 from krx_quant.pricing import Direction
 from krx_quant.smt import SmtEvent
-from krx_quant.special import Window
+from krx_quant.special import RULES, Window
 from krx_quant.touch import TARGET_VERSION, TouchResult, touch_path
+
+log = logging.getLogger(__name__)
 
 # The engine's database, in the state directory.
 DB_NAME = "engine.sqlite3"
@@ -253,7 +256,8 @@ CREATE TABLE IF NOT EXISTS special_days (  -- a past day whose windows were deci
     day TEXT PRIMARY KEY,             -- YYYY-MM-DD (KST)
     source TEXT,                      -- where its events came from; null: recorded nowhere
     windows INTEGER NOT NULL,         -- the windows decided
-    decided_at TEXT NOT NULL
+    decided_at TEXT NOT NULL,
+    rules INTEGER NOT NULL DEFAULT 1  -- the version of the rules it was decided by (special.RULES, #625)
 );
 """
 
@@ -381,6 +385,7 @@ _ADDED_COLUMNS = (
     ("statuses", "simulated", "INTEGER NOT NULL DEFAULT 0"),
     ("smt_events", "a_extreme", "TEXT"),
     ("smt_events", "b_extreme", "TEXT"),
+    ("special_days", "rules", "INTEGER NOT NULL DEFAULT 1"),
 )
 
 
@@ -1514,8 +1519,26 @@ class PredictionStore:
         where ``kind_horizons`` names it (#263), ``horizon`` otherwise.
         """
         self.version += 1
+        with self._db:
+            self._mark_special(symbol, start, end, horizon, kind_horizons)
+
+    def _mark_special(
+        self,
+        symbol: str | None,
+        start: datetime,
+        end: datetime,
+        horizon: timedelta,
+        kind_horizons: Mapping[str, timedelta] | None = None,
+        closes_before: datetime | None = None,
+    ) -> None:
+        """``mark_special`` in the transaction open; of bar closes before ``closes_before`` alone, if
+        given."""
         where = "p.bar_close > ? AND p.bar_close < ? AND o.target_at > ?"
-        params: list[str] = [iso(start - horizon), iso(end), iso(start)]
+        params: list[str] = [
+            iso(start - horizon),
+            iso(min(end, closes_before) if closes_before else end),
+            iso(start),
+        ]
         if symbol is not None:
             where += " AND p.symbol = ?"
             params.append(symbol)
@@ -1524,21 +1547,49 @@ class PredictionStore:
             ("kind NOT IN ({})".format(", ".join("?" * len(own))) if own else "1 = 1", list(own), horizon)
         ]
         marks += [("kind = ?", [name], h) for name, h in own.items()]
-        with self._db:
-            self._db.execute(
-                "UPDATE outcomes SET special = 1 WHERE prediction_id IN"
-                f" (SELECT o.prediction_id FROM outcomes o JOIN predictions p ON p.id = o.prediction_id"
-                f" WHERE {where})",
-                params,
+        self._db.execute(
+            "UPDATE outcomes SET special = 1 WHERE prediction_id IN"
+            f" (SELECT o.prediction_id FROM outcomes o JOIN predictions p ON p.id = o.prediction_id"
+            f" WHERE {where})",
+            params,
+        )
+        for which, names, length in marks:
+            # Its end, bar close + its horizon, after start.
+            answers = f"{which} AND bar_close > ? AND bar_close < ?"
+            answered: list[str] = [
+                *names,
+                iso(start - length),
+                iso(min(end, closes_before) if closes_before else end),
+            ]
+            if symbol is not None:
+                answers += " AND symbol = ?"
+                answered.append(symbol)
+            self._db.execute(f"UPDATE kind_answers SET special = 1 WHERE {answers}", answered)
+
+    def _special_marks(
+        self, first: str, last: str, kinds: Collection[str]
+    ) -> tuple[set[int], set[tuple[Any, ...]]]:
+        """The predictions (ids) and the answers of ``kinds`` (keys) of bar closes in [first, last)
+        marked special now."""
+        outcomes = {
+            r[0]
+            for r in self._db.execute(
+                "SELECT o.prediction_id FROM outcomes o JOIN predictions p ON p.id = o.prediction_id"
+                " WHERE p.bar_close >= ? AND p.bar_close < ? AND o.special = 1",
+                (first, last),
             )
-            for which, names, length in marks:
-                # Its end, bar close + its horizon, after start.
-                answers = f"{which} AND bar_close > ? AND bar_close < ?"
-                answered: list[str] = [*names, iso(start - length), iso(end)]
-                if symbol is not None:
-                    answers += " AND symbol = ?"
-                    answered.append(symbol)
-                self._db.execute(f"UPDATE kind_answers SET special = 1 WHERE {answers}", answered)
+        }
+        names = list(kinds)
+        answers = {
+            tuple(r)
+            for r in self._db.execute(
+                "SELECT kind, symbol, bar_close, answer_version FROM kind_answers"
+                " WHERE bar_close >= ? AND bar_close < ? AND special = 1"
+                f" AND kind IN ({', '.join('?' * len(names))})",
+                (first, last, *names),
+            )
+        }
+        return outcomes, answers
 
     # Special situations' windows (#236).
 
@@ -1615,14 +1666,15 @@ class PredictionStore:
 
     def special_undecided(self, since: date, before: date) -> dict[date, list[str]]:
         """The days from ``since`` to before ``before`` with predictions, not yet decided from
-        their recording (#236), with the symbols predicted on each. Windows the live engine kept
+        their recording (#236) by the rules as they are now (``special.RULES``, #625), with the
+        symbols predicted on each. Windows the live engine kept
         do not make a day decided: an engine restarted that day learned only part of it (its
         special situations live in memory), so only a whole day's replay does."""
         decided = {
             r[0]
             for r in self._db.execute(
-                "SELECT day FROM special_days WHERE day >= ? AND day < ?",
-                (since.isoformat(), before.isoformat()),
+                "SELECT day FROM special_days WHERE day >= ? AND day < ? AND rules >= ?",
+                (since.isoformat(), before.isoformat(), RULES),
             )
         }
         days: dict[date, list[str]] = {}
@@ -1640,28 +1692,88 @@ class PredictionStore:
         return days
 
     def decide_special_day(
-        self, day: date, windows: Sequence[tuple[datetime, Window]], source: str | None, decided_at: datetime
+        self,
+        day: date,
+        windows: Sequence[tuple[datetime, Window]],
+        source: str | None,
+        decided_at: datetime,
+        versions: Sequence[tuple[datetime, Window]] = (),
+        horizon: timedelta = timedelta(minutes=4),
+        kind_horizons: Mapping[str, timedelta] | None = None,
     ) -> int:
         """Keep the windows of a past ``day`` decided from its recording (read from ``source``;
         None: recorded nowhere), each with when it was learned, and mark the day decided, in one
-        transaction; nothing if the day was decided already. The replay is the whole day, so it
+        transaction; nothing if the day was decided already by these rules (one decided by earlier
+        rules is decided again, #625). A day decided again has its predictions' and its bar-close kinds'
+        (``kind_horizons``) answers' special marks made again from every version of its windows
+        (``versions``), as the live engine marks them, ``horizon`` the direction's: newly special and
+        no longer special, both logged. The replay is the whole day, so it
         replaces the windows the live engine kept that day (part of it, if it restarted); a day
         recorded nowhere keeps them. The rows written."""
         first, last = iso(_midnight(day)), iso(_midnight(day + timedelta(days=1)))
         with self._db:
             taken = self._db.execute(
-                "SELECT 1 FROM special_days WHERE day = ?", (day.isoformat(),)
+                "SELECT rules FROM special_days WHERE day = ?", (day.isoformat(),)
             ).fetchone()
-            if taken is not None:
+            if taken is not None and taken[0] >= RULES:
                 return 0
+            self._db.execute("DELETE FROM special_days WHERE day = ?", (day.isoformat(),))
+            if taken is not None and source is not None:
+                self._remark_special(day, first, last, versions, horizon, dict(kind_horizons or {}))
             if source is not None:
                 self._db.execute("DELETE FROM special_windows WHERE start >= ? AND start < ?", (first, last))
             written = sum(self._keep_special(w, learned_at) for learned_at, w in windows)
             self._db.execute(
-                "INSERT INTO special_days (day, source, windows, decided_at) VALUES (?, ?, ?, ?)",
-                (day.isoformat(), source, len(windows), iso(decided_at)),
+                "INSERT INTO special_days (day, source, windows, decided_at, rules) VALUES (?, ?, ?, ?, ?)",
+                (day.isoformat(), source, len(windows), iso(decided_at), RULES),
             )
         return written
+
+    def _remark_special(
+        self,
+        day: date,
+        first: str,
+        last: str,
+        versions: Sequence[tuple[datetime, Window]],
+        horizon: timedelta,
+        kind_horizons: dict[str, timedelta],
+    ) -> None:
+        """A day decided again by new rules (#625): its special marks made again from ``versions``, in
+        the transaction open."""
+        before = self._special_marks(first, last, kind_horizons)
+        self._db.execute(
+            "UPDATE outcomes SET special = 0 WHERE prediction_id IN (SELECT o.prediction_id FROM outcomes o"
+            " JOIN predictions p ON p.id = o.prediction_id WHERE p.bar_close >= ? AND p.bar_close < ?)",
+            (first, last),
+        )
+        names = list(kind_horizons)
+        self._db.execute(
+            f"UPDATE kind_answers SET special = 0 WHERE bar_close >= ? AND bar_close < ?"
+            f" AND kind IN ({', '.join('?' * len(names))})",
+            (first, last, *names),
+        )
+        # As the live engine marks: a version marks what was predicted before it was replaced (made
+        # while it was known, or before it was learned), not what was made after a later one.
+        replaced: dict[int, datetime] = {}
+        latest: dict[tuple[Any, ...], int] = {}
+        for i, (received, w) in enumerate(versions):
+            key = (w.kind, w.symbol, w.start)
+            if key in latest:
+                replaced[latest[key]] = received
+            latest[key] = i
+        for i, (_, w) in enumerate(versions):
+            self._mark_special(w.symbol, w.start, w.end, horizon, kind_horizons, replaced.get(i))
+        after = self._special_marks(first, last, kind_horizons)
+        self.version += 1
+        log.info(
+            "special marks of %s made again by the rules of #625: predictions %d newly special, %d no longer;"
+            " answers %d newly special, %d no longer",
+            day,
+            len(after[0] - before[0]),
+            len(before[0] - after[0]),
+            len(after[1] - before[1]),
+            len(before[1] - after[1]),
+        )
 
     # The kinds besides the direction (#179): their predictions and answers.
 

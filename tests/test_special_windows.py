@@ -245,7 +245,7 @@ def test_a_day_recorded_nowhere_is_decided_without_windows_and_logged(
 
     assert (filled.source, filled.labeled, filled.written) == (None, 0, 0)
     assert decided(db) == [(DAY.isoformat(), None, 0, "2026-10-13T06:00:00+09:00")]
-    assert f"{DAY}: no VI status, KOSPI index nor KOSPI200 futures recorded in the data directory nor" in (
+    assert f"{DAY}: no VI status, trades, book, KOSPI index nor KOSPI200 futures recorded in the data" in (
         caplog.text
     )
     assert fill_special_windows(s, NEXT_MORNING) == []
