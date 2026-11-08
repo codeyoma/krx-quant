@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
+import tracemalloc
 from collections.abc import Iterable, Mapping
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -38,13 +40,15 @@ from krx_quant.feeds import (
     Feed,
 )
 from krx_quant.feeds.base import KST
-from krx_quant.health import FeedHealth
+from krx_quant.footprint import PEAK_START, PEAK_STEP, Meter
+from krx_quant.health import FeedHealth, Unread, read_batches
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.process_log import Ran
 from krx_quant.raw_days import RawDays
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.recording_quality import Polls, polls_of, report, report_day
+from krx_quant.reference import BarBuilder
 from krx_quant.scheduled import JOBS, RECORDING_QUALITY, Facts, JobRecord, Night, recording_quality_calls
 from krx_quant.trader.report import AGENT
 from tests.kis_frames import BOOK_COLUMNS, MEMBER_COLUMNS, TRADE_COLUMNS, book_frame, frame, trade_frame
@@ -374,6 +378,67 @@ def test_the_recorded_bars_are_set_against_kis_s_minute_by_minute(recorded: Path
     assert not [r for r in found if r.startswith(ETF)]
 
 
+def test_the_differing_minutes_are_counted_by_cause(tmp_path: Path) -> None:
+    """#631: each differing minute one way a recording can differ from KIS's bars, the cumulative
+    volume a chain from one trade to the next but where a trade never came."""
+    low, high = PRICES
+
+    def at_(hhmmss: str, qty: int, cum: int, price: int = low, received: str | None = None) -> dict[str, Any]:
+        return trade(TRADE, STOCK, hhmmss, received or hhmmss, price, qty, cum)
+
+    odd = at_("11:20:10", 8, 103) | {"hour_cls": "C"}  # a trade of another hour code
+    record_trades(
+        tmp_path,
+        TRADE,
+        [
+            at_("11:00:30", 10, 10),  # alike
+            at_("11:01:10", 20, 30),  # KIS puts the next trade in 11:01, the recording in 11:02
+            at_("11:02:00", 10, 40),
+            at_("11:02:30", 5, 45),
+            at_("11:10:05", 40, 85),  # the first minute after a halt: KIS counts more
+            at_("11:11:05", 7, 92),
+            at_("11:19:05", 3, 95),
+            odd,
+            at_("11:29:05", 2, 105),
+            at_("11:30:10", 5, 130),  # a trade of 20 before it never came: the cumulative volume says so
+            at_("11:39:05", 1, 131),
+            at_("11:40:59", 2, 133, high, "11:40:59"),
+            at_("11:40:59", 2, 135, low, "11:41:00"),  # received last in the last second: its close
+            at_("11:49:05", 1, 136),
+            at_("11:50:05", 6, 142),  # short, and nothing says why
+        ],
+    )
+    write_bars(
+        tmp_path,
+        STOCK,
+        "UN",
+        {
+            "11:00:00": (low, 10),
+            "11:01:00": (low, 30),
+            "11:02:00": (low, 5),
+            "11:10:00": (low, 50),
+            "11:11:00": (low, 7),
+            "11:19:00": (low, 3),
+            "11:20:00": (low, 9),
+            "11:29:00": (low, 2),
+            "11:30:00": (low, 25),
+            "11:39:00": (low, 1),
+            "11:40:00": (high, 4),
+            "11:49:00": (low, 1),
+            "11:50:00": (low, 9),
+        },
+    )
+
+    bars = section(report(tmp_path, CALENDAR, DAY, [STOCK], POLLS), 2)
+
+    assert (
+        "다른 분 7개의 원인 후보(한 분이 여럿에 들 수 있다): 분 경계(옆 분과 맞바뀜) 2"
+        " · 단일가(개장 분, 멈춘 뒤 연 분) 1 · 다른 시간·장운영 구분의 체결 1 · 누적 거래량에만 있는 체결 1"
+        " · 누적 거래량보다 더 센 체결 0 · 같은 초의 순서(종가만) 1 · 어느 것도 아님 1"
+        " · 누적 거래량 사슬(누적 거래량 순으로 늘어놓은 체결 15행): 체결량보다 더 뛴 곳 1 · 덜 늘어난 곳 0"
+    ) in bars
+
+
 def test_a_minute_missing_inside_a_gap_calls_no_agent(tmp_path: Path) -> None:
     record_gaps(tmp_path)
     write_bars(tmp_path, STOCK, "UN", {"09:06:00": (PRICES[0], VOLUMES[0])})
@@ -539,6 +604,177 @@ def test_a_peak_over_the_memory_bound_calls_an_agent(recorded: Path) -> None:
     assert "최대 메모리 501 MB(기준 500 MB 넘게)" in found.reasons
 
 
+class Peaks(Meter):
+    """A meter whose peak is ``low`` until it has been reset ``over_at`` times, then ``high``: the
+    sections' peaks, one section going over (``footprint.Meter``'s face)."""
+
+    def __init__(self, low: float, high: float, over_at: int, *, resets: bool = True) -> None:
+        super().__init__()
+        self.low, self.high, self.over_at, self.resets, self.reset_count = low, high, over_at, resets, 0
+
+    @property
+    def peak_since(self) -> str:
+        return PEAK_STEP if self.resets else PEAK_START
+
+    def reset(self) -> None:
+        self.reset_count += 1
+
+    def peak_mb(self) -> float | None:
+        return self.high if self.reset_count >= self.over_at else self.low
+
+
+def test_a_run_over_its_memory_bound_stops_in_the_section_and_says_where(recorded: Path) -> None:
+    """#631: the third section's reading goes over the bound: the first two stay, the rest is not read,
+    and the reason says where it stopped, once."""
+    budget = quality.Budget(500, Peaks(300, 600, over_at=3))
+    found = quality.measure(recorded, CALENDAR, DAY, [STOCK], POLLS, budget=budget)
+    assert found is not None
+    quality.ran(found, 1.0, budget.peak_mb())
+    text = quality.render(found)
+
+    assert [heading for heading, _ in found.sections] == [
+        "1. 장중 끊김 (gaps, 09:00–15:30)",
+        "2. 녹화한 1분봉과 KIS 1분봉 (연속매매 09:00–15:19 봉, 봉 시각은 그 분의 시작)",
+        "3. 메모리 기준 넘음",
+        "6. 실행",
+    ]
+    assert "3절을 읽다가 최대 RSS 600 MB(기준 500 MB): 이 절과 그 뒤 절은 읽지 않았다" in section(text, 3)
+    found_reasons = reasons(text)
+    assert (
+        "메모리 기준 넘음: 3절을 읽다가 최대 RSS 600 MB(기준 500 MB 넘게), 그 뒤는 읽지 않았다"
+        in found_reasons
+    )
+    assert not [r for r in found_reasons if r.startswith("최대 메모리")]
+    assert "005930 결측 구간 밖의 빠진 분 1개(기준 1개 이상)" in found_reasons  # read before it stopped
+    assert "1.0초 · 최대 RSS 600 MB(기준 500 MB)" in text
+    assert "절마다 최대 RSS(그 절의 최대): 시작 300 MB · 1절 300 MB · 2절 300 MB · 3절 600 MB" in text
+
+
+def test_a_section_s_peak_over_the_bound_once_it_is_read_stops_the_next(recorded: Path) -> None:
+    """#631: the fourth section reads no batch to check after; its peak over the bound, held to it once
+    the section is read and before the fifth's reset forgets it, still stops the run."""
+    budget = quality.Budget(500, Peaks(300, 600, over_at=4))
+    found = quality.measure(recorded, CALENDAR, DAY, [STOCK], POLLS, budget=budget)
+    assert found is not None
+
+    headings = [heading for heading, _ in found.sections]
+    assert headings[3:] == ["4. REST 조회 실패 (/v1/status의 kis.polls)", "5. 메모리 기준 넘음"]
+    assert found.sections[-1][1] == ["4절을 읽은 뒤 최대 RSS 600 MB(기준 500 MB): 그 뒤 절은 읽지 않았다"]
+    assert "메모리 기준 넘음: 4절을 읽은 뒤 최대 RSS 600 MB(기준 500 MB 넘게), 그 뒤는 읽지 않았다" in (
+        found.reasons
+    )
+
+
+def test_a_peak_over_the_bound_after_the_last_section_is_said_by_the_run_s_own_section(
+    tmp_path: Path,
+) -> None:
+    record_gaps(tmp_path)  # no night recorded: the fifth section reads no batch
+    budget = quality.Budget(500, Peaks(300, 600, over_at=5))
+    found = quality.measure(tmp_path, CALENDAR, DAY, [], POLLS, budget=budget)
+    assert found is not None
+    quality.ran(found, 1.0, budget.peak_mb())
+
+    assert found.stopped is None and found.sections[4][0].startswith("5. 야간 기록량")
+    assert "최대 메모리 600 MB(기준 500 MB 넘게)" in found.reasons
+
+
+def test_a_run_within_its_bound_reads_every_section_and_gives_the_same_report(recorded: Path) -> None:
+    unbounded = report(recorded, CALENDAR, DAY, [STOCK, ETF], POLLS)
+    budget = quality.Budget(500, Peaks(300, 600, over_at=99, resets=False))
+    found = quality.measure(recorded, CALENDAR, DAY, [STOCK, ETF], POLLS, budget=budget)
+    assert found is not None
+
+    assert quality.render(found) == unbounded
+    quality.ran(found, 1.0, budget.peak_mb())
+    assert (
+        "절마다 최대 RSS(프로세스가 시작한 뒤의 최대라 절마다 나뉘지 않는다): 시작 300 MB · 1절 300 MB"
+        in (quality.render(found))
+    )
+
+
+def old_recorded_bars(data: Path, feed: str, symbol: str) -> tuple[dict[datetime, Any], int, int]:
+    """The bars and repeats as the report built them before #631: a Python tuple a row, sorted by
+    receipt into the engine's builder, a set of the rows seen."""
+    partition = data / "events" / f"date={DAY.isoformat()}" / f"feed={feed}" / f"symbol={symbol}"
+    rows: list[tuple[Any, ...]] = []
+    for batch in read_batches(
+        partition, ("event_time", "received_at", "price", "qty", "cum_volume"), Unread()
+    ):
+        rows += zip(
+            *(batch.column(c).to_pylist() for c in ("received_at", "event_time", "price", "qty")),
+            batch.column("cum_volume").to_pylist(),
+            strict=True,
+        )
+    rows.sort(key=lambda r: r[0])
+    builder, seen, duplicates = BarBuilder(), set(), 0
+    for _, at_, price, qty, cum in rows:
+        builder.trade(symbol, at_, price, qty)
+        if cum is not None and cum > 0:
+            duplicates += (at_, price, qty, cum) in seen
+            seen.add((at_, price, qty, cum))
+    closed = builder.closed(symbol, datetime.combine(DAY, time(23, 59, 59), KST))
+    return {b.start: vars(b) for b in closed}, len(rows), duplicates
+
+
+def test_the_bars_are_the_ones_built_a_row_at_a_time(tmp_path: Path) -> None:
+    """#631: held as columns, the trades give the bars, rows and repeats the Python rows gave: received
+    out of exchange order, several in a second, some recorded twice, over several part files."""
+    rng = random.Random(631)
+    rows = []
+    for i in range(3_000):
+        second = rng.randrange(60 * 60)
+        hhmmss = (datetime.combine(DAY, time(10), KST) + timedelta(seconds=second)).strftime("%H:%M:%S")
+        late = datetime.combine(DAY, time(10), KST) + timedelta(seconds=second + rng.choice((0, 0, 1, 70)))
+        price, qty = rng.choice(PRICES), rng.randrange(1, 400)
+        rows.append(trade(TRADE, STOCK, hhmmss, late.strftime("%H:%M:%S"), price, qty, 10_000 + i))
+        if i % 97 == 0:
+            rows.append(dict(rows[-1]))  # the same trade again
+    writer = ParquetRecorder(tmp_path, flush_rows=700, flush_seconds=3600)
+    for row in rows:
+        writer.record("events", DAY, TRADE.tr_id, STOCK, row, TRADE.schema)
+    writer.close()
+
+    got = quality.recorded_bars(tmp_path, DAY, TRADE.tr_id, STOCK, Unread())
+
+    bars, count, duplicates = old_recorded_bars(tmp_path, TRADE.tr_id, STOCK)
+    assert {m: vars(b) for m, b in got.bars.items()} == bars
+    assert (got.rows, got.duplicates) == (count, duplicates) and duplicates > 0
+
+
+def test_a_day_of_trades_is_built_in_little_python_memory(tmp_path: Path) -> None:
+    """#631: 300,000 trades of a symbol, traced (tracemalloc: Python's objects and numpy's arrays).
+    A Python tuple a row and a set of them held about 100 MB here (400 MB for 2026-11-06's 1.2 million
+    of 005930); the columns hold about 44 MB, a slice's rows and a few arrays of a number a row."""
+    rows = 300_000
+    seconds = [i * 76_000 // rows for i in range(rows)]  # 09:00 to about 15:20
+    times = [datetime.combine(DAY, time(9), KST) + timedelta(seconds=s) for s in seconds]
+    columns: dict[str, Any] = {f.name: pa.nulls(rows, f.type) for f in TRADE.schema}
+    columns |= {
+        "symbol": pa.array([STOCK] * rows),
+        "event_time": pa.array(times, TRADE.schema.field("event_time").type),
+        "received_at": pa.array(times, TRADE.schema.field("received_at").type),
+        "price": pa.array([PRICES[i % 2] for i in range(rows)], pa.int64()),
+        "qty": pa.array([300 + i % 50 for i in range(rows)], pa.int64()),
+        "cum_volume": pa.array(range(1_000, 1_000 + rows), pa.int64()),
+        "hour_cls": pa.array(["0"] * rows),
+        "session_code": pa.array(["0"] * rows),
+    }
+    partition = tmp_path / "events" / f"date={DAY.isoformat()}" / f"feed={TRADE.tr_id}" / f"symbol={STOCK}"
+    partition.mkdir(parents=True)
+    pq.write_table(pa.table(columns, schema=TRADE.schema), partition / "data.parquet", row_group_size=256_000)
+    del times, columns
+
+    tracemalloc.start()
+    try:
+        got = quality.recorded_bars(tmp_path, DAY, TRADE.tr_id, STOCK, Unread())
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert got.rows == rows and got.duplicates == 0
+    assert peak < 60 * 2**20, f"{peak / 2**20:.0f} MB"
+
+
 def test_the_command_reads_the_files_and_says_the_engine_did_not_answer(
     recorded: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -547,6 +783,7 @@ def test_the_command_reads_the_files_and_says_the_engine_did_not_answer(
     monkeypatch.setenv("KRX_STATE_DIR", str(recorded / "state"))
     monkeypatch.setenv("KRX_SYMBOLS", STOCK)
     monkeypatch.setenv("KRX_ETF_SYMBOLS", ETF)
+    monkeypatch.setattr(quality, "MEMORY_MB", float("inf"))  # the test process's peak is not the run's
     # Nothing listens on port 9: the engine's API is out of reach at once.
     monkeypatch.setattr(
         quality, "api_candidates", lambda settings: [("이 컨테이너의 엔진 API", "http://127.0.0.1:9")]
@@ -589,6 +826,7 @@ def test_the_command_reads_a_pruned_day_from_the_object_store(
     monkeypatch.setenv("KRX_STATE_DIR", str(recorded / "state"))
     monkeypatch.setenv("KRX_OBJECT_STORE", str(store))
     monkeypatch.setenv("KRX_SYMBOLS", STOCK)
+    monkeypatch.setattr(quality, "MEMORY_MB", float("inf"))  # the test process's peak is not the run's
     monkeypatch.setattr(
         quality, "api_candidates", lambda settings: [("이 컨테이너의 엔진 API", "http://127.0.0.1:9")]
     )
