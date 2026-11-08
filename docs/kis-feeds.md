@@ -32,7 +32,7 @@ WebSocket 구독은 아래 순서대로 보낸다. 세션 한도를 넘는 구�
 | 9 | KRX 상장 미국 지수 ETF 체결(KRX 전용) | `H0STCNT0` | `133690`(TIGER 미국나스닥100), `381180`(TIGER 미국필라델피아반도체나스닥) | 2 | `FHKST01010100`(`J`) |
 | 10 | KRX 전용 체결 | `H0STCNT0` | 종목코드 | 3 | 없음 |
 | 10 | NXT 전용 체결 | `H0NXCNT0` | 종목코드 | 3 | 없음 |
-| 11 | 인버스 ETF KRX 호가(raw만, #606) | `H0STASP0` | `0193L0`(005930의 인버스 2X, `collector.INVERSE_BOOKS`) | 1 | 없음 |
+| 11 | 인버스 ETF KRX 호가(raw와 1호가 이벤트, #606) | `H0STASP0` | `0193L0`(005930의 인버스 2X, `collector.INVERSE_BOOKS`) | 1 | 없음 |
 
 - 합계는 41건으로, 실측 한도 41건을 다 쓴다.
 
@@ -676,10 +676,16 @@ KRX 야간 파생상품시장의 KOSPI200 선물 최근월물을 녹화한다. �
 
 - **TR과 키.** 국내주식 실시간호가 (KRX) `H0STASP0`(KIS 예제 `examples_llm/domestic_stock/asking_price_krx`, 2026-11-06에 읽음), 키 `0193L0`(PLUS 삼성전자 인버스 2X, `products.INVERSE_PRODUCTS`). ETF는 NXT에서 거래되지 않아 통합(`H0UNASP0`)이 아니라 KRX 전용이다(아래 "피드별 메모"의 "KRX 상장 ETF"). trader가 매매하는 종목(`trader.SYMBOL`, 005930)이 `KRX_SYMBOLS`에 있을 때만 구독한다(`collector.INVERSE_BOOKS`).
 - **슬롯.** 구독 계획의 맨 끝(11번)이다. 3종목의 다른 피드가 40건이라 이것이 실측 한도 41건의 마지막 슬롯을 쓴다. 한도가 더 작거나(`KIS_WS_MAX_SUBSCRIPTIONS`) 종목을 늘리면 가장 먼저 잘리고, REST 대체가 없어 시작할 때 ERROR `H0STASP0 0193L0 not recorded (…) and has no REST fallback`이 남는다. 000660의 `0197X0`은 슬롯이 하나 더 빌 때만 더한다(`INVERSE_BOOKS`에 000660을 넣는 PR). 009150에는 짝이 되는 인버스가 없다.
-- **필드 배치.** 예제는 2026-09-28까지 59개(통합 호가의 앞 59개와 같다: 종목코드, 시각, 시간 구분, 매도·매수 10단계의 호가와 잔량, 총 잔량, 시간외 총 잔량, 예상 체결, 누적 거래량, 잔량 증감, 거래 구분), 그 뒤 63개다(`MID_PRC`, `MIDP_TOTAL_RSQN`, `MIDP_CLS_CODE`, `MARKET_CLS_CODE`를 KRX 애프터마켓 안내에 맞춰 더했다). 서버가 어느 쪽을 받는지, 이 앱키로 프레임이 오기는 하는지(통합 체결로 구독한 ETF는 성공 응답만 오고 프레임이 없었다, 아래 "KRX 상장 ETF") 아직 보지 못했다 ⚠. 코드의 배치는 `feeds.KRX_BOOK_COLUMNS`(63개)다.
-- **녹화.** 프레임 원문만 raw(`raw/feed=H0STASP0/symbol=0193L0`)에 남기고 events는 만들지 않는다(`feeds.RAW_FEEDS`, `RawFeed`). 외부 데이터는 먼저 확인한다(CODING_STANDARDS.md): 확인 전의 배치로 이벤트를 만들지 않는다. 버퍼는 다른 피드와 같다(`KRX_FLUSH_ROWS` 5,000행, `KRX_FLUSH_SECONDS` 30초). 결측(`gaps`)과 침묵 판정은 다른 피드와 같다(연속매매 중 300초, `health.DEFAULT_STALE_SECONDS`). 키가 하나라 프레임이 오지 않으면 거래일 09:05 무렵 `[장애] 구독한 키가 모두 끊긴 피드: stale H0STASP0`가 온다([operations.md](operations.md#6-장애-대응)).
-- **확인.** 배포 뒤 첫 거래일 밤 예약 작업 `probe-inverse-book-606`이 그날의 raw를 읽어 #606에 남긴다([operations.md](operations.md#인버스-etf-호가-확인-606)): 구독 응답, 레코드당 필드 수, 필드별 빈 값·0, 코드 값, 시각, 1호가(스프레드, 5초보다 오래된 호가), 결측, 기록 부담(CPU와 RSS 증가를 #606의 기준 RSS 증가 32 MiB·한 코어의 5%와).
-- **다음 단계(그 결과를 본 PR).** 1호가의 가격·잔량·시각 이벤트를 확인한 배치로 기록하고, 명시적인 `down`/`down_first` 호출만 ETF로 재생하는 보고를 예약 작업으로 만든다(첫 매도 1호가에 1주 사고, 005930의 장벽이나 만기에 매수 1호가에 판다. 끊긴 구간과 5초보다 오래된 호가는 빼고, 실제 호가와 ETF 수수료로 원 단위 순손익을 센다. 비용 지도의 인버스 하한값은 쓰지 않는다).
+- **필드 배치.** 예제는 2026-09-28까지 59개(통합 호가의 앞 59개와 같다: 종목코드, 시각, 시간 구분, 매도·매수 10단계의 호가와 잔량, 총 잔량, 시간외 총 잔량, 예상 체결, 누적 거래량, 잔량 증감, 거래 구분), 그 뒤 63개다(`MID_PRC`, `MIDP_TOTAL_RSQN`, `MIDP_CLS_CODE`, `MARKET_CLS_CODE`를 KRX 애프터마켓 안내에 맞춰 더했다). 코드의 배치는 `feeds.KRX_BOOK_COLUMNS`(63개)다. 실측(2026-11-06, `probe-inverse-book-606`, #606 댓글): 이 앱키로 프레임이 온다. 37,469개가 08:30–16:00에 왔고, 모두 레코드 하나에 필드 63개다(59개는 없었다). `BSOP_HOUR`는 모두 HHMMSS이고, 받은 시각 − 레코드의 시각은 중앙 0.8초, 99% 1.4초, 최대 22.3초다. 늘 비거나 0인 필드는 `ACML_VOL`, `STCK_DEAL_CLS_CODE`, `MIDP_TOTAL_RSQN`, `MIDP_CLS_CODE`다. `HOUR_CLS_CODE`는 0이 36,414개, A 524, C 298, B 233개다(KIS: 0 장중, A 장후 예상, B 장전 예상, C 9시 이후의 예상가·VI, D 시간외 단일가 예상). 1호가의 가격이 0인 레코드는 12개다(빈 쪽). 연속매매 레코드 36,716개는 모두 양쪽 1호가가 있고, 맞물리거나(0틱) 뒤집힌 스프레드, ETF 호가단위(2,000원 미만 1원, 이상 5원)의 배수가 아닌 값, 순서가 어긋난 단계는 없었다.
+
+  > **바뀜** (2026-11-09, #PRNUM): "서버가 어느 쪽을 받는지, 이 앱키로 프레임이 오기는 하는지 아직 보지 못했다 ⚠" → 위 실측. 이유: 2026-11-06 밤 `probe-inverse-book-606`.
+- **녹화.** 프레임 원문은 raw(`raw/feed=H0STASP0/symbol=0193L0`)에, 레코드마다 1호가 이벤트 1행은 events(`events/feed=H0STASP0/symbol=0193L0`, [events.md](events.md#events-인버스-etf-호가-h0stasp0-krx-606))에 남긴다(`feeds.KRX_BOOK`): 종목, 시각, 받은 시각, 시간 구분, 매도·매수 1호가와 잔량. 필드가 63개가 아닌 프레임은 raw에만 남는다. 이 이벤트는 재생(아래)만 읽는다: 엔진의 예측과 trader의 호가 흐름은 받지 않는다(`collector.RECORDED_ONLY`), 엔진이 녹화한 날을 읽는 피드(`engine.ENGINE_FEEDS`)에도 없어 학습 표본(`sample_store`)의 키가 바뀌지 않는다. 버퍼는 다른 피드와 같다(`KRX_FLUSH_ROWS` 5,000행, `KRX_FLUSH_SECONDS` 30초). 부담(2026-11-06 실측, 그날 프레임으로): raw와 이벤트를 같이 써도 CPU 2.98초(프레임당 80µs, 받은 동안 한 코어의 0.01%), RSS 증가 11.2 MB(읽기를 빼면 0.0 MB), 디스크 raw 2.6 MB로 #606의 기준(RSS 증가 32 MiB, 한 코어의 5%) 안이다. 결측(`gaps`)과 침묵 판정은 다른 피드와 같다(연속매매 중 300초, `health.DEFAULT_STALE_SECONDS`). 키가 하나라 프레임이 오지 않으면 거래일 09:05 무렵 `[장애] 구독한 키가 모두 끊긴 피드: stale H0STASP0`가 온다([operations.md](operations.md#6-장애-대응)).
+
+  > **바뀜** (2026-11-09, #PRNUM): 프레임 원문만 raw에 남기고 events는 만들지 않았다(`feeds.RAW_FEEDS`, `RawFeed`) → raw와 1호가 이벤트. 이유: 위 실측으로 배치를 확인했고, 레코드마다 이벤트를 써도 부담이 기준 안이었다. `RAW_FEEDS`는 비어 있고, 다음에 확인 전의 피드를 녹화할 때 쓴다.
+- **확인.** 배포 뒤 첫 거래일 밤 예약 작업 `probe-inverse-book-606`이 그날의 raw를 읽어 #606에 남긴다([operations.md](operations.md#인버스-etf-호가-확인-606)): 구독 응답, 레코드당 필드 수, 필드별 빈 값·0, 코드 값, 시각, 1호가(스프레드, 5초보다 오래된 호가), 결측, 기록 부담(CPU와 RSS 증가를 #606의 기준 RSS 증가 32 MiB·한 코어의 5%와). 2026-11-06 밤에 돌아 결과를 #606에 올렸고 `JOBS`에서 빠졌다. 명령은 손으로 돌릴 수 있다.
+- **재생.** 예약 작업 `inverse-replay-606`이 거래일 밤마다 명시적인 `down`/`down_first` 호출만 이 ETF로 재생해 #606에 남긴다([operations.md](operations.md#인버스-etf-재생-606)): 표시된 뒤 첫 매도 1호가에 1주 사고, 005930의 장벽이나 만기에 매수 1호가에 판다. 끊긴 구간과 5초보다 오래된 호가는 빼고, 실제 호가와 ETF 수수료로 원 단위 순손익을 센다(ETF는 거래세가 없다). 비용 지도의 인버스 하한값은 쓰지 않는다.
+
+  > **바뀜** (2026-11-09, #PRNUM): "다음 단계(그 결과를 본 PR)"로 적었던 이벤트 기록과 재생 보고 → 위 녹화와 이 재생. 이유: 확인 결과가 나왔다.
 
 ## 피드별 메모
 

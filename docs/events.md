@@ -41,7 +41,9 @@
 | `received_at` | timestamp(us, UTC) | 수신 시각 |
 | `message` | string | 받은 메시지 원문 |
 
-인버스 ETF의 KRX 호가(`H0STASP0`, 키 `0193L0`, #606)는 raw에만 있고 events는 없다. 이 앱키로 오는 프레임의 배치를 서버에서 확인하기 전이라 이벤트를 만들지 않는다([kis-feeds.md](kis-feeds.md#인버스-etf-호가-606)). 확인한 뒤의 PR이 이벤트를 더한다.
+인버스 ETF의 KRX 호가(`H0STASP0`, 키 `0193L0`, #606)는 raw와 함께 1호가 이벤트로도 남는다(아래 "events: 인버스 ETF 호가").
+
+> **바뀜** (2026-11-09, #PRNUM): raw에만 있고 events는 없었다(프레임의 배치를 서버에서 확인하기 전) → 1호가 이벤트도 남긴다. 이유: 2026-11-06 밤 `probe-inverse-book-606`이 배치를 확인했다([kis-feeds.md](kis-feeds.md#인버스-etf-호가-606)).
 
 ## events: 체결 (`H0UNCNT0` 통합, `H0STCNT0` KRX, `H0NXCNT0` NXT)
 
@@ -200,6 +202,23 @@ KRX 야간시장의 KOSPI200 선물 5단계 호가다. KIS는 0.2초 간격으�
 | `total_ask_count`, `total_bid_count` | int64 | `total_askp_csnu`, `total_bidp_csnu` | 총 매도·매수호가 건수 |
 | `total_ask_qty`, `total_bid_qty` | int64 | `total_askp_rsqn`, `total_bidp_rsqn` | 총 매도·매수호가 잔량 |
 | `total_ask_qty_change`, `total_bid_qty_change` | int64 | `total_askp_rsqn_icdc`, `total_bidp_rsqn_icdc` | 총 잔량 증감 |
+
+## events: 인버스 ETF 호가 (`H0STASP0`, KRX, #606)
+
+005930의 인버스 ETF(`0193L0`)의 KRX 전용 호가에서 1호가만, 레코드마다 1행 남긴다(`feeds.KRX_BOOK`). 나머지 필드는 raw에 있다. 아래 호출의 재생(`inverse_replay.py`, [operations.md](operations.md#인버스-etf-재생-606))만 읽는다: 엔진의 예측과 trader의 호가 흐름은 받지 않고, 엔진이 녹화한 날을 읽는 피드(`engine.ENGINE_FEEDS`)에도 없다. 필드 63개가 아닌 프레임은 raw에만 남는다. `event_time`은 통합 호가와 같은 규칙이다(시각만 오고 날짜는 받은 시각의 KST 날짜).
+
+실측(2026-11-06, `probe-inverse-book-606`): 37,469행이 08:30–16:00에 왔다. `hour_cls`는 `0` 36,414, `A` 524, `C` 298, `B` 233행이다. 1호가의 가격이 0인 행은 12개다.
+
+| 열 | 타입 | KIS 필드 | 설명 |
+|---|---|---|---|
+| `symbol` | string | `MKSC_SHRN_ISCD` | ETF 코드(`0193L0`) |
+| `event_time` | timestamp(s, Asia/Seoul) | `BSOP_HOUR` | 호가 시각 |
+| `received_at` | timestamp(us, UTC) | | 수신 시각 |
+| `hour_cls` | string | `HOUR_CLS_CODE` | 시간 구분. KIS: `0` 장중(연속매매), `A` 장후 예상, `B` 장전 예상, `C` 9시 이후의 예상가·VI, `D` 시간외 단일가 예상 |
+| `ask_px_1` | int64 | `ASKP1` | 매도 1호가(빈 쪽은 0) |
+| `ask_qty_1` | int64 | `ASKP_RSQN1` | 매도 1호가 잔량 |
+| `bid_px_1` | int64 | `BIDP1` | 매수 1호가(빈 쪽은 0) |
+| `bid_qty_1` | int64 | `BIDP_RSQN1` | 매수 1호가 잔량 |
 
 ## events: 미국 주식 (`HDFSCNT0`)
 

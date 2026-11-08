@@ -13,7 +13,6 @@ from krx_quant.feeds.base import (
     LEVELS,
     RECEIVED_AT,
     Feed,
-    RawFeed,
     RestFeed,
     Row,
     kst,
@@ -174,8 +173,8 @@ BOOK = Feed("H0UNASP0", tuple(BOOK_COLUMNS), BOOK_SCHEMA, _normalize_book)
 # for 005930's inverse ETF (#606): ETFs do not trade on NXT. Column order per KIS's example
 # (examples_llm/domestic_stock/asking_price_krx, read 2026-11-06): the integrated book's first 59
 # fields, then MID_PRC, MIDP_TOTAL_RSQN, MIDP_CLS_CODE and MARKET_CLS_CODE, which the example added on
-# 2026-09-28 for KRX's after-market. No such frame has been seen live: they are recorded raw only
-# until ``probe-inverse-book`` has read them (#606).
+# 2026-09-28 for KRX's after-market. The probe of 2026-11-06 (``probe-inverse-book``, #606's comment)
+# found that layout in every frame: 37,469 records of 63 fields, one a frame, the time HHMMSS in all.
 KRX_BOOK_COLUMNS = (
     *BOOK_COLUMNS[: BOOK_COLUMNS.index("STCK_DEAL_CLS_CODE") + 1],
     "MID_PRC",
@@ -186,7 +185,41 @@ KRX_BOOK_COLUMNS = (
 # The example's layout before 2026-09-28: the first 59 of those.
 KRX_BOOK_OLD_WIDTH = KRX_BOOK_COLUMNS.index("MID_PRC")
 
-KRX_BOOK = RawFeed("H0STASP0", KRX_BOOK_COLUMNS)
+# Its event (#606): the best quote alone, price, quantity and time, a row per record, for the replay of
+# down calls through the ETF (``inverse_replay.py``); the raw frame keeps the rest. ``hour_cls`` is
+# HOUR_CLS_CODE: KIS gives 0 for continuous trading and A, B, C, D for an auction's expected prices
+# (after the close, before the open, a VI or after 09:00, the after-hours single price); the probe saw
+# 0 in 36,414 records and A, B, C in 1,055, none blank. A price is 0 when the side is empty (the probe:
+# 12 records of the first level).
+KRX_BOOK_SCHEMA = pa.schema(
+    [
+        ("symbol", pa.string()),
+        ("event_time", EVENT_TIME),
+        ("received_at", RECEIVED_AT),
+        ("hour_cls", pa.string()),
+        ("ask_px_1", pa.int64()),
+        ("ask_qty_1", pa.int64()),
+        ("bid_px_1", pa.int64()),
+        ("bid_qty_1", pa.int64()),
+    ]
+)
+
+
+def _normalize_krx_book(f: dict[str, str], received_at: datetime) -> Row:
+    # As the integrated book's: a time of day, the date from the receipt time in KST.
+    return {
+        "symbol": f["MKSC_SHRN_ISCD"],
+        "event_time": kst(received_at.astimezone(KST).date(), f["BSOP_HOUR"]),
+        "received_at": received_at,
+        "hour_cls": f["HOUR_CLS_CODE"],
+        "ask_px_1": to_int(f["ASKP1"]),
+        "ask_qty_1": to_int(f["ASKP_RSQN1"]),
+        "bid_px_1": to_int(f["BIDP1"]),
+        "bid_qty_1": to_int(f["BIDP_RSQN1"]),
+    }
+
+
+KRX_BOOK = Feed("H0STASP0", KRX_BOOK_COLUMNS, KRX_BOOK_SCHEMA, _normalize_krx_book)
 
 
 QUOTE_SCHEMA = pa.schema(
