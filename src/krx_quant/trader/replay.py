@@ -22,7 +22,7 @@ what the nightly re-fit fits a policy on (``refit.py``).
   from its halted trade), or from its start when it was kept before the engine noted that, with the
   end it kept.
 
-  > **바뀜** (2026-11-09, #NNN): each window was known from its start → from when the engine first
+  > **바뀜** (2026-11-09, #636): each window was known from its start → from when the engine first
   > learned it. 이유: a window that begins before the engine can know it (a VI, a breaker called a
   > minute after the drop began) gave the replay what the trader could not have known (#625).
 
