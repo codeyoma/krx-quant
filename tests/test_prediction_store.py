@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -119,3 +120,35 @@ def test_a_kind_prediction_keeps_a_daily_algorithm_s_inputs_and_an_older_table_g
     assert (cox["algorithm"], cox["inputs"]) == ("cox", inputs)
     assert (flat["algorithm"], flat["inputs"]) == ("otc-flat", None), "a baseline has no inputs"
     store.close()
+
+
+def test_with_checkpoints_aside_no_write_copies_the_log_and_the_checkpoint_thread_does(
+    tmp_path: Path,
+) -> None:
+    """Input: 5 MB written in 50 transactions, past the 1,000 pages at which a commit copies
+    SQLite's log into the database. Output: by default a commit copies it (the database file
+    grows); with the checkpoints aside none does, and ``checkpoint_soon`` copies it in its thread;
+    every row is there before and after, and closing leaves no log (#637)."""
+    detail = "x" * 100_000
+    for aside in (False, True):
+        db = tmp_path / f"aside-{aside}.sqlite3"
+        store = PredictionStore(db)
+        if aside:
+            store.checkpoint_aside()
+        empty = db.stat().st_size
+        for i in range(50):
+            store.add_run("test", T + timedelta(seconds=i), None, detail)
+        assert (db.stat().st_size == empty) is aside
+        with contextlib.closing(sqlite3.connect(db)) as reader:
+            assert reader.execute("SELECT COUNT(*) FROM runs WHERE kind = 'test'").fetchone() == (50,)
+        checkpoint = store.checkpoint_soon()
+        assert (checkpoint is not None) is aside
+        if checkpoint is not None:
+            checkpoint.result(timeout=30)
+            assert db.stat().st_size > 50 * len(detail)
+        store.close()
+        assert not db.with_name(db.name + "-wal").exists()
+        with contextlib.closing(sqlite3.connect(db)) as reader:
+            assert reader.execute(
+                "SELECT COUNT(*), MIN(detail) = MAX(detail) FROM runs WHERE kind = 'test'"
+            ).fetchone() == (50, 1)

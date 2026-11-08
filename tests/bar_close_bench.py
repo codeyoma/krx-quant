@@ -236,23 +236,29 @@ class Collections:
 
 
 class Steps(LoopWatch):
-    """The engine's watch of its loop, adding up each step's seconds (``spent``)."""
+    """The engine's watch of its loop, adding up each step's seconds (``spent``). A step inside
+    another (the store's SQLite writes, #637) counts in it alone, as in the watch."""
 
     made: list[Steps] = []
 
     def __init__(self) -> None:
         super().__init__()
         self.spent: defaultdict[str, float] = defaultdict(float)
+        self._inner: list[float] = []  # for each step under way, its inner steps' seconds
         Steps.made.append(self)
 
     @contextlib.contextmanager
     def step(self, name: str) -> Iterator[None]:
         started = timer.perf_counter()
+        self._inner.append(0.0)
         try:
             with super().step(name):
                 yield
         finally:
-            self.spent[name] += timer.perf_counter() - started
+            took = timer.perf_counter() - started
+            self.spent[name] += took - self._inner.pop()
+            if self._inner:
+                self._inner[-1] += took
 
 
 def timed_in_thread(

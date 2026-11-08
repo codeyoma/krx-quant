@@ -203,6 +203,47 @@ async def test_a_bar_close_that_holds_the_loop_over_a_second_says_what_held_it(
     engine.store.close()
 
 
+async def test_a_bar_close_held_by_a_slow_sqlite_write_says_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Input: the store's first write of a 09:10 prediction waits 1.2 s inside SQLite (a trigger on
+    the engine's connection, a stand-in for a commit waiting for a busy disk), the engine watching
+    its loop. Output: one WARNING, for 09:10, naming the store's SQLite writes as what took that
+    time, not also the step that stored (``records``); the same in the store's run (#637)."""
+    clock = FakeClock(at("09:00:00"))
+    engine = engine_on(tmp_path / "engine.db", clock, watch_loop=True)
+    waited: list[bool] = []
+
+    def wait_for_disk() -> None:
+        if not waited:
+            waited.append(True)
+            timer.sleep(1.2)  # inside the write, on the loop's thread
+
+    engine.store._db.create_function("wait_for_disk", 0, wait_for_disk)
+    engine.store._db.execute(
+        "CREATE TEMP TRIGGER slow_write AFTER INSERT ON predictions"
+        f" WHEN NEW.bar_close = '{at('09:10:00').isoformat()}' BEGIN SELECT wait_for_disk(); END"
+    )
+    events = sorted(busy_morning(end="09:12:00"), key=lambda e: e[1]["received_at"])
+
+    with caplog.at_level(logging.WARNING, logger="krx_quant.engine"):
+        await replay_into(engine, clock, events, until=at("09:12:00"))
+
+    assert waited
+    [line] = [r.getMessage() for r in caplog.records if "event loop" in r.getMessage()]
+    assert line.startswith(f"bar close {DAY} 09:10 held the event loop ")
+    seconds = float(line.split("held the event loop ")[1].split("s")[0])
+    steps = line.split(": ", 1)[1].split("; ")[0]
+    named = {name: float(s.rstrip("s")) for name, s in (part.rsplit(" ", 1) for part in steps.split(", "))}
+    assert named["SQLite writes"] >= 1.2
+    assert named.get("records", 0.0) < 0.2  # the write's seconds count once
+    assert sum(named.values()) == pytest.approx(seconds, abs=0.05)
+    with sqlite3.connect(tmp_path / "engine.db") as db:
+        [(detail,)] = db.execute("SELECT detail FROM runs WHERE kind = ?", (LOOP_HELD,)).fetchall()
+    assert json.loads(detail)["parts"]["SQLite writes"] >= 1.2
+    engine.store.close()
+
+
 class Collecting(AlwaysHeld):
     """A kind baseline that runs a full garbage collection on the event loop at the 09:10 bar
     close; ``slow`` makes that collection's end wait 1.2 s (a stand-in for a pass over the session's
