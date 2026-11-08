@@ -542,6 +542,11 @@ class MarketView:
         # The touch windows followed (#167), by symbol and bar close, and each symbol's last
         # integrated best quote (bid, ask), the one before a window opens.
         self._windows: dict[str, dict[datetime, TouchWindow]] = {s: {} for s in self.symbols}
+        # Their bar closes, in order (#630): an event goes only to the windows it falls in, found by
+        # bisection. A window keeps the longest kind's hour and more (``_horizon``), and handing every
+        # quote to each of them, to be dropped by all but the last four minutes', cost a recorded
+        # day most of its making.
+        self._closes: dict[str, list[datetime]] = {s: [] for s in self.symbols}
         self._best: dict[str, tuple[float, float]] = {}
         # The last bar close whose windows were handed out, by window length (#263): the touch
         # windows' four minutes, and each longer kind's horizon.
@@ -876,6 +881,7 @@ class MarketView:
             for old in [c for c in windows if c + self._horizon + _KEEP_WINDOWS < close]:
                 del windows[old]
                 self._widths[symbol].pop(old, None)
+            self._closes[symbol] = sorted(windows)
             if symbol in self._logs:  # and the quotes only they read
                 self._logs[symbol].forget(min(windows))
 
@@ -911,14 +917,21 @@ class MarketView:
         # price's, which the touch target's half-spread term (a feature) is made from.
         if not rest and bid and ask and 0 < bid <= ask:
             self._best[symbol] = (float(bid), float(ask))
-        for window in self._windows[symbol].values():
+        # The windows the event falls in (#630): from a bar close in (received_at − 4 minutes,
+        # received_at]. A window takes nothing from outside its four minutes (``TouchWindow.quote``),
+        # so the others are not handed it.
+        closes, windows = self._closes[symbol], self._windows[symbol]
+        upto = bisect.bisect_right(closes, received_at)
+        for close in closes[bisect.bisect_right(closes, received_at - WINDOW) : upto]:
+            window = windows[close]
             window.quote(received_at, bid, ask, bid_size=bid_size, ask_size=ask_size, rest=rest)
             if feed == TRADE.tr_id:
                 window.trade(received_at, row["price"])
         log = self._logs.get(symbol)
-        # The kinds' windows read the same (#179): kept while a window open now reads it (every
-        # window an event falls in is open by the time it is followed, ``_freeze_before``).
-        if log is not None and any(c <= received_at < c + self._horizon for c in self._windows[symbol]):
+        # The kinds' windows read the same (#179): kept while a window open now reads it, one from a
+        # bar close in (received_at − the longest horizon, received_at] (every window an event falls
+        # in is open by the time it is followed, ``_freeze_before``).
+        if log is not None and upto > bisect.bisect_right(closes, received_at - self._horizon):
             log.quote(received_at, bid, ask, bid_size, ask_size, rest)
             if feed == TRADE.tr_id:
                 log.trade(received_at, row["price"])
