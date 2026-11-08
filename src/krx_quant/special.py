@@ -100,6 +100,8 @@ QUIET_AFTER_HALT = timedelta(minutes=1)
 REOPEN_HOLD = timedelta(minutes=1)
 FRESH = timedelta(seconds=10)
 HALTED, AUCTION, REOPENED = "정지", "단일가", "재개"  # a market halt's phases (``Window.detail``)
+# The status of the predictions the engine does not make in a market halt (#625), as ``vi`` in a VI.
+HALT_STATUS = "halt"
 
 
 class Kind(enum.Enum):
@@ -401,6 +403,12 @@ class SpecialSituations:
             return None
         self._learned.append((received_at, window))
         return window
+
+
+def in_halt(windows: Sequence[Window], at: datetime) -> Window | None:
+    """The market halt ``at`` is in, by ``windows`` (#625): from the halted trade to the minute of
+    fresh quotes and trades after the reopening."""
+    return next((w for w in windows if w.kind is Kind.MARKET_HALT and w.start <= at < w.end), None)
 
 
 def in_vi(windows: Sequence[Window], symbol: str, at: datetime) -> bool:

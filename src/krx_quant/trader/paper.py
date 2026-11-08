@@ -178,7 +178,7 @@ from krx_quant.footprint import resident_mb
 from krx_quant.kinds import most_likely
 from krx_quant.market_calendar import Session
 from krx_quant.pricing import SELL_TAX, tick_size
-from krx_quant.special import Window, touching
+from krx_quant.special import HALT_STATUS, Window, touching
 from krx_quant.trader import (
     CAPITAL,
     COOLDOWN,
@@ -234,8 +234,10 @@ BUY_LIMIT, COOLING_DOWN = "buy_limit", "cooldown"
 # A practice buy too soon after the day's last (#598, ``spaced``).
 SPACING = "spacing"
 BUY, SKIP = "buy", "skip"
-# The status of a prediction the engine did not make for a VI (``engine._record_not_predicted``).
+# The status of a prediction the engine did not make for a VI (``engine._record_not_predicted``), and
+# for a market halt (#625).
 VI_STATUS = "vi"
+NOT_MADE = (VI_STATUS, HALT_STATUS)
 
 
 @dataclass(frozen=True)
@@ -350,7 +352,7 @@ def plan(
     it buys nothing (the reasons the module doc lists, but the trader's own: ``not_picked``,
     ``holding``, ``outranked``). ``threshold`` is its cell's θ under the policy (#399), else
     ``rules.threshold``. The nightly re-fit replays the recorded days by the same rules (``replay.py``)."""
-    if signal.status == VI_STATUS:
+    if signal.status in NOT_MADE:
         return SPECIAL
     p = signal.rise_probability
     if signal.status != "ok" or signal.probabilities is None or p is None:
