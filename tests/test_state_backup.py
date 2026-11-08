@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib
+import importlib.util
 import io
 import json
 import logging
@@ -59,7 +59,8 @@ from tests.waiting import until
 
 NOW = datetime(2026, 11, 7, 5, 35, tzinfo=KST)
 BUCKET = "krx-quant-test"
-# The experiments' reports the state below holds, as their writers name them (#604), made up.
+# The experiments' reports the state below holds, as their writers name them (#604) or as one is kept
+# after its code went (#529), made up.
 EXPERIMENT_REPORTS = {
     "experiments/climate-prior-429.json": {"experiment": "climate-prior-429", "arms": {"a": {"n": 3}}},
     "experiments/normal-order-529.json": {
@@ -275,6 +276,16 @@ def test_each_module_that_writes_under_experiments_has_the_pattern_of_its_report
         assert report.parent.as_posix() == state_backup.EXPERIMENTS
         assert fnmatchcase(report.name, pattern), module
         assert not state_backup.has_refused_word(pattern), pattern
+
+
+def test_a_kept_report_has_no_writer_left_and_no_refused_word() -> None:
+    """The reports kept after their experiment's code went (#529's) are named by no module's pattern
+    and no module writes them; the backup still takes them (``EXPERIMENT_REPORTS`` above)."""
+    assert state_backup.KEPT_REPORTS == ("normal-order-529.json",)
+    assert importlib.util.find_spec("krx_quant.normal_order") is None
+    for name in state_backup.KEPT_REPORTS:
+        assert not any(fnmatchcase(name, p) for p in state_backup.EXPERIMENT_REPORTS.values()), name
+        assert not state_backup.has_refused_word(name), name
 
 
 @pytest.fixture

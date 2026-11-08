@@ -7,8 +7,9 @@ the pre-validation reports and their history (``prevalidations/``) and the sched
 (``scheduled.json``). The models the engine runs (``models/``) go too: a collector started on an
 empty ``state/models`` publishes the defaults as ``live.json`` and prunes the store's models it no
 longer names (``swap.keep_models``), so a new server needs them back before its first start. And the
-experiments' reports their writers name (``EXPERIMENT_REPORTS``, #604): neyman's holds the window's N
-and plan, fixed before the window and never computed again; the user decided on 2026-11-06.
+experiments' reports their writers name (``EXPERIMENT_REPORTS``, #604), with those kept as records
+after their experiment's code went (``KEPT_REPORTS``): neyman's holds the window's N and plan, fixed
+before the window and never computed again; the user decided on 2026-11-06.
 
 **Backup** (``back_up``). Every night at ``BACKUP_AT`` (05:35 KST: the scheduled jobs' night ends at
 05:30, the 06:00 deploy comes after) the collector packs them into one ``tar.gz`` in a scratch folder
@@ -30,14 +31,14 @@ leaked key cannot delete the backups. And 30 days is the drill's month: a backup
 broken still has older nights to go back to.
 
 **Never exported**: the backup takes the files named here (``DATABASES``, ``FILES``, ``FOLDERS``,
-``EXPERIMENT_REPORTS``) and nothing else. ``state/fill_notices.sqlite3`` (and its ``-wal``, ``-shm``)
-stays on the server as the docs require: ``NEVER`` names it, a backup that would hold it is refused, a
-restore takes none from a pack, and no symbolic link is followed. The state folder's other files (the
-KRX Open API's values in ``closing_flow/``, Toss's in ``supply/``, the KIS token caches) are not
-named, so not taken. An experiment report its pattern names is still left out when a word of its name
-or of a key of its JSON is an account's, an order's, a fill notice's or a secret's
-(``REFUSED_WORDS``), or when it is not JSON: the manifest lists it under ``refused``, and the drill
-fails on it.
+``EXPERIMENT_REPORTS``, ``KEPT_REPORTS``) and nothing else. ``state/fill_notices.sqlite3`` (and its
+``-wal``, ``-shm``) stays on the server as the docs require: ``NEVER`` names it, a backup that would
+hold it is refused, a restore takes none from a pack, and no symbolic link is followed. The state
+folder's other files (the KRX Open API's values in ``closing_flow/``, Toss's in ``supply/``, the KIS
+token caches) are not named, so not taken. An experiment report its pattern names is still left out
+when a word of its name or of a key of its JSON is an account's, an order's, a fill notice's or a
+secret's (``REFUSED_WORDS``), or when it is not JSON: the manifest lists it under ``refused``, and the
+drill fails on it.
 
 **Restore** (``restore``, ``krx-quant restore-state``): the latest backup (or a pack given, such as an
 older version fetched from S3) is downloaded into a scratch folder and checked as the drill checks
@@ -118,10 +119,13 @@ FOLDERS = ("prevalidations", "models")
 EXPERIMENTS = "experiments"
 EXPERIMENT_REPORTS = {
     "krx_quant.climate_prior": "climate-prior-429.json",
-    "krx_quant.normal_order": "normal-order-529.json",
     "krx_quant.neyman_variants": "neyman-variants-283.json",
     "krx_quant.neyman_backfill": "neyman-backfill-532.json",
 }
+# The reports a backup holds though their experiment's code is gone: each stays on the server as the
+# record of its result. The label-order experiment's (#529), removed once its result was in (none of
+# the five a candidate, the night of 2026-11-08): nothing writes or reads it any more.
+KEPT_REPORTS = ("normal-order-529.json",)
 # Refused though its pattern names it (#604): an experiment report with one of these words in its
 # name or in a key of its JSON, at any depth. A name or a key is split into words at anything but a
 # letter or a digit and where a lower case letter meets an upper case one, then lowered; each word is
@@ -627,7 +631,7 @@ def _plain_files(state_dir: Path) -> list[Path]:
 
 
 def _experiment_files(state_dir: Path) -> list[Path]:
-    """The files directly under ``EXPERIMENTS`` that a pattern of ``EXPERIMENT_REPORTS`` names, those
+    """The files directly under ``EXPERIMENTS`` that ``_named`` names, those
     a backup refuses (``_refusal``) among them: regular files, no symbolic link followed."""
     root = state_dir / EXPERIMENTS
     if root.is_symlink() or not root.is_dir():
@@ -636,9 +640,10 @@ def _experiment_files(state_dir: Path) -> list[Path]:
 
 
 def _named(name: str) -> bool:
-    """Whether a pattern of ``EXPERIMENT_REPORTS`` names the file ``name``; never one whose name
-    starts with a dot (a file being written)."""
-    return not name.startswith(".") and any(fnmatchcase(name, p) for p in EXPERIMENT_REPORTS.values())
+    """Whether a pattern of ``EXPERIMENT_REPORTS`` or ``KEPT_REPORTS`` names the file ``name``; never
+    one whose name starts with a dot (a file being written)."""
+    patterns = (*EXPERIMENT_REPORTS.values(), *KEPT_REPORTS)
+    return not name.startswith(".") and any(fnmatchcase(name, p) for p in patterns)
 
 
 def _experiment(name: str) -> bool:

@@ -942,6 +942,8 @@ SMT(ICT의 Smart Money Technique)는 함께 움직이는 두 종목 중 한쪽�
 - **서버에서.** 예약 작업 `normal-order-529`(`krx-quant normal-order`)가 녹화 10거래일 이상인 첫 밤에 한 번 돈다. 엔진을 재생하지 않고 학습 표본으로 돈다. 결과는 #529에 댓글로 남는다([operations.md](operations.md#예약-작업-215), 방법은 [engine-api.md](engine-api.md#정답-순서-실험-529)).
 - **채택.** 에이전트가 그 숫자로 #529에 안을 남기고, 사용자가 정한다. 바꾸면 다음 PR에서 `normal_forecast`를 정답의 순서로 고치고 `forecasts.py`를 다섯의 `code_from`에 넣는다. 다섯이 수습으로 돌아가고 Newton은 그동안 합의에서 빠진다.
 
+  > **삭제됨** (2026-11-09, #642): 이 실험의 코드. 명령 `normal-order`, 모듈 `normal_order.py`, `forecasts.label_order` 스위치(와 `normal_forecast`의 그 갈래), 예약 작업 `normal-order-529`, 그 테스트. 2026-11-08 밤에 돌아 결과를 #529에 올렸다(20 녹화일, 봉 마감 21,542개 짝: 다섯 모두 순서 팔의 맞힘률 lift가 0 이하이거나 log loss가 더 나빴다). 이유: 결론이 났다(다섯 모두 후보 아님, #529 2026-11-08 밤 결과). 대신: 지금의 독립 근사를 그대로 쓴다. `normal_forecast`와 다섯의 코드는 그대로라 예측과 코드 digest가 바뀌지 않는다. 결론 난 실험은 지운다(사용자 결정 2026-11-05, #559와 같은 방식). 리포트 `state/experiments/normal-order-529.json`은 서버에 기록으로 남는다.
+
 - 예비 후보: Hurst 지수로 추세 지속과 되돌림을 판정해 둘 사이를 전환하는 방향 알고리즘. Markov와 역할이 겹쳐 v1에서는 뺐다.
 
   > **바뀜** (2026-10-15, #198): "예비 후보: Mandelbrot. Hurst 지수로 …" → 후보는 그대로이고, Mandelbrot이라는 이름은 변동폭의 첫 모델(위 표)이 쓴다. 이 후보를 넣게 되면 다른 이름을 쓴다(알고리즘 이름은 하나뿐이어야 한다). 이유: 변동폭 spec(#177)이 변동성 군집을 처음 짚은 Mandelbrot(1963)의 이름을 첫 모델에 붙였다.

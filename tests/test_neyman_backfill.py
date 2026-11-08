@@ -54,7 +54,7 @@ from krx_quant.prevalidation import code_digest
 from krx_quant.pricing import Direction
 from krx_quant.sample_store import STORE_DIR, SampleStore, night_reads, read_day
 from krx_quant.scheduled import FAILED, JOBS, NEYMAN_BACKFILL, Facts, JobRecord, Night
-from krx_quant.scheduled.research import NORMAL_ORDER, SMT_DISCOVERY
+from krx_quant.scheduled.research import SMT_DISCOVERY
 from krx_quant.training import is_recorded
 from tests.synthetic_bars import day_of_bars
 from tests.test_neyman_variants import SERVER_DISCOVERY
@@ -384,7 +384,7 @@ def test_the_job_judges_once_after_the_discovery_last_in_the_list() -> None:
     assert [t.issue for t in job.targets] == [455] and "시세 값이 없다" in job.targets[0].note
     assert [a.path for a in job.attach] == ["experiments/neyman-backfill-532.json"]
     assert JOBS[-1] is job, "last: after the pre-validations and the experiments of 11-05"
-    assert JOBS.index(job) > max(JOBS.index(NORMAL_ORDER), JOBS.index(SMT_DISCOVERY))
+    assert JOBS.index(job) > JOBS.index(SMT_DISCOVERY)
     assert all(
         JOBS.index(j) < JOBS.index(job) for j in JOBS if j.name.startswith(("prevalidate-", "simulate-"))
     )

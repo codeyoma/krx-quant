@@ -96,7 +96,6 @@
  "tests/test_night_futures.py": 0.75,
  "tests/test_nightly.py": 119.13,
  "tests/test_nightly_hit_rates.py": 1.96,
- "tests/test_normal_order.py": 7.37,
  "tests/test_notice_layout.py": 0.17,
  "tests/test_notify.py": 1.56,
  "tests/test_notify_cli.py": 0.01,

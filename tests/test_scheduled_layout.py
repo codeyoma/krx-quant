@@ -45,7 +45,6 @@ SIMULATIONS = ("simulate-daily-298", "simulate-bar-close-298", "sample-profile-5
 # After the bar-close pre-validations: the experiments.
 LAST = (
     "neyman-variants-283",
-    "normal-order-529",
     "smt-discovery-519",
     "smt-holdout-519",
     "neyman-backfill-532",
@@ -84,10 +83,12 @@ RETIRED = {
     "turing-prior-448": ("turing-prior",),
     # #580: it joined a buy, a sell and a cancel on 2026-11-04 and #531 named the 23 columns.
     "fill-notice-layout-403": ("fill-notice-layout",),
+    # #529: none of the five is a candidate (2026-11-08 night).
+    "normal-order-529": ("normal-order",),
 }
 # The commands removed with their modules once their questions were settled: the probes (#563) and
-# the concluded experiments (#559). The user decided both on 2026-11-05, over #505's "the commands
-# stay". ``probe-candles`` ran by hand only (#111).
+# the concluded experiments (#559, #529). The user decided both on 2026-11-05, over #505's "the
+# commands stay". ``probe-candles`` ran by hand only (#111).
 REMOVED = (
     "probe-candles",
     "probe-close",
@@ -99,13 +100,15 @@ REMOVED = (
     "cost-map-audit",
     "poisson-link",
     "turing-prior",
+    "normal-order",
 )
-# The concluded experiments' modules, removed with their commands (#559).
+# The concluded experiments' modules, removed with their commands (#559, #529).
 REMOVED_MODULES = (
     "krx_quant.trader.passive",
     "krx_quant.cost_map_audit",
     "krx_quant.poisson_link",
     "krx_quant.turing_prior",
+    "krx_quant.normal_order",
 )
 
 
@@ -146,7 +149,7 @@ def test_every_job_a_family_defines_is_listed_once() -> None:
 def test_the_retired_jobs_are_gone_and_their_commands_stay() -> None:
     """Left in, a lost state file would run them again on closed issues; by hand, each still runs,
     unless its command was removed since."""
-    assert len(RETIRED) == 29
+    assert len(RETIRED) == 30
     assert sorted(set(RETIRED) & {j.name for j in JOBS}) == []
     parser = cli._parser()
     for name, argv in RETIRED.items():
@@ -164,5 +167,5 @@ def test_the_removed_probes_are_no_command_and_no_job_runs_one() -> None:
 
 
 def test_the_concluded_experiments_modules_are_gone() -> None:
-    """#559: removed with their commands (``REMOVED``), nothing is left to import."""
+    """#559, #529: removed with their commands (``REMOVED``), nothing is left to import."""
     assert [m for m in REMOVED_MODULES if importlib.util.find_spec(m) is not None] == []
