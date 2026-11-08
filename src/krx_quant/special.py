@@ -20,7 +20,7 @@ futures' 08:45 start is called at 09:06, not before the stock market opens. Brea
 from the open: on 2026-11-06 the index met the first stage's drop from 09:02:30, the rules
 call it at 09:03:30 and trading halted at 09:03:33 (#625's probe).
 
-> 바뀜 (2026-11-09, #NNN): breakers, like sidecars, were not called in the first 5 minutes →
+> 바뀜 (2026-11-09, #632): breakers, like sidecars, were not called in the first 5 minutes →
 > they are, from the open. Why: 2026-11-06's breaker halted trading at 09:03:33, and the window
 > began at 09:06:00.
 
