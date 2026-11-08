@@ -1,0 +1,6 @@
+usage: krx-quant inverse-replay [-h] [--day DAY]
+
+options:
+  -h, --help  show this help message and exit
+  --day DAY   the last day replayed, YYYY-MM-DD (default: the latest trading
+              day whose session is over)

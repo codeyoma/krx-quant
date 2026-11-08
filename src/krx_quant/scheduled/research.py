@@ -15,14 +15,17 @@ from __future__ import annotations
 from datetime import timedelta
 
 from krx_quant.holdout import DAYS as HOLDOUT_DAYS
+from krx_quant.inverse_replay import AGENT_LINE
 from krx_quant.neyman_backfill import REPORT as NEYMAN_BACKFILL_REPORT
 from krx_quant.neyman_variants import REPORT as NEYMAN_VARIANTS_REPORT
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS
 from krx_quant.normal_order import REPORT as NORMAL_ORDER_REPORT
 from krx_quant.prevalidation import MIN_DAYS
+from krx_quant.process_log import Ran
 from krx_quant.sample_profile import LIMIT as SAMPLE_PROFILE_LIMIT
 from krx_quant.scheduled.core import (
     FAILED,
+    OK,
     SIGNAL_REVIEW_FIXED_DAYS,
     SIGNAL_REVIEW_FROM,
     Attachment,
@@ -137,6 +140,63 @@ NIGHTLY_HIT_RATES = Job(
                 "돌린다. 사용자가 정한다. 다시 돌리기(읽기만): "
                 "`docker compose run --rm engine nightly-hit-rates --nights 10`. "
                 "출력에는 가격과 시세 값이 없다(개수, 비율, 날짜만)."
+            ),
+        ),
+    ),
+)
+
+
+# The down calls replayed through the inverse ETF (#606, ``inverse_replay.py``): the explicit
+# ``down`` and ``down_first`` calls of the traded kinds, by every predictor, each bought as one share of
+# 0193L0 at the first ETF ask after its display and sold at the ETF's bid when 005930 reaches a barrier
+# or at the time barrier, on the ETF's recorded quotes (its events, or its raw frames before they were
+# made), with the gaps and the quotes older than 5 s left out; net won after the commissions (an ETF's
+# sale pays no tax), not the cost map's floor. A measurement: no order, and nothing of the scoring, the
+# live eligibility or the promotion reads it. Every trading night, once (a run a restart cut, the next),
+# on the latest 20 recorded trading days, a day's recording at a time: 005930's quotes of a day are read
+# in about a second, the ETF's 40,000 records and the day's predictions in less; the quarter hour is a
+# bound. Each night's comment on #606 is a record and changes no label; ``ready-for-agent`` comes on a
+# failed run and on the first report with 20 recorded days or more, once (``inverse_replay.AGENT_LINE``,
+# kept in ``state/inverse-replay.json`` so that a night missed does not skip it), when an
+# agent proposes on #606 whether down calls should be bought through the ETF and the user decides. Its
+# output holds counts, rates, ticks and won, no price.
+INVERSE_REPLAY_ISSUE = 606
+
+
+def _every_trading_night(night: Night) -> bool:
+    """Every trading day's night, once; a run a restart cut runs the next trading night."""
+    if not night.trading_day:
+        return False
+    record = night.record
+    return record is None or record.outcome not in (OK, FAILED) or record.day != night.day
+
+
+def inverse_replay_calls(ran: Ran) -> bool:
+    """Whether the replay's night calls an agent: it failed, or its output says so (``AGENT_LINE``)."""
+    return ran.exit_code != 0 or ran.timed_out or AGENT_LINE in ran.stdout
+
+
+INVERSE_REPLAY = Job(
+    name="inverse-replay-606",
+    due=_every_trading_night,
+    command=("inverse-replay",),
+    timeout=timedelta(minutes=15),
+    label_if=inverse_replay_calls,
+    unlabel=(),  # a question an agent put to the user on the issue (``ready-for-human``) stays
+    targets=(
+        Target(
+            INVERSE_REPLAY_ISSUE,
+            note=(
+                "아래 호출을 인버스 ETF(0193L0)로 재생했다(#606, 매매하지 않는다): 매매하는 종류의 명시적 "
+                "`down`·`down_first` 호출마다(`not_up`은 횡보가 섞여 쓰지 않는다) 표시된 뒤 첫 ETF 매도 "
+                "호가에서 1주를 사고, 005930이 장벽에 닿거나 만기가 오면 ETF 매수 호가에서 판다. 결측 구간과 "
+                "5초보다 오래된 호가는 뺀다. 순손익은 기록된 호가와 양쪽 수수료로 잰다(ETF는 거래세가 없고, "
+                "비용표의 하한은 쓰지 않는다). 최근 20거래일. 1절 날마다, 2절 모든 호출, 3절 종류별, 4절 "
+                "칸별. 밤마다의 댓글은 기록이고 라벨을 바꾸지 않는다. 실패한 밤과 기록된 날이 20일 이상인 첫 "
+                "보고(`에이전트 차례:` 줄, 한 번)에만 `ready-for-agent`를 붙인다. "
+                "그때 에이전트가 이 이슈에 안을 남기고 사용자가 정한다. 다시 돌리기(읽기만): "
+                "`docker compose run --rm engine inverse-replay --day <날>`. 출력에는 가격이 없다(개수, "
+                "비율, 틱, 원만)."
             ),
         ),
     ),
