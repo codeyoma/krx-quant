@@ -178,7 +178,7 @@ from krx_quant.footprint import resident_mb
 from krx_quant.kinds import most_likely
 from krx_quant.market_calendar import Session
 from krx_quant.pricing import SELL_TAX, tick_size
-from krx_quant.special import Window, touching
+from krx_quant.special import HALT_STATUS, Kind, Window, touching
 from krx_quant.trader import (
     CAPITAL,
     COOLDOWN,
@@ -194,7 +194,7 @@ from krx_quant.trader import (
     SYMBOL,
     THRESHOLD,
 )
-from krx_quant.trader.cells import Cell, Signal
+from krx_quant.trader.cells import Cell, Signal, learned_at
 from krx_quant.trader.db import iso
 from krx_quant.trader.limits import (
     HEARTBEAT,
@@ -234,8 +234,10 @@ BUY_LIMIT, COOLING_DOWN = "buy_limit", "cooldown"
 # A practice buy too soon after the day's last (#598, ``spaced``).
 SPACING = "spacing"
 BUY, SKIP = "buy", "skip"
-# The status of a prediction the engine did not make for a VI (``engine._record_not_predicted``).
+# The status of a prediction the engine did not make for a VI (``engine._record_not_predicted``), and
+# for a market halt (#625).
 VI_STATUS = "vi"
+NOT_MADE = (VI_STATUS, HALT_STATUS)
 
 
 @dataclass(frozen=True)
@@ -350,7 +352,7 @@ def plan(
     it buys nothing (the reasons the module doc lists, but the trader's own: ``not_picked``,
     ``holding``, ``outranked``). ``threshold`` is its cell's θ under the policy (#399), else
     ``rules.threshold``. The nightly re-fit replays the recorded days by the same rules (``replay.py``)."""
-    if signal.status == VI_STATUS:
+    if signal.status in NOT_MADE:
         return SPECIAL
     p = signal.rise_probability
     if signal.status != "ok" or signal.probabilities is None or p is None:
@@ -631,6 +633,24 @@ def exit_on(
     return None
 
 
+def halt_spans(windows: Sequence[Window]) -> list[tuple[datetime, datetime]]:
+    """The spans in which a market halt holds a paper book (#625): from when the engine had learned
+    it, or its start if later, to its end. A paper book takes no quote received in one (the reopening
+    auction's book is not one to trade on) and makes no time exit by the clock in one; a recorded gap
+    that begins in one is the halt's silence, not data lost. The paper book and the re-fit's replay
+    (``replay.Fills``) both go by these spans."""
+    return [
+        (max(learned_at(w), w.start), w.end)
+        for w in windows
+        if w.kind is Kind.MARKET_HALT and max(learned_at(w), w.start) < w.end
+    ]
+
+
+def halted(spans: Sequence[tuple[datetime, datetime]], at: datetime) -> bool:
+    """Whether ``at`` is in one of a market halt's ``spans`` (``halt_spans``)."""
+    return any(start <= at < end for start, end in spans)
+
+
 def clock_exit(
     barriers: Barriers, last: BestQuote | None, now: datetime, rules: Rules, ran_at_barrier: bool = True
 ) -> Sale | None:
@@ -750,6 +770,7 @@ class PaperTrader:
         self._picks: dict[Cell, tuple[int, Pick]] = {}  # each picked cell's rank and pick
         self._inactive: tuple[Cell, ...] = ()  # the policy's cells held off, read and never bought (#603)
         self._special: list[Window] = []
+        self._halts: list[tuple[datetime, datetime]] = []  # the market halts' spans (#625, ``halt_spans``)
         self._read: dict[datetime, set[Cell]] = {}  # the cells read of each recent bar close
         self._pending: dict[datetime, list[Rise]] = {}  # rises waiting, by bar close
         self._last: BestQuote | None = None  # the latest quote received
@@ -889,6 +910,7 @@ class PaperTrader:
         """The special windows the engine knows of now (the latest of each). A buy decided but not
         filled yet whose window one of them touches is given up (``special``)."""
         self._special = list(windows)
+        self._halts = halt_spans(self._special)
         waiting = self._waiting
         if waiting is not None and touching(
             self._special, waiting.signal.symbol, waiting.signal.bar_close, waiting.plan.time_barrier
@@ -943,6 +965,8 @@ class PaperTrader:
     def on_quote(self, quote: BestQuote) -> None:
         """A quote from the stream (in mock mode during a stall, KIS's REST one, #407). One not newer
         than the latest (a reconnect's first) is passed over."""
+        if self._in_halt(quote.received_at):
+            return  # a market halt's quote (#625): not one to fill on
         standing = self._last
         if standing is not None and quote.received_at <= standing.received_at:
             self._returned = None  # the first quote after a stall, passed over: none waited on it
@@ -1007,6 +1031,11 @@ class PaperTrader:
             self._sell_after = at
             log.info("trader: %s: trade %s sells at the next quote", status, trade.id)
 
+    def _in_halt(self, at: datetime) -> bool:
+        """Whether a market halt holds this book's fills at ``at`` (#625, ``halt_spans``): a paper book's;
+        the KIS book's never (``mock.MockTrader``: its orders and fills are KIS's)."""
+        return halted(self._halts, at)
+
     def on_time(self, now: datetime) -> None:
         """The clock: a rise that waited long enough for the cells ranked above it is decided, a
         buy whose quote did not come is given up, a time barrier passed is sold on the last quote
@@ -1019,7 +1048,7 @@ class PaperTrader:
         if waiting is not None and now >= waiting.deadline(self.rules) + grace:
             self._give_up(waiting, NO_QUOTE)
         trade = self._open
-        if trade is not None:
+        if trade is not None and not self._in_halt(now):  # no time exit by the clock in a halt (#625)
             sale = clock_exit(trade, self._last, now, self.rules, trade.time_barrier >= self._started_at)
             if sale is not None:
                 self._exit(trade, sale.at, sale.price, sale.reason, sale.quote)

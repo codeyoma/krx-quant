@@ -17,8 +17,19 @@ what the nightly re-fit fits a policy on (``refit.py``).
   active, or not active at the pick of an earlier trading day of the same review cycle (the trader's
   ``evaluation``, when one is given: the trader holds it off until the next review); such a cell ranks
   below none that day, as in the paper book;
-- the special windows the engine kept (``special_windows``), each known from its start (the engine
-  learns a VI, a circuit breaker or a sidecar as it begins), with the end it kept.
+- the special windows the engine kept (``special_windows``), each known from when the engine first
+  learned it (``cells.Kept.learned_at``, #625: a VI up to 5 seconds after it began, a market halt
+  from its halted trade), or from its start when it was kept before the engine noted that, with the
+  end it kept.
+
+  > **바뀜** (2026-11-09, #636): each window was known from its start → from when the engine first
+  > learned it. 이유: a window that begins before the engine can know it (a VI, a breaker called a
+  > minute after the drop began) gave the replay what the trader could not have known (#625).
+
+A market halt holds the replay's fills as it holds a paper book's (#625, ``paper.halt_spans``, from when
+the engine learned it to its end): the quotes received in one are left out (``held_out``), and so are the
+recorded gaps that begin in one (the halt's silence, not data lost), so that a trade held through a halt
+sells on the first quote after it, as the paper book sells it.
 
 No answer is read for a decision, nor its special flag: nothing the trader could not have known
 then. The calibration alone (#475, below) reads each rise's answer, once it is measured.
@@ -92,7 +103,7 @@ import math
 import sqlite3
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
@@ -125,6 +136,7 @@ from krx_quant.trader.cells import (
     Signal,
     direction_signal,
     kind_signal,
+    learned_at,
     status_at,
     statuses,
     traded_kind,
@@ -142,6 +154,7 @@ from krx_quant.trader.paper import (
     admit,
     clock_exit,
     exit_on,
+    halt_spans,
     net_of,
     plan,
     refused,
@@ -382,8 +395,8 @@ def _upper_first(path: str | None) -> bool:
 
 
 def known(windows: Sequence[Window], at: datetime) -> list[Window]:
-    """The special windows known at ``at``: those begun by then (module doc)."""
-    return [w for w in windows if w.start <= at]
+    """The special windows known at ``at``: those the engine had learned by then (module doc)."""
+    return [w for w in windows if learned_at(w) <= at]
 
 
 def inactive_days(
@@ -437,12 +450,27 @@ class Fill:
     until: int = 0
 
 
+def held_out(day: Recording, spans: Sequence[tuple[datetime, datetime]]) -> Recording:
+    """``day`` as a paper book takes it through market halts (#625, ``paper.halt_spans``): without the
+    quotes received in one, and without the recorded gaps that begin in one (the halt's silence, not
+    data lost)."""
+    if not spans:
+        return day
+    times = day.quotes.times
+    keep = np.ones(len(times), dtype=bool)
+    for start, end in spans:
+        keep &= ~((times >= micros(start)) & (times < micros(end)))
+    quotes = day.quotes if keep.all() else Quotes(times[keep], day.quotes.bids[keep], day.quotes.asks[keep])
+    gaps = tuple(g for g in day.gaps if not any(micros(s) <= g[0] < micros(e) for s, e in spans))
+    return replace(day, quotes=quotes, gaps=gaps)
+
+
 class Fills:
     """A day's fills on its recording (None: not recorded), each rise's at each decision time made
     once: the policies of a pass and the signals measured alone share them."""
 
     def __init__(self, day: Recording | None, windows: Sequence[Window], rules: Rules) -> None:
-        self.day = day
+        self.day = None if day is None else held_out(day, halt_spans(windows))
         self._windows = windows
         self._rules = rules
         self._made: dict[tuple[str, str, int, datetime], Fill] = {}

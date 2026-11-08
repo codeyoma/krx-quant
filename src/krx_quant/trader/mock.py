@@ -437,6 +437,10 @@ class MockTrader(PaperTrader):
             self._begin_sale(trade, reason)
         self._kick(self._clock())
 
+    def _in_halt(self, at: datetime) -> bool:
+        """Never: a market halt holds the paper books alone (#625); this book's orders are KIS's."""
+        return False
+
     def on_quote(self, quote: BestQuote) -> None:
         super().on_quote(quote)
         self._kick(self._clock())

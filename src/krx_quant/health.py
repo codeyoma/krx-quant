@@ -3,7 +3,9 @@
 A gap opens for a WebSocket subscription when the connection drops or goes silent
 (closed again once KIS acknowledges the subscription after the reconnect) and when a feed goes
 quiet in continuous trading, per the Market Calendar, for longer than its threshold
-(closed by the next message).
+(closed by the next message). A feed a market-wide halt silences (``HALT_QUIET``, #625) that goes
+quiet while the engine knows of one has its gap marked so (``stale: market halt``): an expected
+silence, not data lost, which ``silent_feeds`` does not count, during the halt or after it.
 Closed gaps are written to the ``gaps`` layer; gaps still open at shutdown are
 written with no end. Each key also counts today's frames that came short of fields and were
 kept raw only (#381).
@@ -74,6 +76,15 @@ DEFAULT_STALE_SECONDS = 300.0
 # summer time and skips US holidays): silence counts only once they delivered that day.
 OWN_HOURS = frozenset({"HDFSCNT0"})
 
+# The feeds a market-wide halt silences (#625's probe, 2026-11-06): the trades, the books, the
+# KOSPI200 futures and options, the member firms and program trading stopped; the indices, the USD
+# futures and the REST polls went on, and their silence still counts as a fault.
+HALT_QUIET = frozenset(
+    {"H0UNCNT0", "H0STCNT0", "H0NXCNT0", "H0UNASP0", "H0STASP0"}  # trades, books
+    | {"H0IFCNT0", "H0IOCNT0", "H0UNMBC0", "H0UNPGM0"}  # futures, options, member firms, programs
+)
+HALT_DETAIL = "market halt"  # a stale gap's detail when a market halt explains it
+
 # The KOSPI200 night futures' trades and book (#264): they deliver from 18:00 to 06:00 only,
 # so they are quiet all through continuous trading and their silence never counts. KRX
 # also closes some nights it does not announce through the holiday API (the evening before
@@ -115,6 +126,7 @@ class FeedHealth:
         self._last_seen: dict[Key, datetime] = {}
         self._watched: dict[Key, datetime] = {}  # key -> when it started being expected
         self._short: dict[Key, tuple[date, int]] = {}  # key -> (KST day, short frames that day)
+        self.halted = False  # a market halt is known on (#625): set by the collector
 
     def watch(self, key: Key) -> None:
         """``key`` is registered or polled from now on, so it should deliver in market hours."""
@@ -173,7 +185,8 @@ class FeedHealth:
             seen = self._last_seen.get(key)
             since = max(t for t in (session.open, seen, self._watched.get(key)) if t is not None)
             if (at - since).total_seconds() > STALE_SECONDS.get(key[0], DEFAULT_STALE_SECONDS):
-                self._open[key] = _Gap(GapKind.STALE, since)
+                detail = HALT_DETAIL if self.halted and key[0] in HALT_QUIET else ""
+                self._open[key] = _Gap(GapKind.STALE, since, detail)
                 newly.append(key)
         return newly
 
@@ -184,19 +197,21 @@ class FeedHealth:
         connection. One quiet key of a busier feed is the market: a halt, a VI, an option
         strike nobody trades. A key that cannot go stale yet (not delivered today, in a
         feed that keeps its own hours or on a day KIS has not confirmed) does not hold the
-        rest of its feed back.
+        rest of its feed back, nor does a key whose silence a market halt explains (#625).
         """
         today = kst_day(self._now())
         confirmed = self._calendar.knows(today)
-        stale = {key for key, gap in self._open.items() if gap.kind is GapKind.STALE}
+        stale = {key for key, gap in self._open.items() if gap.kind is GapKind.STALE and not gap.detail}
+        # A key a market halt silenced (#625) holds nothing back, as one that cannot go stale.
+        quiet = {key for key, gap in self._open.items() if gap.kind is GapKind.STALE and gap.detail}
         keys: dict[str, list[Key]] = {}
         for key in self._watched.keys() | self._last_seen.keys():
             keys.setdefault(key[0], []).append(key)
         return sorted(
             feed
-            for feed, feed_keys in keys.items()
-            if any(k in stale for k in feed_keys)
-            and all(k in stale or not self._counts_silence(k, today, confirmed) for k in feed_keys)
+            for feed, group in keys.items()
+            if any(k in stale for k in group)
+            and all(k in stale or k in quiet or not self._counts_silence(k, today, confirmed) for k in group)
         )
 
     def _counts_silence(self, key: Key, today: date, confirmed: bool) -> bool:

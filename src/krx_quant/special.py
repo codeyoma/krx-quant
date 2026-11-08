@@ -21,7 +21,7 @@ from the open: on 2026-11-06 the index met the first stage's drop from 09:02:30,
 call it at 09:03:30 and trading halted at 09:03:33 (#625's probe).
 
 > 바뀜 (2026-11-09, #632): breakers, like sidecars, were not called in the first 5 minutes →
-> they are, from the open. Why: 2026-11-06's breaker halted trading at 09:03:33, and the window
+> they are, from the open. 이유: 2026-11-06's breaker halted trading at 09:03:33, and the window
 > began at 09:06:00.
 
 **The market halt** (#625). KIS sends no notice of a breaker on the feeds subscribed (the market
@@ -115,6 +115,8 @@ TRADING_CAP = timedelta(minutes=10)
 # stands in for the book cut by the session limit (fresh quotes; it carries no time code).
 _HALT_FEEDS = (TRADE.tr_id, BOOK.tr_id, BOOK_SNAPSHOT.tr_id)
 HALTED, AUCTION, REOPENED = "정지", "단일가", "재개"  # a market halt's phases (``Window.detail``)
+# The status of the predictions the engine does not make in a market halt (#625), as ``vi`` in a VI.
+HALT_STATUS = "halt"
 # The version of these rules a past day's windows are decided by (``special_days.rules``): a day
 # decided by an earlier one is decided again from its recording. 2: #625 (the breaker from the open,
 # the market halt).
@@ -485,6 +487,12 @@ class SpecialSituations:
             return None
         self._learned.append((received_at, window))
         return window
+
+
+def in_halt(windows: Sequence[Window], at: datetime) -> Window | None:
+    """The market halt ``at`` is in, by ``windows`` (#625): from the halted trade to the minute of
+    fresh quotes and trades after the reopening."""
+    return next((w for w in windows if w.kind is Kind.MARKET_HALT and w.start <= at < w.end), None)
 
 
 def in_vi(windows: Sequence[Window], symbol: str, at: datetime) -> bool:

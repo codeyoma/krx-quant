@@ -24,6 +24,15 @@ same cells' predictions and the same quotes, in one process.
   follows every book's cells (``cells``).
 - **Quotes, special windows, the clock**: to every book. **Controls** (pauses, resumes, re-arms):
   to the champion's alone.
+- **A market halt** (#625, ``special.py``: the engine's ``market_halt`` window, from the halted trade
+  to a minute of fresh quotes and trades after the reopening): no book buys (its window touches every
+  rise's, ``paper.plan``'s ``special``), and the paper books fill nothing on the quotes received in it
+  (the reopening auction's book is not one they could trade on): they take no quote then, as through
+  a stall, make no time exit by the clock, and an exit waits for the first quote after it
+  (``paper.halt_spans``, which the re-fit's replay goes by too). The KIS book (mock, live) takes them as
+  ever: its real orders and fills, its stop and time rules, its loss limits are its own. The stall's
+  notice is not sent for a halt the engine knows (``QuoteWatch.on_special``): the engine sends the
+  halt's.
 - **A stall of the quotes** (#407, ``stall.QuoteWatch``): the desk watches the stream once for every
   book, keeps each stall and sends one thirty seconds long and its return to Telegram once each
   (#624); every book is told (``on_stall``, ``on_recover``: no new buy meanwhile; the mock champion
@@ -517,6 +526,7 @@ class Desk:
             return None
 
     def on_special(self, windows: Sequence[Window]) -> None:
+        self.watch.on_special(windows)
         for book in self.books:
             book.on_special(windows)
 
@@ -528,7 +538,7 @@ class Desk:
 
     def on_quote(self, quote: BestQuote) -> None:
         ended = self.watch.on_quote(quote)  # the quotes back (#407): each book told before it takes it
-        for book in self.books:
+        for book in self.books:  # a paper book takes no quote of a market halt (#625, ``paper.halt_spans``)
             if ended is not None:
                 book.on_recover(ended, quote.received_at)
             book.on_quote(quote)
