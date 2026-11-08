@@ -12,6 +12,7 @@ windows for the cases around it.
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import sqlite3
 from datetime import datetime, timedelta
@@ -21,7 +22,7 @@ from typing import Any
 import pytest
 
 from krx_quant.engine import Event
-from krx_quant.feeds import BOOK, TRADE
+from krx_quant.feeds import BOOK, BOOK_SNAPSHOT, INDEX, TRADE
 from krx_quant.predictions import DB_NAME
 from krx_quant.rescore import fill_special_windows
 from krx_quant.special import Kind, SpecialSituations, Window
@@ -32,7 +33,7 @@ from tests.test_rescore import settings
 from tests.test_special_windows import before_236
 
 OTHER = "000660"
-END_OF_DAY = at("23:59:59.999999")
+CLOSE = at("15:30:00")  # a halt whose reopening is not known lasts to the close
 
 
 def coded(event: Event, code: str, *, halted: bool = False) -> Event:
@@ -143,8 +144,8 @@ def test_the_halt_is_confirmed_by_a_halted_trade_and_its_phases_follow_the_time_
     learned = situations([*halt_morning(), *market()])
 
     assert halts(learned) == [
-        (at("09:03:32"), at("09:03:32"), END_OF_DAY, "정지"),
-        (at("09:23:33"), at("09:03:32"), END_OF_DAY, "단일가"),
+        (at("09:03:32"), at("09:03:32"), CLOSE, "정지"),
+        (at("09:23:33"), at("09:03:32"), CLOSE, "단일가"),
         (at("09:35:10"), at("09:03:32"), at("09:35:10"), "재개"),
     ]
     breakers = [(r, w.end) for r, w in learned if w.kind is Kind.CIRCUIT_BREAKER]
@@ -176,7 +177,7 @@ def test_a_halted_trade_in_the_minute_before_the_breaker_confirms_the_halt_with_
         (at("09:03:30"), Kind.CIRCUIT_BREAKER),
         (at("09:03:30"), Kind.MARKET_HALT),
     ]
-    assert halts(learned)[0] == (at("09:03:30"), at("09:03:29"), END_OF_DAY, "정지")
+    assert halts(learned)[0] == (at("09:03:30"), at("09:03:29"), CLOSE, "정지")
 
 
 def test_a_symbol_still_in_the_auction_holds_continuous_trading_back() -> None:
@@ -296,7 +297,35 @@ def test_quotes_further_apart_than_fresh_never_make_the_fresh_minute() -> None:
 
     learned = situations([*sparse, *market()])
 
-    assert [p for _, _, _, p in halts(learned)] == ["정지", "단일가"]
+    # No fresh minute: the halt holds until ten minutes after the trades came back (09:33:38), and is
+    # ended at the first frame after that (``TRADING_CAP``).
+    assert [p for _, _, _, p in halts(learned)] == ["정지", "단일가", "재개"]
+    assert at("09:43:38") <= halts(learned)[-1][2] < at("09:43:50")
+
+
+def test_a_symbols_book_on_rest_counts_toward_the_fresh_minute() -> None:
+    # After the halt the book comes as the REST snapshot (the session limit cut the WebSocket's): no
+    # time code, but fresh quotes; the trades say continuous trading.
+    rest = []
+    for feed, row in halt_morning():
+        if feed == BOOK.tr_id and row["received_at"] >= at("09:23:00"):
+            rest.append((BOOK_SNAPSHOT.tr_id, {"symbol": row["symbol"], "received_at": row["received_at"]}))
+        else:
+            rest.append((feed, row))
+
+    learned = situations([*rest, *market()])
+
+    assert [p for _, _, _, p in halts(learned)] == ["정지", "단일가", "재개"]
+    assert halts(learned)[-1][2] == at("09:35:11")
+
+
+def test_a_halt_whose_reopening_never_shows_ends_at_the_close() -> None:
+    # Nothing after the halted trade: the window lasts to the session's close, never past it.
+    silent = [e for e in halt_morning() if e[1]["received_at"] <= at("09:03:33")]
+
+    learned = situations([*silent, *market()])
+
+    assert halts(learned) == [(at("09:03:32"), at("09:03:32"), at("15:30:00"), "정지")]
 
 
 async def test_the_status_and_the_special_windows_show_a_market_halt_within_the_contract(
@@ -400,7 +429,9 @@ def test_the_order_of_a_seconds_trades_and_books_does_not_move_the_reopening_pas
     assert at("09:35:10") <= phases[-1][2] <= at("09:35:16")
 
 
-def test_a_day_decided_by_the_rules_before_625_is_decided_again_once(tmp_path: Path) -> None:
+def test_a_day_decided_by_the_rules_before_625_is_decided_again_once_with_its_marks(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     # An installation's database: the halt morning decided before #625 (its breaker from 09:06, no
     # halt, ``special_days`` without a rules version). The next fill decides it again, once.
     s = settings(tmp_path)
@@ -432,8 +463,134 @@ def test_a_day_decided_by_the_rules_before_625_is_decided_again_once(tmp_path: P
             (at("06:00:00").isoformat(),),
         )
 
-    [filled] = fill_special_windows(s, NEXT_MORNING)
+        # The old marks: 09:01's four minutes not special (the breaker from 09:06), 09:45's special.
+        for close, mark in (("09:01", 0), ("09:45", 1)):
+            bar_close = at(f"{close}:00").isoformat()
+            conn.execute(
+                "UPDATE outcomes SET special = ? WHERE prediction_id IN"
+                " (SELECT id FROM predictions WHERE bar_close = ?)",
+                (mark, bar_close),
+            )
+            conn.execute("UPDATE kind_answers SET special = ? WHERE bar_close = ?", (mark, bar_close))
+
+    with caplog.at_level(logging.INFO, logger="krx_quant.predictions"):
+        [filled] = fill_special_windows(s, NEXT_MORNING)
 
     assert (filled.labeled, filled.failed) == (2, None)
     assert kept(db) == KEPT
+    with sqlite3.connect(db) as conn:
+        for close, mark in (("09:01", 1), ("09:45", 0)):
+            bar_close = at(f"{close}:00").isoformat()
+            outcomes = conn.execute(
+                "SELECT DISTINCT o.special FROM outcomes o JOIN predictions p ON p.id = o.prediction_id"
+                " WHERE p.bar_close = ?",
+                (bar_close,),
+            ).fetchall()
+            answers = conn.execute(
+                "SELECT DISTINCT special FROM kind_answers WHERE bar_close = ?", (bar_close,)
+            ).fetchall()
+            assert outcomes == answers == [(mark,)], close
+    [line] = [r.getMessage() for r in caplog.records if "made again" in r.getMessage()]
+    assert "newly special" in line and "no longer" in line
     assert fill_special_windows(s, NEXT_MORNING) == [], "decided by these rules: not read again"
+
+
+# --- Orderings of a halt's reopening (Codex's review of #632): what releases the halt is read from what
+# came after its latest stage or halted trade. Each case: the morning's events changed, the symbols, and
+# the halt's last phase and end (None: no halt confirmed).
+
+
+def without(events: list[Event], start: str, end: str, feed: str | None = None) -> list[Event]:
+    return [e for e in events if not (at(start) <= e[1]["received_at"] < at(end) and feed in (None, e[0]))]
+
+
+def second_stage(at_: str) -> list[Event]:
+    """The KOSPI 15.4% down a minute before ``at_``: the second stage called then."""
+    called = at(at_)
+    return every(called - timedelta(minutes=1), called + timedelta(seconds=30), 5, lambda w: kospi(w, -15.4))
+
+
+def auction_again(start: str, end: str) -> list[Event]:
+    """A reopening auction's book (no trades while it lasts)."""
+    return quotes(start, end, "C", trades=False)
+
+
+def rest_books(events: list[Event], since: str) -> list[Event]:
+    return [
+        (BOOK_SNAPSHOT.tr_id, {"symbol": r["symbol"], "received_at": r["received_at"]})
+        if f == BOOK.tr_id and r["received_at"] >= at(since)
+        else (f, r)
+        for f, r in events
+    ]
+
+
+def restarted(events: list[Event], at_: str) -> list[Event]:
+    """What an engine started at ``at_`` receives: nothing before."""
+    return [e for e in events if e[1]["received_at"] >= at(at_)]
+
+
+MORNING = sorted([*halt_morning(), *market()], key=lambda e: e[1]["received_at"])
+REOPENINGS = [
+    ("as 11-06", MORNING, ("재개", "09:35:10")),
+    # The second stage at 09:34:30, in the first's fresh minute: halted again (trading stops), its
+    # auction from 09:35:30 to 10:00, and nothing after: still halted, to the close.
+    (
+        "a stage during the hold",
+        [
+            *without(without(MORNING, "09:33:30", "11:00:00", INDEX.tr_id), "09:34:31", "11:00:00"),
+            *second_stage("09:34:30"),
+            *auction_again("09:35:30", "10:00:00"),
+        ],
+        ("단일가", "15:30"),
+    ),
+    (
+        "two stages, both halted and reopened",
+        [
+            *[e for e in MORNING if e[1]["received_at"] < at("10:00:00")],
+            *quotes("10:00:00", "10:20:55", "0"),
+            *second_stage("10:21:00"),
+            coded(trade(at("10:21:02"), 81_300), "0", halted=True),
+            *auction_again("10:41:00", "10:51:00"),
+            *quotes("10:51:05", "11:00:00", "0"),
+        ],
+        ("재개", "10:52:06"),
+    ),
+    (
+        "a halted trade after the call",
+        [
+            *without(MORNING, "09:03:32", "09:03:33", TRADE.tr_id),
+            coded(trade(at("09:03:40"), 81_300), "0", halted=True),
+        ],
+        ("재개", "09:35:10"),
+    ),
+    (
+        "a halted trade before the call",
+        [
+            *without(MORNING, "09:03:32", "09:03:33", TRADE.tr_id),
+            coded(trade(at("09:03:29"), 81_300), "0", halted=True),
+        ],
+        ("재개", "09:35:10"),
+    ),
+    ("the book on REST after the halt", rest_books(MORNING, "09:23:00"), ("재개", "09:35:11")),
+    ("a book gap in the hold", without(MORNING, "09:34:30", "09:34:55", BOOK.tr_id), ("재개", "09:35:55")),
+    (
+        "a halted trade in the hold",
+        [*MORNING, coded(trade(at("09:34:40"), 81_300), "0", halted=True)],
+        # Halted again at 09:34:40: the next minute's frames trail it; the fresh minute from 09:35:41.
+        ("재개", "09:36:41"),
+    ),
+    ("an engine restarted mid-halt", restarted(MORNING, "09:10:00"), None),
+]
+
+
+@pytest.mark.parametrize(
+    ("events", "expected"), [(e, x) for _, e, x in REOPENINGS], ids=[n for n, _, _ in REOPENINGS]
+)
+def test_the_reopening_in_every_order(events: list[Event], expected: tuple[str, str] | None) -> None:
+    learned = halts(situations(events))
+
+    if expected is None:
+        assert learned == []
+        return
+    phase, end = expected
+    assert (learned[-1][3], learned[-1][2]) == (phase, at(f"{end}:00" if len(end) == 5 else end))

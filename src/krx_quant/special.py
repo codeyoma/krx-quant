@@ -37,14 +37,18 @@ operation feed ``H0STMKO0`` is not, #625's probe), but the integrated trades and
 A halt is confirmed when a trade of one of the engine's symbols flagged halted is received from a
 minute before a breaker stage is called to the end of that stage's window by the rules (a halted
 trade with no breaker, or outside its window, is one stock's halt): a ``MARKET_HALT`` window from
-the first such trade's exchange time, learned when both are known, to the end of the day while
+the first such trade's exchange time, learned when both are known, to the session's close while
 the reopening is not known (detail ``정지``). A trade or book of the symbols in the auction ('C'),
 or in continuous trading ('0') when the auction's frames were missed, received at least a minute
 after, makes it ``단일가``. Once every symbol's latest
 trade or book says '0' (continuous trading), the breaker's window ends there (the real
 reopening, a later version of it), and once each symbol's trades and book have then kept coming
 (each within ``FRESH`` of the one before) for a full ``REOPEN_HOLD``, the halt's window ends there
-(``재개``): the engine predicts again, the trader buys again (#625's stage 3). A halt whose
+(``재개``): the engine predicts again, the trader buys again (#625's stage 3). The REST book that
+stands in for a book cut by the session limit counts as the book, with no time code. A halt still on
+``TRADING_CAP`` (10 minutes) after the trades came back is ended there with a WARNING. A later breaker
+stage or halted trade while it is on starts it over (``정지``): its reopening is judged from what came
+after alone, the minute's frames after it left out. A halt whose
 trades carry no flag is not confirmed: the breaker's window is all there is.
 
 Each is a window of exchange time. A window is known from the moment its event is
@@ -64,14 +68,17 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import Any
 
-from krx_quant.feeds import BOOK, INDEX, INDEX_REST, KOSPI200_FUTURES, TRADE, VI_STATUS
+from krx_quant.feeds import BOOK, BOOK_SNAPSHOT, INDEX, INDEX_REST, KOSPI200_FUTURES, TRADE, VI_STATUS
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, Session
+
+log = logging.getLogger(__name__)
 
 # A VI still on (or whose release is not known) is taken to last at least this long: two
 # minutes and the random end of up to 30 seconds, with a little room.
@@ -101,6 +108,12 @@ QUIET_AFTER_HALT = timedelta(minutes=1)
 # long, each within ``FRESH`` of every moment.
 REOPEN_HOLD = timedelta(minutes=1)
 FRESH = timedelta(seconds=10)
+# A halt still on this long after the trades came back is ended there, with a WARNING: the time codes
+# that would end it are not coming (a symbol's books or trades without them).
+TRADING_CAP = timedelta(minutes=10)
+# The symbols' feeds a market halt follows: the integrated trades and book, and the REST book that
+# stands in for the book cut by the session limit (fresh quotes; it carries no time code).
+_HALT_FEEDS = (TRADE.tr_id, BOOK.tr_id, BOOK_SNAPSHOT.tr_id)
 HALTED, AUCTION, REOPENED = "정지", "단일가", "재개"  # a market halt's phases (``Window.detail``)
 # The version of these rules a past day's windows are decided by (``special_days.rules``): a day
 # decided by an earlier one is decided again from its recording. 2: #625 (the breaker from the open,
@@ -202,17 +215,30 @@ def _in_hours(at: datetime, session: Session, *, until_close: bool, after_open: 
 
 
 class _Halt:
-    """A market-wide halt KIS's fields confirmed, from its halted trade to its reopening (module doc)."""
+    """A market-wide halt KIS's fields confirmed, from its halted trade to its reopening (module doc).
+
+    What releases it is read afresh from what came after its latest reset (``since``: its confirmation,
+    a later breaker stage, a later halted trade), never carried across one: every symbol's latest time
+    code since then continuous trading, and every symbol's trades and book kept coming for a minute."""
 
     def __init__(self, window: Window, breaker: Window, confirmed_at: datetime) -> None:
         self.window = window  # the halt's window, as last learned
-        self.breaker = breaker  # the breaker stage it is the halt of
-        self.confirmed_at = confirmed_at  # when it was confirmed (received)
-        self.codes: dict[str, str] = {}  # from the reopening on: each symbol's latest time code
-        self.continuous_at: datetime | None = None  # when every symbol said continuous trading
-        self.trade_at: dict[str, datetime] = {}  # from the reopening on: each symbol's last trade, book
+        self.breaker = breaker  # the latest breaker stage it is the halt of
+        self.reset(confirmed_at)
+
+    def reset(self, at: datetime) -> None:
+        """The halt (again) from ``at``: what came before tells nothing of its reopening."""
+        self.since = at
+        self.codes: dict[str, str] = {}  # each symbol's latest time code since then
+        self.trade_at: dict[str, datetime] = {}  # each symbol's last trade, book since then
         self.book_at: dict[str, datetime] = {}
-        self.fresh_since: datetime | None = None  # since when every symbol's trades and book kept coming
+        self.fresh_since: datetime | None = None  # since when the release's conditions held
+        self.trading_since: datetime | None = None  # the first trade not halted since then
+        self.ended_breaker = False  # the breaker's window ended at the continuous trading seen
+
+    def continuous(self, symbols: Sequence[str]) -> bool:
+        """Whether every symbol's latest time code since the reset says continuous trading."""
+        return all(self.codes.get(s) == CONTINUOUS_CODE for s in symbols)
 
     def fresh(self, at: datetime, symbols: Sequence[str]) -> bool:
         """Whether every one of ``symbols`` had a trade and a book received within ``FRESH`` of ``at``."""
@@ -248,7 +274,7 @@ class SpecialSituations:
         ``symbols``, a circuit breaker (KOSPI), a sidecar (KOSPI200 futures), a market halt and
         the breaker's end (the integrated trades and book of ``symbols``, #625).
         """
-        if feed == TRADE.tr_id or feed == BOOK.tr_id:
+        if feed in _HALT_FEEDS:
             if row["symbol"] not in symbols or (self._halt is None and not row.get("halted")):
                 return ()  # nearly every event: nothing halted
             return self._market(feed, row, symbols)
@@ -289,10 +315,15 @@ class SpecialSituations:
             return ()
         stage = f"{self._breaker.stage}단계"  # the stage just called
         window = Window(Kind.CIRCUIT_BREAKER, None, *called, stage)
-        out = self._one(self._learn(row["received_at"], window))
-        self._pending = (window, row["received_at"])
-        if self._halt is None:
-            out += self._one(self._confirm(row["received_at"], session))
+        received = row["received_at"]
+        out = self._one(self._learn(received, window))
+        halt = self._halt
+        if halt is None:
+            self._pending = (window, received)
+            out += self._one(self._confirm(received, session))
+        else:  # a later stage in the halt or its reopening: the halt again, of that stage
+            halt.breaker = window
+            out += self._one(self._again(received))
         return out
 
     def futures(self, row: dict[str, Any]) -> Window | None:
@@ -313,54 +344,76 @@ class SpecialSituations:
         session = self._today(received)  # a new day: a halt of an earlier day is over
         if session is None:
             return ()
+        halt = self._halt
         if feed == TRADE.tr_id and row.get("halted"):
             self._flags = [f for f in self._flags if f[1] >= received - HOLD]
             self._flags.append((row["event_time"], received))
-            if self._halt is None:
+            if halt is None:
                 return self._one(self._confirm(received, session))
-        halt = self._halt
-        if halt is None:
-            return ()
+            return self._one(self._again(received))  # halted again: the reopening starts over
+        if halt is None or received < halt.since + QUIET_AFTER_HALT:
+            return ()  # no halt, or the frames trailing its (re)start
         symbol: str = row["symbol"]
         code = row.get("hour_cls")
         out: list[Window] = []
-        if halt.window.detail == HALTED:
+        if halt.window.detail == HALTED and code in (AUCTION_CODE, CONTINUOUS_CODE):
             # The market speaks again: the reopening auction, or (its frames missed) continuous trading.
-            if code in (AUCTION_CODE, CONTINUOUS_CODE) and received >= halt.confirmed_at + QUIET_AFTER_HALT:
-                out += self._one(self._halt_version(received, halt.window.end, AUCTION))
-            else:
-                return ()
-        # In the auction or after: each symbol's latest time code, trade and book. A trade or book
-        # more than ``FRESH`` after the one before it is a gap: the minute of fresh quotes starts again.
+            out += self._one(self._halt_version(received, halt.window.end, AUCTION))
+        # Each symbol's latest time code, trade and book since the reset. A trade or book more than
+        # ``FRESH`` after the one before it is a gap: the fresh minute starts again.
         seen = halt.trade_at if feed == TRADE.tr_id else halt.book_at
         before = seen.get(symbol)
         gap = before is not None and received - before > FRESH
         seen[symbol] = received
-        if halt.continuous_at is None:
-            if code in (AUCTION_CODE, CONTINUOUS_CODE):
-                halt.codes[symbol] = code
-            if all(halt.codes.get(s) == CONTINUOUS_CODE for s in symbols):
-                halt.continuous_at = received
-                halt.fresh_since = received if halt.fresh(received, symbols) and not gap else None
-                breaker = halt.breaker
-                if breaker is not None and breaker.detail != f"{len(BREAKER_STAGES)}단계":
-                    # The breaker ends at the real reopening, not the rules' 30 minutes.
-                    out += self._one(self._learn(received, dataclasses.replace(breaker, end=received)))
-            return tuple(out)
-        if not halt.fresh(received, symbols):
+        if code in (AUCTION_CODE, CONTINUOUS_CODE):
+            halt.codes[symbol] = code
+        if feed == TRADE.tr_id and halt.trading_since is None:
+            halt.trading_since = received
+        if halt.trading_since is not None and received - halt.trading_since >= TRADING_CAP:
+            log.warning(
+                "market halt of %s: trading came back at %s and no fresh minute of continuous trading by"
+                " %s; ended there",
+                halt.window.start.isoformat(),
+                halt.trading_since.isoformat(),
+                received.isoformat(),
+            )
+            return (*out, *self._release(received))
+        continuous = halt.continuous(symbols)
+        if continuous and not halt.ended_breaker:
+            halt.ended_breaker = True
+            if halt.breaker.detail != f"{len(BREAKER_STAGES)}단계":
+                # The breaker ends at the real reopening, not the rules' 30 minutes.
+                breaker = dataclasses.replace(halt.breaker, end=received)
+                out += self._one(self._learn(received, breaker))
+        if not (continuous and halt.fresh(received, symbols)):
             halt.fresh_since = None
         elif gap or halt.fresh_since is None:
             halt.fresh_since = received
         elif received - halt.fresh_since >= REOPEN_HOLD:
-            out += self._one(self._halt_version(received, received, REOPENED))
-            self._halt = None  # over: a later stage starts afresh
+            out += self._release(received)
         return tuple(out)
+
+    def _again(self, received: datetime) -> Window | None:
+        """The halt on again from ``received`` (a later stage, a halted trade): its reopening starts
+        over, back to ``정지`` if it was further on."""
+        halt = self._halt
+        assert halt is not None
+        halt.reset(received)
+        if halt.window.detail == HALTED:
+            return None
+        return self._halt_version(received, halt.window.end, HALTED)
+
+    def _release(self, received: datetime) -> tuple[Window, ...]:
+        """The halt over at ``received``: its window ends there (``재개``)."""
+        released = self._one(self._halt_version(received, received, REOPENED))
+        self._halt = None  # a later stage starts afresh
+        return released
 
     def _confirm(self, received: datetime, session: Session) -> Window | None:
         """The market halt confirmed at ``received``, if the breaker stage pending and a halted trade
         meet (module doc): a trade received from a minute before the stage was called to the end of
         the stage's window by the rules. Its window starts at the first such trade's time and lasts
-        to the end of the day while the reopening is not known."""
+        to the session's close while the reopening is not known."""
         if self._pending is None:
             return None
         breaker, called_at = self._pending
@@ -368,8 +421,8 @@ class SpecialSituations:
         if not flags or received >= breaker.end:
             return None
         self._pending = None
-        end = datetime.combine(session.day, time.max, KST)
-        window = Window(Kind.MARKET_HALT, None, min(flags), end, HALTED)
+        # To the close while the reopening is not known: no halt outlives the session.
+        window = Window(Kind.MARKET_HALT, None, min(flags), session.close, HALTED)
         self._halt = _Halt(window, breaker, received)
         return self._learn(received, window)
 
@@ -391,6 +444,19 @@ class SpecialSituations:
         for received_at, w in self._learned:
             if before is not None and received_at >= before:
                 break
+            latest[(w.kind, w.symbol, w.start)] = (received_at, w)
+        return list(latest.values())
+
+    def versions(self) -> list[tuple[datetime, Window]]:
+        """Every version of every window learned (of today and the windows reaching it), with when it
+        was received, in that order: the fill marks a day decided again with them (#625)."""
+        return list(self._learned)
+
+    @staticmethod
+    def latest_of(versions: Sequence[tuple[datetime, Window]]) -> list[tuple[datetime, Window]]:
+        """The latest of each window of ``versions`` (in receipt order), in the order first learned."""
+        latest: dict[tuple[Kind, str | None, datetime], tuple[datetime, Window]] = {}
+        for received_at, w in versions:
             latest[(w.kind, w.symbol, w.start)] = (received_at, w)
         return list(latest.values())
 

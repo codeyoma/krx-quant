@@ -72,9 +72,10 @@ from krx_quant.engine import Event, PredictionEngine
 from krx_quant.features import Leaders, PreviousDays
 from krx_quant.feeds import BOOK, BOOK_SNAPSHOT, INDEX, INDEX_REST, KOSPI200_FUTURES, TRADE, VI_STATUS
 from krx_quant.feeds.base import KST, kst_day
+from krx_quant.kind_registry import KINDS
 from krx_quant.kinds import DIRECTION, Answer, Kind
 from krx_quant.market_calendar import MarketCalendar, calendar_store
-from krx_quant.market_view import MarketView, prediction_window
+from krx_quant.market_view import HORIZON, MarketView, prediction_window
 from krx_quant.object_store import ObjectStore, open_store
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.reference import BAR
@@ -102,8 +103,9 @@ MARKET_FEEDS: dict[str, str | None] = {
     KOSPI200_FUTURES.tr_id: None,
 }
 # The symbols' feeds the special windows' fill reads (#236): their VI status, and their integrated
-# trades and book, which confirm a market halt and its reopening (#625).
-SYMBOL_SPECIAL_FEEDS = (VI_STATUS.tr_id, TRADE.tr_id, BOOK.tr_id)
+# trades and book (and the REST book standing in for it), which confirm a market halt and its
+# reopening (#625).
+SYMBOL_SPECIAL_FEEDS = (VI_STATUS.tr_id, TRADE.tr_id, BOOK.tr_id, BOOK_SNAPSHOT.tr_id)
 # The feeds the special windows' fill reads: the symbols' and the market's.
 SPECIAL_FEEDS = (*SYMBOL_SPECIAL_FEEDS, *MARKET_FEEDS)
 # How often an engine started beside a rescore looks whether it is done.
@@ -603,14 +605,15 @@ def decide_day(
     halt: threading.Event | None = None,
 ) -> list[tuple[datetime, Window]]:
     """A day's special windows decided from its events (in receipt order) as the engine
-    decides them (#236): the VIs of ``symbols``, the circuit breakers and the sidecars, the
-    latest version of each with when it was received, as the engine keeps them."""
+    decides them (#236): the VIs of ``symbols``, the circuit breakers, the sidecars and the market
+    halts, every version of each with when it was received (``SpecialSituations.latest_of`` keeps
+    the latest, as the engine does)."""
     special = SpecialSituations(calendar)
     for i, (feed, row) in enumerate(events):
         if halt is not None and i % _HALT_EVERY == 0 and halt.is_set():
             raise _Halted
         special.event(feed, row, symbols)
-    return special.latest()
+    return special.versions()
 
 
 def fill_special_windows(
@@ -685,7 +688,17 @@ def _decide_special_day(
             day,
             where,
         )
-    written = store.decide_special_day(day, windows, source, now)
+    versions = windows
+    windows = SpecialSituations.latest_of(versions)
+    written = store.decide_special_day(
+        day,
+        windows,
+        source,
+        now,
+        versions,
+        HORIZON,
+        {k.name: k.horizon for k in KINDS},
+    )
     log.info("special windows of %s from %s: %d windows, %d rows written", day, source, len(windows), written)
     return Filled(day, source, len(windows), written)
 
