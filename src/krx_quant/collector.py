@@ -90,6 +90,7 @@ from krx_quant.revisions import RevisionGate
 from krx_quant.scheduled import keep_jobs
 from krx_quant.signals import Signals
 from krx_quant.snapshot import keep_snapshots
+from krx_quant.special import REOPENED, Window
 from krx_quant.state_backup import keep_backed_up
 from krx_quant.state_lock import in_use
 from krx_quant.stream import LiveStatus
@@ -438,6 +439,7 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                 alerts,
                 on_event,
                 calendar.calendar,
+                engine.market_halt,
             )
             # The closing flow's days (#305): after the history task's runs and after KRX's net
             # assets come in, one computation at a time (they write the same file).
@@ -1043,6 +1045,7 @@ class _Stream:
         alerts: Alerts,
         on_event: Callable[[str, dict[str, Any]], None],
         calendar: MarketCalendar | None = None,
+        market_halt: Callable[[], Window | None] = lambda: None,
     ) -> None:
         self._session = session
         self._settings = settings
@@ -1078,6 +1081,10 @@ class _Stream:
         # gap a silent connection leaves (#308).
         self._heard_at = 0.0
         self._heard_wall: datetime | None = None
+        # The market halt the engine knows now (#625, ``PredictionEngine.market_halt``), and the one
+        # its notice was sent for.
+        self._market_halt = market_halt
+        self._halt_told: Window | None = None
 
     async def run(self) -> None:
         """Stay connected until ``stop``: reconnect with exponential backoff and register
@@ -1137,14 +1144,43 @@ class _Stream:
 
     def check_stale(self) -> None:
         """Alert, in one message, on feeds whose every key went quiet; announce the ones that
-        came back. One quiet key is only a gap record: it is the market, not a fault.
+        came back. One quiet key is only a gap record: it is the market, not a fault. A market-wide
+        halt the engine confirmed (#625) is one notice when it begins and one when trading is back
+        (``_tell_halt``), in place of the feeds it silences.
         """
+        self._tell_halt()
         self._health.check_stale()
         silent = [_stale_name(feed) for feed in self._health.silent_feeds()]
         self._alerts.raise_many(silent, "구독한 키가 모두 끊긴 피드")
         back = [name for name in self._alerts.active(_STALE_PREFIX) if name not in silent]
         if back:
             self._alerts.resolve_many(back, "데이터가 다시 들어오는 피드")
+
+    def _tell_halt(self) -> None:
+        """One notice when a market halt is known while the WebSocket is up, and one when it is over
+        (#625); meanwhile the feeds it silences open gaps marked so, never alerted (``FeedHealth``)."""
+        halt = self._market_halt()
+        now = self._now()
+        on = halt is not None and now < halt.end
+        self._health.halted = on
+        told = self._halt_told
+        if halt is not None and on and told is None and self.connected:
+            self._halt_told = halt
+            self._alerts.notice(
+                f"시장 전체 매매 정지: {_hms(halt.start)}부터 체결이 멈췄습니다"
+                "(통합 체결의 정지 표시, 서킷브레이커)."
+                " 접속 매매가 돌아오고 호가와 체결이 1분 동안 이어질 때까지 새 예측과 새 매수를 멈춥니다."
+                " 이 정지로 멈춘 피드는 따로 알리지 않습니다."
+            )
+        elif not on and told is not None:
+            self._halt_told = None
+            if halt is None or halt.start != told.start or halt.detail != REOPENED:
+                return  # the day ended halted (a breaker's last stage): no reopening to tell
+            minutes = (halt.end - told.start).total_seconds() / 60
+            self._alerts.notice(
+                f"시장 전체 매매 재개: 접속 매매와 1분 동안의 호가·체결을 확인했습니다({_hms(halt.end)},"
+                f" 정지 {_hms(told.start)}부터 {minutes:.0f}분). 예측과 매수를 다시 엽니다."
+            )
 
     async def _ensure_approval(self) -> None:
         now = self._now()
@@ -1394,6 +1430,10 @@ class _Stream:
 
 
 _STALE_PREFIX = "stale "
+
+
+def _hms(at: datetime) -> str:
+    return at.astimezone(KST).strftime("%H:%M:%S")
 
 
 def _stale_name(feed: str) -> str:

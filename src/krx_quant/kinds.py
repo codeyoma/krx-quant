@@ -66,6 +66,8 @@ from bisect import bisect_left
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from itertools import chain
+from operator import attrgetter, sub
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 from krx_quant.cards import Card, Meaning
@@ -278,7 +280,7 @@ def follow(
     one of those quotes (from t, between two, or up to the end). ``cost`` and ``width`` go with it
     as given (``Followed``)."""
     quotes = tuple(taken.quotes) if crossed else tuple(q for q in taken.quotes if not q.crossed)
-    silent = went_silent(bar_close, bar_close + horizon, [q.received_at for q in quotes])
+    silent = went_silent(bar_close, bar_close + horizon, list(map(attrgetter("received_at"), quotes)))
     unscorable = MISSING_MID if anchor is None else REST_QUOTES if taken.rest else SILENT if silent else None
     return Followed(
         symbol,
@@ -307,13 +309,10 @@ def _at(trade: tuple[datetime, float]) -> datetime:
 
 def went_silent(start: datetime, end: datetime, received: Sequence[datetime]) -> bool:
     """Whether sixty seconds or more went by without a quote in [``start``, ``end``): from the
-    start to the first quote ``received``, between two, or from the last to the end."""
-    last = start
-    for at in received:
-        if at - last >= SILENCE:
-            return True
-        last = at
-    return end - last >= SILENCE
+    start to the first quote ``received``, between two, or from the last to the end. The gaps are
+    taken at C speed (#630): a window of the horizon ladder holds an hour of quotes (#263)."""
+    gaps = map(sub, chain(received, (end,)), chain((start,), received))
+    return any(map(SILENCE.__le__, gaps))
 
 
 @dataclass(frozen=True)

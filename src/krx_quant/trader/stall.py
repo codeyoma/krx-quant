@@ -31,6 +31,12 @@ seconds stops the entries, is kept and logged, and tells Telegram nothing. Of th
 from 2026-11-02 to 11-06, 42 were over within thirty seconds (the median 5 s); a short one needs
 nobody, since the entries are stopped whatever is sent and come back by themselves.
 
+**A market halt** (#625): a stall while the engine knows of a market-wide halt that the stall's
+silence began in, or at most ``HALT_LEAD`` (five seconds) before (``on_special``: its window from the
+halted trade to a minute after the reopening), is the halt, which the engine sends one notice of:
+kept and logged as any stall, sent to Telegram neither when it lasts thirty seconds nor when the
+quotes return. One whose silence began earlier is a stall of its own and is sent as any.
+
 A stall the trader stopped during is taken up again when it starts on the same day in the same
 mode: one already sent is not sent again (the next quote ends it, with its notice); one not sent
 yet is sent once thirty seconds have passed since its last quote (or, with none received, since
@@ -41,11 +47,12 @@ without a notice. Outside continuous trading no stall begins; one begun lasts un
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
 
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.market_calendar import Session
+from krx_quant.special import Kind, Window
 from krx_quant.trader import MOCK
 from krx_quant.trader.limits import Notify
 from krx_quant.trader.quotes import BestQuote
@@ -58,6 +65,10 @@ STALL_AFTER = timedelta(seconds=5)
 # A stall whose silence is this long is sent to Telegram (#624): counted like ``STALL_AFTER``, from
 # the last quote.
 ALERT_AFTER = timedelta(seconds=30)
+# A stall whose silence began at most this long before a market halt's start is the halt's (#625): the
+# stall's own five seconds. On 2026-11-06 the last quote came 0.8 s after the first halted trade; a
+# book can come last a moment before it.
+HALT_LEAD = STALL_AFTER
 
 
 def _hms(at: datetime) -> str:
@@ -93,6 +104,8 @@ class QuoteWatch:
         # Of the stall that lasts (#624): from when its silence is counted, and whether it was sent.
         self._silent_since = started_at
         self._alerted = False
+        self._halted = False  # the stall that lasts is a market halt's, logged so (#625)
+        self._windows: list[Window] = []  # the special windows the engine knows (#625)
         kept = store.open_stall() if after is not None else None
         if kept is None or after is None:
             return
@@ -109,6 +122,17 @@ class QuoteWatch:
             return
         store.end_stall(kept.id, started_at, RESTART)
         log.info("trader: the stall of %s ended with the trader's start", kept.began_at.isoformat())
+
+    def on_special(self, windows: Sequence[Window]) -> None:
+        """The special windows the engine knows now: a market halt's explains a stall (#625)."""
+        self._windows = list(windows)
+
+    def _in_halt(self) -> bool:
+        """Whether the stall that lasts is a market halt's (#625): its silence began in a halt the engine
+        knows now, or at most ``HALT_LEAD`` before its start (the last quotes come just before the
+        halted trade that confirms it)."""
+        since = self._silent_since
+        return any(w.kind is Kind.MARKET_HALT and w.start - HALT_LEAD <= since < w.end for w in self._windows)
 
     @property
     def stalled(self) -> bool:
@@ -131,7 +155,7 @@ class QuoteWatch:
             return None
         last = self._last
         self.stall = stall = self._store.add_stall(self._mode, now, last)
-        self._silent_since, self._alerted = since, False
+        self._silent_since, self._alerted, self._halted = since, False, False
         log.warning(
             "trader: the collector's quotes stalled: none for more than %gs (the last at %s): no new entry"
             " until they return",
@@ -146,6 +170,11 @@ class QuoteWatch:
         (#624). That it was sent is kept first, so that a trader started again does not send it twice."""
         stall = self.stall
         if stall is None or self._alerted or now - self._silent_since < self.alert_after:
+            return
+        if self._in_halt():
+            if not self._halted:
+                self._halted = True
+                log.warning("trader: the quotes stalled in a market halt: the engine tells it (#625)")
             return
         self._store.alert_stall(stall.id, now)
         self._alerted = True

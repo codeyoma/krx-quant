@@ -266,7 +266,7 @@ from krx_quant.reference import Bar
 from krx_quant.signals import SENT, Blocked, Judged, SignalRule, Signals
 from krx_quant.smt import LIVE as SMT_LIVE
 from krx_quant.smt import Detector as SmtDetector
-from krx_quant.special import KOSPI, Kind, SpecialSituations, Window, in_vi, touching
+from krx_quant.special import HALT_STATUS, KOSPI, Kind, SpecialSituations, Window, in_halt, in_vi, touching
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 from krx_quant.touch import RESTARTED, TARGET_VERSION, WINDOW
 
@@ -1203,6 +1203,14 @@ class PredictionEngine:
         midnight = _start_of(self.clock.now().astimezone(KST).date())
         return CpuUse(self._budget, expected, self.store.count_runs("cpu_budget", midnight))
 
+    def market_halt(self) -> Window | None:
+        """The latest market halt known now, begun by now (#625), as last learned: on while now is
+        before its end. The collector sends one notice for it in place of the feeds' outages, and one
+        when it is over."""
+        now = self.clock.now()
+        halts = [w for w in self._special.known(before=now) if w.kind is Kind.MARKET_HALT and w.start <= now]
+        return max(halts, key=lambda w: w.start, default=None)
+
     def special_today(self) -> list[Window]:
         """The special situations known now that touch today, in time order."""
         now = self.clock.now()
@@ -1622,9 +1630,14 @@ class PredictionEngine:
             members = [a.name for a in running if a.name in active]
             known = self._special.known(before=bar_close)
             regime = self._regime(bar_close)
-            stopped = [s for s in self.symbols if in_vi(known, s, bar_close)]
+            # A market halt (#625) stops every symbol, as a VI stops its own.
+            halted = in_halt(known, bar_close) is not None
+            stopped = (
+                list(self.symbols) if halted else [s for s in self.symbols if in_vi(known, s, bar_close)]
+            )
+            not_made = HALT_STATUS if halted else "vi"
             if stopped:
-                self._record_not_predicted(bar_close, stopped, "vi", running)
+                self._record_not_predicted(bar_close, stopped, not_made, running)
             to_touch = self.target_version >= 2
             made_by: dict[tuple[str, str, str], dict[str, Forecast | None]] = {}
             for symbol in self.symbols:
@@ -1670,7 +1683,7 @@ class PredictionEngine:
         # this bar close's scoring and take milliseconds, while beside the algorithms' threads each
         # of their store calls waited for the GIL, which those threads hold as they compute.
         with self._step(KIND_BASELINES):
-            self._predict_kinds(bar_close, at_close, stopped, kind_running, late)
+            self._predict_kinds(bar_close, at_close, stopped, kind_running, late, not_made)
         if not at_close:
             return
         # The kinds' algorithms after the direction's: the budget skips them first (#179).
@@ -1720,11 +1733,13 @@ class PredictionEngine:
         stopped: Sequence[str],
         running: Sequence[KindAlgorithm],
         late: Collection[str] = (),
+        not_made: str = "vi",
     ) -> None:
         """Each kind's baselines' predictions of every symbol, at once, and every predictor's
-        empty prediction of the symbols in a VI (#179); none of a kind in ``late`` (its window
-        would end after the closing auction, #263). A kind that fails is logged: the other
-        kinds and the direction go on."""
+        empty prediction of the symbols ``stopped`` (#179), status ``not_made`` (in a VI, or every
+        symbol in a market halt, #625); none of a kind in ``late`` (its window would end after the
+        closing auction, #263). A kind that fails is logged: the other kinds and the direction go
+        on."""
         day_start = datetime.combine(bar_close.date(), time(), KST)
         for kind in self.kinds:
             if kind.name in late:
@@ -1760,9 +1775,9 @@ class PredictionEngine:
                 made = [(name, version, f, status) for (name, version, status), f in made_by.items()]
                 if stopped:
                     nothing: dict[str, KindForecast | None] = dict.fromkeys(stopped)
-                    made += [(b.name, b.version, nothing, "vi") for b in baselines]
+                    made += [(b.name, b.version, nothing, not_made) for b in baselines]
                     made += [
-                        (a.name, self.models[a.name].version, nothing, "vi")
+                        (a.name, self.models[a.name].version, nothing, not_made)
                         for a in running
                         if a.kind == kind.name
                     ]

@@ -12,8 +12,9 @@ What it reads:
   own run in a worker thread, so its time after that first record is its wait for a worker and the
   GIL and its computing; the final consensus waits for every member; the last record ends the bar
   close. The direction's predictions and the bar-close kinds' algorithms' (``KIND_ALGORITHMS``); a
-  VI's rows (``vi``) are stored at once and left out. An algorithm past its time limit is stored
-  when it was given up: its seconds count, and its bar closes timed out or failed are counted apart.
+  VI's rows (``vi``) and a market halt's (``halt``, #625) are stored at once and left out. An
+  algorithm past its time limit is stored when it was given up: its seconds count, and its bar
+  closes timed out or failed are counted apart.
 - The engine's ``loop_held`` runs (``loop_watch.LOOP_HELD``): each bar close that held the event
   loop over a second, the WARNING's ``held the event loop`` line. The engine keeps them from #589
   on; for the days before, Loki has the lines. From #621 each says how much garbage collection ran
@@ -42,6 +43,7 @@ from krx_quant.consensus import FINAL
 from krx_quant.feeds.base import KST
 from krx_quant.loop_watch import LOOP_HELD
 from krx_quant.predictions import DB_NAME, read_only
+from krx_quant.special import HALT_STATUS
 from krx_quant.trader.store import DB_NAME as TRADER_DB_NAME
 
 DAYS_BEFORE = 5  # the trading days before the day it is compared with
@@ -156,7 +158,7 @@ def read_day(
     found = Day(day)
     by_close: dict[str, list[tuple[str, datetime, str]]] = defaultdict(list)
     for name, bar_close, displayed_at, status in _rows(db, day, kind_algorithms):
-        if status != VI:
+        if status not in (VI, HALT_STATUS):
             by_close[bar_close].append((name, datetime.fromisoformat(displayed_at), status))
     for bar_close, rows in by_close.items():
         at = datetime.fromisoformat(bar_close)
