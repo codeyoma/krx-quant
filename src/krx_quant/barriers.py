@@ -77,9 +77,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta
+from itertools import compress, islice, repeat
+from operator import attrgetter, ge, le
 from typing import TYPE_CHECKING, Any
 
 from krx_quant.cards import Card
@@ -125,9 +127,15 @@ def _at(t: datetime | None) -> str | None:
     return t.astimezone(KST).isoformat() if t is not None else None
 
 
-def _first(quotes: Sequence[Quote], reached: Any) -> Quote | None:
-    """The first received of ``quotes`` that ``reached`` says reached a barrier."""
-    return min((q for q in quotes if reached(q)), key=lambda q: q.received_at, default=None)
+def _first(quotes: Sequence[Quote], reached: Iterable[bool], ordered: bool) -> Quote | None:
+    """The first received of ``quotes`` that reached a barrier, ``reached`` saying which did, quote
+    by quote: of ``quotes`` received in order (``ordered``) the first that did, else the earliest
+    received of them, the first on a tie. In order, the first is the earliest: the scan stops there
+    (#630), where the earliest reads them all, an hour of quotes with the horizon ladder (#263)."""
+    hits = compress(quotes, reached)
+    if ordered:
+        return next(hits, None)
+    return min(hits, key=attrgetter("received_at"), default=None)
 
 
 def barrier_answer(window: Followed) -> Answer:
@@ -136,9 +144,21 @@ def barrier_answer(window: Followed) -> Answer:
     upper = lower = None
     if width is not None and anchor is not None and tick is not None:
         upper, lower = anchor + width.ticks * tick, anchor - width.ticks * tick
-    up = _first(window.quotes, lambda q: q.bid >= upper) if upper is not None else None
-    down = _first(window.quotes, lambda q: q.ask <= lower) if lower is not None else None
-    last = window.quotes[-1] if window.quotes else None
+    quotes = window.quotes
+    received = list(map(attrgetter("received_at"), quotes))
+    ordered = all(map(le, received, islice(received, 1, None)))
+    # Each quote's bid at or above U, ask at or below L, compared at C speed (#630).
+    up = (
+        _first(quotes, map(ge, map(attrgetter("bid"), quotes), repeat(upper)), ordered)
+        if upper is not None
+        else None
+    )
+    down = (
+        _first(quotes, map(le, map(attrgetter("ask"), quotes), repeat(lower)), ordered)
+        if lower is not None
+        else None
+    )
+    last = quotes[-1] if quotes else None
     path: dict[str, Any] = {
         "w": width.ticks if width is not None else None,
         "sigma": width.sigma if width is not None else None,
@@ -159,7 +179,7 @@ def barrier_answer(window: Followed) -> Answer:
         "bid_end": last.bid if last else None,
         "ask_end": last.ask if last else None,
         "quotes": len(window.quotes),
-        "silent": went_silent(window.bar_close, window.end, [q.received_at for q in window.quotes]),
+        "silent": went_silent(window.bar_close, window.end, received),
     }
     if upper is None:
         return Answer(None, None, path)
