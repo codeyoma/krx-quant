@@ -495,7 +495,7 @@
       }
     },
     "special_window": {
-      "description": "A special situation's window (#12, #236). end is the release; a VI whose release is not known yet lasts start + 3 minutes, and a third breaker stage to the end of the day; a breaker whose halt was confirmed ends at the real reopening. A market halt (#625, confirmed from KIS's fields) lasts to the end of the day until a minute of fresh quotes and trades after the reopening ends it. detail is a breaker's stage, a VI's type when known (static, dynamic, both), a market halt's phase (정지, 단일가, 재개), else null.",
+      "description": "A special situation's window (#12, #236). end is the release; a VI whose release is not known yet lasts start + 3 minutes, and a third breaker stage to the end of the day; a breaker whose halt was confirmed ends at the real reopening. A market halt (#625, confirmed from KIS's fields) lasts to the session's close until a minute of fresh quotes and trades after the reopening ends it. detail is a breaker's stage, a VI's type when known (static, dynamic, both), a market halt's phase (정지, 단일가, 재개), else null.",
       "oneOf": [
         {
           "type": "object",
