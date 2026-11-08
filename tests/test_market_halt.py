@@ -22,7 +22,7 @@ import pytest
 
 from krx_quant.engine import Event
 from krx_quant.feeds import BOOK, TRADE
-from krx_quant.predictions import PredictionStore
+from krx_quant.predictions import DB_NAME
 from krx_quant.rescore import fill_special_windows
 from krx_quant.special import Kind, SpecialSituations, Window
 from tests.api_schema import check
@@ -413,9 +413,14 @@ def test_a_day_decided_by_the_rules_before_625_is_decided_again_once(tmp_path: P
         engine.store.close()
 
     asyncio.run(replay())
-    db = before_236(s.state_dir, replayed)
-    PredictionStore(db).close()  # the tables, as an engine made them
+    # The live database as the engine before #625 left it: its special tables kept, with that day's
+    # windows and decision by the old rules (no ``rules`` column yet: an engine adds it as 1).
+    s.state_dir.mkdir(parents=True, exist_ok=True)
+    db = s.state_dir / DB_NAME
+    with sqlite3.connect(replayed) as source, sqlite3.connect(db) as target:
+        source.backup(target)
     with sqlite3.connect(db) as conn:
+        conn.execute("ALTER TABLE special_days DROP COLUMN rules")
         conn.execute("DELETE FROM special_windows")
         conn.execute(
             "INSERT INTO special_windows (kind, symbol, start, end, detail, learned_at)"
@@ -426,7 +431,6 @@ def test_a_day_decided_by_the_rules_before_625_is_decided_again_once(tmp_path: P
             "INSERT INTO special_days (day, source, windows, decided_at) VALUES ('2026-10-12', 'old', 1, ?)",
             (at("06:00:00").isoformat(),),
         )
-        conn.execute("UPDATE special_days SET rules = 1")
 
     [filled] = fill_special_windows(s, NEXT_MORNING)
 
