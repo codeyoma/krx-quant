@@ -280,7 +280,7 @@
           "description": "null unless the status is ok: only those are scored.",
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]
         },
-        "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_members", "none_finished", "no_previous"]},
+        "status": {"enum": ["ok", "timed_out", "error", "vi", "halt", "no_book", "no_members", "none_finished", "no_previous"]},
         "blocked": {
           "description": "Why a final consensus is not to be acted on (#88); null for any other prediction.",
           "enum": [null, "special", "no_reference", "expired"]
@@ -1167,7 +1167,7 @@
         "unscorable": {"type": "integer", "minimum": 0},
         "status": {
           "type": "object",
-          "propertyNames": {"enum": ["timed_out", "error", "vi", "no_book", "no_members", "none_finished", "no_previous"]},
+          "propertyNames": {"enum": ["timed_out", "error", "vi", "halt", "no_book", "no_members", "none_finished", "no_previous"]},
           "additionalProperties": {"type": "integer", "minimum": 1}
         }
       }
@@ -1538,7 +1538,7 @@
           "description": "null unless the status is ok: only those are scored. A daily kind's (#264): its day's close (the closing auction's end).",
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]
         },
-        "status": {"enum": ["ok", "timed_out", "error", "vi", "no_book", "no_previous"]},
+        "status": {"enum": ["ok", "timed_out", "error", "vi", "halt", "no_book", "no_previous"]},
         "flat_ticks": {
           "description": "k at the bar close (#200): the flat band in ticks at its mid-point, what the kind's predictors were given and the range's answer counts; kept as the price moves on. Every status has it. null without a mid-point at the bar close, and for predictions stored before #200.",
           "type": ["integer", "null"],

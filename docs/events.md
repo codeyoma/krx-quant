@@ -256,6 +256,9 @@ REST 응답 원문은 raw 계층에 `{"tr_id", "params", "body"}` JSON으로 남
 
   > **바뀜** (2026-10-19, #311): 닫힘 없이 죽은 연결은 결측으로 남지 않았다(수집기가 알아채지 못했다) → `disconnected: silent 60s`로 마지막 프레임부터 남는다. 이유: 2026-10-19 16:33 장애에서 그날 끝까지 녹화가 빠졌는데 `gaps`에는 아무것도 없었다(#308).
 - **`stale`**: 연속매매 시간(Market Calendar 기준. 보통 09:00–15:20, 연초 첫 거래일과 수능일은 10:00부터)에 피드가 기준 시간보다 오래 조용했던 구간이다. 다음 메시지가 온 시각에 끝난다. 기준 시간은 피드마다 다르다(`health.STALE_SECONDS`).
+  - 엔진이 시장 전체 매매 정지(`market_halt`, #625)를 아는 동안 그 정지로 멈추는 피드(`health.HALT_QUIET`: 통합·KRX·NXT 체결, 통합·KRX 호가, KOSPI200 선물, 옵션, 회원사, 프로그램매매)의 침묵은 `stale: market halt`로 남는다. 피드별 알림(`[장애] 구독한 키가 모두 끊긴 피드`)에 세지 않는다. 지수 같은 다른 피드의 침묵은 그대로 `stale`이다.
+
+    > **바뀜** (2026-11-09, #NNN): 시장 전체 정지로 멈춘 피드도 `stale`로 남고 피드별로 알렸다 → `stale: market halt`로 남기고 알리지 않는다. 이유: 예상된 침묵과 데이터 손실을 가르려고(#625).
   - 시작은 개장 시각, 구독(또는 REST 조회)을 시작한 시각, 마지막 수신 시각 중 가장 늦은 시각이다. 그래서 NXT 프리마켓에 받은 데이터는 침묵 시간에 들어가지 않는다.
   - 그날 한 번도 데이터가 오지 않은 피드는 KIS가 거래일이라고 확인한 날에만 판정한다. 휴장일에는 판정하지 않는다.
   - 미국 주간거래(`HDFSCNT0`)는 자기 시간표(미국 서머타임이 아니면 10:00 시작, 미국 휴일 휴장)를 따라서, 그날 데이터가 한 번 온 뒤에만 판정한다.
@@ -271,7 +274,7 @@ REST 응답 원문은 raw 계층에 `{"tr_id", "params", "body"}` JSON으로 남
 | `symbol` | string | 구독 키 |
 | `start` | timestamp(us, Asia/Seoul) | 시작 |
 | `end` | timestamp(us, Asia/Seoul), null 가능 | 끝 |
-| `reason` | string | `disconnected: …`(`disconnected: silent 60s` 포함) 또는 `stale` |
+| `reason` | string | `disconnected: …`(`disconnected: silent 60s` 포함), `stale`, 또는 `stale: market halt`(#625: 엔진이 확인한 시장 전체 매매 정지 동안 멈춘 피드의 예상된 침묵. 데이터 손실이 아니다) |
 
 ## bars: 1분봉 (REST 백필)
 

@@ -23,8 +23,8 @@ what the nightly re-fit fits a policy on (``refit.py``).
   end it kept.
 
   > **바뀜** (2026-11-09, #NNN): each window was known from its start → from when the engine first
-  > learned it. Why: a window that begins before the engine can know it (a VI, a breaker called a
-  > minute after the drop began) gave the replay what the trader could not have known.
+  > learned it. 이유: a window that begins before the engine can know it (a VI, a breaker called a
+  > minute after the drop began) gave the replay what the trader could not have known (#625).
 
 No answer is read for a decision, nor its special flag: nothing the trader could not have known
 then. The calibration alone (#475, below) reads each rise's answer, once it is measured.

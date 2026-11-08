@@ -21,7 +21,7 @@ from the open: on 2026-11-06 the index met the first stage's drop from 09:02:30,
 call it at 09:03:30 and trading halted at 09:03:33 (#625's probe).
 
 > 바뀜 (2026-11-09, #632): breakers, like sidecars, were not called in the first 5 minutes →
-> they are, from the open. Why: 2026-11-06's breaker halted trading at 09:03:33, and the window
+> they are, from the open. 이유: 2026-11-06's breaker halted trading at 09:03:33, and the window
 > began at 09:06:00.
 
 **The market halt** (#625). KIS sends no notice of a breaker on the feeds subscribed (the market

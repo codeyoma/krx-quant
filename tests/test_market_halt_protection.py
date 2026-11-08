@@ -13,19 +13,30 @@ import asyncio
 import sqlite3
 from dataclasses import replace
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds import KST
-from krx_quant.special import AUCTION, HALTED, REOPENED, Kind, Window
-from krx_quant.trader.cells import Kept
+from krx_quant.special import REOPENED, Kind, Window
+from krx_quant.special import Kind as SpecialKind
+from krx_quant.trader.cells import Kept, special_windows
+from krx_quant.trader.paper import TIME
 from krx_quant.trader.replay import known
+from tests.api_schema import check
 from tests.collector_doubles import FIXED_NOW, TRADE_KEY, Clock, read, settings_for
 from tests.kis_frames import book_frame, index_frame, trade_frame
-from tests.replay_events import at, run
+from tests.replay_doubles import VI, busy_morning
+from tests.replay_events import SYMBOL, api, at, get_json, run
+from tests.test_calendar_health import health_checks
 from tests.test_market_halt import halt_morning, market
 from tests.test_resilience import with_telegram
+from tests.test_trader_stall import BOUGHT, TEN, flowing, paper_day, stalls
+from tests.trader_doubles import Read, Special, Tick, quote
 from tests.waiting import until
 
 INDEX_KEY = ("H0UPCNT0", "0001")
@@ -69,9 +80,14 @@ def book_at(at: datetime, code: str) -> str:
 # --- The collector's notices.
 
 
+def checked_after(checks: Any, done: int) -> bool:
+    return len(checks.opened) > done
+
+
 async def test_a_confirmed_halt_is_one_notice_and_its_reopening_another_with_no_feed_outage(
-    kis: FakeKis, tmp_path: Path
+    kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    checks = health_checks(monkeypatch)
     kis.script[TRADE_KEY] = [trade_at(FIXED_NOW)]
     kis.script[INDEX_KEY] = [index_at(FIXED_NOW)]
     clock = Clock(FIXED_NOW)  # 09:30:16
@@ -92,11 +108,14 @@ async def test_a_confirmed_halt_is_one_notice_and_its_reopening_another_with_no_
     # The KOSPI held 8.4% down a minute: the breaker at 09:31:16; the trade flagged at 09:31:18.
     await at_(FIXED_NOW + timedelta(minutes=1), index_at(FIXED_NOW + timedelta(minutes=1)))
     await at_(FIXED_NOW + timedelta(minutes=1, seconds=2), trade_at(FIXED_NOW, halted=True))
+    clock.at += timedelta(seconds=1)  # the engine knows what it received before now
     await until(lambda: any(m["text"].startswith(HALT_NOTICE) for m in kis.telegram_messages))
-    # Five minutes without trades or books, the index going on.
+    # Five minutes without trades or books, the index going on: the trades' key goes stale.
     for minute in range(2, 8):
         when = FIXED_NOW + timedelta(minutes=minute)
         await at_(when, index_at(when))
+        await until(partial(checked_after, checks, len(checks.opened)))  # a stale check at this minute
+    assert any(TRADE_KEY in opened for opened in checks.opened)
     # The reopening auction's book, then continuous trading and a minute of fresh quotes and trades.
     when = FIXED_NOW + timedelta(minutes=8)
     await at_(when, book_at(when, "C"), index_at(when))
@@ -123,12 +142,13 @@ async def test_no_prediction_in_the_halt_until_a_minute_of_fresh_quotes_after_th
 ) -> None:
     db = tmp_path / "engine.db"
 
-    await run(db, [*halt_morning(), *market()], until=at("09:50:00"))
+    engine = await run(db, [*halt_morning(), *market()], until=at("09:50:00"))
 
     with sqlite3.connect(db) as conn:
         statuses = dict(
             conn.execute(
-                "SELECT substr(bar_close, 12, 5), group_concat(DISTINCT status) FROM predictions GROUP BY bar_close"
+                "SELECT substr(bar_close, 12, 5), group_concat(DISTINCT status) FROM predictions"
+                " GROUP BY bar_close"
             ).fetchall()
         )
         kinds = dict(
@@ -143,6 +163,14 @@ async def test_no_prediction_in_the_halt_until_a_minute_of_fresh_quotes_after_th
         assert kinds[close] == "halt", close
     assert "halt" not in statuses["09:03"] and "halt" not in statuses["09:36"]
     assert "halt" not in kinds["09:36"]
+    async with api(engine) as client:
+        shown = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?limit=1000")
+        barrier = await get_json(
+            client, f"/v1/symbols/{SYMBOL}/kinds/barrier/predictions?bar_close=2026-10-12T09:20:00%2B09:00"
+        )
+    check("predictions", shown)
+    check("kind_predictions", barrier)
+    assert {p["status"] for p in shown["predictions"] if p["bar_close"][11:16] == "09:20"} == {"halt"}
 
 
 # --- The trader.
@@ -158,5 +186,74 @@ def test_the_replay_knows_a_window_from_when_the_engine_learned_it() -> None:
     assert known([kept, before], at("09:30:24")) == [kept, before]
 
 
-def test_the_phases_are_named_as_the_docs_say() -> None:
-    assert (HALTED, AUCTION, REOPENED) == ("정지", "단일가", "재개")
+async def test_the_engine_keeps_when_it_first_learned_a_window_and_the_trader_reads_it(
+    tmp_path: Path,
+) -> None:
+    # A VI seen on at 09:30:24 and released at 09:32:44: one row, learned at its release, first
+    # learned at 09:30:24, which the trader's replay knows it from.
+    db = tmp_path / "engine.db"
+    await run(db, [*busy_morning(), *VI], until=at("09:40:00"))
+
+    with sqlite3.connect(db) as conn:
+        conn.row_factory = sqlite3.Row
+        [window] = special_windows(conn, "005930", at("09:00:00"))
+        [row] = conn.execute("SELECT learned_at, first_learned_at FROM special_windows").fetchall()
+    assert (row["learned_at"], row["first_learned_at"]) == (
+        "2026-10-12T09:32:44+09:00",
+        "2026-10-12T09:30:24+09:00",
+    )
+    assert isinstance(window, Kept) and window.learned_at == at("09:30:24")
+    assert known([window], at("09:30:23")) == []
+
+
+# --- The trader's books through a halt (the example of ``tests/test_trader_stall.py``: bought at
+# 10:00:02.5 at 70,100, its stop 69,850, its time barrier 10:04).
+
+
+def halted_from(start: str, end: str) -> Read:
+    """The engine's market halt from ``start`` to ``end``, read by the trader at ``start``."""
+    return Read(start, [Special(start, end, SpecialKind.MARKET_HALT)])
+
+
+def test_a_paper_book_fills_nothing_on_the_quotes_of_a_halt_and_exits_on_the_first_after_it(
+    tmp_path: Path,
+) -> None:
+    """The halt known from 10:00:30 to 10:05:00; the auction's quotes in it bid below the stop and past
+    the time barrier: the book sells on none of them, and on the first quote after the halt."""
+    day = paper_day(tmp_path)
+
+    [trade] = day.run(
+        [
+            *flowing("10:00:00", "10:00:02"),
+            TEN,
+            BOUGHT,
+            *flowing("10:00:03", "10:00:29"),
+            halted_from("10:00:30", "10:05:00"),
+            *flowing("10:00:31", "10:04:59", bid=69_500, ask=69_400),
+            quote("10:05:00", 69_900, 70_000),
+        ]
+    )
+
+    assert trade["exit"] == {"at": "2026-10-14T10:05:00+09:00", "price": 69_900, "reason": TIME}
+
+
+def test_a_stall_in_a_halt_the_engine_knows_tells_telegram_nothing(tmp_path: Path) -> None:
+    """The halt known from 10:00:30; the last quote at 10:01:00 and none until 10:05:00: the stall is
+    kept, and neither it nor the quotes' return is sent (the engine sends the halt's notices)."""
+    day = paper_day(tmp_path)
+
+    day.run(
+        [
+            *flowing("10:00:00", "10:00:29"),
+            halted_from("10:00:30", "10:05:00"),
+            *flowing("10:00:31", "10:01:00"),
+            Tick("10:01:05.5"),
+            Tick("10:01:31"),
+            Tick("10:03:00"),
+            quote("10:05:00", 70_000, 70_100),
+        ]
+    )
+
+    [stall] = stalls(tmp_path)
+    assert (stall["began_at"], stall["alerted_at"]) == ("2026-10-14T10:01:05.500000+09:00", None)
+    assert day.notices == []
