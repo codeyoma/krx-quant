@@ -18,7 +18,7 @@ narrow the capital, never widen it (#393).
 - ``KRX_TRADER_LOSS_STREAK``, ``KRX_TRADER_COOLDOWN_MINUTES`` (#471): the net losses in a row (3
   unless set; from 1 to 3) that stop new buys for the cooldown (30 minutes unless set; at least 30);
 - ``KRX_TRADER_DAILY_BUY_ORDERS`` (#471): the buy orders a day, those refused counted (20 unless set;
-  from 1 to 20). The risk rules, ``paper.risk_held``: ``.env`` may make them stricter, never looser;
+  from 1 to 20). The risk rules, ``book.risk_held``: ``.env`` may make them stricter, never looser;
 - ``KRX_TRADER_QUOTES_URL``: the collector's quote stream (``quotes.py``); compose sets it to the
   engine service's;
 - ``KRX_TRADER_ENGINE_URL``: the Engine API the cost map is read from (``selection.py``, #395);
@@ -30,7 +30,7 @@ narrow the capital, never widen it (#393).
   here, before a live trader falls back to paper (``run.py``);
 - ``KRX_TRADER_MOCK_PRACTICE_SPACING_MINUTES`` (#598): the least minutes between two practice buys,
   from the bar close of the day's last practice buy order to the next one's (15 unless set; from 0,
-  which spaces none: ``paper.spaced``). The practice's pace, no risk rule: ``.env`` may set it either
+  which spaces none: ``book.spaced``). The practice's pace, no risk rule: ``.env`` may set it either
   way. Read in every mode, used with the practice alone.
 
 ``KRX_TRADER_KIND`` and ``KRX_TRADER_PREDICTOR`` (#394: the one cell traded) are gone: the cost map

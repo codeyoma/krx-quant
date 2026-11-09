@@ -56,9 +56,7 @@ from krx_quant.special import Window
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader import CAPITAL, SYMBOL
 from krx_quant.trader import policy as policies
-from krx_quant.trader.cells import Cell, open_engine_db
-from krx_quant.trader.money import net_of
-from krx_quant.trader.paper import (
+from krx_quant.trader.book import (
     BEFORE_ENTRY,
     NOT_UP,
     PAST_LAST_EXIT,
@@ -68,6 +66,8 @@ from krx_quant.trader.paper import (
     TARGET_REACHED,
     Rules,
 )
+from krx_quant.trader.cells import Cell, open_engine_db
+from krx_quant.trader.money import net_of
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.refit import (
     BOOTSTRAP,

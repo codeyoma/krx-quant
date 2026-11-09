@@ -23,8 +23,8 @@ import pytest
 
 from krx_quant.trader import policy as policies
 from krx_quant.trader import promotion
+from krx_quant.trader.book import BELOW_THRESHOLD, STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.limits import ENTRIES_PAUSED, RUNNING
-from krx_quant.trader.paper import BELOW_THRESHOLD, STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.store import DAILY_LIMIT, DB_NAME, TraderStore, read_trader
 from tests.trader_doubles import (
     BARRIER,

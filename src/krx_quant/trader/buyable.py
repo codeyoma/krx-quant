@@ -31,7 +31,7 @@ other); the champion is read at the picks only and changes on a review night alo
 them.
 
 **What the replay keeps apart on purpose.** A recorded gap leaves its signals out where the live book
-would stall (``replay.py``), and a policy's replay spaces no practice buy (``paper.spaced``): neither
+would stall (``replay.py``), and a policy's replay spaces no practice buy (``book.spaced``): neither
 is a question of which cells may buy.
 """
 
@@ -135,7 +135,7 @@ def today(cells: Sequence[R], rest: Rest = NO_REST, *, cost_map: bool = True) ->
 
 
 def under_policy(kept: Policy | None, selection: Selection, rest: Rest = NO_REST) -> Selection:
-    """``selection`` (today's cost map) under the policy ``kept`` (module doc; ``policy.apply``): its
+    """``selection`` (today's cost map) under the policy ``kept`` (module doc): its
     cells that may buy (``today``), in its order, each at its θ, whatever the cost map's verdict
     (#472), with the cost map's figures where it names them (``Pick.unmapped`` where it does not); the
     cells the cost map passes that it does not have marked as not in it. Each of its cells kept with

@@ -94,7 +94,7 @@ def test_the_desk_and_the_replay_ask_the_same_function() -> None:
     assert [(r.cell, r.threshold) for r in desk.buys] == [(r.cell, r.threshold) for r in night.buys]
     assert desk.held == night.held == (BARRIER,)
     assert vars(replay)["today"] is buyable.today
-    assert vars(replay)["inactive_days"] is buyable.inactive_days
+    assert "inactive_days" not in vars(replay)  # #652: no forwarding name left
 
 
 # The desk's questions, on the store and the engine's database.

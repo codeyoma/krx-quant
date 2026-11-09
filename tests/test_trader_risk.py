@@ -20,9 +20,7 @@ import pytest
 
 from krx_quant.config import SettingsError
 from krx_quant.trader import MOCK
-from krx_quant.trader.limits import RUNNING, Limits, Simulated
-from krx_quant.trader.money import BAD_STOP, NO_SHARES, at_risk, size
-from krx_quant.trader.paper import (
+from krx_quant.trader.book import (
     BUY_LIMIT,
     COOLING_DOWN,
     STOP_LOSS,
@@ -32,6 +30,8 @@ from krx_quant.trader.paper import (
     risk_held,
     risk_state,
 )
+from krx_quant.trader.limits import RUNNING, Limits, Simulated
+from krx_quant.trader.money import BAD_STOP, NO_SHARES, at_risk, size
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import CUMULATIVE_LIMIT, DAILY_LIMIT, DB_NAME, TraderStore, read_trader

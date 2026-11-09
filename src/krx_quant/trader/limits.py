@@ -17,7 +17,7 @@ sold). The account's P&L is both (``realized_all``: the cash buys on it), the pr
 the limits' count (``practice_day``, ``practice_cumulative``, ``practice_unrealized``) for the state,
 the ledger and the report to show apart. A day's ledger written before #533 (the deploy day's, from
 its 00:00) counted the practice in its lows: a start takes none of them (``_load``). The risk rules
-count the practice as ever (#471, ``paper.risk_held``). The practice shadow's simulated limits count
+count the practice as ever (#471, ``book.risk_held``). The practice shadow's simulated limits count
 none of its trades either: they are all practice.
 
 > **바뀜** (2026-11-05, #534): the loss counted the mock book's practice trades with the champion's
@@ -77,7 +77,9 @@ import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Any, Protocol
+from typing import Any, Protocol, overload
+
+import numpy as np
 
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.trader.store import (
@@ -171,6 +173,17 @@ _WHAT = {
 
 def won(value: float) -> str:
     return f"{value:,.0f}원"
+
+
+@overload
+def reaches(pnl: float, limit: float) -> bool: ...
+@overload
+def reaches(pnl: np.ndarray, limit: float) -> np.ndarray: ...
+def reaches(pnl: float | np.ndarray, limit: float) -> bool | np.ndarray:
+    """Whether ``pnl`` reaches a loss ``limit`` (in won, above 0): at or below its negative. The
+    champion's limits (``Guard``), a simulated book's (``Simulated``) and the replay's search of a held
+    position's marks (#652) all ask this."""
+    return pnl <= -limit
 
 
 class Guard:
@@ -327,10 +340,10 @@ class Guard:
         self.worst = min(self.worst, day)
         self.cumulative_worst = min(self.cumulative_worst, cumulative)
         reached = None
-        if self.daily_halt is None and day <= -self.limits.daily:
+        if self.daily_halt is None and reaches(day, self.limits.daily):
             self.daily_halt = self._halt(DAILY_LIMIT, at, day, self.realized_day, self.limits.daily)
             reached = DAILY_LIMIT
-        if self.cumulative_halt is None and cumulative <= -self.limits.cumulative:
+        if self.cumulative_halt is None and reaches(cumulative, self.limits.cumulative):
             self.cumulative_halt = self._halt(
                 CUMULATIVE_LIMIT, at, cumulative, self.realized_cumulative, self.limits.cumulative
             )
@@ -582,10 +595,12 @@ class Simulated:
     def _check(self) -> str | None:
         """As ``Guard._check``: a limit is reached when the P&L is at or below its negative."""
         reached = None
-        if not self.daily_halt and self.realized_day + self.unrealized <= -self.limits.daily:
+        if not self.daily_halt and reaches(self.realized_day + self.unrealized, self.limits.daily):
             self.daily_halt = True
             reached = DAILY_LIMIT
-        if not self.cumulative_halt and self.realized_cumulative + self.unrealized <= -self.limits.cumulative:
+        if not self.cumulative_halt and reaches(
+            self.realized_cumulative + self.unrealized, self.limits.cumulative
+        ):
             self.cumulative_halt = True
             reached = CUMULATIVE_LIMIT
         return reached

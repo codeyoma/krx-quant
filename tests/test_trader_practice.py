@@ -34,12 +34,12 @@ from krx_quant.fake_kis import BUY_SIDE, SELL_SIDE, FakeAccount, FakeKis
 from krx_quant.kis_orders import Servers, trader_broker
 from krx_quant.trader import MOCK, PAPER, SYMBOL, limits, live, practice, promotion, report
 from krx_quant.trader import policy as policies
+from krx_quant.trader.book import BUY_LIMIT, COOLING_DOWN, STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.gap import day_gap, pairing
 from krx_quant.trader.limits import RUNNING
 from krx_quant.trader.marks import read_marks
-from krx_quant.trader.paper import BUY_LIMIT, COOLING_DOWN, STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.selection import (
     NO_CHAMPION,
     NO_COST_MAP,

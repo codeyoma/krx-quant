@@ -1,5 +1,5 @@
 """Paper trading by the triple barrier (#393 "모의 체결", #394), on the cells picked from the cost map
-(#395, ``selection.py``) under the champion policy (#399, ``policy.apply``).
+(#395, ``selection.py``) under the champion policy (#399, ``buyable.under_policy``).
 
 **Entry.** A prediction of a cell, as the trader reads it, buys when all hold, else it is skipped
 with its reason:
@@ -149,12 +149,13 @@ time and the mid-point of the quote it was decided on (``Exit.decided_at``, ``Ex
 book's when its sale begins, ``mock.py``). A take-profit rests at the target from the buy: its leg is
 measured from the target.
 
-**One set of rules** (#470): the entry (``plan``, ``admit``), the priority (``settle``), the buy's fill
-(``refused``, ``size``), the risk rules (``risk_held``, #471), the exits (``exit_on``, ``clock_exit``)
-and the costs (``money.py``, #652) are functions the paper book calls, and so
-does the nightly re-fit's replay of the recorded days (``replay.py``), with the loss limits a
-challenger's book simulates (``limits.Simulated``): the same predictions and the same quotes make the
-same trades there (``tests/test_trader_replay.py``).
+**One set of rules** (#470, #652): the entry (``plan``, ``admit``), the priority (``settle``), why a
+rise buys nothing now (``not_now``: the status, a stall, what is held, the risk rules ``risk_held``,
+#471, the practice's spacing), the buy's fill (``refused``), the exits (``exit_on``, ``clock_exit``) are
+``book.py``'s, the costs and the size ``money.py``'s: the paper book calls them, and so do the KIS book
+(``mock.py``) and the nightly re-fit's replay of the recorded days (``replay.py``), with the loss limits
+a challenger's book simulates (``limits.Simulated``). Each tests its own fills against the same trades
+(``tests/test_trader_replay.py``); the rules are tested once (``tests/test_trader_book.py``).
 
 **State.** The trader writes its state (``state``: status, cash, position, the day's and the
 cumulative P&L the limits count with, since #533, the mock practice's and the account's beside them,
@@ -168,32 +169,49 @@ snapshot also carries the process's resident memory for the engine's heartbeat (
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.footprint import resident_mb
-from krx_quant.kinds import most_likely
 from krx_quant.market_calendar import Session
-from krx_quant.special import HALT_STATUS, Kind, Window, touching
+from krx_quant.special import Window, touching
 from krx_quant.trader import (
-    CAPITAL,
-    COOLDOWN,
-    CUMULATIVE_LOSS_PERCENT,
-    DAILY_BUY_ORDERS,
-    DAILY_LOSS_PERCENT,
-    ENTRY_AFTER_OPEN,
-    EXIT_BEFORE_AUCTION,
-    LOSS_STREAK,
     PAPER,
-    PRACTICE_SPACING,
-    RISK_PER_TRADE_PERCENT,
     SYMBOL,
-    THRESHOLD,
 )
-from krx_quant.trader.cells import Cell, Signal, learned_at
+from krx_quant.trader.book import (
+    BUY,
+    NO_QUOTE,
+    NOT_PICKED,
+    RESTARTED,
+    SKIP,
+    SPECIAL,
+    STALLED,
+    TAKE_PROFIT,
+    Busy,
+    Plan,
+    Rise,
+    Rules,
+    Taken,
+    admit,
+    clock_exit,
+    exit_on,
+    halt_spans,
+    halted,
+    mid_of,
+    midnight,
+    not_now,
+    plan,
+    refused,
+    risk_held,
+    risk_state,
+    settle,
+    spaced,
+)
+from krx_quant.trader.cells import Cell, Signal
 from krx_quant.trader.db import iso
 from krx_quant.trader.limits import (
     HEARTBEAT,
@@ -202,7 +220,6 @@ from krx_quant.trader.limits import (
     SNAPSHOT_SECONDS,
     Guard,
     Holds,
-    Limits,
     Notify,
     Simulated,
 )
@@ -212,397 +229,9 @@ from krx_quant.trader.selection import PREDICTOR_INACTIVE, Pick, Selection
 from krx_quant.trader.store import RESIDENT, WAITED, Entry, Exit, OpenTrade, Stall, TraderStore
 
 if TYPE_CHECKING:
-    from krx_quant.trader.settings import TraderSettings
+    pass
 
 log = logging.getLogger(__name__)
-
-# Why a trade ended.
-TAKE_PROFIT, STOP_LOSS, TIME = "take_profit", "stop_loss", "time"
-# Why a prediction bought nothing.
-NOT_PICKED, NOT_OK, BLOCKED, SPECIAL = "not_picked", "not_ok", "blocked", "special"
-STALE, EXPIRED = "stale", "expired"
-NOT_UP, BELOW_THRESHOLD, NO_REFERENCE = "not_up", "below_threshold", "no_reference"
-CLOSED, BEFORE_ENTRY, PAST_LAST_EXIT = "closed", "before_entry", "past_last_exit"
-HOLDING, OUTRANKED = "holding", "outranked"
-# The collector's quotes stalled (#407): nothing new is bought until they come again.
-STALLED = "quotes_stalled"
-# Why a buy decided did not fill.
-TARGET_REACHED, NO_QUOTE, RESTARTED = "target_reached", "no_quote", "restarted"
-# A buy below one share, or its stop not below the ask, takes none: ``money.NO_SHARES``, ``BAD_STOP``.
-# The risk rules hold new buys (#471, ``risk_held``): the day's buy orders, the losses in a row.
-BUY_LIMIT, COOLING_DOWN = "buy_limit", "cooldown"
-# A practice buy too soon after the day's last (#598, ``spaced``).
-SPACING = "spacing"
-BUY, SKIP = "buy", "skip"
-# The status of a prediction the engine did not make for a VI (``engine._record_not_predicted``), and
-# for a market halt (#625).
-VI_STATUS = "vi"
-NOT_MADE = (VI_STATUS, HALT_STATUS)
-
-
-@dataclass(frozen=True)
-class Rules:
-    threshold: float = THRESHOLD
-    capital: int = CAPITAL
-    daily_loss_percent: float = DAILY_LOSS_PERCENT  # the loss limits, of the capital (#396)
-    cumulative_loss_percent: float = CUMULATIVE_LOSS_PERCENT
-    # The risk rules (#471, module doc "Size" and "Risk rules"): a trade's loss budget in percent of
-    # the capital it trades on; the net losses in a row that start a cooldown; the buy orders a day.
-    risk_percent: float = RISK_PER_TRADE_PERCENT
-    loss_streak: int = LOSS_STREAK
-    cooldown: timedelta = COOLDOWN
-    daily_buys: int = DAILY_BUY_ORDERS
-    # The least time between two practice buys' bar closes (#598, ``spaced``): the practice's alone.
-    practice_spacing: timedelta = PRACTICE_SPACING
-    fee_rate: float = 0.00015  # the commission per side, as a fraction
-    entry_after_open: timedelta = ENTRY_AFTER_OPEN
-    exit_before_auction: timedelta = EXIT_BEFORE_AUCTION
-    # A buy waits this long for its first quote; a time exit needs a quote this recent.
-    quote_wait: timedelta = timedelta(seconds=5)
-    # A prediction read later than this after its display is not acted on; a rise waits for the
-    # cells ranked above it until this long after its display at most.
-    fresh: timedelta = timedelta(seconds=10)
-    # The clock passes a deadline by this much before it acts without a quote: quotes received
-    # before the deadline but still on their way come in first.
-    grace: timedelta = timedelta(seconds=1)
-
-    @property
-    def limits(self) -> Limits:
-        return Limits(self.capital, self.daily_loss_percent, self.cumulative_loss_percent)
-
-    @classmethod
-    def of(cls, trader: TraderSettings, fee_rate: float) -> Rules:
-        """The rules the trader's settings (``.env``, #394) make, at the engine's commission
-        (``KRX_FEE_PERCENT``): the trader's and the nightly re-fit's replay's."""
-        return cls(
-            threshold=trader.threshold,
-            capital=trader.capital,
-            daily_loss_percent=trader.daily_loss_percent,
-            cumulative_loss_percent=trader.cumulative_loss_percent,
-            risk_percent=trader.risk_per_trade_percent,
-            loss_streak=trader.loss_streak,
-            cooldown=timedelta(minutes=trader.cooldown_minutes),
-            daily_buys=trader.daily_buy_orders,
-            practice_spacing=timedelta(minutes=trader.practice_spacing_minutes),
-            fee_rate=fee_rate,
-        )
-
-    def budget(self, capital: float) -> float:
-        """A trade's loss budget in won, on ``capital`` (the live first period's cap below the
-        capital): ``risk_percent`` of it (#471)."""
-        return capital * self.risk_percent / 100
-
-
-@dataclass(frozen=True)
-class Plan:
-    """A buy's barriers: the target, the stop and the time barrier."""
-
-    target: float
-    stop: float
-    time_barrier: datetime
-
-
-def plan(
-    signal: Signal,
-    rules: Rules,
-    session: Session | None,
-    at: datetime,
-    special: Sequence[Window] = (),
-    threshold: float | None = None,
-) -> Plan | str:
-    """A prediction read at ``at``, with the special windows known then: its buy's barriers, or why
-    it buys nothing (the reasons the module doc lists, but the trader's own: ``not_picked``,
-    ``holding``, ``outranked``). ``threshold`` is its cell's θ under the policy (#399), else
-    ``rules.threshold``. The nightly re-fit replays the recorded days by the same rules (``replay.py``)."""
-    if signal.status in NOT_MADE:
-        return SPECIAL
-    p = signal.rise_probability
-    if signal.status != "ok" or signal.probabilities is None or p is None:
-        return NOT_OK
-    if signal.blocked is not None:
-        return SPECIAL if signal.blocked == SPECIAL else BLOCKED
-    if at - signal.displayed_at > rules.fresh:
-        return STALE
-    if at >= signal.bar_close + signal.horizon:
-        return EXPIRED
-    if most_likely(signal.probabilities) != signal.rise:
-        return NOT_UP
-    if p < (rules.threshold if threshold is None else threshold):
-        return BELOW_THRESHOLD
-    if signal.anchor is None or not signal.tick or not signal.width:
-        return NO_REFERENCE
-    if session is None:
-        return CLOSED
-    if signal.bar_close < session.open + rules.entry_after_open:
-        return BEFORE_ENTRY
-    barrier = signal.bar_close + signal.horizon
-    if barrier > session.closing_auction - rules.exit_before_auction:
-        return PAST_LAST_EXIT
-    if touching(special, signal.symbol, signal.bar_close, barrier):
-        return SPECIAL
-    move = signal.width * signal.tick
-    return Plan(signal.anchor + move, signal.anchor - move, barrier)
-
-
-@dataclass(frozen=True)
-class Rise:
-    """A rise of a picked cell, read at ``read_at``, waiting for the cells ranked above it."""
-
-    signal: Signal
-    plan: Plan
-    read_at: datetime
-
-    @property
-    def cell(self) -> Cell:
-        return Cell(self.signal.kind, self.signal.predictor)
-
-    def deadline(self, rules: Rules) -> datetime:
-        return self.signal.displayed_at + rules.fresh
-
-
-# The rules a book follows, as functions (#470): the paper book's and the re-fit's replay of the
-# recorded days (``replay.py``) call these, so that both make the same trades.
-
-# A book's answers to the priority (``admit``, ``settle``): ``skip`` keeps that a prediction bought
-# nothing and why; ``held`` says why the book buys nothing now (its status, a stall, a position held
-# or a buy waiting: ``holding``, ``outranked``), None if it may; ``decide`` decides a rise's buy.
-Skip = Callable[[Signal, datetime, str], None]
-Held = Callable[[Signal, datetime], str | None]
-Decide = Callable[[Rise, datetime], None]
-
-
-def admit(
-    pending: dict[datetime, list[Rise]],
-    signal: Signal,
-    planned: Plan | str,
-    at: datetime,
-    skip: Skip,
-    held: Held,
-) -> bool:
-    """A picked cell's prediction read at ``at``, with its plan (``plan``): skipped with why it buys
-    nothing (its plan's reason, or why the book buys nothing now), else waiting among its bar close's
-    rises for the cells ranked above it (``settle``). Whether it waits."""
-    if not isinstance(planned, Plan):
-        skip(signal, at, planned)
-        return False
-    why = held(signal, at)
-    if why is not None:
-        skip(signal, at, why)
-        return False
-    pending.setdefault(signal.bar_close, []).append(Rise(signal, planned, at))
-    return True
-
-
-def settle(
-    pending: dict[datetime, list[Rise]],
-    read: Mapping[datetime, Collection[Cell]],
-    ranks: Mapping[Cell, int],
-    special: Sequence[Window],
-    now: datetime,
-    rules: Rules,
-    *,
-    skip: Skip,
-    held: Held,
-    decide: Decide,
-) -> None:
-    """Decide the rises waiting (module doc "Priority"), oldest bar close first: of a bar close, the
-    first ranked buys once every cell ranked above it (``ranks``, 0 first) was read of that bar close
-    (``read``), or its wait is over; the others are outranked (or held off, when something was bought
-    meanwhile). A rise a special window known now touches is ``special``. A bar close still waiting
-    holds the later ones too: they are decided after it."""
-    for close in sorted(pending):
-        waiting = []
-        for c in sorted(pending[close], key=lambda c: ranks[c.cell]):
-            if touching(special, c.signal.symbol, close, c.plan.time_barrier):
-                skip(c.signal, now, SPECIAL)
-            else:
-                waiting.append(c)
-        if not waiting:
-            del pending[close]
-            continue
-        pending[close] = waiting
-        best = waiting[0]
-        rank = ranks[best.cell]
-        seen = read.get(close, ())
-        if now < best.deadline(rules) and any(r < rank and cell not in seen for cell, r in ranks.items()):
-            return  # a later bar close waits too: this one may still buy
-        del pending[close]
-        why = held(best.signal, now)
-        if why is not None:  # paused, stopped or stalled meanwhile, or bought on another bar close
-            for c in waiting:
-                skip(c.signal, now, held(c.signal, now) or why)
-            continue
-        decide(best, now)
-        for c in waiting[1:]:
-            skip(c.signal, now, OUTRANKED)
-
-
-class Barriers(Protocol):
-    """A buy's barriers: a ``Plan``'s, an open trade's."""
-
-    @property
-    def target(self) -> float: ...
-
-    @property
-    def stop(self) -> float: ...
-
-    @property
-    def time_barrier(self) -> datetime: ...
-
-
-def refused(decided_at: datetime, barriers: Barriers, quote: BestQuote, rules: Rules) -> str | None:
-    """Why the first quote received after a buy's decision at ``decided_at`` does not fill it (module
-    doc "Fills"): received at or after its time barrier (``expired``), later than
-    ``Rules.quote_wait`` after the decision (``no_quote``), its ask at or above the target
-    (``target_reached``); None: it fills at that ask, if the size makes a share (``size``)."""
-    if quote.received_at >= barriers.time_barrier:
-        return EXPIRED
-    if quote.received_at > decided_at + rules.quote_wait:
-        return NO_QUOTE
-    if quote.ask >= barriers.target:
-        return TARGET_REACHED
-    return None
-
-
-def risk_held(rules: Rules, at: datetime, buys: int, exits: Sequence[tuple[datetime, float]]) -> str | None:
-    """Why the risk rules hold a book's new buy at ``at`` (#471, module doc "Risk rules"), from its buy
-    orders of ``at``'s day (``buys``) and its trades exited that day (``exits``: each one's exit time and
-    net, in the order they exited): ``buy_limit`` at ``rules.daily_buys`` of them, ``cooldown`` less than
-    ``rules.cooldown`` after the exit that made ``rules.loss_streak`` net losses in a row; None if
-    neither holds."""
-    if buys >= rules.daily_buys:
-        return BUY_LIMIT
-    began, _ = cooldowns(rules, exits)
-    return COOLING_DOWN if began and at < began[-1][1] else None
-
-
-def spaced(rules: Rules, bar_close: datetime, last: datetime | None) -> str | None:
-    """Why the practice's spacing holds a practice rise of ``bar_close`` (#598, module doc "Practice"):
-    ``spacing`` when it is less than ``rules.practice_spacing`` after ``last``, the bar close of the
-    book's last practice buy order that day; None if it is not, or none was."""
-    if last is None or bar_close >= last + rules.practice_spacing:
-        return None
-    return SPACING
-
-
-def cooldowns(
-    rules: Rules, exits: Sequence[tuple[datetime, float]]
-) -> tuple[list[tuple[datetime, datetime]], int]:
-    """The cooldowns a book's ``exits`` of a day began (#471, module doc "Risk rules"; each exit's time
-    and net, in the order they exited): each exit that made ``rules.loss_streak`` net losses in a row or
-    more, with when it ends; and the net losses in a row at the last exit."""
-    losses, began = 0, []
-    for exited_at, net in exits:
-        losses = losses + 1 if net < 0 else 0
-        if losses >= rules.loss_streak:
-            began.append((exited_at, exited_at + rules.cooldown))
-    return began, losses
-
-
-def risk_state(
-    rules: Rules, at: datetime, buys: int, exits: Sequence[tuple[datetime, float]], capital: float
-) -> dict[str, Any]:
-    """The risk rules' state at ``at`` (#475, ``GET /v1/trader``'s ``risk``), from a book's buy orders
-    of ``at``'s day and its exits that day (``risk_held``'s): the loss budget (its percent of
-    ``capital``, the capital a buy sizes on, and in won), the buy orders and their limit, the net
-    losses in a row and how many start a cooldown, the cooldown's minutes, those begun that day and the
-    end of the one in force (None when none is), and what holds a buy now (``buy_limit``,
-    ``cooldown``; None)."""
-    began, losses = cooldowns(rules, exits)
-    until = began[-1][1] if began and at < began[-1][1] else None
-    return {
-        "day": kst_day(at).isoformat(),
-        "budget_percent": rules.risk_percent,
-        "budget": rules.budget(capital),
-        "buys": buys,
-        "daily_buys": rules.daily_buys,
-        "losses": losses,
-        "loss_streak": rules.loss_streak,
-        "cooldown_minutes": rules.cooldown.total_seconds() / 60,
-        "cooldowns": len(began),
-        "cooldown_until": None if until is None else iso(until),
-        "held": risk_held(rules, at, buys, exits),
-    }
-
-
-def mid_of(quote: BestQuote | None) -> float | None:
-    """A quote's mid-point (#475: a leg's execution cost is from the one the book knew at its decision)."""
-    return None if quote is None else (quote.bid + quote.ask) / 2
-
-
-def midnight(at: datetime) -> datetime:
-    """00:00 KST of ``at``'s day: where a day's risk rules count from (#471)."""
-    return datetime.combine(kst_day(at), time(), KST)
-
-
-@dataclass(frozen=True)
-class Sale:
-    """An exit: sold at ``price`` at ``at`` for ``reason``, on ``quote`` (the one whose bid it took)."""
-
-    at: datetime
-    price: float
-    reason: str
-    quote: BestQuote
-
-
-def fresh_before(barrier: datetime, quote: BestQuote, rules: Rules) -> bool:
-    """Whether ``quote`` was received before ``barrier``, within ``Rules.quote_wait`` of it: the quote
-    a time exit sells on at the barrier."""
-    return timedelta(0) < barrier - quote.received_at <= rules.quote_wait
-
-
-def exit_on(
-    barriers: Barriers,
-    quote: BestQuote,
-    standing: BestQuote | None,
-    rules: Rules,
-    ran_at_barrier: bool = True,
-) -> Sale | None:
-    """The exit ``quote``, received after the buy, makes of a position (module doc "Fills"),
-    ``standing`` the latest quote received before it: at or after the time barrier, the time exit at
-    the standing quote's bid at the barrier if it is recent (``fresh_before``) and the trader ran at
-    the barrier, else at this one's bid now; before it, the take-profit at the target once its bid
-    reaches it, the stop at its bid at or below the stop. None: held on."""
-    if quote.received_at >= barriers.time_barrier:
-        if ran_at_barrier and standing is not None and fresh_before(barriers.time_barrier, standing, rules):
-            return Sale(barriers.time_barrier, standing.bid, TIME, standing)
-        return Sale(quote.received_at, quote.bid, TIME, quote)
-    if quote.bid >= barriers.target:
-        return Sale(quote.received_at, barriers.target, TAKE_PROFIT, quote)
-    if quote.bid <= barriers.stop:
-        return Sale(quote.received_at, quote.bid, STOP_LOSS, quote)
-    return None
-
-
-def halt_spans(windows: Sequence[Window]) -> list[tuple[datetime, datetime]]:
-    """The spans in which a market halt holds a paper book (#625): from when the engine had learned
-    it, or its start if later, to its end. A paper book takes no quote received in one (the reopening
-    auction's book is not one to trade on) and makes no time exit by the clock in one; a recorded gap
-    that begins in one is the halt's silence, not data lost. The paper book and the re-fit's replay
-    (``replay.Fills``) both go by these spans."""
-    return [
-        (max(learned_at(w), w.start), w.end)
-        for w in windows
-        if w.kind is Kind.MARKET_HALT and max(learned_at(w), w.start) < w.end
-    ]
-
-
-def halted(spans: Sequence[tuple[datetime, datetime]], at: datetime) -> bool:
-    """Whether ``at`` is in one of a market halt's ``spans`` (``halt_spans``)."""
-    return any(start <= at < end for start, end in spans)
-
-
-def clock_exit(
-    barriers: Barriers, last: BestQuote | None, now: datetime, rules: Rules, ran_at_barrier: bool = True
-) -> Sale | None:
-    """The time exit the clock makes at ``now``, ``Rules.grace`` past the time barrier, before a quote
-    at or after it came: at the bid of ``last``, the latest quote received, at the barrier, if it is
-    recent (``fresh_before``) and the trader ran at the barrier. None: it waits for the next quote."""
-    if now < barriers.time_barrier + rules.grace or not ran_at_barrier or last is None:
-        return None
-    if not fresh_before(barriers.time_barrier, last, rules):
-        return None
-    return Sale(barriers.time_barrier, last.bid, TIME, last)
 
 
 def _pnl(realized: float, unrealized: float, trades: int | None = None) -> dict[str, Any]:
@@ -774,8 +403,9 @@ class PaperTrader:
 
     @property
     def busy(self) -> bool:
-        """Whether it holds a position or waits to buy one."""
-        return self._busy()
+        """Whether it holds a position or waits to buy one (the KIS book: or has an order in flight, or
+        has not reconciled yet)."""
+        return self._busy_with() is not None
 
     def _book(self) -> dict[str, Any]:
         """Which book's trades and orders are its own in the store (#471): the champion's, a
@@ -1109,8 +739,14 @@ class PaperTrader:
         self._risk_read = (at, found)
         return found
 
-    def _busy(self) -> bool:
-        return self._open is not None or self._waiting is not None
+    def _busy_with(self) -> Busy:
+        """What it is busy with, as ``book.not_now`` asks: the buy waiting for its quote, or the position
+        held (``Taken``); None. The KIS book adds its own (``mock.MockTrader``)."""
+        held = self._waiting.signal if self._waiting is not None else None
+        if held is not None:
+            return Taken(Cell(held.kind, held.predictor), held.bar_close)
+        trade = self._open
+        return None if trade is None else Taken(Cell(trade.kind, trade.predictor), trade.bar_close)
 
     def _unrealized(self, trade: OpenTrade, bid: float) -> float:
         """What the open ``trade`` nets sold at ``bid`` now (``money.open_net``); the mock book counts
@@ -1120,35 +756,19 @@ class PaperTrader:
     def _rank(self, cell: Cell) -> int:
         return self._picks[cell][0] if cell in self._picks else len(self._picks)
 
-    def _held_off(self, signal: Signal) -> str:
-        """Why a rise does not buy while something is held or bought: ``outranked`` when that is a
-        cell ranked above it of the same bar close, else ``holding``."""
-        if self._waiting is not None:
-            close, kind, predictor = (
-                self._waiting.signal.bar_close,
-                self._waiting.signal.kind,
-                self._waiting.signal.predictor,
-            )
-        elif self._open is not None:
-            close, kind, predictor = self._open.bar_close, self._open.kind, self._open.predictor
-        else:
-            return HOLDING
-        mine = self._rank(Cell(signal.kind, signal.predictor))
-        if close == signal.bar_close and self._rank(Cell(kind, predictor)) < mine:
-            return OUTRANKED
-        return HOLDING
-
     def _not_now(self, signal: Signal, at: datetime) -> str | None:
-        """Why a rise read or decided at ``at`` buys nothing now: paused or stopped (#396, its status),
-        the quotes stalled (#407), something held or bought (``_held_off``), the risk rules (#471), a
-        practice buy's spacing (#598); None if it may buy."""
-        if self.status != RUNNING:
-            return self.status
-        if self._stall is not None:
-            return STALLED
-        if self._busy():
-            return self._held_off(signal)
-        return self._risk(at) or self._spacing(signal, at)
+        """Why a rise read or decided at ``at`` buys nothing now (``book.not_now``): its status, a stall
+        (#407), what it is busy with, the risk rules (#471), a practice buy's spacing (#598)."""
+        return not_now(
+            signal,
+            at,
+            status=self.status,
+            busy=self._busy_with(),
+            rank=self._rank,
+            risk=self._risk,
+            stalled=self._stall is not None,
+            spacing=self._spacing,
+        )
 
     def _spacing(self, signal: Signal, at: datetime) -> str | None:
         """Why the practice's spacing holds ``signal``'s buy (#598, ``spaced``): of a practice pick alone,

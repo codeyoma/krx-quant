@@ -120,9 +120,9 @@ from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.stats import Interval, day_mean
 from krx_quant.trader import ROLES, SYMBOL, TRADED_KINDS, cohort, promotion, review
 from krx_quant.trader import policy as policies
+from krx_quant.trader.book import NO_QUOTE, Rules
 from krx_quant.trader.cells import Cell, open_engine_db, special_windows
 from krx_quant.trader.db import reading
-from krx_quant.trader.paper import NO_QUOTE, Rules
 from krx_quant.trader.replay import (
     GAP,
     GAPPED,

@@ -22,9 +22,7 @@ from krx_quant.kind_registry import kind_named
 from krx_quant.kinds import QuoteLog
 from krx_quant.pricing import cost_ticks
 from krx_quant.trader import SYMBOL, TRADED_KINDS
-from krx_quant.trader.cells import traded_kind
-from krx_quant.trader.money import NO_SHARES
-from krx_quant.trader.paper import (
+from krx_quant.trader.book import (
     BEFORE_ENTRY,
     BELOW_THRESHOLD,
     BLOCKED,
@@ -42,6 +40,8 @@ from krx_quant.trader.paper import (
     TARGET_REACHED,
     TIME,
 )
+from krx_quant.trader.cells import traded_kind
+from krx_quant.trader.money import NO_SHARES
 from tests.trader_doubles import (
     DIRECTION,
     FEE,

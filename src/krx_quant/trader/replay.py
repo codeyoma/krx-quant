@@ -26,7 +26,7 @@ what the nightly re-fit fits a policy on (``refit.py``).
   > learned it. 이유: a window that begins before the engine can know it (a VI, a breaker called a
   > minute after the drop began) gave the replay what the trader could not have known (#625).
 
-A market halt holds the replay's fills as it holds a paper book's (#625, ``paper.halt_spans``, from when
+A market halt holds the replay's fills as it holds a paper book's (#625, ``book.halt_spans``, from when
 the engine learned it to its end): the quotes received in one are left out (``held_out``), and so are the
 recorded gaps that begin in one (the halt's silence, not data lost), so that a trade held through a halt
 sells on the first quote after it, as the paper book sells it.
@@ -124,8 +124,28 @@ from krx_quant.market_calendar import Session
 from krx_quant.predictions import KIND_ANSWER_JOIN, TOUCH_JOIN
 from krx_quant.special import Window, touching
 from krx_quant.stats import Interval, day_mean
-from krx_quant.trader import SYMBOL, review
-from krx_quant.trader.buyable import NO_REST, Rest, inactive_days, today
+from krx_quant.trader import SYMBOL, buyable, review
+from krx_quant.trader.book import (
+    NO_QUOTE,
+    SPECIAL,
+    Plan,
+    Rise,
+    Rules,
+    Sale,
+    Taken,
+    admit,
+    clock_exit,
+    exit_on,
+    halt_spans,
+    not_now,
+    plan,
+    refused,
+    risk_held,
+    settle,
+    stopped,
+    takes_profit,
+)
+from krx_quant.trader.buyable import NO_REST, Rest, today
 from krx_quant.trader.cells import (
     DIRECTION_COLUMNS,
     DIRECTION_FROM,
@@ -138,26 +158,8 @@ from krx_quant.trader.cells import (
     statuses,
     traded_kind,
 )
-from krx_quant.trader.limits import RUNNING, SALE, Simulated
+from krx_quant.trader.limits import SALE, Simulated, reaches
 from krx_quant.trader.money import commission, net_of, round_trip, size
-from krx_quant.trader.paper import (
-    HOLDING,
-    NO_QUOTE,
-    OUTRANKED,
-    SPECIAL,
-    Plan,
-    Rise,
-    Rules,
-    Sale,
-    admit,
-    clock_exit,
-    exit_on,
-    halt_spans,
-    plan,
-    refused,
-    risk_held,
-    settle,
-)
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import PREDICTOR_INACTIVE
 
@@ -418,7 +420,7 @@ class Fill:
 
 
 def held_out(day: Recording, spans: Sequence[tuple[datetime, datetime]]) -> Recording:
-    """``day`` as a paper book takes it through market halts (#625, ``paper.halt_spans``): without the
+    """``day`` as a paper book takes it through market halts (#625, ``book.halt_spans``): without the
     quotes received in one, and without the recorded gaps that begin in one (the halt's silence, not
     data lost)."""
     if not spans:
@@ -489,7 +491,7 @@ class Fills:
         while k < n:
             if k < end:  # the first quote before the barrier whose bid takes profit or stops
                 window = bids[k:end]
-                found = np.flatnonzero((window >= planned.target) | (window <= planned.stop))
+                found = np.flatnonzero(takes_profit(window, planned.target) | stopped(window, planned.stop))
                 k = k + int(found[0]) if len(found) else end
                 if k >= n:
                     break
@@ -813,20 +815,23 @@ class Policy:
         self.skipped[reason] += 1
 
     def _busy(self, signal: Signal, at: datetime) -> str | None:
-        """Why a rise does not buy at ``at``, as ``PaperTrader._not_now``: a loss limit reached (its
-        status), something held or waiting to be bought (``outranked`` when of the same bar close and
-        ranked above it, as ``PaperTrader._held_off``), the risk rules (#471, ``risk_held``)."""
+        """Why a rise does not buy at ``at`` (``book.not_now``, as the paper book asks): a loss limit
+        reached (its status), something held or waiting to be bought until ``free_at``, the risk rules
+        (#471) on the replay's own day. No stall (a gap leaves the signals out instead), no practice
+        spacing (it replays policies alone)."""
         self.holds.roll(at)
-        if self.holds.status != RUNNING:
-            return self.holds.status
         held = self._held
+        busy = None
         if held is not None and at < held[0]:
-            of = held[1]
-            mine = self.ranks[Cell(signal.kind, signal.predictor)]
-            if of.bar_close == signal.bar_close and self.ranks[Cell(of.kind, of.predictor)] < mine:
-                return OUTRANKED
-            return HOLDING
-        return risk_held(self._rules, at, self._buys, self._exits)
+            busy = Taken(Cell(held[1].kind, held[1].predictor), held[1].bar_close)
+        return not_now(
+            signal,
+            at,
+            status=self.holds.status,
+            busy=busy,
+            rank=self.ranks.__getitem__,
+            risk=lambda when: risk_held(self._rules, when, self._buys, self._exits),
+        )
 
     def _decide(self, rise: Rise, at: datetime) -> None:
         assert self._fills is not None
@@ -897,8 +902,8 @@ class Policy:
         fee = commission(filled.entry, quantity, fee_rate)
         held = round_trip(filled.entry, quantity, fee, bids * quantity, fee_rate).net  # each quote's at once
         hit = np.flatnonzero(
-            (holds.realized_day + held <= -limits.daily)
-            | (holds.realized_cumulative + held <= -limits.cumulative)
+            reaches(holds.realized_day + held, limits.daily)
+            | reaches(holds.realized_cumulative + held, limits.cumulative)
         )
         if not len(hit):
             return None
@@ -962,7 +967,7 @@ class Replayer:
         # statuses as the engine kept them.
         found = statuses(db, {c.predictor for c in self._cells})
         self.inactive = {
-            c: inactive_days(found.get(c.predictor, ()), source.days, sessions, evaluation)
+            c: buyable.inactive_days(found.get(c.predictor, ()), source.days, sessions, evaluation)
             for c, source in self._cells.items()
         }
         self._target_version = target_version

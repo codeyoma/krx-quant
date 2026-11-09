@@ -12,7 +12,7 @@ trader depends on nothing more.
 map's three predictors (``ROLES``): the final consensus (the direction's only), the kind's
 first-ranked active algorithm (#594: the cost map names no other), its strongest baseline. Every
 cell the cost map names is kept with its figures (``Selection.named``, a figure the cost map lacks
-None): the champion's cells trade whatever their verdict (#472, ``policy.apply``: the nightly fit
+None): the champion's cells trade whatever their verdict (#472, ``buyable.under_policy``: the nightly fit
 judged each on its replayed one-share net). A cell whose verdict at a market order's round trip
 (``verdict.market``) is ``pass`` (its hit rate's lower bound above the breakeven p*) is also a pick
 (``Selection.picks``): what the cost map alone would trade, kept as a diagnosis (``no_pass`` when
@@ -25,7 +25,7 @@ none passes) and no longer a condition.
 
 **Rank.** The picks are ranked by their hit rate's lower bound less p* (``Pick.priority``),
 greatest first; of two alike, by the kinds' order, then the predictors'. Under a policy its own order
-ranks its cells (``policy.apply``). Of the rises of one bar close, the first ranked buys
+ranks its cells (``buyable.under_policy``). Of the rises of one bar close, the first ranked buys
 (``paper.py``).
 
 **Kelly.** Each pick's Kelly fraction of the capital, from its hit rate's lower bound p and the
@@ -78,16 +78,16 @@ PASS = "pass"
 NO_PASS = "no_pass"  # the cost map was read: no cell's verdict passes (and no champion's cell trades)
 NO_COST_MAP = "no_cost_map"  # it could not be read
 NOT_IN_POLICY = (
-    "not_in_policy"  # cells pass, none of them the champion's, none of its trading (``policy.apply``)
+    "not_in_policy"  # cells pass, none of them the champion's, none of its trading (``buyable.under_policy``)
 )
 NO_POLICY = "no_policy"  # the champion policy could not be read (#399): nothing trades
 NO_CHAMPION = "no_champion"  # no champion yet (#469): nothing trades before the first
-# Why a policy's cell does not trade (#469, ``policy.apply``): its predictor stopped predicting (for
+# Why a policy's cell does not trade (#469, ``buyable.under_policy``): its predictor stopped predicting (for
 # the rest of the review cycle), or (#472) the cost map could not be read (``NO_COST_MAP``).
 GONE = "gone"
-# Why a policy's cell buys nothing (#603, ``policy.apply``): its predictor is not active (on probation,
-# on the bench, retired, a clone: ``cells.inactive``), for the rest of the review cycle. Its predictions
-# are read all the same, each skipped so (``paper.py``).
+# Why a policy's cell buys nothing (#603, ``buyable.under_policy``): its predictor is not active (on
+# probation, on the bench, retired, a clone: ``cells.inactive``), for the rest of the review cycle. Its
+# predictions are read all the same, each skipped so (``paper.py``).
 PREDICTOR_INACTIVE = "predictor_inactive"
 # Why it did not trade before #472, kept by the picks of then: the cost map did not name it that day
 # (another predictor held its role). Since #472 such a cell trades (``Pick.unmapped``).
@@ -175,7 +175,7 @@ class Pick:
 class Selection:
     """The cells picked from one cost map, ranked; with every cell considered and, when none
     trades, why (``NO_PASS``, ``NO_COST_MAP`` with ``detail``, ``policy.NOT_IN_POLICY``). Under a
-    policy (#399, ``policy.apply``), the policy's cells among them, in its order, and its version."""
+    policy (#399, ``buyable.under_policy``), the policy's cells among them, in its order, and its version."""
 
     picks: tuple[Pick, ...]
     considered: tuple[dict[str, Any], ...] = ()
@@ -186,7 +186,7 @@ class Selection:
     # The cells the mock book may practise on this cost map (#427, module doc), in the picks' order;
     # the nightly job freezes one for a review cycle (#474, ``practice.py``).
     practisable: tuple[Pick, ...] = ()
-    # Under a policy (#469, ``policy.apply``): each of its cells in its order, whether it trades and,
+    # Under a policy (#469, ``buyable.under_policy``): each of its cells in its order, whether it trades and,
     # if not, why (``GONE``, ``PREDICTOR_INACTIVE``, ``NO_COST_MAP``; ``OFF_MAP`` or the cost map's
     # verdict before #472).
     cells: tuple[dict[str, Any], ...] = ()
@@ -198,7 +198,7 @@ class Selection:
     evaluation: int | None = None
     cycle: int | None = None
     # Every cell the cost map names, with its figures, whatever its verdict (#472): what a policy's
-    # cells trade on (``policy.apply``); empty under a policy and for a cost map not read.
+    # cells trade on (``buyable.under_policy``); empty under a policy and for a cost map not read.
     named: tuple[Pick, ...] = ()
     # A cost map not read because the Engine API could not be connected to (#508, ``CostMapError``).
     unreachable: bool = False

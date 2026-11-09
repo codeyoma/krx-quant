@@ -1,4 +1,4 @@
-"""The mock practice's spacing (#598, ``paper.spaced``): a practice rise buys only at a bar close at
+"""The mock practice's spacing (#598, ``book.spaced``): a practice rise buys only at a bar close at
 least ``Rules.practice_spacing`` (15 minutes) after the bar close of the day's last practice buy order,
 else it is skipped ``spacing``; the champion's cells are never spaced. So the practice's buys, which
 on 2026-11-04 and 11-05 were gone by 13:14 and 11:04, reach the afternoon and the time exits before
@@ -23,16 +23,8 @@ import pytest
 from krx_quant.config import SettingsError
 from krx_quant.fake_kis import FakeAccount, FakeKis
 from krx_quant.trader import MOCK, SYMBOL, report
+from krx_quant.trader.book import BUY_LIMIT, PAST_LAST_EXIT, SPACING, TAKE_PROFIT, TIME, Rules, spaced
 from krx_quant.trader.limits import RUNNING
-from krx_quant.trader.paper import (
-    BUY_LIMIT,
-    PAST_LAST_EXIT,
-    SPACING,
-    TAKE_PROFIT,
-    TIME,
-    Rules,
-    spaced,
-)
 from krx_quant.trader.selection import Pick
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME

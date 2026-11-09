@@ -25,8 +25,8 @@ from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
 from krx_quant.trader import SYMBOL, promotion, review
 from krx_quant.trader import policy as policies
+from krx_quant.trader.buyable import under_champion
 from krx_quant.trader.cells import gone
-from krx_quant.trader.desk import under_champion
 from krx_quant.trader.promotion import BETWEEN_REVIEWS, REVIEWED
 from krx_quant.trader.run import run_trader
 from krx_quant.trader.selection import NOT_IN_POLICY, choose

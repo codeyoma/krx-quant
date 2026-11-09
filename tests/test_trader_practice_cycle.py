@@ -27,9 +27,9 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.stats import day_mean
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader import MOCK, practice, report
+from krx_quant.trader.book import Rules
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.desk import Desk
-from krx_quant.trader.paper import Rules
 from krx_quant.trader.practice import Measured, freeze_now, frozen, measure, ranked
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import GONE, Pick, Selection, choose

@@ -92,7 +92,6 @@ from krx_quant.feeds.base import KST
 from krx_quant.trader import PICK_AT, review
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.db import iso, reading
-from krx_quant.trader.selection import Selection
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS policies (   -- each policy version (#399): what the trader trades on
@@ -221,20 +220,6 @@ class Policy:
     fit: Mapping[str, Any] = field(default_factory=dict)
     admitted_at: datetime | None = None  # a challenger given a running slot (#400)
     dropped_at: datetime | None = None  # a challenger dropped unpromoted (#400)
-
-
-def apply(
-    policy: Policy | None,
-    selection: Selection,
-    gone: Collection[Cell] = (),
-    inactive: Collection[Cell] = (),
-) -> Selection:
-    """``selection`` (today's cost map) under ``policy`` (module doc), its cells of ``gone`` (#469: its
-    predictor stopped predicting) and of ``inactive`` (#603: its predictor is not active; read, never
-    bought) resting: ``buyable.under_policy``, which the desk and the replay ask (#646)."""
-    from krx_quant.trader.buyable import Rest, under_policy
-
-    return under_policy(policy, selection, Rest(frozenset(gone), frozenset(inactive)))
 
 
 def ensure_schema(db: sqlite3.Connection) -> None:
