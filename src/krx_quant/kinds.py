@@ -611,7 +611,7 @@ def register_kinds(kinds: Sequence[Kind]) -> tuple[Kind, ...]:
 
 
 # The direction, as it always ran (#160, #170): its answer is the touch label (``touch.py``,
-# the ``touches`` table), its baselines ``baselines.baselines_for``. The touch window counts
+# the ``touches`` table), its baselines ``baselines.TOUCH_BASELINES``. The touch window counts
 # crossed quotes itself (#187): ``crossed`` says so here, and nothing reads it.
 DIRECTION_KIND = Kind(
     name=DIRECTION,

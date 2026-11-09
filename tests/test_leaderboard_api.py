@@ -11,6 +11,7 @@ import contextlib
 import math
 import sqlite3
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from typing import Any
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from krx_quant.algorithms import ALGORITHMS
 from krx_quant.api import create_app
 from krx_quant.baselines import Forecast
 from krx_quant.engine import PredictionEngine
@@ -36,7 +38,7 @@ EARLIER = date(2026, 10, 8)
 
 @contextlib.asynccontextmanager
 async def board(
-    tmp_path: Path, min_sample: int = 20, target_version: int = 1
+    tmp_path: Path, min_sample: int = 20
 ) -> AsyncIterator[tuple[PredictionEngine, TestClient[Any, Any]]]:
     # A holiday: the engine predicts nothing itself; the test stores what it needs.
     engine = await run(
@@ -45,7 +47,7 @@ async def board(
         until=at("16:00:00"),
         calendar=MarketCalendar({DAY: False}),
         symbols=("005930", "000660"),
-        target_version=target_version,
+        target_version=TARGET_VERSION,
     )
     async with TestClient(TestServer(create_app(engine, min_sample=min_sample))) as client:
         yield engine, client
@@ -87,6 +89,7 @@ async def test_the_leaderboard_ranks_by_the_lower_bound_of_the_weakest_lift(tmp_
         "baseline-flat",
         "baseline-persist",
         "baseline-random",
+        "baseline-climate",
     }
     assert all("lift" not in b for b in body["baselines"])
 
@@ -119,11 +122,10 @@ async def test_on_the_touch_target_the_stats_count_only_models_trained_on_it(tmp
     """Input: alpha's predictions by an older model (the four-minute move's), always wrong on
     005930, and by a model trained on the touch target, always right on 000660. Output: the
     leaderboard and alpha's stats count the second only, as the statuses do (#170)."""
-    async with board(tmp_path, target_version=TARGET_VERSION) as (engine, client):
+    async with board(tmp_path) as (engine, client):
         baselines(engine.store)
-        store_scored(engine.store, "alpha", [DOWN] * 40, version="alpha-old")
+        store_scored(engine.store, "alpha", [DOWN] * 40, version="alpha-old", target=1)
         store_scored(engine.store, "alpha", OUTCOMES, version="alpha-new", symbol="000660")
-        engine.store.record_models([("alpha", "alpha-old", 1), ("alpha", "alpha-new", TARGET_VERSION)])
 
         body = await get(client, "/v1/leaderboard")
         stats = await get(client, "/v1/algorithms/alpha/stats")
@@ -140,11 +142,10 @@ async def test_on_version_3_neither_version_2_s_models_nor_its_labels_count(tmp_
     version 3's labels; and every 000660 bar close's version 2 label too, always down (an
     engine before #187 wrote them). Output: the leaderboard counts the version 3 model's 40,
     scored on version 3's labels: all right."""
-    async with board(tmp_path, target_version=TARGET_VERSION) as (engine, client):
+    async with board(tmp_path) as (engine, client):
         baselines(engine.store)
-        store_scored(engine.store, "alpha", OUTCOMES, version="alpha-v2")
+        store_scored(engine.store, "alpha", OUTCOMES, version="alpha-v2", target=2)
         store_scored(engine.store, "alpha", OUTCOMES, version="alpha-v3", symbol="000660")
-        engine.store.record_models([("alpha", "alpha-v2", 2), ("alpha", "alpha-v3", TARGET_VERSION)])
         with contextlib.closing(sqlite3.connect(tmp_path / "engine.db")) as conn, conn:
             conn.execute(
                 "INSERT INTO touches (symbol, bar_close, target_version, class, unscorable, path, scored_at)"
@@ -318,7 +319,8 @@ def store_one(
 ) -> None:
     """One prediction at bar close ``t``, scored: its touch label ``label``, a label it could
     not be scored on (``None``, silent quotes), no label row at all (``NO_LABEL``), or, with
-    ``label`` ``"pending"``, not yet over."""
+    ``label`` ``"pending"``, not yet over. Its model is of the touch target (#170)."""
+    store.record_models([(algorithm, "v1", TARGET_VERSION)])
     added = store.add_all(
         [
             NewPrediction(
@@ -447,7 +449,9 @@ async def test_ranking_needs_enough_pairs_and_only_candidates_share_the_adjustme
 
 
 async def test_a_replayed_morning_reaches_the_leaderboard(tmp_path: Path) -> None:
-    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=1)
+    # The defaults, as models of the touch target: only those count (#170).
+    models = {a.name: replace(a.default_model(), target_version=TARGET_VERSION) for a in ALGORITHMS}
+    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), models=models)
 
     async with TestClient(TestServer(create_app(engine, min_sample=50))) as client:
         body = await get(client, "/v1/leaderboard")
@@ -470,8 +474,19 @@ async def test_a_replayed_morning_reaches_the_leaderboard(tmp_path: Path) -> Non
         ("bishop", 56),
     }
     for ranked in body["ranked"]:
-        assert set(ranked["lift"]["vs"]) == {"baseline-flat", "baseline-persist", "baseline-random"}
-    assert [b["n"] for b in body["baselines"]] == [56, 56, 56]
+        assert set(ranked["lift"]["vs"]) == {
+            "baseline-flat",
+            "baseline-persist",
+            "baseline-random",
+            "baseline-climate",
+        }
+    # Persistence has nothing to go on until the first touch window is over (09:05: no_previous).
+    assert {b["algorithm"]: b["n"] for b in body["baselines"]} == {
+        "baseline-flat": 56,
+        "baseline-persist": 52,
+        "baseline-random": 56,
+        "baseline-climate": 56,
+    }
     assert newton["overall"]["n"] == 56
     assert set(newton["by_slot"]) == {"09:00", "09:30"}
 
@@ -488,3 +503,21 @@ async def test_new_scores_show_on_the_next_request(tmp_path: Path) -> None:
         return next(int(e["n"]) for e in body["ranked"] + body["unranked"] if e["algorithm"] == "alpha")
 
     assert (alpha_n(before), alpha_n(after)) == (30, 40)
+
+
+async def test_an_old_four_minute_model_s_predictions_are_still_served_as_they_are(tmp_path: Path) -> None:
+    """Input (#659): alpha's predictions by a model of the four-minute move (target version 1),
+    stored before that target's code went, scored on their touch labels. Output: the API serves
+    them as stored, model and outcome; the statistics leave them out, as they have since #170."""
+    async with board(tmp_path) as (engine, client):
+        baselines(engine.store)
+        store_scored(engine.store, "alpha", OUTCOMES, version="alpha-old", target=1)
+
+        served = await get(client, "/v1/symbols/005930/predictions?algorithm=alpha&limit=100")
+        body = await get(client, "/v1/leaderboard")
+
+    check("predictions", served)
+    made = served["predictions"]
+    assert len(made) == len(OUTCOMES) and {p["model_version"] for p in made} == {"alpha-old"}
+    assert [p["outcome"]["touch"]["class"] for p in reversed(made)] == [o.value for o in OUTCOMES]
+    assert all(e["n"] == 0 for e in body["ranked"] + body["unranked"] if e["algorithm"] == "alpha")

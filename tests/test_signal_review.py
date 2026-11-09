@@ -543,6 +543,8 @@ async def morning(db: Path, rule: SignalRule) -> None:
         FEE,
         clock,
         algorithms=algorithms,
+        # Models of the touch target: only those count, in the review as in the engine (#170).
+        models={a.name: replace(a.default_model(), target_version=TARGET_VERSION) for a in algorithms},
         signals=Signals(rule, lambda _: None),
         target_version=TARGET_VERSION,
     )
@@ -577,7 +579,7 @@ def judged(closes: Sequence[BarClose], rule: SignalRule) -> set[tuple[str, str, 
 async def test_each_candidate_gives_the_signals_the_engine_sends_by_it(tmp_path: Path) -> None:
     for i, rule in enumerate(RULES):
         await morning(tmp_path / f"{i}.db", rule)
-    settings = Settings("key", "secret", target_version=1)  # the stand-ins' models are of no target
+    settings = Settings("key", "secret")
 
     with read_only(tmp_path / "0.db") as conn:
         assert conn is not None

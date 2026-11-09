@@ -43,7 +43,7 @@ VWAP_FEATURES = ("vwap_gap", "vwap_z", "reversion_speed")
 
 
 async def test_newton_predicts_and_is_scored_under_its_model_version(tmp_path: Path) -> None:
-    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=1)
+    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"))
 
     newton = await predictions_of(engine, "newton")
     assert len(newton) == 60  # 09:01–10:00
@@ -60,7 +60,10 @@ async def test_a_context_aware_algorithm_is_given_each_symbol_and_bar_close(tmp_
     placed = PlacedAlgorithm("placed", features=("velocity",), unique=("velocity",))
 
     engine = await run(
-        tmp_path / "engine.db", busy_morning(), until=at("09:10:00"), algorithms=[placed], target_version=1
+        tmp_path / "engine.db",
+        busy_morning(),
+        until=at("09:10:00"),
+        algorithms=[placed],
     )
 
     closes = [at(f"09:{m:02d}:00") for m in range(1, 11)]
@@ -71,7 +74,7 @@ async def test_a_context_aware_algorithm_is_given_each_symbol_and_bar_close(tmp_
 
 
 async def test_gauss_predicts_and_is_scored_under_its_model_version(tmp_path: Path) -> None:
-    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=1)
+    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"))
 
     gauss = await predictions_of(engine, "gauss")
     assert len(gauss) == 60  # 09:01–10:00
@@ -94,10 +97,12 @@ async def test_pre_market_trades_stay_out_of_the_vwap(tmp_path: Path) -> None:
         [*pre_market, *busy_morning()],
         until=at("09:40:00"),
         algorithms=[with_pre],
-        target_version=1,
     )
     await run(
-        tmp_path / "open.db", busy_morning(), until=at("09:40:00"), algorithms=[without], target_version=1
+        tmp_path / "open.db",
+        busy_morning(),
+        until=at("09:40:00"),
+        algorithms=[without],
     )
 
     assert with_pre.seen == without.seen
@@ -113,7 +118,6 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
         busy_morning(),
         until=at("09:40:00"),
         models={"newton": trained},
-        target_version=1,
     )
 
     assert {p["model_version"] for p in await predictions_of(engine, "newton")} == {"newton-20261009-abc123"}
@@ -150,7 +154,12 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
         assert set(a["model"]["params"]) <= a["param_meanings"].keys()
     assert newton["feature_meanings"]["velocity"]["unit"] == "틱/분"
     assert newton["param_meanings"].keys() == {"damping", "threshold"}
-    assert [b["name"] for b in body["baselines"]] == ["baseline-flat", "baseline-persist", "baseline-random"]
+    assert [b["name"] for b in body["baselines"]] == [
+        "baseline-flat",
+        "baseline-persist",
+        "baseline-random",
+        "baseline-climate",
+    ]
     assert [c["name"] for c in body["consensus"]] == ["consensus-fast", "consensus-final"]
     assert body["baselines"][0]["card"]["scientist"] is None
     assert all(c["card"]["forecasting"] for c in body["consensus"])
@@ -185,7 +194,6 @@ async def test_each_feature_is_computed_once_per_symbol_and_bar_close_for_everyo
         algorithms=[first, second],
         kind_algorithms=(),  # the direction's only: the range's Mandelbrot reads its own (#181)
         feature_store=store,
-        target_version=1,
     )
 
     bar_closes = 30  # 09:01–09:30, one symbol
@@ -206,7 +214,6 @@ async def test_an_algorithm_over_its_time_budget_is_skipped_and_recorded(tmp_pat
         algorithms=[quick, slow],
         kind_algorithms=(),  # the stand-ins only: the kinds' real ones would hold the GIL quick needs (#327)
         budget=Budget(per_algorithm=0.1),
-        target_version=1,
     )
 
     [skipped] = await predictions_of(engine, "slow")
@@ -236,7 +243,6 @@ async def test_one_algorithm_at_its_time_limit_leaves_the_others_room(
         # the room left on a slow runner (#327).
         kind_algorithms=(),
         budget=budget,
-        target_version=1,
     )
 
     # Registered first, the slow one counts its whole limit from 09:01 on; the others still run.
@@ -273,7 +279,6 @@ async def test_the_days_predictions_lost_to_the_budgets_are_told_after_the_close
         kind_algorithms=(),
         budget=budget,
         notify=notify,
-        target_version=1,
     )
     assert sent == []
     with sqlite3.connect(db) as conn:
@@ -291,7 +296,6 @@ async def test_the_days_predictions_lost_to_the_budgets_are_told_after_the_close
         kind_algorithms=(),
         budget=budget,
         notify=notify,
-        target_version=1,
     )
 
     [told] = sent
@@ -311,7 +315,13 @@ async def test_a_day_without_predictions_lost_to_the_budgets_tells_nothing(tmp_p
         sent.append(text)
         return True
 
-    await run(db, busy_morning(), until=at("09:03:30"), algorithms=[quick], notify=notify, target_version=1)
+    await run(
+        db,
+        busy_morning(),
+        until=at("09:03:30"),
+        algorithms=[quick],
+        notify=notify,
+    )
     await run(
         db,
         [],
@@ -319,7 +329,6 @@ async def test_a_day_without_predictions_lost_to_the_budgets_tells_nothing(tmp_p
         until=at("15:45:00"),
         algorithms=[quick],
         notify=notify,
-        target_version=1,
     )
 
     assert sent == []
@@ -339,7 +348,6 @@ async def test_when_the_cpu_budget_runs_short_the_last_registered_is_skipped_fir
         algorithms=[first, second, third],
         kind_algorithms=(),  # the direction's only: a kind's would be skipped first (#179)
         budget=Budget(cpu=0.2),
-        target_version=1,
     )
 
     # 09:01 measures each one's time; at 09:02 the three together are over 0.2 seconds.
@@ -391,7 +399,6 @@ async def test_an_algorithm_that_fails_or_breaks_the_contract_is_recorded_as_an_
         busy_morning(),
         until=at("09:01:30"),
         algorithms=[raising, endless],
-        target_version=1,
     )
 
     for name in ("raising", "endless"):
@@ -407,10 +414,16 @@ async def test_a_trade_received_after_a_bar_close_stays_out_of_its_features(tmp_
     delayed = timedelta(seconds=2)  # the 09:31 bar close runs at 09:31:02, after the late trade
 
     with_late = await run(
-        tmp_path / "late.db", events, until=at("09:32:30"), display_delay=delayed, target_version=1
+        tmp_path / "late.db",
+        events,
+        until=at("09:32:30"),
+        display_delay=delayed,
     )
     without = await run(
-        tmp_path / "on-time.db", busy_morning(), until=at("09:32:30"), display_delay=delayed, target_version=1
+        tmp_path / "on-time.db",
+        busy_morning(),
+        until=at("09:32:30"),
+        display_delay=delayed,
     )
 
     def at_0931(predictions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -477,7 +490,6 @@ async def test_the_leading_series_are_built_from_their_feeds(tmp_path: Path) -> 
         until=at("10:30:00"),
         algorithms=[probe],
         leaders=LEADERS,
-        target_version=1,
     )
 
     def known(bar_close: str) -> set[str]:
@@ -500,7 +512,6 @@ async def test_granger_predicts_through_a_silent_feed_and_is_scored(tmp_path: Pa
         until=at("10:30:00"),
         models={"granger": trained},
         leaders=LEADERS,
-        target_version=1,
     )
 
     granger = await predictions_of(engine, "granger")

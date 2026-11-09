@@ -28,7 +28,7 @@ from krx_quant.lifecycle import Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionStore, Score
 from krx_quant.pricing import Direction
-from krx_quant.touch import Reached, TouchResult
+from krx_quant.touch import TARGET_VERSION, Reached, TouchResult
 from tests.api_schema import check
 from tests.replay_events import DAY, at, run
 from tests.waiting import until
@@ -74,9 +74,13 @@ def store_scored(
     day: date = DAY,
     version: str = "v1",
     special: bool = False,
+    target: int | None = TARGET_VERSION,
 ) -> None:
     """Store ``calls`` (one sure call per bar close from 09:01), scored against OUTCOMES: the
-    bar closes' touch labels (and, unread, the old bases' classes)."""
+    bar closes' touch labels (and, unread, the old bases' classes). The model ``version`` was
+    trained on ``target`` (#170: the engine's, so its calls count; None: not recorded)."""
+    if target is not None:
+        store.record_models([(algorithm, version, target)])
     start = datetime.combine(day, at("09:01:00").timetz())
     for i, call in enumerate(calls):
         t = start + timedelta(minutes=i)
@@ -115,6 +119,7 @@ def baselines(store: PredictionStore, n: int = 40, **kw: Any) -> None:
     store_scored(store, "baseline-flat", [FLAT] * n, **kw)
     store_scored(store, "baseline-persist", [UP] * n, **kw)
     store_scored(store, "baseline-random", [DOWN] * n, **kw)
+    store_scored(store, "baseline-climate", [FLAT] * n, **kw)  # the touch target's fourth (#169)
 
 
 SYMBOLS = ("005930", "000660", "009150")
@@ -135,7 +140,7 @@ async def cost_map(
         until=at("16:00:00"),
         calendar=MarketCalendar({DAY: False}),
         symbols=SYMBOLS,
-        target_version=1,
+        target_version=TARGET_VERSION,
         daily=StoredDays(tmp_path / "data"),  # the daily kind's row
     )
     app = create_app(engine, min_sample=min_sample, state_dir=tmp_path / "state")

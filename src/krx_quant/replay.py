@@ -276,8 +276,7 @@ async def replay_day(settings: Settings, day: date, db: Path | None = None) -> R
     models: dict[str, Model] = {}
     set_aside: list[str] = []
     saved = load_models(settings.state_dir, [*ALGORITHMS, *KIND_ALGORITHMS])
-    if settings.target_version >= 2:
-        saved[CLIMATE] = load_climate(settings.state_dir)
+    saved[CLIMATE] = load_climate(settings.state_dir)
     saved.update(load_tables(settings.state_dir, KINDS))  # the kinds' baselines' tables (#180)
     for name, model in saved.items():
         if model.trained_until is not None and model.trained_until >= day:

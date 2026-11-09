@@ -156,7 +156,6 @@ def fit(state: Path) -> dict[str, Any]:
         names,
         demo._FEE,
         Leaders(),
-        target_version=TARGET_VERSION,
         kinds=[k for k in KINDS if k.name != DIRECTION],
     )
     # The bar closes while the events last; after them the book stands still.

@@ -299,7 +299,7 @@ def train_night(
     day: date | None = None,
     calendar: MarketCalendar | None = None,
     commit: str = "unknown",
-    target_version: int = 1,
+    target_version: int = TARGET_VERSION,
     kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
     kinds: Sequence[Kind] = KINDS,
     daily: DailyTrainer | None = None,
@@ -309,9 +309,9 @@ def train_night(
 ) -> Night:
     """Train every algorithm for the night of ``day`` (default: the latest day with data) and
     store the promotion list. A night already finished is returned as it was. Each report
-    names ``commit``, the code that trained it. The samples' outcomes are of
-    ``target_version``; with the touch target (3) the climate baseline is refitted too, and
-    so are the tables of the ``kinds``' baselines (#180). The algorithms of the ``kinds``
+    names ``commit``, the code that trained it. The samples' outcomes are the touch target's
+    labels (``target_version`` 3, the only one since #659); the climate baseline is refitted too,
+    and so are the tables of the ``kinds``' baselines (#180). The algorithms of the ``kinds``
     besides the direction train after them, on their kind's answers (#179), and the daily kinds'
     algorithms last, given ``daily`` (#264). Each day's samples are read from the sample store in
     ``samples`` (#370, ``sample_store.py``) when they are there under their key, else made and
@@ -385,8 +385,7 @@ def train_night(
         for a in algorithms
         if a.name not in refused
     ]
-    if target_version >= 2:
-        steps.append(_Step(CLIMATE, target_version, False, trainer.climate, trainer.climate_needs()))
+    steps.append(_Step(CLIMATE, target_version, False, trainer.climate, trainer.climate_needs()))
     for kind, table in tables:
         steps.append(
             _Step(
@@ -438,7 +437,7 @@ def train_night(
             log.info("started step %s", step.name)  # STARTED_STEP
             with trainer.running(meter) as usage:
                 report = {**step.run(), "commit": commit}
-            if target_version >= 2 and not step.of_kind:
+            if not step.of_kind:
                 report["target_version"] = target_version
             report["resources"] = usage.as_dict(trainer.days_cached)
             put_json(store, report_key(night, step.name), report)
@@ -524,7 +523,7 @@ class _Trainer:
         days: Sequence[date],
         reads: NightReads,
         calendar: MarketCalendar | None = None,
-        target_version: int = 1,
+        target_version: int = TARGET_VERSION,
         samples: SampleStore | None = None,
     ) -> None:
         self._store = store
@@ -626,11 +625,7 @@ class _Trainer:
             self._target_version,
             DIRECTION_KIND,
             {},
-            lambda loaded: (
-                {"target_version": self._target_version, "labels": _labels(loaded)}
-                if self._target_version >= 2
-                else {}
-            ),
+            lambda loaded: {"target_version": self._target_version, "labels": _labels(loaded)},
             lambda days: self._samples(algorithm, days),
             algorithm.fit,
             partial(_losses, algorithm),

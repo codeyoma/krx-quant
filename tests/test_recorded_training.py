@@ -17,7 +17,6 @@ from krx_quant.macro import MACRO, REGIME_SCHEMA
 from krx_quant.predictions import PredictionStore
 from krx_quant.pricing import Direction, tick_size
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import recorded_samples, training_day
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_doubles import busy_morning, record
@@ -66,7 +65,8 @@ def morning() -> list[Event]:
 
 
 def scored(db: Path) -> dict[tuple[str, datetime], tuple[str | None, float | None, float | None]]:
-    """Each scored prediction of the probe: class on basis A, mid-points at t and t + 4 minutes."""
+    """Each scored prediction of the probe: class on basis A (unread since #659: the samples' outcomes
+    are the touch labels), mid-points at t and t + 4 minutes."""
     with sqlite3.connect(db) as conn:
         rows = conn.execute(
             "SELECT p.symbol, p.bar_close, o.class_a, o.mid_close, o.mid_target"
@@ -98,8 +98,7 @@ async def test_a_recorded_day_trains_on_what_the_engine_saw_and_scored(tmp_path:
     for s in predicted:
         if (s.symbol, s.bar_close) not in outcomes:
             continue
-        class_a, mid_close, mid_target = outcomes[(s.symbol, s.bar_close)]
-        assert (s.outcome.value if s.outcome else None) == class_a
+        _, mid_close, mid_target = outcomes[(s.symbol, s.bar_close)]
         assert mid_close is not None and mid_target is not None
         assert s.change_ticks == (mid_target - mid_close) / tick_size(mid_close)
     assert {s.outcome for s in predicted} >= {Direction.UP, Direction.FLAT, Direction.DOWN}
@@ -117,10 +116,12 @@ def test_trades_bouncing_between_bid_and_ask_are_no_move_on_a_recorded_day() -> 
         sorted(events, key=received), CALENDAR, DAY, (SYMBOL,), ("return_1",), FEE, Leaders()
     )
 
-    outcomes = [s for s in samples if s.outcome is not None]
-    assert len(outcomes) == 37  # 09:01–09:37: the last book, at 09:40, counts for a minute
-    assert all(s.outcome is Direction.FLAT and s.change_ticks == 0 for s in outcomes)
-    assert {s.features["return_1"] for s in outcomes[2:10]} != {0.0}, "the closes bounce"
+    moves = [s for s in samples if s.change_ticks is not None]
+    assert len(moves) == 37  # 09:01–09:37: the last book, at 09:40, counts for a minute
+    assert all(s.change_ticks == 0 for s in moves)
+    labelled = [s for s in samples if s.outcome is not None]
+    assert labelled and all(s.outcome is Direction.FLAT for s in labelled)
+    assert {s.features["return_1"] for s in moves[2:10]} != {0.0}, "the closes bounce"
 
 
 async def test_a_recorded_day_leaves_out_what_live_statistics_leave_out(tmp_path: Path) -> None:
@@ -197,10 +198,7 @@ async def test_a_recorded_day_trains_on_the_touch_labels_the_engine_records(tmp_
     finally:
         store.close()
 
-    touching = recorded_samples(
-        events, CALENDAR, DAY, (SYMBOL, PEER), NAMES, FEE, LEADERS, target_version=TARGET_VERSION
-    )
-    moving = recorded_samples(events, CALENDAR, DAY, (SYMBOL, PEER), NAMES, FEE, LEADERS)
+    touching = recorded_samples(events, CALENDAR, DAY, (SYMBOL, PEER), NAMES, FEE, LEADERS)
 
     # The windows over by the end of the replay: 09:01–10:26.
     over = [s for s in touching if s.bar_close <= END - timedelta(minutes=4)]
@@ -212,8 +210,3 @@ async def test_a_recorded_day_trains_on_the_touch_labels_the_engine_records(tmp_
         assert s.features.touch is not None
         assert s.features.touch.half_spread == (path["ask_start"] - path["bid_start"]) / 2 / path["tick"]
     assert {s.outcome for s in over} >= {Direction.UP, Direction.FLAT, Direction.DOWN}
-    assert any(s.outcome is not m.outcome for s, m in zip(touching, moving, strict=True)), "a new label"
-    # Only the label changes: the features, and the move the outcome used to be, stay.
-    assert [s.change_ticks for s in touching] == [s.change_ticks for s in moving]
-    assert [s.features.as_dict() for s in touching] == [s.features.as_dict() for s in moving]
-    assert all(m.features.touch is None for m in moving)

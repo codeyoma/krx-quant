@@ -119,7 +119,8 @@ def test_the_live_and_the_replayed_engine_differ_only_in_what_the_mode_sets(tmp_
 
 def test_a_setting_reaches_every_mode(tmp_path: Path) -> None:
     settings = settings_of(tmp_path)
-    changed = replace(settings, target_version=1, min_sample=3)
+    # Another target than the one settings allow (#659): a value only to see it reach every mode.
+    changed = replace(settings, target_version=TOUCH_TARGET + 1, min_sample=3)
 
     for mode in Mode:
         # The live gates are made anew each time: they always differ.

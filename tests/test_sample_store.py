@@ -203,7 +203,6 @@ def made(
     names: Sequence[str] = NIGHT_READS.names,
     kinds: Sequence[Kind] = NIGHT_READS.kinds,
     *,
-    target_version: int = TARGET_VERSION,
     calendar: MarketCalendar = CALENDAR,
 ) -> TrainingDay:
     """``day`` made from the files, as ``training_day`` makes it."""
@@ -215,7 +214,6 @@ def made(
         names,
         FEE,
         LEADERS,
-        target_version=target_version,
         kinds=kinds,
     )
     assert found is not None
@@ -502,19 +500,19 @@ def test_a_docstring_or_a_comment_leaves_the_code_digest() -> None:
 
 @pytest.fixture(scope="module")
 def golden(market: Path) -> list[tuple[TrainingDay, tuple[str, ...]]]:
-    """The fixed days ``sample_store.GOLDEN`` is the digest of, with every feature and kind the
-    night reads: a recorded day (every feed, a VI) with the touch target and with the four-minute
-    move, and a backfilled day."""
+    """The fixed days the golden samples are made of, with every feature and kind the night reads:
+    a recorded day (every feed, a VI) and a backfilled day. The golden file holds the recorded day
+    with the four-minute move too, between them (``FOUR_MINUTE``), which no code makes since #659."""
     names = NIGHT_READS.names
-    return [
-        (made(market, NIGHT), names),
-        (made(market, NIGHT, target_version=1), names),
-        (made(market, DAYS[2]), names),
-    ]
+    return [(made(market, NIGHT), names), (made(market, DAYS[2]), names)]
 
 
 # The golden samples, as ``sample_store.content`` gives them: made on Linux from the code of #655.
 GOLDEN_FILE = Path(__file__).parent / "golden" / "sample_store_days.json.gz"
+# The file's recorded day with the four-minute move (target version 1). Its learning is gone (#659), so
+# no code makes it; it stays in the file as it was, which keeps ``GOLDEN`` (the file's digest) and so
+# every stored day's key: removing it would make every day again on the next night for no change.
+FOUR_MINUTE = 1
 # The same code on another CPU gives a few numbers another last bit or two: NumPy picks its vector
 # kernels by the CPU (``np.exp`` and the sums of the excitations and of a barrier's sigma on AVX-512,
 # AVX2, SSE or NEON), and a Mac's C maths library rounds some logarithms otherwise. GitHub's runners
@@ -573,14 +571,18 @@ def test_the_fixed_days_make_the_golden_samples(
     ``KRX_WRITE_GOLDEN=1`` writes what they make as the golden samples, when they changed and why is
     said in the PR."""
     if os.environ.get("KRX_WRITE_GOLDEN") == "1":
-        text = json.dumps(stored_golden, separators=(",", ":"))
+        kept = json.loads(gzip.decompress(GOLDEN_FILE.read_bytes()))[FOUR_MINUTE]
+        text = json.dumps(
+            [*stored_golden[:FOUR_MINUTE], kept, *stored_golden[FOUR_MINUTE:]], separators=(",", ":")
+        )
         GOLDEN_FILE.write_bytes(gzip.compress(text.encode(), compresslevel=9, mtime=0))
-    expected = json.loads(gzip.decompress(GOLDEN_FILE.read_bytes()))
-    digest = sample_store.golden_digest(expected)
+    whole = json.loads(gzip.decompress(GOLDEN_FILE.read_bytes()))
+    digest = sample_store.golden_digest(whole)
     assert digest == sample_store.GOLDEN, (
         f"{GOLDEN_FILE.name} is not the golden samples the key holds: set sample_store.GOLDEN to "
         f"{digest} (every day is made again on the next night)"
     )
+    expected = [day for i, day in enumerate(whole) if i != FOUR_MINUTE]
     changed = differences(stored_golden, expected)
     assert not changed, (
         "the fixed days' samples changed, so the stored days no longer match what the code makes: "
@@ -588,7 +590,7 @@ def test_the_fixed_days_make_the_golden_samples(
         "them) and set sample_store.GOLDEN as this test then says, and say in the PR why they changed."
     )
     assert all(found.samples and found.answers for found, _ in golden)
-    assert golden[0][0].left_out["vi"] > 0 and golden[2][0].reference == "close"
+    assert golden[0][0].left_out["vi"] > 0 and golden[1][0].reference == "close"
 
 
 def test_another_cpu_s_last_bits_are_the_golden_samples(
@@ -718,8 +720,7 @@ MUTATIONS: dict[str, tuple[int, Callable[[TrainingDay], TrainingDay], bool]] = {
     "two samples' order": (0, _swap_samples, False),
     "a sample fewer": (0, lambda f: dataclasses.replace(f, samples=f.samples[1:]), False),
     "a sample's label": (0, _outcome, False),
-    "a backfilled sample's label": (2, _outcome, False),
-    "a four-minute sample's label": (1, _outcome, False),
+    "a backfilled sample's label": (1, _outcome, False),
     "a sample's move": (0, _change_ticks, False),
     "a sample's bar close": (
         0,
@@ -743,7 +744,7 @@ MUTATIONS: dict[str, tuple[int, Callable[[TrainingDay], TrainingDay], bool]] = {
         lambda f: dataclasses.replace(f, left_out={**f.left_out, "vi": f.left_out["vi"] + 1}),
         False,
     ),
-    "the day's reference": (2, lambda f: dataclasses.replace(f, reference="mid"), False),
+    "the day's reference": (1, lambda f: dataclasses.replace(f, reference="mid"), False),
 }
 
 
@@ -792,7 +793,7 @@ def _covered(module: str, qualname: str) -> bool:
 # Traced, the days take some seconds more than the 30 s default on a loaded runner (#327).
 @pytest.mark.timeout(120)
 def test_every_function_that_makes_samples_is_in_the_code_digest(market: Path) -> None:
-    """A recorded day (with the touch target and the four-minute move) and a backfilled one, with
+    """A recorded day and a backfilled one, with
     every feature and kind, traced: each function of krx_quant they run is in a module the digest
     takes whole, or is one it takes by name."""
     codes: set[Any] = set()
@@ -803,7 +804,6 @@ def test_every_function_that_makes_samples_is_in_the_code_digest(market: Path) -
     sys.setprofile(profile)
     try:
         made(market, NIGHT)
-        made(market, NIGHT, target_version=1)
         made(market, DAYS[2])
     finally:
         sys.setprofile(None)
@@ -1143,15 +1143,15 @@ def test_the_night_removes_the_days_no_step_reads_and_older_keys(store_root: Pat
     narrow = FrequencyAlgorithm("narrow", "volatility")
     narrow.training_days = 1  # DAYS[-4] and the validation days
 
-    night(store_root, tmp_path / "cache", samples, [wide, narrow], (DIRECTION_KIND,), target_version=1)
+    night(store_root, tmp_path / "cache", samples, [wide, narrow], (DIRECTION_KIND,))
 
-    window = [f"date={d}" for d in DAYS[-7:]]
+    window = [f"date={d}" for d in DAYS]  # the climate's twenty days reach back to every one
     assert sorted(stored_files(samples)) == window
     assert all(len(files) == 1 for files in stored_files(samples).values())
     # A night cut short after wide: run again, narrow reads its four days alone; wide's are kept.
     (store_root / "promotions" / f"{NIGHT}.json").unlink()
     (store_root / "reports" / str(NIGHT) / "narrow.json").unlink()
-    night(store_root, tmp_path / "cache", samples, [wide, narrow], (DIRECTION_KIND,), target_version=1)
+    night(store_root, tmp_path / "cache", samples, [wide, narrow], (DIRECTION_KIND,))
     assert sorted(stored_files(samples)) == window
 
 
@@ -1186,18 +1186,17 @@ def walk_settings(market: Path, tmp_path: Path) -> Settings:
     )
 
 
-@pytest.mark.parametrize("target_version", [1, TARGET_VERSION])
 @pytest.mark.parametrize("day", [NIGHT, DAYS[2]], ids=["recorded", "backfilled"])
 def test_a_day_kept_to_some_features_and_kinds_is_that_day_made_with_them_alone(
-    market: Path, day: date, target_version: int
+    market: Path, day: date
 ) -> None:
     """What pre-validation and the simulated probation read of the night's day (``keeping``) is
     what making the day with the candidate's features and kind alone gives: a recorded day read
     from the store, a backfilled one made (#373: its leaders' bars were read for the lead features
     alone, so a candidate without one, as Kalman, had no futures' moves there)."""
-    whole = made(market, day, target_version=target_version)
+    whole = made(market, day)
     for names, kinds in asked_alone():
-        alone = made(market, day, names, kinds, target_version=target_version)
+        alone = made(market, day, names, kinds)
         kept = whole.keeping(names, [k.name for k in kinds])
         assert fingerprint(kept) == fingerprint(alone), (names, [k.name for k in kinds])
 

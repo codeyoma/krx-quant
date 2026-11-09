@@ -51,11 +51,10 @@ def test_the_settings_of_the_training_elsewhere_left_in_an_env_are_not_read() ->
     assert settings.train_at == time(21, 30)
 
 
-def test_the_target_is_the_touch_target_unless_the_four_minute_move_is_chosen() -> None:
-    # The default since #170, version 3 (crossed quotes counted) since #187: the deploy is the switch.
+def test_the_target_is_the_touch_target() -> None:
+    # The default since #170, version 3 (crossed quotes counted) since #187, the only one since #659.
     assert Settings.from_env(KEYS, dotenv_path=None).target_version == TARGET_VERSION == 3
     assert Settings.from_env({**KEYS, "KRX_TARGET_VERSION": "3"}, dotenv_path=None).target_version == 3
-    assert Settings.from_env({**KEYS, "KRX_TARGET_VERSION": "1"}, dotenv_path=None).target_version == 1
     for bad in ("4", "0", "two", ""):
         with pytest.raises(SettingsError, match="KRX_TARGET_VERSION"):
             Settings.from_env({**KEYS, "KRX_TARGET_VERSION": bad}, dotenv_path=None)
@@ -68,11 +67,20 @@ def test_the_touch_target_that_dropped_crossed_quotes_is_refused_saying_what_to_
         Settings.from_env({**KEYS, "KRX_TARGET_VERSION": "2"}, dotenv_path=None)
 
 
+def test_the_four_minute_move_is_refused_saying_what_to_set() -> None:
+    """Input: KRX_TARGET_VERSION=1, the four-minute mid-point move, whose training, forecasting and
+    scoring are gone (#659). Output: a settings error naming #659 and the default 3, so the engine
+    does not start."""
+    for raw in ("1", " 1 "):
+        with pytest.raises(SettingsError, match=r"KRX_TARGET_VERSION 1 .*#659.*default 3"):
+            Settings.from_env({**KEYS, "KRX_TARGET_VERSION": raw}, dotenv_path=None)
+
+
 def test_the_settings_touch_target_is_the_touch_module_s() -> None:
     """The settings cannot import ``touch`` (it reads the calendar, which reads the settings):
     their copy of its version is kept equal here."""
     assert TOUCH_TARGET == TARGET_VERSION
-    assert TARGETS == ("1", str(TARGET_VERSION))
+    assert TARGETS == (str(TARGET_VERSION),)
 
 
 def test_the_commit_running_is_the_deploy_s_or_unknown() -> None:

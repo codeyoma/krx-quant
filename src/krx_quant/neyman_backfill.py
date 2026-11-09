@@ -200,9 +200,7 @@ def labelled_count(settings: Settings, calendar: MarketCalendar, leaders: Leader
     """``day``'s bar closes with a label, as many as every arm scores of it: the day made from its data
     with no feature (its labels read none) and let go."""
     s = settings
-    found = training_day(
-        s.data_dir, day, calendar, s.symbols, (), s.fee_rate, leaders, target_version=s.target_version
-    )
+    found = training_day(s.data_dir, day, calendar, s.symbols, (), s.fee_rate, leaders)
     count = 0 if found is None else sum(1 for x in found.samples if x.outcome is not None)
     del found
     give_back()
