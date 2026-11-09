@@ -2920,6 +2920,7 @@ docker compose run --rm --no-deps engine neyman-variants   # 다음 단계: 발�
 
 ```bash
 docker compose run --rm --no-deps engine neyman-variants --backfill   # 백필 판정(한 번), 판정 뒤에는 저장한 줄
+docker compose run --rm --no-deps engine neyman-variants --backfill --until 2026-11-10T05:30+09:00   # 그 시각까지만 날 단위로, 다음 실행이 이어 한다(#643)
 ```
 
 - **평가 날(`Listed`).** 발견 단계가 학습한 첫날(`first_training_day`: 2026-10-12 전 데이터가 있는 날 중 20번째, walk-forward가 창을 잡은 대로)보다 앞선 백필 거래일(녹화가 없는 날) 중, 그 앞에 데이터가 있는 날이 `WARMUP`(40)일 이상인 날이다: 학습할 20거래일과, 그 첫날의 `slot_return_20d`가 읽는 20거래일(`PREPARED`)이다. 서버의 가장 오래된 날은 백필이 365일 전까지 받은 날이고, 출력이 알려 준다.
@@ -2935,7 +2936,13 @@ docker compose run --rm --no-deps engine neyman-variants --backfill   # 백필 �
 - **리포트** `state/experiments/neyman-backfill-532.json`: `listed`(`listed_at`, `oldest`, `first_training_day`, `discovery_start`, `warmup`, `min_scored`, `days`, `short`), 판정 뒤에는 `verdict`(`n_avail`, `level`, 비교마다 `pairs`, `by_day`, `candidate`, `conclusion`, `candidates`, `power`(비교마다 발견의 s_d와 그 검정력, 이 날들의 `days`, `mean`, `sd`, `n`과 그 검정력), `arms`, `described`(`by_month`, `by_slot`, `by_volatility`, `caveats`), `folds`)와 `lines`. 판정한 뒤에는 덮어쓰지 않는다. 읽지 못하면 명령이 1로 끝나고 파일은 그대로다.
 - **출력.** 날, 개수, 비율, lift, 검정력만 낸다. 시세 값, σ̂₄ 값과 경계는 없다. 맨 앞에 실시간 계획의 줄, 그다음 가장 오래된 날, 발견이 학습한 첫날, 목록(`… backfilled days can judge (…), … with at least 200 bar closes every arm scored (N_avail)`), 팔의 표, 비교마다 `… - A: … -> passed`(또는 `did not pass`), 검정력, 결론, 주의점, 설명이다. 발견이 없으면 1로 끝난다(`no discovery in …`).
 - **메모리와 비용.** 사전 검증의 학습 단계와 같다(#383): 학습 창의 날만 들고, 날마다 메모리 줄(`neyman backfill: memory on <날> (day i of n): …`)을 남기고 비운다. 네 팔의 예측은 작은 기록(`Hit`)으로만 남긴다(수백 일의 `Scored`는 2GB 서버에 맞지 않는다). 하루에 트리 열 개를 20거래일로 맞추고(서버에서 51초쯤: 발견의 15일이 11분이었다), 창에 새로 드는 백필 날 하나를 만든다(서버에서 4–6초. 표본 저장소는 밤 학습이 읽는 날, 약 61거래일만 둔다). 목록을 셀 때는 날마다 피처 없이 한 번 더 만든다(맥에서 피처가 있을 때의 40분의 1쯤). 백필이 365일 전까지라 날은 200일쯤이고, 세 시간 반쯤 걸린다.
-- **서버에서는** 예약 작업 `neyman-backfill-532`가 한 번 돌린다([operations.md](operations.md#예약-작업-215)). 에이전트가 판정을 그대로 읽어 안을 #455에 남긴다. 후보를 Neyman에 넣는 것은 #454가 끝난 뒤 사용자가 정한다.
+- **날 단위로 이어 하기(#643).** `--until <시각>`(ISO 8601, 오프셋이 없으면 KST)을 주면 그 시각을 넘겨 끝날 날은 시작하지 않는다. 날 하나의 길이는 그 실행에서 가장 오래 걸린 날로 본다. 첫 날은 시각이 이미 지나지 않았으면 늘 시작한다. 날마다 끝낸 결과를 체크포인트 `state/experiments/neyman-backfill-532.days.jsonl`에 한 줄씩 덧붙인다: 첫 줄은 키(`code`, `input`), 그 뒤 날마다 `day`, `fold`, 봉 마감마다 종목(`symbols`, `symbol`), 그날 0시부터의 초(`at`), 정답, 네 팔의 예측(`calls`, `u`/`f`/`d`), σ̂₄(`sigma`, 없으면 null). 다음 실행은 목록의 앞에서부터 체크포인트의 날을 그대로 되살리고(다시 학습하지 않는다) 남은 첫날부터 걷는다. 그래서 여러 밤에 나눠 걸은 판정은 한 번에 걸은 판정과 같다(테스트로 확인).
+  - **같을 때만 이어 한다.** 키의 `code`는 `neyman_backfill.py`, `neyman_variants.py`, `training.py`, `features.py`, `touch.py`의 소스, Neyman 패키지의 코드 digest(`prevalidation.code_digest`), `_WalkForward` 클래스의 소스로 만든다(`code_key`). `prevalidation.py` 전체는 넣지 않는다: 자주 바뀌는데 대부분 이 판정과 상관이 없다. `input`은 표본을 만드는 설정(종목, ETF, 지수, 미국 종목, 수수료, 정답 버전), 날짜 목록(`listed`), 마지막 평가 날까지의 데이터 디렉터리 `bars/`, `events/`의 날 폴더 파일마다 경로, 크기, 수정 시각이다(`input_key`). 키가 다르면 체크포인트를 버리고 첫날부터 한다(출력: `from the first day (the days kept were set aside: another code)`). 마지막 줄이 잘렸으면(쓰는 중 죽음) 그 앞까지만 읽고 나머지는 지운다.
+  - **출력.** 실행마다 `neyman backfill (#532, by day across nights, #643): <k> of <n> listed days walked (<처음>..<k번째>), <남은 수> left (…)`, 이번 실행이 걸은 날과 그 앞에 이어 받은 날을 낸다. 끝나지 않았으면 `it goes on the next night from <날>; the verdict comes once, after the last day, …`로 끝나고 판정은 내지 않는다(리포트에는 `listed`와 `progress`: `walked`, `left`, `next`, `at`). 마지막 날을 걸은 실행이 판정을 한 번 내고 체크포인트를 지운다. 판정 규칙, 목록, `lines`는 바뀌지 않았다.
+  - **체크포인트는 올리지 않는다.** σ̂₄ 값이 들어 있어 이슈에 붙이지 않고 서버 상태 백업에도 넣지 않는다(백업 패턴은 `neyman-backfill-532.json`뿐이다). 잃으면 첫날부터 다시 걷는다.
+- **서버에서는** 예약 작업 `neyman-backfill-532`가 돌린다. 하루치가 05:30 전에 들어가면 시작해 `--until`(그 밤의 05:30)까지 걷고, 판정이 날 때까지 밤마다 이어 한다([operations.md](operations.md#예약-작업-215)). 에이전트가 판정을 그대로 읽어 안을 #455에 남긴다. 후보를 Neyman에 넣는 것은 #454가 끝난 뒤 사용자가 정한다.
+
+  > **바뀜** (2026-11-09, #PR): 한 실행이 목록의 모든 날을 걷고 판정했다(끊기면 처음부터) → `--until`까지 날 단위로 걷고, 끝낸 날을 체크포인트에 남겨 다음 실행이 이어 한다. 이유: 제한 시간 5시간이 들어갈 밤이 없어(밤 학습이 01:28–02:06에 끝난다) 2026-11-05부터 11-08까지 4밤을 건너뛰었다(#643).
 
 #### 정답 순서 실험 (#529)
 

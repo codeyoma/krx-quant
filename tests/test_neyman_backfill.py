@@ -16,6 +16,7 @@ import math
 import random
 import re
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -34,13 +35,18 @@ from krx_quant.feeds import KST
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.neyman_backfill import (
     CANDIDATE,
+    CHECKPOINT,
+    GOES_ON_LINE,
     NO_CONCLUSION,
     NOT_A_CANDIDATE,
     PREPARED,
     WARMUP,
+    Backfill,
+    Checkpoint,
     Hit,
     Listed,
     Tally,
+    Until,
     candidates,
     first_training_day,
     fix_list,
@@ -48,12 +54,14 @@ from krx_quant.neyman_backfill import (
     labelled_count,
     neyman_backfill,
     power,
+    progress,
 )
 from krx_quant.neyman_variants import DELTA, LEVEL, LIVE_DELTA, A, B, C, D, Fold, Verdict, required_days
 from krx_quant.prevalidation import code_digest
 from krx_quant.pricing import Direction
+from krx_quant.process_log import Ran
 from krx_quant.sample_store import STORE_DIR, SampleStore, night_reads, read_day
-from krx_quant.scheduled import FAILED, JOBS, NEYMAN_BACKFILL, Facts, JobRecord, Night
+from krx_quant.scheduled import FAILED, INTERRUPTED, JOBS, NEYMAN_BACKFILL, OK, Facts, JobRecord, Night
 from krx_quant.scheduled.research import SMT_DISCOVERY
 from krx_quant.training import is_recorded
 from tests.synthetic_bars import day_of_bars
@@ -213,8 +221,8 @@ def data(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return root
 
 
-def settings_of(data: Path, tmp_path: Path) -> Settings:
-    state = tmp_path / "state"
+def settings_of(data: Path, tmp_path: Path, state_dir: str = "state") -> Settings:
+    state = tmp_path / state_dir
     report = state / neyman_variants.REPORT
     report.parent.mkdir(parents=True)
     discovery = SERVER_DISCOVERY | {"period": list(PERIOD)}
@@ -374,14 +382,17 @@ def test_the_command_needs_the_discovery(
     assert not (tmp_path / "state" / module.REPORT).exists()
 
 
-def test_the_job_judges_once_after_the_discovery_last_in_the_list() -> None:
+def test_the_job_goes_on_by_day_until_its_verdict_last_in_the_list() -> None:
     job = NEYMAN_BACKFILL
     assert (job.name, job.command, job.timeout) == (
         "neyman-backfill-532",
         ("neyman-variants", "--backfill"),
         timedelta(hours=5),
     )
+    # It starts when a day fits before 05:30 (the first night's listing among it), not five hours.
+    assert job.resumes == timedelta(minutes=30) and job.needs == job.resumes
     assert [t.issue for t in job.targets] == [455] and "시세 값이 없다" in job.targets[0].note
+    assert "이어 한다" in job.targets[0].note
     assert [a.path for a in job.attach] == ["experiments/neyman-backfill-532.json"]
     assert JOBS[-1] is job, "last: after the pre-validations and the experiments of 11-05"
     assert JOBS.index(job) > JOBS.index(SMT_DISCOVERY)
@@ -391,16 +402,254 @@ def test_the_job_judges_once_after_the_discovery_last_in_the_list() -> None:
     assert job.gives_way_to is None and job.session is None
     sunday = date(2026, 11, 8)
     started = datetime(2026, 11, 8, 23, 0, tzinfo=KST)
-    ran = JobRecord(sunday, "ok", started, "abc", 0, 9000.0)
-    failed = JobRecord(sunday, FAILED, started, "abc", None, 18000.0, timed_out=True)
+    went_on = JobRecord(sunday, OK, started, "abc", 0, 9000.0)
+    stopped = JobRecord(sunday, FAILED, started, "abc", None, 18000.0, timed_out=True)
+    raised = JobRecord(sunday, FAILED, started, "abc", 1, 60.0)
+    cut = JobRecord(sunday + timedelta(days=1), INTERRUPTED, started, "abc")
+    open_ = module.Progress(read=True)
 
-    def night(found: neyman_variants.Progress, record: JobRecord | None = None, commit: str = "abc") -> Night:
-        return Night(sunday + timedelta(days=1), False, commit, record, {}, Facts(neyman_variants=found))
+    def night(
+        found: neyman_variants.Progress,
+        record: JobRecord | None = None,
+        commit: str = "abc",
+        backfill: module.Progress = open_,
+    ) -> Night:
+        facts = Facts(neyman_variants=found, neyman_backfill=backfill)
+        return Night(sunday + timedelta(days=1), False, commit, record, {}, facts)
 
     discovered = neyman_variants.Progress(True, 56, False, 3)
-    assert job.due(night(discovered)), "once, trading or not"
+    assert job.due(night(discovered)), "first, trading or not"
     assert not job.due(night(neyman_variants.Progress(read=True))), "not before the discovery"
     assert not job.due(night(neyman_variants.Progress())), "not on a night its progress was not read"
-    assert not job.due(night(discovered, ran)), "judged once"
-    assert not job.due(night(discovered, failed)), "a failure is not run again on the same code"
-    assert job.due(night(discovered, failed, "def")), "but again once a deploy brings other code"
+    assert not job.due(night(discovered, backfill=module.Progress())), "nor the backfill's"
+    assert job.due(night(discovered, went_on)), "it goes on the next night"
+    assert job.due(night(discovered, stopped)), "and after its limit stopped it: the days walked are kept"
+    assert job.due(night(discovered, cut)), "a run a restart cut"
+    assert not job.due(night(discovered, went_on, backfill=module.Progress(True, judged=True))), "judged once"
+    assert not job.due(night(discovered, raised)), "a failure is not run again on the same code"
+    assert job.due(night(discovered, raised, "def")), "but again once a deploy brings other code"
+    same_night = JobRecord(sunday + timedelta(days=1), OK, started, "abc", 0, 60.0)
+    assert not job.due(night(discovered, same_night)), "once a night"
+    # Its issue is called on the run that judges, not on a night it goes on.
+    assert job.label_if is not None
+    assert not job.label_if(Ran(0, f"...\n  {GOES_ON_LINE} 2026-03-02; the verdict comes once\n", ""))
+    assert job.label_if(Ran(0, "verdict (as #455 registered it ...\n", ""))
+
+
+def test_progress_says_whether_the_verdict_is_in(tmp_path: Path) -> None:
+    s = Settings(kis_app_key="", kis_app_secret="", symbols=SYMBOLS, data_dir=tmp_path, state_dir=tmp_path)
+    assert progress(s) == module.Progress(True, False)
+    path = tmp_path / module.REPORT
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"listed": {}, "progress": {"walked": 3}}))
+    assert progress(s) == module.Progress(True, False)
+    path.write_text(json.dumps({"listed": {}, "verdict": {"n_avail": 3}}))
+    assert progress(s) == module.Progress(True, True)
+
+
+class Ticks:
+    """A clock that moves ``step`` on at each reading."""
+
+    def __init__(self, start: datetime, step: timedelta) -> None:
+        self.now, self.step = start, step
+
+    def __call__(self) -> datetime:
+        found = self.now
+        self.now += self.step
+        return found
+
+
+def test_the_walk_stops_before_a_day_that_would_end_after_its_time() -> None:
+    start = datetime(2026, 11, 10, 3, 0, tzinfo=KST)
+    # Each day takes an hour: the third would end at 06:00, after 05:30.
+    stop = Until(start + timedelta(hours=2, minutes=30), Ticks(start, timedelta(hours=1)))
+    assert [stop() for _ in range(3)] == [False, False, True]
+    assert stop.slowest == timedelta(hours=1)
+    # The first day starts whatever its length, unless the time is past; without one, none stops.
+    assert not Until(start + timedelta(minutes=1), Ticks(start, timedelta(hours=1)))()
+    assert Until(start, Ticks(start, timedelta(hours=1)))()
+    endless = Until(None, Ticks(start, timedelta(hours=9)))
+    assert not any(endless() for _ in range(5))
+
+
+def made_up_tally() -> Tally:
+    days = [date(2026, 3, 2), date(2026, 3, 3)]
+    calls = {arm: [[UP, FLAT, DOWN], [DOWN, DOWN, UP]] for arm in (A, B, C, D)}
+    found = tally(days, calls, [UP, FLAT, UP])
+    found.sigmas = {
+        ("005930", h.bar_close.isoformat()): 0.0011 * (i + 1) for i, h in enumerate(found.hits[A][:4])
+    }
+    return found
+
+
+def kept_in(path: Path, key: dict[str, str], source: Tally) -> None:
+    """``source``'s days kept, a line each, as the walk keeps them."""
+    checkpoint = Checkpoint(path, key)
+    replay = Tally()
+    for fold in source.folds:
+        n = fold.scored
+        at = len(replay.folds) * n
+        for arm in (A, B, C, D):
+            replay.hits[arm] += source.hits[arm][at : at + n]
+        replay.sigmas = dict(source.sigmas)
+        replay.folds.append(fold)
+        checkpoint.keep(module._day_line(fold.day, fold, replay, n))
+
+
+def listed_of(days: list[date]) -> Listed:
+    return Listed(WHEN, days[0], days[-1], date(2026, 7, 13), 2, 3, days, [])
+
+
+def test_a_day_kept_gives_back_the_tally_the_walk_gave(tmp_path: Path) -> None:
+    source = made_up_tally()
+    path = tmp_path / CHECKPOINT
+    key = {"code": "c1", "input": "i1"}
+    kept_in(path, key, source)
+    back = Tally()
+    assert Checkpoint(path, key).restore(back, listed_of([f.day for f in source.folds])) == (2, None)
+    assert back.hits == source.hits and back.folds == source.folds and back.sigmas == source.sigmas
+    # The same hour, minute and month, so the same slot, month and σ̂₄ cell.
+    assert [h.bar_close.isoformat() for h in back.hits[A]] == [
+        h.bar_close.isoformat() for h in source.hits[A]
+    ]
+    # Only the listed days' first ones, in order: the rest of the file is dropped.
+    first = Tally()
+    assert Checkpoint(path, key).restore(first, listed_of([source.folds[0].day])) == (1, None)
+    assert first.folds == source.folds[:1] and len(path.read_text().splitlines()) == 2
+
+
+def test_a_line_cut_short_ends_the_days_kept(tmp_path: Path) -> None:
+    source = made_up_tally()
+    path = tmp_path / CHECKPOINT
+    key = {"code": "c1", "input": "i1"}
+    kept_in(path, key, source)
+    whole = path.read_text()
+    path.write_text(whole[: len(whole) - 20])  # the run was killed as it wrote the second day
+    back = Tally()
+    assert Checkpoint(path, key).restore(back, listed_of([f.day for f in source.folds])) == (1, None)
+    assert back.folds == source.folds[:1] and len(back.hits[A]) == 3
+    assert path.read_text() == "".join(whole.splitlines(keepends=True)[:2])
+
+
+def test_days_kept_with_other_code_or_input_are_set_aside(tmp_path: Path) -> None:
+    source = made_up_tally()
+    days = [f.day for f in source.folds]
+    path = tmp_path / CHECKPOINT
+    kept_in(path, {"code": "c1", "input": "i1"}, source)
+    back = Tally()
+    assert Checkpoint(path, {"code": "c2", "input": "i1"}).restore(back, listed_of(days)) == (
+        0,
+        "set aside: another code",
+    )
+    assert not path.exists() and back.folds == [] and back.hits[A] == []
+    kept_in(path, {"code": "c1", "input": "i1"}, source)
+    assert Checkpoint(path, {"code": "c1", "input": "i2"}).restore(Tally(), listed_of(days)) == (
+        0,
+        "set aside: another input",
+    )
+    path.write_text("not json\n")
+    assert Checkpoint(path, {"code": "c1", "input": "i1"}).restore(Tally(), listed_of(days)) == (
+        0,
+        "set aside: another code and input",
+    )
+    # Another list: the days do not line up from the first.
+    kept_in(path, {"code": "c1", "input": "i1"}, source)
+    assert Checkpoint(path, {"code": "c1", "input": "i1"}).restore(Tally(), listed_of(days[1:])) == (0, None)
+
+
+def test_the_keys_follow_the_code_the_settings_the_list_and_the_data(data: Path, tmp_path: Path) -> None:
+    s = settings_of(data, tmp_path)
+    listed = Listed(WHEN, DAYS[0], DAYS[-TRAINING_DAYS], date(2026, 7, 13), 2, 200, [DAYS[3]], [DAYS[2]])
+    assert module.code_key() == module.code_key() and len(module.code_key()) == 16
+    key = module.input_key(s, listed)
+    assert module.input_key(s, listed) == key
+    assert module.input_key(replace(s, fee_rate=s.fee_rate + 0.0001), listed) != key
+    assert module.input_key(s, replace(listed, days=[DAYS[3], DAYS[5]])) != key
+    # A day folder after the last listed day is not read; one before it is.
+    later, earlier = data / "bars" / f"date={DAYS[9]}", data / "bars" / f"date={DAYS[1]}"
+    (later / "note.txt").write_text("x")
+    try:
+        assert module.input_key(s, listed) == key
+    finally:
+        (later / "note.txt").unlink()
+    (earlier / "note.txt").write_text("x")
+    try:
+        assert module.input_key(s, listed) != key
+    finally:
+        (earlier / "note.txt").unlink()
+    assert module.input_key(s, listed) == key
+
+
+# The made-up days walked once whole and once over three runs (each fitting ten tree models on each of
+# the three days judged): past the 30 s default on a loaded CI runner.
+@pytest.mark.timeout(240)
+def test_days_walked_over_several_nights_give_the_verdict_of_one_walk(
+    data: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    whole = neyman_backfill(settings_of(data, tmp_path, "whole"), **RULES)  # type: ignore[arg-type]
+    assert whole.stage == module.JUDGED and whole.judged is not None and whole.judged.days == 3
+
+    s = settings_of(data, tmp_path, "split")
+    report, kept = s.state_dir / module.REPORT, s.state_dir / CHECKPOINT
+    caplog.set_level("INFO", logger="krx_quant.neyman_variants")
+    night = datetime(2026, 11, 10, 3, 0, tzinfo=KST)
+    # The first night: each day an hour, 05:30 its end: two days walked, the third would end at 06:00.
+    until, clock = night.replace(hour=5, minute=30), Ticks(night, timedelta(hours=1))
+    first = neyman_backfill(s, **RULES, until=until, clock=clock)  # type: ignore[arg-type]
+    assert first.stage == module.GOES_ON and first.judged is None
+    text = "\n".join(first.lines)
+    assert "neyman backfill (#532, by day across nights, #643): 2 of 3 listed days walked" in text
+    assert f"1 left ({DAYS[5]}..{DAYS[5]})" in text and "this run: 2 days" in text
+    assert "from the first day" in text and f"{GOES_ON_LINE} {DAYS[5]}" in text
+    saved = json.loads(report.read_text())
+    assert (
+        "verdict" not in saved
+        and saved["progress"]["walked"] == 2
+        and saved["progress"]["next"] == str(DAYS[5])
+    )
+    assert len(kept.read_text().splitlines()) == 3, "the key and a line a day"
+    assert not progress(s).judged
+    # The second night has an hour: the day left starts and ends by it.
+    caplog.clear()
+    until, clock = night + timedelta(hours=1), Ticks(night, timedelta(minutes=50))
+    second = neyman_backfill(s, **RULES, until=until, clock=clock)  # type: ignore[arg-type]
+    assert second.stage == module.JUDGED and second.judged is not None
+    walked = [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("neyman backfill: memory on")
+    ]
+    assert len(walked) == 1 and str(DAYS[5]) in walked[0], "the days kept are not walked again"
+    text = "\n".join(second.lines)
+    assert "3 of 3 listed days walked" in text and "0 left (-)" in text
+    assert f"after the 2 days kept from earlier runs ({DAYS[2]}..{DAYS[3]})" in text
+    assert GOES_ON_LINE not in text
+    # The same verdict, the same lines, as one walk gave.
+    made = {"made_at"}
+    one = {k: v for k, v in whole.judged.as_dict().items() if k not in made}
+    split = {k: v for k, v in second.judged.as_dict().items() if k not in made}
+    assert split == one
+    assert (
+        json.loads(report.read_text())["lines"]
+        == json.loads((tmp_path / "whole" / module.REPORT).read_text())["lines"]
+    )
+    assert not kept.exists(), "gone once the verdict is in"
+    assert progress(s).judged
+
+
+@pytest.mark.timeout(240)
+def test_days_kept_with_other_code_are_walked_again_from_the_first(
+    data: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    s = settings_of(data, tmp_path)
+    night = datetime(2026, 11, 10, 3, 0, tzinfo=KST)
+
+    def one_day() -> Backfill:  # each day an hour: the second would end after 04:30
+        until, clock = night + timedelta(minutes=90), Ticks(night, timedelta(hours=1))
+        return neyman_backfill(s, **RULES, until=until, clock=clock)  # type: ignore[arg-type]
+
+    first = one_day()
+    assert first.stage == module.GOES_ON and "1 of 3 listed days walked" in "\n".join(first.lines)
+    monkeypatch.setattr(module, "code_key", lambda: "another")
+    again = one_day()
+    text = "\n".join(again.lines)
+    assert "1 of 3 listed days walked" in text and "this run: 1 days" in text
+    assert "from the first day (the days kept were set aside: another code)" in text

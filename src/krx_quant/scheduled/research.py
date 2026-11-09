@@ -16,6 +16,7 @@ from datetime import timedelta
 
 from krx_quant.holdout import DAYS as HOLDOUT_DAYS
 from krx_quant.inverse_replay import AGENT_LINE
+from krx_quant.neyman_backfill import GOES_ON_LINE as NEYMAN_BACKFILL_GOES_ON
 from krx_quant.neyman_backfill import REPORT as NEYMAN_BACKFILL_REPORT
 from krx_quant.neyman_variants import REPORT as NEYMAN_VARIANTS_REPORT
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS
@@ -486,24 +487,40 @@ SMT_HOLDOUT = Job(
 # (about 51 s on the server: the discovery's 15 days took 11 minutes) and makes the one backfilled day
 # that enters its window (4–6 s; the sample store keeps only the nights' days); the list's count makes
 # each day once more, with no feature. The backfill reaches 365 calendar days back, so about 200 days
-# (the oldest is the server's: the output says it), about three hours and a half; the five hours are a
-# bound (last start 00:30). Last in the list: after the pre-validations, which it never holds back,
-# and after the experiment due the night of 2026-11-05 (``smt-discovery-519``), which it does not
-# push to another night: on a night it takes, its last start passes and it waits
-# for the next. It only reads the sample store, so the nightly training's days stay (#512). Its output
-# holds dates, counts, rates, lifts and powers, no price nor σ̂₄.
+# (the oldest is the server's: the output says it), about three hours and a half. Last in the list:
+# after the pre-validations, which it never holds back, and after the experiment due the night of
+# 2026-11-05 (``smt-discovery-519``), which it does not push to another night. It only reads the
+# sample store, so the nightly training's days stay (#512). Its output holds dates, counts, rates,
+# lifts and powers, no price nor σ̂₄.
+# By day across nights (#643): with a five-hour limit it had to start by 00:30, and after trainings
+# ending 01:28–02:06 it waited four nights running (2026-11-05 to 11-08). It now starts when a day
+# still fits before 05:30 (``resumes``: 30 minutes, the first night's listing, about 200 days counted
+# at 4–6 s, among them), runs to 05:30 at most, keeps each day it walked and goes on from the first
+# day left the next night (``neyman_backfill``'s "By day across nights"): due again while its report
+# has no verdict. Its issue is called only on the run that judges (``label_if``); each night's
+# comment says how many days are walked and left.
+NEYMAN_BACKFILL_DAY = timedelta(minutes=30)
 
 
 def _neyman_backfill_due(night: Night) -> bool:
-    """Once, on the first night with the variants' discovery in its report, trading or not; after a
-    failed run, again on other code. Not on a night its progress was not read."""
-    found = night.facts.neyman_variants
-    if not found.read or found.n is None:
+    """On each night with the variants' discovery in its report and no verdict of its own yet,
+    trading or not, while it goes on by day (#643): after a run that stopped before the last day, or
+    one its time limit stopped (the days it walked are kept); after another failure, again on other
+    code. Not on a night its progress was not read."""
+    found, backfill = night.facts.neyman_variants, night.facts.neyman_backfill
+    if not found.read or found.n is None or not backfill.read or backfill.judged:
         return False
     record = night.record
-    return not night.ran or (
-        record is not None and record.outcome == FAILED and record.commit != night.commit
-    )
+    if record is None or record.outcome not in (OK, FAILED):
+        return True  # never ran, or a restart cut it
+    if record.day == night.day:
+        return False  # once a night
+    return record.outcome == OK or record.timed_out or record.commit != night.commit
+
+
+def _neyman_backfill_judged(ran: Ran) -> bool:
+    """Whether the run calls an agent: not when it stopped before the last day (#643)."""
+    return NEYMAN_BACKFILL_GOES_ON not in ran.stdout
 
 
 NEYMAN_BACKFILL = Job(
@@ -511,6 +528,8 @@ NEYMAN_BACKFILL = Job(
     due=_neyman_backfill_due,
     command=("neyman-variants", "--backfill"),
     timeout=timedelta(hours=5),
+    resumes=NEYMAN_BACKFILL_DAY,
+    label_if=_neyman_backfill_judged,
     targets=(
         Target(
             NEYMAN_VARIANTS_ISSUE,
@@ -529,7 +548,10 @@ NEYMAN_BACKFILL = Job(
                 "후보를 neyman에 넣는 것은 #454가 끝난 뒤 사용자가 정한다. 날짜 목록, 규칙, 실시간 계획은 "
                 "결과를 보고 바꾸지 않는다. 다시 돌리기(판정 뒤에는 저장한 줄만 다시 낸다): "
                 "`docker compose run --rm engine neyman-variants --backfill`. 출력에는 시세 값이 없다"
-                "(날짜, 개수, 비율, lift, 검정력만. σ̂₄ 값과 경계도 없다)."
+                "(날짜, 개수, 비율, lift, 검정력만. σ̂₄ 값과 경계도 없다). 날 단위로 밤을 넘어 이어 한다"
+                "(#643): 05:30 전에 하루치(30분)가 들어가면 시작해 05:30 전에 멈추고, 끝낸 날을 남겨 다음 "
+                "밤에 남은 날부터 한다. 판정 전의 밤에는 몇 날째까지 했는지와 남은 날만 올리고 라벨은 "
+                "바꾸지 않는다. 판정은 마지막 날 뒤에 한 번, 같은 규칙으로 낸다."
             ),
         ),
     ),

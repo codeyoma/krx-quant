@@ -57,16 +57,34 @@ minutes) and makes the one backfilled day that enters its window (4–6 s on the
 store keeps only the nights' days, about 61 trading days); counting makes each listed day once more,
 with no feature. The backfill reaches 365 calendar days back, so about 200 days: about three hours
 and a half.
+
+**By day across nights** (#643). The night after the nightly training is about three hours and a half
+long, less on a long training: the run goes on by day. Told when to stop (``until``: the night's 05:30,
+``--until``), it starts no day it could not end by then (by the slowest of tonight's days), and each
+day it ended is kept (``CHECKPOINT``: its fold, and each bar close's symbol, time, answer, the four
+arms' calls and σ̂₄), so the next night's run goes on from the first day left. The kept days are read
+only with the same code (``code_key``: this module's, ``neyman_variants``', ``training``'s,
+``features``' and ``touch``'s, neyman's package's digest and the walk-forward's class), the same list
+and the same input (``input_key``: the settings that make the samples and each data file of the days
+up to the last listed, by its size and time); with any other, they are set aside and the run starts
+from the first day. A day kept gives the tally the walk gave it, so the verdict on days walked over
+several nights is the verdict on them walked in one. The verdict comes once, after the last day, by the
+same rule.
 """
 
 from __future__ import annotations
 
+import hashlib
+import importlib
+import inspect
+import json
 import logging
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from functools import partial
+from pathlib import Path
 from statistics import NormalDist
 from typing import Any
 
@@ -118,7 +136,7 @@ from krx_quant.neyman_variants import (
     REPORT as VARIANTS_REPORT,
 )
 from krx_quant.predictions import iso
-from krx_quant.prevalidation import _WalkForward
+from krx_quant.prevalidation import _WalkForward, code_digest
 from krx_quant.pricing import Direction, most_likely
 from krx_quant.sample_store import night_reads
 from krx_quant.stats import Interval, wilson
@@ -130,6 +148,9 @@ ISSUE = 455  # where the result goes: #455's experiment (#532 is the work)
 WORK = 532
 EXPERIMENT = "neyman-backfill-532"  # the scheduled job's name
 REPORT = f"experiments/{EXPERIMENT}.json"  # under the state directory
+# The days walked so far (#643), under the state directory: a line each, read by the next night's run.
+# Never posted nor backed up (it holds σ̂₄ at each bar close); gone once the verdict is in.
+CHECKPOINT = f"experiments/{EXPERIMENT}.days.jsonl"
 
 # Fixed in #532 before the run.
 PREPARED = previous_days_needed(FEATURES)  # the trading days of bars a day's features read before it: 20
@@ -290,6 +311,202 @@ class Tally:
         self.folds.append(Fold(day, 0 if fit is None else fit.trained_on, composition, len(samples)))
 
 
+# The days kept across nights (#643)
+
+# The modules whose code makes a day's calls, beside neyman's package and the walk-forward's class.
+CODE = (
+    "krx_quant.neyman_backfill",
+    "krx_quant.neyman_variants",
+    "krx_quant.training",
+    "krx_quant.features",
+    "krx_quant.touch",
+)
+_CALL = {UP: "u", FLAT: "f", DOWN: "d"}
+_DIRECTION = {v: k for k, v in _CALL.items()}
+
+
+def code_key() -> str:
+    """A digest of the code that makes a day's calls (``CODE``, neyman's package by
+    ``prevalidation.code_digest``, and ``_WalkForward``'s class): kept days are read only with it."""
+    digest = hashlib.sha256()
+    for name in CODE:
+        module = importlib.import_module(name)
+        assert module.__file__ is not None
+        digest.update(name.encode() + b"\0" + Path(module.__file__).read_bytes())
+    digest.update(b"\0neyman\0" + code_digest(Neyman()).encode())
+    digest.update(b"\0walk\0" + inspect.getsource(_WalkForward).encode())
+    return digest.hexdigest()[:16]
+
+
+def input_key(settings: Settings, listed: Listed) -> str:
+    """A digest of what a day's samples are made from: the settings that make them, the list, and
+    each file of the data directory's day folders up to the last listed day, by its path, size and
+    time (``bars/``, ``events/``)."""
+    s = settings
+    digest = hashlib.sha256()
+    made = [s.symbols, s.etf_symbols, s.index_codes, s.us_symbols, s.fee_rate, s.target_version]
+    digest.update(json.dumps([list(x) if isinstance(x, tuple) else x for x in made]).encode())
+    digest.update(json.dumps(listed.as_dict(), sort_keys=True).encode())
+    last = max([*listed.days, *listed.short], default=None)
+    for top in ("bars", "events"):
+        for folder in sorted((s.data_dir / top).glob("date=*")):
+            try:
+                day = date.fromisoformat(folder.name.removeprefix("date="))
+            except ValueError:
+                continue
+            if last is None or day > last:
+                continue
+            for f in sorted(p for p in folder.rglob("*") if p.is_file()):
+                found = f.stat()
+                where = f.relative_to(s.data_dir).as_posix()
+                digest.update(f"{where}\0{found.st_size}\0{found.st_mtime_ns}\n".encode())
+    return digest.hexdigest()[:16]
+
+
+def _day_line(day: date, fold: Fold, tally: Tally, scored: int) -> dict[str, Any]:
+    """``day``'s line: its fold, and of its ``scored`` bar closes (the tally's last), each one's
+    symbol, time from the day's midnight, answer, the four arms' calls and σ̂₄ (None without)."""
+    hits = {arm: tally.hits[arm][len(tally.hits[arm]) - scored :] for arm in ARMS}
+    midnight = datetime.combine(day, time(), KST)
+    symbols = sorted({h.symbol for h in hits[A]})
+    return {
+        "day": day.isoformat(),
+        "fold": fold.as_dict(),
+        "symbols": symbols,
+        "symbol": [symbols.index(h.symbol) for h in hits[A]],
+        "at": [(h.bar_close - midnight).total_seconds() for h in hits[A]],
+        "outcome": "".join(_CALL[h.outcome] for h in hits[A]),
+        "calls": {arm: "".join(_CALL[h.predicted] for h in hits[arm]) for arm in ARMS},
+        "sigma": [tally.sigmas.get((h.symbol, iso(h.bar_close))) for h in hits[A]],
+    }
+
+
+def _restore(tally: Tally, line: Mapping[str, Any]) -> date:
+    """A kept day's line back into ``tally``, as the walk added it; nothing added from a line that
+    cannot be read (ValueError, KeyError, TypeError, IndexError)."""
+    day = date.fromisoformat(line["day"])
+    midnight = datetime.combine(day, time(), KST)
+    symbols = [str(x) for x in line["symbols"]]
+    at = [midnight + timedelta(seconds=float(x)) for x in line["at"]]
+    who = [symbols[int(i)] for i in line["symbol"]]
+    outcome = [_DIRECTION[c] for c in line["outcome"]]
+    calls = {arm: [_DIRECTION[c] for c in line["calls"][arm]] for arm in ARMS}
+    sigma = list(line["sigma"])
+    f = line["fold"]
+    fold = Fold(date.fromisoformat(f["day"]), int(f["trained_on"]), str(f["window"]), int(f["scored"]))
+    sizes = {len(who), len(outcome), len(sigma), *(len(c) for c in calls.values())}
+    if sizes - {len(at)}:
+        raise ValueError(f"{day}: its bar closes do not line up")
+    for arm in ARMS:
+        hits = tally.hits[arm]
+        hits.extend(Hit(s, b, c, o) for s, b, c, o in zip(who, at, calls[arm], outcome, strict=True))
+    for s, b, v in zip(who, at, sigma, strict=True):
+        if v is not None:
+            tally.sigmas[(s, iso(b))] = float(v)
+    tally.folds.append(fold)
+    return day
+
+
+class Checkpoint:
+    """The days walked so far (``CHECKPOINT``): a first line with the key they were walked with
+    (``code_key``, ``input_key``), then a line a day (``_day_line``)."""
+
+    def __init__(self, path: Path, key: Mapping[str, str]) -> None:
+        self.path = path
+        self.key = dict(key)
+
+    def restore(self, tally: Tally, listed: Listed) -> tuple[int, str | None]:
+        """The days kept, back into ``tally`` (the listed days' first ones, in order): how many, and
+        why none were (None if there were none to read). Those of another key are set aside; a line
+        cut short (a run killed as it wrote) ends the kept days, and is dropped."""
+        try:
+            text = self.path.read_text()
+        except FileNotFoundError:
+            return 0, None
+        lines = text.splitlines(keepends=True)
+        try:
+            head = json.loads(lines[0]) if lines else None
+        except ValueError:
+            head = None
+        if not isinstance(head, dict) or head.get("key") != self.key:
+            was = head.get("key") if isinstance(head, dict) else None
+            changed = [k for k in self.key if not isinstance(was, dict) or was.get(k) != self.key[k]]
+            self.path.unlink()
+            return 0, f"set aside: another {' and '.join(changed) or 'file'}"
+        kept = 0
+        for line in lines[1:]:
+            if kept >= len(listed.days) or not line.endswith("\n"):
+                break
+            try:
+                found = json.loads(line)
+                if date.fromisoformat(found["day"]) != listed.days[kept]:
+                    break
+                _restore(tally, found)
+            except (ValueError, KeyError, TypeError, IndexError):
+                break
+            kept += 1
+        if kept < len(lines) - 1:  # what follows the days read is dropped: they go on from there
+            self._rewrite(lines[: kept + 1])
+            dropped = len(lines) - 1 - kept
+            log.warning("neyman backfill: %d lines after the %d days kept dropped", dropped, kept)
+        return kept, None
+
+    def _rewrite(self, lines: Sequence[str]) -> None:
+        tmp = self.path.with_name(f".{self.path.name}.tmp")
+        tmp.write_text("".join(lines))
+        tmp.replace(self.path)
+
+    def keep(self, line: Mapping[str, Any]) -> None:
+        """A day walked, after those kept (the key first, on the first)."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a") as f:
+            if f.tell() == 0:
+                f.write(json.dumps({"key": self.key}) + "\n")
+            f.write(json.dumps(line) + "\n")
+            f.flush()
+
+    def drop(self) -> None:
+        self.path.unlink(missing_ok=True)
+
+
+class Until:
+    """Whether the walk stops before its next day (``walk_into``'s ``stop``): when that day, as long
+    as the slowest of tonight's, would end after ``until``; the first day always starts unless
+    ``until`` has passed."""
+
+    def __init__(self, until: datetime | None, clock: Callable[[], datetime]) -> None:
+        self.until = until
+        self.clock = clock
+        self.last: datetime | None = None
+        self.slowest = timedelta(0)
+
+    def __call__(self) -> bool:
+        now = self.clock()
+        if self.last is not None:
+            self.slowest = max(self.slowest, now - self.last)
+        self.last = now
+        return self.until is not None and now + self.slowest >= self.until
+
+
+@dataclass(frozen=True)
+class Progress:
+    """Where the backfill stands, as its scheduled job's condition reads it (``Facts.neyman_backfill``)."""
+
+    read: bool = False  # read tonight: without, the job waits
+    judged: bool = False  # its verdict is in the report
+
+
+def progress(settings: Settings) -> Progress:
+    """The backfill's ``Progress`` from its report (a small file). One that cannot be read says not
+    judged (logged): the job then runs, and its command says why it cannot."""
+    try:
+        report = read_report(settings.state_dir / REPORT, "the fixed list of days, never listed again")
+    except (OSError, ValueError):
+        log.exception("could not read where the neyman backfill (#532) stands")
+        return Progress(read=True)
+    return Progress(True, bool(report and report.get("verdict")))
+
+
 # The verdict
 
 
@@ -415,12 +632,14 @@ def judge(tally: Tally, spreads: Mapping[str, Mapping[str, Any]], now: datetime)
 
 # The run
 
-JUDGED, JUDGED_BEFORE = "judged", "judged before"
+JUDGED, JUDGED_BEFORE, GOES_ON = "judged", "judged before", "goes on"
+# What a run that stopped before the last day says (#643): the job's issue is not called then.
+GOES_ON_LINE = "it goes on the next night from"
 
 
 @dataclass(frozen=True)
 class Backfill:
-    stage: str  # JUDGED or JUDGED_BEFORE
+    stage: str  # JUDGED, JUDGED_BEFORE or GOES_ON
     lines: list[str]
     listed: Listed | None = None
     judged: Judged | None = None
@@ -436,13 +655,18 @@ def neyman_backfill(
     warmup: int = WARMUP,
     live_delta: float = LIVE_DELTA,
     count: Callable[[date], int] | None = None,
+    until: datetime | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> Backfill:
     """The backfill's verdict (module doc), its report saved: the live window's plan moved into the
     experiment's report first if it is not there, then the days listed (``count`` counts a day;
     ``labelled_count`` by default) and saved before any arm is fitted, unless a run saved them
-    already, then walked and judged once. A run after the verdict prints it and computes nothing.
-    Raises FileNotFoundError without a discovery, ValueError for a report that cannot be read or a
-    listed day counted again with fewer bar closes."""
+    already, then walked and judged once. With ``until`` (#643), no day starts that would end after
+    it, by the slowest of the run's days on ``clock``: a run that stops before the last day keeps
+    the days it walked and says where the next goes on (``GOES_ON``), and the next run goes on
+    from there. A run after the verdict prints it and computes nothing. Raises FileNotFoundError
+    without a discovery, ValueError for a report that cannot be read or a listed day counted again
+    with fewer bar closes."""
     now = now or datetime.now(KST)
     main = settings.state_dir / VARIANTS_REPORT
     saved = read_report(main)
@@ -481,12 +705,32 @@ def neyman_backfill(
         listed.first,
         _list_head(listed),
     )
+    tally = Tally()
+    checkpoint = Checkpoint(
+        settings.state_dir / CHECKPOINT, {"code": code_key(), "input": input_key(settings, listed)}
+    )
+    kept, set_aside = checkpoint.restore(tally, listed)
+
+    def add(day: date, fit: Fit | None, climate: Model, samples: Sequence[Sample]) -> None:
+        tally.add(day, fit, climate, samples)
+        checkpoint.keep(_day_line(day, tally.folds[-1], tally, len(samples)))
+
     night = night_reads(algorithms, kind_algorithms, kinds)
     trainer = _WalkForward(settings, Neyman(), available, calendar, leaders, night=night)
-    tally = Tally()
-    left = walk_into(tally.add, trainer, listed.days, listed.min_scored, name="neyman backfill")
+    stop = Until(until, clock or (lambda: datetime.now(KST)))
+    left = walk_into(add, trainer, listed.days[kept:], listed.min_scored, name="neyman backfill", stop=stop)
     if left:
         raise ValueError(f"neyman backfill: {', '.join(map(str, left))} counted again with fewer bar closes")
+    walked = progress_lines(listed, kept, len(tally.folds), set_aside)
+    if len(tally.folds) < len(listed.days):
+        done = len(tally.folds)
+        went = {"walked": done, "left": len(listed.days) - done, "next": listed.days[done].isoformat()}
+        _write(
+            path,
+            {"experiment": EXPERIMENT, "issue": ISSUE, "work": WORK, "listed": listed.as_dict()}
+            | {"progress": went | {"at": now.isoformat()}},
+        )
+        return Backfill(GOES_ON, [*head, *walked, f"report: {path}"], listed)
     judged = judge(tally, discovery["spreads"], now)
     lines = backfill_lines(listed, judged, int(discovery["n"]))
     _write(
@@ -494,7 +738,8 @@ def neyman_backfill(
         {"experiment": EXPERIMENT, "issue": ISSUE, "work": WORK, "lines": lines, "verdict": judged.as_dict()}
         | {"listed": listed.as_dict()},
     )
-    return Backfill(JUDGED, [*head, *lines, f"report: {path}"], listed, judged)
+    checkpoint.drop()
+    return Backfill(JUDGED, [*head, *walked, "", *lines, f"report: {path}"], listed, judged)
 
 
 # The command's lines: dates, counts, rates, lifts and powers; no price, σ̂₄ or cut.
@@ -510,6 +755,27 @@ def _list_head(listed: Listed) -> str:
         f"{len(every)} backfilled days can judge ({_span(every)}), {len(listed.days)} with at least"
         f" {listed.min_scored} bar closes every arm scored (N_avail); listed on {listed.listed_at.date()}"
     )
+
+
+def progress_lines(listed: Listed, kept: int, done: int, set_aside: str | None) -> list[str]:
+    """How far the walk is (#643): the listed days walked and left, and this run's share of them."""
+    total = len(listed.days)
+    tonight = listed.days[kept:done]
+    if kept:
+        before = f"after the {kept} days kept from earlier runs ({_span(listed.days[:kept])})"
+    else:
+        before = "from the first day" + (f" (the days kept were {set_aside})" if set_aside else "")
+    out = [
+        f"neyman backfill (#{WORK}, by day across nights, #643): {done} of {total} listed days walked"
+        f" ({_span(listed.days[:done])}), {total - done} left ({_span(listed.days[done:])})",
+        f"  this run: {len(tonight)} days ({_span(tonight)}), {before}",
+    ]
+    if done < total:
+        out.append(
+            f"  {GOES_ON_LINE} {listed.days[done]}; the verdict comes once, after the last day, by the rule"
+            " fixed before the run"
+        )
+    return out
 
 
 def _interval_dict(i: Mapping[str, Any] | None) -> str:
