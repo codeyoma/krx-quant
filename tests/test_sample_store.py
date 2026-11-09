@@ -515,7 +515,14 @@ def golden(market: Path) -> list[tuple[TrainingDay, tuple[str, ...]]]:
 # Making the three days takes some seconds more than the 30 s default on a loaded runner.
 @pytest.mark.timeout(120)
 def test_the_fixed_days_make_the_golden_samples(golden: list[tuple[TrainingDay, tuple[str, ...]]]) -> None:
-    """What stands in the key for the code (#645): the same days make the same samples, bit for bit."""
+    """What stands in the key for the code (#645): the same days make the same samples, bit for bit.
+    On Linux, as the server and CI make them: a Mac's C maths library gives a few logarithms and
+    exponentials another last bit (``kospi200f_moves``, ``reversion_speed``, ``session_sigma``), so
+    its digest is another (Linux on arm64 and on x86-64 agree)."""
+    if sys.platform != "linux":
+        pytest.skip(
+            "GOLDEN is Linux's samples (the server's, CI's); this platform's maths differ in the last bit"
+        )
     found = sample_store.golden_digest(golden)
     assert found == sample_store.GOLDEN, (
         f"the fixed days' samples changed (golden digest {found}): the stored days no longer match "

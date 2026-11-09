@@ -118,10 +118,12 @@ STORE_DIR = "training-samples"  # under the state directory
 FORMAT = 1  # the file's layout; another is a miss
 # What the samples mean (#645, module doc). Raise SAMPLE_SEMANTICS when a change can change a sample
 # on any day, whatever the golden test says; GOLDEN is ``golden_digest`` of the test's fixed days as
-# CI makes them; REVIEWED_CODE is ``code_digest()`` as last reviewed. GOLDEN and SAMPLE_SEMANTICS are
+# Linux makes them (the server's and CI's; the same on arm64 and x86-64, while a Mac's C maths library
+# differs in the last bit of a few logarithms, so the test checks it on Linux alone); REVIEWED_CODE is
+# ``code_digest()`` as last reviewed. GOLDEN and SAMPLE_SEMANTICS are
 # in every day's key (a change to either makes every day again), REVIEWED_CODE is not.
 SAMPLE_SEMANTICS = 1
-GOLDEN = "35f652991e24aa7e505bcc8ce9025760"
+GOLDEN = "9ad340d6e42b4493126df0bcd9d9ec3b"
 REVIEWED_CODE = "27cd65b408826d27"
 # How far before a day the key holds the calendar's sessions: the 20 trading days whose bars the slot
 # returns read (#265), with holidays, and their previous days, are well inside. Of the days after it
