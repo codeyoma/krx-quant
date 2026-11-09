@@ -1,4 +1,0 @@
-usage: krx-quant check-krx-net-assets [-h]
-
-options:
-  -h, --help  show this help message and exit

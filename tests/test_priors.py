@@ -68,17 +68,16 @@ def test_the_table_s_parameters_have_a_meaning_by_name_and_are_not_listed() -> N
     assert "prior.005930.15:00.flat" in PARAM_MEANINGS, "shannon's"
 
 
-def test_production_code_never_loads_the_experiment_and_the_climate_imports_first() -> None:
+def test_the_climate_imports_first() -> None:
     # ``priors`` may not import ``climate``: ``climate`` imports the algorithms' contract, whose
-    # package imports shannon, which imports ``priors``. A fresh interpreter, ``climate`` first.
-    script = (
-        "import sys, krx_quant.climate, krx_quant.engine, krx_quant.nightly, krx_quant.prevalidation; "
-        "print('krx_quant.climate_prior' in sys.modules)"
-    )
+    # package imports shannon, which imports ``priors``. A fresh interpreter, ``climate`` first. (The
+    # experiment's module, ``krx_quant.climate_prior``, that production code was never to load, was
+    # removed in #658.)
+    script = "import krx_quant.climate, krx_quant.engine, krx_quant.nightly, krx_quant.prevalidation"
 
-    ran = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True)
+    ran = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
 
-    assert ran.stdout.strip() == "False"
+    assert ran.returncode == 0, ran.stderr
 
 
 def test_shannon_s_code_digest_holds_the_prior_s_code() -> None:
