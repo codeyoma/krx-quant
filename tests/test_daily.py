@@ -36,6 +36,7 @@ from krx_quant.predictions import NewKindPrediction, PredictionStore
 from krx_quant.replay import replay_into
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
+from krx_quant.touch import TARGET_VERSION
 
 SYMBOLS = ("005930", "000660")
 FEE = 0.015 / 100
@@ -101,6 +102,7 @@ def engine(
         daily_features=features,
         daily_feature_names={"last_change"},
         budget=budget,
+        target_version=TARGET_VERSION,
     )
 
 
@@ -310,6 +312,7 @@ async def test_a_daily_algorithm_predicts_at_0850_and_its_failures_are_kept(tmp_
         daily_features=lambda a, s, d, p, b: FeatureVector({f: p[-1].change for f in a.features}, a.features),
         daily_feature_names={"last_change", "x", "y"},
         budget=Budget(per_algorithm=0.1, cpu=30),
+        target_version=TARGET_VERSION,
     )
     await replay_into(e, clock, [], until=at(MONDAY, "08:51"))
     by_algorithm = {(r["algorithm"], r["symbol"]): r for r in predictions(e.store)}

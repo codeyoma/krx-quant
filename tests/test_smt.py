@@ -20,7 +20,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from krx_quant.backfill import BAR_SCHEMA, FUTURES_BAR_SCHEMA, FUTURES_BARS_TR, MINUTE_BARS_TR, bars_key
-from krx_quant.baselines import BASELINES
+from krx_quant.baselines import TOUCH_BASELINES
 from krx_quant.cli import main
 from krx_quant.engine import Event
 from krx_quant.feeds import KOSPI200_FUTURES, TRADE
@@ -376,7 +376,7 @@ async def test_a_failure_to_judge_smt_never_stops_the_bar_close_predictions(
         )
     for symbol in (A, B):  # every predictor's prediction of the bar close is there, the algorithm's made
         made = {p["algorithm"]: p["status"] for p in engine.store.at_close(symbol, at("10:01"))}
-        assert {*(b.name for b in BASELINES), "fixed"} <= set(made) and made["fixed"] == "ok"
+        assert {*(b.name for b in TOUCH_BASELINES), "fixed"} <= set(made) and made["fixed"] == "ok"
     assert any("SMT not judged" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
     assert engine.store.smt_events(at("00:00"), at("00:00", NEXT)) == []
     engine.store.close()

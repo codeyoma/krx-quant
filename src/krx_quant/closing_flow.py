@@ -43,7 +43,7 @@ bar's close too, #317).
 
 **The days.** Each day of the backfill's bars that follows a day with them (no day missing
 between), as #270's ``structure-check`` section 2 reads them, with the same functions
-(``structure_check.auction_days``, ``period_of``, ``same_share``, ``opposite_share``): the closing
+(``base_rates.auction_days``, ``period_of``, ``same_share``, ``opposite_share``): the closing
 auction's move (close ÷ the last price before it − 1), the day's flow to 15:20 (that price ÷ the
 day before's close − 1), the next day's gap and close-to-close. A day's demand is its stored 15:20
 one (``live``); a day without one but with its A is computed from the bars (``bars``: r is the
@@ -82,16 +82,7 @@ import pyarrow.parquet as pq
 from krx_quant.auctions import MINUTE_BAR as KRX_MINUTE_BAR
 from krx_quant.auctions import read_auctions
 from krx_quant.backfill import MINUTE_BARS_TR, read_bars
-from krx_quant.daily import DayPrices as KrxDay
-from krx_quant.daily import StoredDays
-from krx_quant.feeds import KRX_TRADE
-from krx_quant.feeds.base import EVENT_TIME, KST, Row
-from krx_quant.macro import read_partition
-from krx_quant.market_calendar import MarketCalendar, Session
-from krx_quant.net_assets import KIS, net_assets_for, read_net_assets, source_of
-from krx_quant.predictions import iso
-from krx_quant.products import Product, Structure, products_of
-from krx_quant.structure_check import (
+from krx_quant.base_rates import (
     PERIODS,
     DayPrices,
     auction_days,
@@ -101,6 +92,15 @@ from krx_quant.structure_check import (
     period_of,
     same_share,
 )
+from krx_quant.daily import DayPrices as KrxDay
+from krx_quant.daily import StoredDays
+from krx_quant.feeds import KRX_TRADE
+from krx_quant.feeds.base import EVENT_TIME, KST, Row
+from krx_quant.macro import read_partition
+from krx_quant.market_calendar import MarketCalendar, Session
+from krx_quant.net_assets import KIS, net_assets_for, read_net_assets, source_of
+from krx_quant.predictions import iso
+from krx_quant.products import Product, Structure, products_of
 
 log = logging.getLogger(__name__)
 

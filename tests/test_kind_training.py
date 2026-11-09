@@ -73,7 +73,6 @@ async def test_a_recorded_day_trains_a_kind_on_the_answers_the_engine_scores(tmp
         ("velocity",),
         FEE,
         Leaders(),
-        target_version=TARGET_VERSION,
         kinds=(TEST_KIND,),
     )
 
@@ -165,6 +164,7 @@ def test_a_kind_s_algorithm_is_fitted_on_its_answers_and_the_engine_switches_to_
         FakeClock(at("08:00:00")),
         kinds=(TEST_KIND,),
         kind_algorithms=[counter],
+        target_version=TARGET_VERSION,
     )
     assert reload_models(engine, Shelf(s.state_dir))
     assert engine.models["counter"].version == fitted.model.version

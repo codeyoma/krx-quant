@@ -20,20 +20,18 @@ from krx_quant import heartbeat, kis, loki, route_counts
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, load_models
 from krx_quant.api import create_app
 from krx_quant.archive import NIGHTLY_ARCHIVE, archive
+from krx_quant.assembly import Mode, build_engine
 from krx_quant.auth import TokenManager, tokens_and_client
-from krx_quant.backfill import PreviousDay, keep_history
+from krx_quant.backfill import keep_history
 from krx_quant.climate import load_climate, load_tables
 from krx_quant.clock import SessionClock, SystemClock
 from krx_quant.closing_flow import keep_days, keep_demand, store_closing_demand
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, night_front_month
-from krx_quant.daily import StoredDays
-from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.disk_watch import DiskWatch, keep_disks
 from krx_quant.doctor import RecentLog, engine_status, report
 from krx_quant.econ_calendar import CalendarCollector, keep_calendar
-from krx_quant.engine import Budget, PredictionEngine, run_live
-from krx_quant.features import Leaders
+from krx_quant.engine import PredictionEngine, run_live
 from krx_quant.feeds import (
     BOOK,
     ETF_FALLBACKS,
@@ -63,12 +61,10 @@ from krx_quant.feeds import (
     us_daytime_key,
 )
 from krx_quant.feeds.base import kst_day
-from krx_quant.garbage import Garbage
 from krx_quant.health import FeedHealth, FeedState
 from krx_quant.kind_registry import KINDS
 from krx_quant.krx_net_assets import KrxClient, KrxNetAssetKeeper, keep_krx_net_assets
-from krx_quant.lifecycle import Rules
-from krx_quant.macro import MacroCollector, day_regime, keep_macro, macro_recorder
+from krx_quant.macro import MacroCollector, keep_macro, macro_recorder
 from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store, next_on_trading_day
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.model_shelf import Shelf
@@ -76,17 +72,14 @@ from krx_quant.names import fill_names
 from krx_quant.net_assets import NetAssetKeeper, keep_net_assets
 from krx_quant.notify import Alerts
 from krx_quant.object_store import open_store
-from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.poll_outages import PollOutages, PollState
 from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
-from krx_quant.prevalidation import admits, refusals
 from krx_quant.products import INVERSE_PRODUCTS, products_of
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.readiness import Readiness, keep_ready
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.rescore import EngineLock, keep_touches_filled
-from krx_quant.revisions import RevisionGate
 from krx_quant.scheduled import keep_jobs
 from krx_quant.signals import Signals
 from krx_quant.snapshot import keep_snapshots
@@ -324,53 +317,20 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
     calendar = calendar_store(settings)
     health = FeedHealth(recorder, now, calendar.calendar)
     store = PredictionStore(settings.state_dir / DB_NAME)
-    # A garbage collection and a freeze after each bar close, let go when idle and here at the end
-    # (#621): Python's full collections no longer walk the session's quote logs.
-    garbage = Garbage()
-    engine = PredictionEngine(
+    # The engine as the server's (#647): the settings', with what only the live engine has (the
+    # gates, the daily kinds, the loop watch, the garbage collection after each bar close).
+    engine = build_engine(
+        settings,
+        Mode.LIVE,
         store,
-        calendar.calendar,
-        settings.symbols,
-        settings.fee_rate,
         session_clock,
+        calendar.calendar,
         # The algorithms' models, and the kinds' baselines' tables (#180).
         models={
             **load_models(settings.state_dir, [*ALGORITHMS, *KIND_ALGORITHMS, *DAILY_ALGORITHMS]),
             **load_tables(settings.state_dir, KINDS),
         },
-        budget=Budget.of(settings),
-        min_sample=settings.min_sample,
-        leaders=Leaders.of(settings),
-        regimes=partial(day_regime, settings.data_dir),  # recorded by the 07:30 macro read
-        # A new algorithm waits for its pre-validation, on the target it runs.
-        admits=admits(settings.state_dir, settings.target_version),
-        # One its latest pre-validation refused is told once, not as waiting (#310).
-        refused=refusals(settings.state_dir, settings.target_version),
-        # A running bar-close algorithm whose code changed is judged again (#454).
-        revisions=RevisionGate(settings.state_dir, settings.target_version),
-        commit=settings.commit,
-        signal_rule=settings.signal_thresholds,  # served by the status (#617)
-        review_rules=Rules.of(settings),
-        target_version=settings.target_version,  # the target learned and forecast (#169)
-        climate=load_climate(settings.state_dir) if settings.target_version >= 2 else None,
-        # The previous trading day's backfilled bars (range_prev_day, #181).
-        previous=PreviousDay(settings.data_dir, calendar.calendar),
-        # The KRX day candles the daily kinds are predicted from and answered on (#264), their
-        # algorithms and their features at 08:50.
-        daily=StoredDays(settings.data_dir),
-        daily_algorithms=DAILY_ALGORITHMS,
-        daily_features=LiveFeatures(
-            OPEN_TO_CLOSE,
-            settings.data_dir,
-            settings.state_dir,
-            calendar.calendar,
-            settings.symbols,
-            settings.fee_rate,
-        ),
-        daily_feature_names=DAILY_FEATURES,
-        # A bar close that holds the event loop over a second says what held it (#538).
-        watch_loop=True,
-        garbage=garbage,
+        climate=load_climate(settings.state_dir),
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
     # Held while it runs: a rescore refuses to run beside it (#168). One running already
@@ -656,7 +616,8 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
         recorder.close()
         store.close()
         lock.release()
-        garbage.release()
+        if engine.garbage is not None:  # the live engine's (#621), let go here at the end
+            engine.garbage.release()
 
 
 async def restart_each_day(

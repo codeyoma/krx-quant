@@ -367,6 +367,7 @@ def test_section_10_lists_each_kind_s_algorithms_and_those_waiting_for_or_refuse
         models={"bravo": Model("bravo-20261019-0a1b2c", {})},
         admits=lambda a: a.name in {"alpha", "drifter"},  # charlie and delta have not passed
         refused=lambda a: refusal if a.name == "delta" else None,
+        target_version=TARGET_VERSION,
     )
 
     text = report(settings, NOW, engine_status(engine, None))

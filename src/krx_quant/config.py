@@ -54,11 +54,12 @@ DEFAULT_KRX_OPENAPI_URL = "https://data-dbg.krx.co.kr"
 JOBS_FROM = time(20, 0)
 JOBS_UNTIL = time(5, 30)
 RULES = RegimeRules()  # the regime's default thresholds
-# The target versions (#169) one may choose: 1, the four-minute mid-point move; 3, the touch
-# target (#160) with crossed quotes counted (#187). ``TOUCH_TARGET`` is ``touch.TARGET_VERSION``
-# (the touch module reads the calendar, which reads this one; a test keeps the two equal).
+# The target versions (#169) one may choose: 3, the touch target (#160) with crossed quotes counted
+# (#187), alone since #659 (1, the four-minute mid-point move, is refused as 2 is: ``GONE_TARGETS``).
+# ``TOUCH_TARGET`` is ``touch.TARGET_VERSION`` (the touch module reads the calendar, which reads
+# this one; a test keeps the two equal).
 TOUCH_TARGET = 3
-TARGETS = ("1", str(TOUCH_TARGET))
+TARGETS = (str(TOUCH_TARGET),)
 SIGNALS = SignalRule()  # the signal alerts' defaults
 
 
@@ -200,11 +201,10 @@ class Settings:
     bench_review_days: tuple[int, ...] = (20, 40, 60)  # days on the bench it may recover on
     review_confidence: float = 0.983  # the lift-by-day interval's level those judgements need
     # The target the engine learns and forecasts (KRX_TARGET_VERSION, #169): 3, the touch target
-    # with crossed quotes counted (#160, #187, the default); 1, the four-minute mid-point move.
-    # 2, the touch target with crossed quotes dropped (the default from #170 to #187), is gone:
-    # no code labels it any more. Training labels, the shared normal forecast and the
-    # baselines follow it. Everything is scored on the touch label either way (#170): with 1
-    # no model counts toward the statuses or the weights.
+    # with crossed quotes counted (#160, #187), the only one. 2, the touch target with crossed
+    # quotes dropped (the default from #170 to #187), and 1, the four-minute mid-point move (gone
+    # since #659), are refused: no code learns, forecasts or scores them any more. Their stored
+    # records (models, predictions, answers) are still read.
     target_version: int = TOUCH_TARGET
     # The collector starts the night's scheduled jobs at this time (KST) every day, after the
     # nightly training (KRX_JOBS_AT: 22:30 unless set; "off", #215). None here, as train_at.
@@ -605,16 +605,21 @@ def _on_or_off(name: str, raw: str) -> bool:
     raise SettingsError(f"{name} must be on or off, got {raw!r}")
 
 
-# The touch target before #187 (crossed quotes dropped): its rule is gone, so it is refused.
-GONE_TARGET = "2"
+# The targets whose code is gone, so they are refused with what to set instead: the four-minute
+# mid-point move (#659) and the touch target before #187 (crossed quotes dropped).
+GONE_TARGETS = {
+    "1": "the four-minute mid-point move) is gone since #659",
+    "2": "the touch target with crossed quotes dropped) is gone since #187",
+}
 
 
 def _target_version(raw: str) -> int:
-    """``KRX_TARGET_VERSION``: one of ``TARGETS``; 2 is refused with what to set instead."""
-    if raw.strip() == GONE_TARGET:
+    """``KRX_TARGET_VERSION``: one of ``TARGETS``; 1 and 2 are refused with what to set instead."""
+    gone = GONE_TARGETS.get(raw.strip())
+    if gone is not None:
         raise SettingsError(
-            f"KRX_TARGET_VERSION 2 (the touch target with crossed quotes dropped) is gone since #187; "
-            f"remove it for the default {TOUCH_TARGET} (crossed quotes counted), or set 1"
+            f"KRX_TARGET_VERSION {raw.strip()} ({gone}; "
+            f"remove it for the default {TOUCH_TARGET} (crossed quotes counted)"
         )
     return int(_one_of("KRX_TARGET_VERSION", raw, TARGETS))
 

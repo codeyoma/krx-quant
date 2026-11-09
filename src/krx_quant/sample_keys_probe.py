@@ -4,12 +4,13 @@ A normal night says "23 days read (2 made)": besides its new day it makes the tr
 again, in 532–1,132 s, about 40% of the night (Loki's ``read <day>: … (made, stored)`` lines, every
 night from 10-27 to 11-04). A day is read back from the sample store only under the key it was stored
 with (``sample_store.day_key``): the settings, the input files by SHA-256 (the Object Store's, of
-which the night's cache is a copy), what the samples ask of the calendar, and the code. So between
-the night that stored that day and the next night one of those changed, and the code alone does not
-say which. The issue's hypothesis was the archive's run at the 06:00 start, merging rows that came
-after 21:00 into the day's files (it uploaded 13 files on 2026-11-05); but the server snapshot of
-2026-11-06 00:27 on #565 shows no feed the samples read received after 20:05 of 11-05 (the night
-futures were, which they do not read). This probe, run after a night's training, prints:
+which the night's cache is a copy), what the samples ask of the calendar, and what the samples mean
+(the code's digest until #645). So between the night that stored that day and the next night one of
+those changed, and the code alone does not say which. The issue's hypothesis was the archive's run at
+the 06:00 start, merging rows that came after 21:00 into the day's files (it uploaded 13 files on
+2026-11-05); but the server snapshot of 2026-11-06 00:27 on #565 shows no feed the samples read
+received after 20:05 of 11-05 (the night futures were, which they do not read). This probe, run after
+a night's training, prints:
 
 1. the sample store (``state/training-samples``): its days and files, and the days the night made
    (their file written after that night's ``KRX_TRAIN_AT``);

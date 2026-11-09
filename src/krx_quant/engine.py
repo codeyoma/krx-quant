@@ -90,7 +90,7 @@ until the last bar close whose target (t + 4 minutes) is still in continuous tra
 
 With the touch target (``target_version`` 3, 2 before #187; #169) the algorithms' features carry its
 terms at the bar close (half the spread there), so the shared normal forecast gives the
-chances of reaching the targets; the baselines are the touch target's (``baselines_for``):
+chances of reaching the targets; the baselines are the touch target's (``TOUCH_BASELINES``):
 the last four minutes' direction is the label of the touch window that just ended, read
 from the Market View (not predicted, ``no_previous``, when it could not be scored), the
 random one draws in the day's touch labels' proportions, and the climate baseline calls
@@ -162,7 +162,7 @@ from krx_quant.algorithms import (
     register_kind_algorithms,
 )
 from krx_quant.algorithms.forecasts import forecasting
-from krx_quant.baselines import NO_PREVIOUS, Baseline, Forecast, Inputs, baselines_for
+from krx_quant.baselines import NO_PREVIOUS, TOUCH_BASELINES, Baseline, Forecast, Inputs
 from krx_quant.climate import CLIMATE
 from krx_quant.climate import DEFAULT as NO_CLIMATE
 from krx_quant.climate import direction as climate_direction
@@ -502,7 +502,7 @@ class PredictionEngine:
         revisions: RevisionGate | None = None,
         commit: str = "unknown",
         review_rules: Rules | None = None,
-        target_version: int = 1,
+        target_version: int,  # no default: the settings' (KRX_TARGET_VERSION, #647)
         climate: Model | None = None,
         kinds: Sequence[PredictionKind] = KINDS,
         kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
@@ -526,7 +526,7 @@ class PredictionEngine:
         self.registered = register(algorithms)
         # What is learned and forecast (KRX_TARGET_VERSION, #169), and the baselines of it.
         self.target_version = target_version
-        self.baselines: tuple[Baseline, ...] = baselines_for(target_version)
+        self.baselines: tuple[Baseline, ...] = TOUCH_BASELINES
         self.baseline_names = frozenset(b.name for b in self.baselines)
         self.climate = climate or NO_CLIMATE  # the climate baseline's table (the touch target)
         # The kinds predicted besides the direction (#179), in order, and their algorithms.
@@ -1638,18 +1638,13 @@ class PredictionEngine:
             not_made = HALT_STATUS if halted else "vi"
             if stopped:
                 self._record_not_predicted(bar_close, stopped, not_made, running)
-            to_touch = self.target_version >= 2
             made_by: dict[tuple[str, str, str], dict[str, Forecast | None]] = {}
             for symbol in self.symbols:
                 if symbol in stopped:
                     continue
                 snapshot = self._market.snapshot(frozen, symbol, self.fee_rate, regime)
                 mid = snapshot.price
-                touch = (
-                    TouchTerms.at(self._market.quote_at(symbol, bar_close), snapshot.tick)
-                    if to_touch
-                    else None
-                )
+                touch = TouchTerms.at(self._market.quote_at(symbol, bar_close), snapshot.tick)
                 at_close[symbol] = _AtClose(mid, self._features.compute(snapshot, self._feature_names), touch)
                 inputs = Inputs(
                     symbol=symbol,
@@ -1658,14 +1653,10 @@ class PredictionEngine:
                     mid_before=self._market.mid(symbol, bar_close - HORIZON),
                     flat_ticks=snapshot.flat_ticks,
                     tick=snapshot.tick,
-                    day_classes=(
-                        # The windows over by now: their bar closes four minutes back or more.
-                        self.store.day_touches(symbol, day_start, bar_close - HORIZON)
-                        if to_touch
-                        else self.store.day_classes(symbol, day_start, bar_close)
-                    ),
-                    previous=self._market.touch(symbol, bar_close - HORIZON).direction if to_touch else None,
-                    climate=climate_direction(self.climate, symbol, bar_close) if to_touch else None,
+                    # The windows over by now: their bar closes four minutes back or more.
+                    day_classes=self.store.day_touches(symbol, day_start, bar_close - HORIZON),
+                    previous=self._market.touch(symbol, bar_close - HORIZON).direction,
+                    climate=climate_direction(self.climate, symbol, bar_close),
                 )
                 for b in self.baselines:
                     forecast = b.predict(inputs)

@@ -132,21 +132,26 @@ class PlacedAlgorithm(FixedAlgorithm):
 
 class FrequencyAlgorithm:
     """Forecasts the class frequencies it was trained on, or, ``inverted``, the up and down
-    frequencies swapped: a model that learns the wrong way round.
+    frequencies swapped: a model that learns the wrong way round. Its defaults are of ``target``
+    (None: of no target, as a registered algorithm's; the touch target's: a champion the night
+    compares with, #170).
     """
 
     training_days = 4
 
-    def __init__(self, name: str, feature: str, *, inverted: bool = False) -> None:
+    def __init__(self, name: str, feature: str, *, inverted: bool = False, target: int | None = None) -> None:
         self.name = name
         self.features: tuple[str, ...] = (feature,)
         self.card = stand_in_card(name, "class frequencies", (feature,), "counting")
         self.param_meanings = stand_in_meanings("up", "flat", "down")
         self._inverted = inverted
+        self._target = target
         self.fitted_on: list[int] = []  # samples per fit
 
     def default_model(self) -> Model:
-        return Model(f"{self.name}-default", {"up": 1 / 3, "flat": 1 / 3, "down": 1 / 3})
+        return Model(
+            f"{self.name}-default", {"up": 1 / 3, "flat": 1 / 3, "down": 1 / 3}, target_version=self._target
+        )
 
     def fit(self, samples: Sequence[Sample]) -> Model:
         scored = [s for s in samples if s.outcome is not None]

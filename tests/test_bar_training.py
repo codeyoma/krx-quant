@@ -18,7 +18,6 @@ from krx_quant.feeds import KST
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.pricing import Direction
 from krx_quant.reference import Bar
-from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import samples
 
 DAY = date(2026, 10, 12)
@@ -41,15 +40,13 @@ def day_of_bars() -> list[Bar]:
     return bars
 
 
-def labels(target_version: int) -> dict[str, Direction | None]:
-    made = samples(
-        {("005930", DAY): day_of_bars()}, CALENDAR, ("flat_ticks",), FEE, target_version=target_version
-    )
+def labels() -> dict[str, Direction | None]:
+    made = samples({("005930", DAY): day_of_bars()}, CALENDAR, ("flat_ticks",), FEE)
     return {f"{s.bar_close:%H:%M}": s.outcome for s in made if s.bar_close <= at(9, 30)}
 
 
 def test_a_backfilled_day_is_labelled_by_the_one_minute_bar_rule() -> None:
-    found = labels(2)
+    found = labels()
 
     # The windows that hold 09:10's high of 81,500: up (the targets are 81,500 and 80,900).
     assert [found[t] for t in ("09:07", "09:08", "09:09", "09:10")] == [Direction.UP] * 4
@@ -62,18 +59,13 @@ def test_a_backfilled_day_is_labelled_by_the_one_minute_bar_rule() -> None:
     assert {found[t] for t in ("09:01", "09:02", "09:03", "09:04", "09:12", "09:30")} == {Direction.FLAT}
 
 
-def test_only_the_label_changes_with_the_touch_target() -> None:
-    bars = {("005930", DAY): day_of_bars()}
-    touching = samples(bars, CALENDAR, ("flat_ticks",), FEE, target_version=TARGET_VERSION)
-    moving = samples(bars, CALENDAR, ("flat_ticks",), FEE)
+def test_a_backfilled_sample_carries_a_one_tick_spread_and_the_four_minute_move() -> None:
+    made = samples({("005930", DAY): day_of_bars()}, CALENDAR, ("flat_ticks",), FEE)
 
-    assert [s.change_ticks for s in touching] == [s.change_ticks for s in moving]
-    assert [s.features.as_dict() for s in touching] == [s.features.as_dict() for s in moving]
     # No quotes on a backfilled day: a one-tick spread is assumed for the forecast.
-    assert {s.features.touch.half_spread for s in touching if s.features.touch} == {DEFAULT_HALF_SPREAD}
-    assert all(s.features.touch is not None for s in touching)
-    assert all(s.features.touch is None for s in moving)
-    # The old outcome: every close four minutes later is 81,200, none at 09:06 (no 09:05 bar).
-    old = {f"{s.bar_close:%H:%M}": s.outcome for s in moving if s.bar_close <= at(9, 30)}
-    assert old.pop("09:02") is None
-    assert set(old.values()) == {Direction.FLAT}
+    assert {s.features.touch.half_spread for s in made if s.features.touch} == {DEFAULT_HALF_SPREAD}
+    assert all(s.features.touch is not None for s in made)
+    # The move is still the close four minutes later's: 81,200 throughout, none at 09:02 (no 09:05 bar).
+    moves = {f"{s.bar_close:%H:%M}": s.change_ticks for s in made if s.bar_close <= at(9, 30)}
+    assert moves.pop("09:02") is None
+    assert set(moves.values()) == {0.0}

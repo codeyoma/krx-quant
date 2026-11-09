@@ -104,7 +104,11 @@ async def test_a_kospi_drop_of_8_percent_held_a_minute_is_a_circuit_breaker(tmp_
         *held("10:20:00", "10:22:00", kospi, -15.4),
     ]
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *market], until=at("10:30:00"))
+    engine = await run(
+        tmp_path / "engine.db",
+        [*busy_morning(), *market],
+        until=at("10:30:00"),
+    )
 
     made = await predictions(engine)
     for close in ("09:17", "09:20", "09:37"):  # the dip; 09:37–09:41 ends as the halt begins
@@ -124,7 +128,11 @@ async def test_kospi200_futures_5_percent_off_held_a_minute_is_a_sidecar_once_a_
         *held("09:40:00", "09:42:00", kospi200_futures, 5.6),
     ]
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *futures], until=at("09:55:00"))
+    engine = await run(
+        tmp_path / "engine.db",
+        [*busy_morning(), *futures],
+        until=at("09:55:00"),
+    )
 
     made = await predictions(engine)
     for close in ("09:18", "09:21", "09:25"):
@@ -147,11 +155,16 @@ async def test_a_vi_whose_release_is_not_seen_lasts_three_minutes(tmp_path: Path
 async def test_a_vi_at_the_open_skips_the_first_bar_closes(tmp_path: Path) -> None:
     at_open = [vi(at("09:00:14"), "09:00:10"), vi(at("09:02:39"), "09:00:10", "09:02:35")]
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *at_open], until=at("09:10:00"))
+    engine = await run(
+        tmp_path / "engine.db",
+        [*busy_morning(), *at_open],
+        until=at("09:10:00"),
+    )
 
     made = await predictions(engine)
     assert {p["status"] for p in made["09:01"] + made["09:02"]} == {"vi"}
-    assert made_by(made["09:03"]) == {"ok"}
+    # Persistence has no window over before 09:05 to go on (no_previous); the rest predict.
+    assert made_by(made["09:03"]) == {"ok", "no_previous"}
 
 
 async def test_a_futures_gap_from_before_the_open_is_a_sidecar_five_minutes_in(tmp_path: Path) -> None:
@@ -180,7 +193,11 @@ async def test_no_breaker_or_sidecar_in_the_last_40_minutes(tmp_path: Path) -> N
 async def test_the_status_shows_the_special_situations_known_today(tmp_path: Path) -> None:
     market = held("09:40:00", "09:42:00", kospi, -8.2)
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *VI, *market], until=at("09:50:00"))
+    engine = await run(
+        tmp_path / "engine.db",
+        [*busy_morning(), *VI, *market],
+        until=at("09:50:00"),
+    )
 
     async with api(engine) as client:
         status = await get_json(client, "/v1/status")

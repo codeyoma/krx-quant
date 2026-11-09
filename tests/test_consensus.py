@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from krx_quant.algorithms import Model
 from krx_quant.baselines import Forecast
 from krx_quant.consensus import Timing
 from krx_quant.lifecycle import Status
@@ -27,7 +28,8 @@ from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
 from tests.lifecycle_doubles import RIGHT, put_days, stored, weekdays_before
 from tests.replay_doubles import busy_morning
-from tests.replay_events import DAY, SYMBOL, api, at, get_json, run
+from tests.replay_events import DAY, SYMBOL, api, at, get_json
+from tests.replay_events import run as replay_run
 from tests.test_lifecycle import MISSES_DOWNS, NEXT_DAY, WRONG, morning
 
 QUICK = FixedAlgorithm(
@@ -54,6 +56,16 @@ LOWER = FixedAlgorithm(
     "lower", features=("acceleration",), unique=("acceleration",), forecast=Forecast(0.2, 0.3, 0.5, -1.0)
 )
 TWO_DAYS = MarketCalendar({DAY: True, NEXT_DAY: True})
+
+
+async def run(db: Path, events: Any, until: Any, **options: Any) -> Any:
+    """The replay, the stand-ins running models of the touch target: only such a model's
+    algorithm is a member the weights are fitted for (#170)."""
+    on_target = {
+        a.name: Model(f"{a.name}-default", {}, target_version=TARGET_VERSION)
+        for a in options.get("algorithms", ())
+    }
+    return await replay_run(db, events, until, **{"models": on_target, **options})
 
 
 def put_statuses(db: Path, statuses: dict[str, Status]) -> None:
@@ -157,7 +169,12 @@ async def test_a_consensus_stored_before_the_votes_shows_none(tmp_path: Path) ->
 
 
 async def test_the_fast_consensus_card_tells_the_engine_s_own_cutoff(tmp_path: Path) -> None:
-    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("09:02:00"), consensus_timing=TIMING)
+    engine = await run(
+        tmp_path / "engine.db",
+        busy_morning(),
+        until=at("09:02:00"),
+        consensus_timing=TIMING,
+    )
 
     async with api(engine) as client:
         body = await get_json(client, "/v1/algorithms")
@@ -168,7 +185,13 @@ async def test_the_fast_consensus_card_tells_the_engine_s_own_cutoff(tmp_path: P
 async def test_one_bar_close_s_predictions_every_one_of_them(tmp_path: Path) -> None:
     db = tmp_path / "engine.db"
     put_statuses(db, {"quick": Status.ACTIVE})
-    engine = await run(db, busy_morning(), until=at("09:06:00"), algorithms=[QUICK], consensus_timing=TIMING)
+    engine = await run(
+        db,
+        busy_morning(),
+        until=at("09:06:00"),
+        algorithms=[QUICK],
+        consensus_timing=TIMING,
+    )
 
     async with api(engine) as client:
         body = await get_json(
@@ -186,6 +209,7 @@ async def test_one_bar_close_s_predictions_every_one_of_them(tmp_path: Path) -> 
         "baseline-flat",
         "baseline-persist",
         "baseline-random",
+        "baseline-climate",
         "quick",
         "consensus-fast",
         "consensus-final",
@@ -195,7 +219,12 @@ async def test_one_bar_close_s_predictions_every_one_of_them(tmp_path: Path) -> 
 
 
 async def test_an_empty_consensus_has_no_votes(tmp_path: Path) -> None:
-    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("09:02:00"), algorithms=[QUICK])
+    engine = await run(
+        tmp_path / "engine.db",
+        busy_morning(),
+        until=at("09:02:00"),
+        algorithms=[QUICK],
+    )
 
     made = await at_close(engine, "09:01")
     assert made["consensus-final"]["votes"] is None
@@ -203,7 +232,12 @@ async def test_an_empty_consensus_has_no_votes(tmp_path: Path) -> None:
 
 
 async def test_with_no_active_algorithm_the_consensus_is_recorded_empty(tmp_path: Path) -> None:
-    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("09:03:00"), algorithms=[QUICK])
+    engine = await run(
+        tmp_path / "engine.db",
+        busy_morning(),
+        until=at("09:03:00"),
+        algorithms=[QUICK],
+    )
 
     made = await at_close(engine, "09:01")
     for name in ("consensus-fast", "consensus-final"):
@@ -327,7 +361,11 @@ async def test_members_that_have_not_finished_or_failed_leave_the_consensus_with
     put_statuses(db, {"slow": Status.ACTIVE, "failing": Status.ACTIVE})
 
     engine = await run(
-        db, busy_morning(), until=at("09:02:00"), algorithms=[SLOW, failing], consensus_timing=TIMING
+        db,
+        busy_morning(),
+        until=at("09:02:00"),
+        algorithms=[SLOW, failing],
+        consensus_timing=TIMING,
     )
 
     made = await at_close(engine, "09:01")

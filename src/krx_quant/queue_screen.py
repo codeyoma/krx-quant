@@ -24,9 +24,9 @@ leave out (a VI, a special situation) are left out.
   opened at t less the horizon), the random one the classes of the day's windows over by t (their
   bar close plus the horizon at or before t): never a class of a window still open at t. A day's
   whole class shares would leak the answers into the baseline. Live, both also count the bar closes
-  no sample has (a VI); here they do not. The touch target's baselines only: with
-  ``KRX_TARGET_VERSION=1`` a direction candidate's score is unknown (``TOUCH_ONLY``), as the
-  four-minute move's persistence reads mid-points the samples do not keep.
+  no sample has (a VI); here they do not. Until #659, with ``KRX_TARGET_VERSION=1`` a direction
+  candidate's score was unknown (``TOUCH_ONLY``): the four-minute move's persistence read mid-points
+  the samples do not keep.
 - A kind's candidate (#179: the range, the barrier and its horizon ladder) is scored on its kind's
   answers (``TrainingDay.of_kind``: its answer version, its horizon of 4, 15, 30 or 60 minutes), its
   barriers' width the one fixed at the bar close, as the engine fixes it; a window with no class
@@ -48,11 +48,12 @@ correlation.
 
 **Fixed and recorded.** The rule's version (``SCREEN_VERSION``) is in each score's key with the
 candidate's code digest, its target or kind's answer version and the samples' key (the days, the
-symbols, the fee rate, what the nights read, the code that makes samples and the sample store's file
-of each day the folds read, ``screen_key``): a score of the same key is not screened again
-(``cached``), and a new recorded day screens every one again. Every screen is kept (``HISTORY``); the
-latest (``QUEUE``) is what the night's pre-validations go by. A night's screen of the same days is not
-new evidence beside the one before it: tuning the score on what it ordered needs days it has not seen.
+symbols, the fee rate, what the nights read, what the samples mean (``sample_store.semantics``) and
+the sample store's file of each day the folds read, ``screen_key``): a score of the same key is not
+screened again (``cached``), and a new recorded day screens every one again. Every screen is kept
+(``HISTORY``); the latest (``QUEUE``) is what the night's pre-validations go by. A night's screen of
+the same days is not new evidence beside the one before it: tuning the score on what it ordered needs
+days it has not seen.
 #262's correction counts the pre-validations run on the same days, not this choice among them.
 
 **Resources.** Each candidate is screened in its own process (``screen-queue --candidate``), one after
@@ -88,7 +89,7 @@ from typing import Any, cast
 
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm, Model, kind_of
 from krx_quant.algorithms.contract import KindSample, NotPredicted, PredictionContext, Sample, forecast_of
-from krx_quant.baselines import Baseline, Forecast, Inputs, baselines_for
+from krx_quant.baselines import TOUCH_BASELINES, Baseline, Forecast, Inputs
 from krx_quant.climate import CLIMATE_DAYS, direction
 from krx_quant.config import Settings
 from krx_quant.features import Leaders
@@ -109,7 +110,7 @@ from krx_quant.pricing import Direction
 from krx_quant.pricing import most_likely as most_likely_direction
 from krx_quant.process_log import KRX_QUANT
 from krx_quant.sample_store import STORE_DIR, NightReads, night_reads
-from krx_quant.sample_store import code_digest as samples_code
+from krx_quant.sample_store import semantics as samples_semantics
 from krx_quant.stats import Lift, day_lift
 from krx_quant.touch import WINDOW
 from krx_quant.training import finished_days, is_recorded
@@ -134,8 +135,6 @@ SHORTEST = timedelta(minutes=1)  # less budget than this left: the rest are not 
 POLL_SECONDS = 1.0  # how often a candidate's process is looked at
 # A queue made more days than this before is not gone by: its seats were set on other nights.
 QUEUE_KEPT_DAYS = 4
-# Why a direction candidate is not scored on the four-minute move (``KRX_TARGET_VERSION=1``).
-TOUCH_ONLY = "the touch target only: KRX_TARGET_VERSION 1's persistence needs mid-points the samples lack"
 
 
 @dataclass(frozen=True)
@@ -298,7 +297,7 @@ def _called(f: Forecast) -> Direction:
 class Screened:
     """A candidate's folds (``screen``): the days predicted, its calls scored, its errors, and its
     lift by trading day over each of its kind's baselines (None: fewer than two days paired); or why
-    it was not scored at all (``unscored``, ``TOUCH_ONLY``)."""
+    it was not scored at all (``unscored``; until #659 also on the four-minute move)."""
 
     algorithm: str
     kind: str
@@ -412,14 +411,10 @@ def screen(
     predicted = _predicted(settings, available, days)
     if not predicted:
         raise FileNotFoundError(f"no recorded day of {', '.join(settings.symbols)} in {settings.data_dir}")
-    if kind is None and settings.target_version < 2:
-        # The four-minute move's persistence (``baselines.Persistence``) reads the mid-points four
-        # minutes apart, which the samples do not keep: given none, it would be always flat again.
-        return Screened(name, DIRECTION, tuple(predicted), 0, 0, {}, TOUCH_ONLY)
     calendar = calendar_store(settings).calendar
     night = night_reads(algorithms, kind_algorithms, kinds)
     trainer = _WalkForward(settings, candidate, available, calendar, Leaders.of(settings), kind, night=night)
-    baselines = baselines_for(settings.target_version)
+    baselines = TOUCH_BASELINES
     calls: Calls = {}
     errors = 0
     meter = Meter()
@@ -505,7 +500,7 @@ def screen_key(
             "symbols": list(settings.symbols),
             "fee_rate": repr(float(settings.fee_rate)),
             "reads": [list(night.names), [k.name for k in night.kinds]],
-            "code": samples_code(),
+            "semantics": samples_semantics(),
             "store": {d.isoformat(): _stored(store, d) for d in read},
         },
     }
@@ -753,9 +748,9 @@ def read_queue(state_dir: Path) -> dict[str, Any] | None:
 
 
 def queue_order(state_dir: Path, now: datetime) -> tuple[str, ...]:
-    """The order the latest screen set, as the night's pre-validations go by it (``Facts.queue``, the
-    Engine API's ``queue``); none without one, one that cannot be read, or one of a night more than
-    ``QUEUE_KEPT_DAYS`` days before ``now``'s."""
+    """The order the latest screen set, as the night's pre-validations go by it
+    (``scheduled.prevalidations.read_queue``, the Engine API's ``queue``); none without one, one that
+    cannot be read, or one of a night more than ``QUEUE_KEPT_DAYS`` days before ``now``'s."""
     data = read_queue(state_dir)
     if data is None:
         return ()

@@ -51,7 +51,7 @@ def test_their_features_are_those_before_518_in_the_same_order() -> None:
 def test_turing_learns_and_predicts_as_before() -> None:
     calendar = MarketCalendar(dict.fromkeys(DAYS, True))
     bar_days = {("005930", DAYS[0]): trending(DAYS[0]), ("005930", DAYS[1]): random_walk(DAYS[1])}
-    training = samples(bar_days, calendar, Turing.features, FEE, target_version=3)
+    training = samples(bar_days, calendar, Turing.features, FEE)
 
     now, before = Turing().fit(training), TuringBefore().fit(training)
 

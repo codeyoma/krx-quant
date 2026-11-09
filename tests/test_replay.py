@@ -44,6 +44,10 @@ async def test_every_baseline_predicts_at_a_bar_close_in_continuous_trading(tmp_
         if p["algorithm"] in CONSENSUS:
             assert p["status"] == "no_members"  # no algorithm is active yet
             continue
+        if p["algorithm"] == "baseline-persist":
+            # The window that ended at 09:31 opened before the first quote: nothing to go on.
+            assert p["status"] == "no_previous"
+            continue
         assert p["target_at"] == "2026-10-12T09:35:00+09:00"
         assert abs(p["p_up"] + p["p_flat"] + p["p_down"] - 1) < 1e-9
         assert p["outcome"] is None  # not scored before 09:35
@@ -68,7 +72,10 @@ async def test_a_prediction_is_scored_on_its_bar_closes_touch_label_however_late
     ]
 
     engine = await run(
-        tmp_path / "engine.db", events, until=at("09:35:30"), display_delay=timedelta(seconds=2)
+        tmp_path / "engine.db",
+        events,
+        until=at("09:35:30"),
+        display_delay=timedelta(seconds=2),
     )
 
     async with api(engine) as client:
@@ -116,7 +123,7 @@ async def test_without_any_quote_a_prediction_is_still_made_and_left_unscorable(
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")
     predictions = by_algorithm(body["predictions"], "09:31:00")
     assert set(predictions) == PREDICTORS
-    outcome = predictions["baseline-persist"]["outcome"]
+    outcome = predictions["baseline-flat"]["outcome"]
     assert outcome["flat_ticks"] is None
     assert outcome["unscorable"] == "missing mid"  # no mid-point at the bar close for the targets
 
@@ -142,7 +149,12 @@ async def test_a_late_opening_day_starts_predicting_an_hour_later(tmp_path: Path
     first_day = date(2026, 1, 2)  # the first trading day of 2026 opens at 10:00
     calendar = MarketCalendar({date(2026, 1, 1): False, first_day: True})
 
-    engine = await run(tmp_path / "engine.db", [], until=at("12:00:00", first_day), calendar=calendar)
+    engine = await run(
+        tmp_path / "engine.db",
+        [],
+        until=at("12:00:00", first_day),
+        calendar=calendar,
+    )
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?limit=1000")
@@ -153,7 +165,12 @@ async def test_the_exam_day_moves_the_whole_window_an_hour_later(tmp_path: Path)
     exam_day = date(2026, 11, 19)  # 수능: 10:00–16:30, the closing auction from 16:20
     calendar = MarketCalendar({exam_day: True})
 
-    engine = await run(tmp_path / "engine.db", [], until=at("17:00:00", exam_day), calendar=calendar)
+    engine = await run(
+        tmp_path / "engine.db",
+        [],
+        until=at("17:00:00", exam_day),
+        calendar=calendar,
+    )
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?limit=1000")
@@ -165,7 +182,12 @@ async def test_nothing_is_predicted_on_a_holiday(tmp_path: Path) -> None:
     holiday = date(2026, 10, 9)  # Hangul Day
     calendar = MarketCalendar({holiday: False})
 
-    engine = await run(tmp_path / "engine.db", [], until=at("16:00:00", holiday), calendar=calendar)
+    engine = await run(
+        tmp_path / "engine.db",
+        [],
+        until=at("16:00:00", holiday),
+        calendar=calendar,
+    )
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")
@@ -251,23 +273,6 @@ def forecast(prediction: dict[str, Any]) -> tuple[float, float, float, float]:
     return (prediction["p_up"], prediction["p_flat"], prediction["p_down"], prediction["expected_ticks"])
 
 
-async def test_the_persistence_baseline_expects_the_last_four_minutes_to_go_on(tmp_path: Path) -> None:
-    events = [
-        *steady_book(at("09:26:40"), at("09:26:50"), bid=81_200, ask=81_300),  # 81,250 at 09:27
-        *steady_book(at("09:30:30"), at("09:31:00"), bid=81_500, ask=81_600),  # 81,550 at 09:31
-        *steady_book(at("09:31:30"), at("09:32:00"), bid=81_500, ask=81_600),  # 81,550 at 09:32
-    ]
-
-    engine = await run(tmp_path / "engine.db", events, until=at("09:32:30"))
-
-    async with api(engine) as client:
-        body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions")
-    # +300 won over 09:27–09:31 is three 100-won ticks, past the 2-tick flat band: up.
-    assert forecast(by_algorithm(body["predictions"], "09:31:00")["baseline-persist"]) == (1, 0, 0, 3)
-    # Nothing known at 09:28 (no quote within the minute before), so no direction to go on.
-    assert forecast(by_algorithm(body["predictions"], "09:32:00")["baseline-persist"]) == (0, 1, 0, 0)
-
-
 async def test_the_random_baseline_draws_in_the_proportions_of_the_day_so_far(tmp_path: Path) -> None:
     # A book that never moves: every scored bar is flat.
     events = steady_book(at("09:00:30"), at("10:30:00"), bid=81_200, ask=81_300)
@@ -326,7 +331,11 @@ async def test_a_prediction_does_not_change_when_everything_after_it_is_cut(tmp_
 async def test_a_restarted_engine_scores_what_was_pending(tmp_path: Path) -> None:
     db = tmp_path / "engine.db"
     events = steady_book(at("09:29:00"), at("09:36:00"), bid=81_200, ask=81_300)
-    await run(db, [e for e in events if e[1]["received_at"] <= at("09:32:00")], until=at("09:32:00"))
+    await run(
+        db,
+        [e for e in events if e[1]["received_at"] <= at("09:32:00")],
+        until=at("09:32:00"),
+    )
 
     restarted = await run(
         db,

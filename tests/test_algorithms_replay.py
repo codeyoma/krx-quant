@@ -59,7 +59,12 @@ async def test_a_context_aware_algorithm_is_given_each_symbol_and_bar_close(tmp_
     # #429: the engine asks every algorithm through one dispatcher (``forecast_of``).
     placed = PlacedAlgorithm("placed", features=("velocity",), unique=("velocity",))
 
-    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("09:10:00"), algorithms=[placed])
+    engine = await run(
+        tmp_path / "engine.db",
+        busy_morning(),
+        until=at("09:10:00"),
+        algorithms=[placed],
+    )
 
     closes = [at(f"09:{m:02d}:00") for m in range(1, 11)]
     assert placed.contexts == [PredictionContext(SYMBOL, close) for close in closes]
@@ -88,9 +93,17 @@ async def test_pre_market_trades_stay_out_of_the_vwap(tmp_path: Path) -> None:
 
     with_pre, without = probe(), probe()
     engine = await run(
-        tmp_path / "pre.db", [*pre_market, *busy_morning()], until=at("09:40:00"), algorithms=[with_pre]
+        tmp_path / "pre.db",
+        [*pre_market, *busy_morning()],
+        until=at("09:40:00"),
+        algorithms=[with_pre],
     )
-    await run(tmp_path / "open.db", busy_morning(), until=at("09:40:00"), algorithms=[without])
+    await run(
+        tmp_path / "open.db",
+        busy_morning(),
+        until=at("09:40:00"),
+        algorithms=[without],
+    )
 
     assert with_pre.seen == without.seen
     assert any(None not in s.values() for s in with_pre.seen)
@@ -101,7 +114,10 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
     trained = Model("newton-20261009-abc123", {"damping": 0.0, "threshold": 0.0})
 
     engine = await run(
-        tmp_path / "engine.db", busy_morning(), until=at("09:40:00"), models={"newton": trained}
+        tmp_path / "engine.db",
+        busy_morning(),
+        until=at("09:40:00"),
+        models={"newton": trained},
     )
 
     assert {p["model_version"] for p in await predictions_of(engine, "newton")} == {"newton-20261009-abc123"}
@@ -138,7 +154,12 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
         assert set(a["model"]["params"]) <= a["param_meanings"].keys()
     assert newton["feature_meanings"]["velocity"]["unit"] == "틱/분"
     assert newton["param_meanings"].keys() == {"damping", "threshold"}
-    assert [b["name"] for b in body["baselines"]] == ["baseline-flat", "baseline-persist", "baseline-random"]
+    assert [b["name"] for b in body["baselines"]] == [
+        "baseline-flat",
+        "baseline-persist",
+        "baseline-random",
+        "baseline-climate",
+    ]
     assert [c["name"] for c in body["consensus"]] == ["consensus-fast", "consensus-final"]
     assert body["baselines"][0]["card"]["scientist"] is None
     assert all(c["card"]["forecasting"] for c in body["consensus"])
@@ -294,8 +315,21 @@ async def test_a_day_without_predictions_lost_to_the_budgets_tells_nothing(tmp_p
         sent.append(text)
         return True
 
-    await run(db, busy_morning(), until=at("09:03:30"), algorithms=[quick], notify=notify)
-    await run(db, [], start=at("15:39:00"), until=at("15:45:00"), algorithms=[quick], notify=notify)
+    await run(
+        db,
+        busy_morning(),
+        until=at("09:03:30"),
+        algorithms=[quick],
+        notify=notify,
+    )
+    await run(
+        db,
+        [],
+        start=at("15:39:00"),
+        until=at("15:45:00"),
+        algorithms=[quick],
+        notify=notify,
+    )
 
     assert sent == []
 
@@ -361,7 +395,10 @@ async def test_an_algorithm_that_fails_or_breaks_the_contract_is_recorded_as_an_
     )
 
     engine = await run(
-        tmp_path / "engine.db", busy_morning(), until=at("09:01:30"), algorithms=[raising, endless]
+        tmp_path / "engine.db",
+        busy_morning(),
+        until=at("09:01:30"),
+        algorithms=[raising, endless],
     )
 
     for name in ("raising", "endless"):
@@ -376,8 +413,18 @@ async def test_a_trade_received_after_a_bar_close_stays_out_of_its_features(tmp_
     events = [*busy_morning(), late]
     delayed = timedelta(seconds=2)  # the 09:31 bar close runs at 09:31:02, after the late trade
 
-    with_late = await run(tmp_path / "late.db", events, until=at("09:32:30"), display_delay=delayed)
-    without = await run(tmp_path / "on-time.db", busy_morning(), until=at("09:32:30"), display_delay=delayed)
+    with_late = await run(
+        tmp_path / "late.db",
+        events,
+        until=at("09:32:30"),
+        display_delay=delayed,
+    )
+    without = await run(
+        tmp_path / "on-time.db",
+        busy_morning(),
+        until=at("09:32:30"),
+        display_delay=delayed,
+    )
 
     def at_0931(predictions: list[dict[str, Any]]) -> dict[str, Any]:
         return next(p for p in predictions if p["bar_close"] == "2026-10-12T09:31:00+09:00")
@@ -437,7 +484,13 @@ def morning() -> list[Event]:
 async def test_the_leading_series_are_built_from_their_feeds(tmp_path: Path) -> None:
     probe = FixedAlgorithm("probe", features=LEAD_1, unique=LEAD_1)
 
-    await run(tmp_path / "engine.db", morning(), until=at("10:30:00"), algorithms=[probe], leaders=LEADERS)
+    await run(
+        tmp_path / "engine.db",
+        morning(),
+        until=at("10:30:00"),
+        algorithms=[probe],
+        leaders=LEADERS,
+    )
 
     def known(bar_close: str) -> set[str]:
         minute = (at(bar_close) - at("09:01:00")) // timedelta(minutes=1)
@@ -454,7 +507,11 @@ async def test_granger_predicts_through_a_silent_feed_and_is_scored(tmp_path: Pa
     trained = Model("granger-test", {**GRANGER_DEFAULTS, "lead_kospi200f_1": 0.5, "lead_us_1": 0.5})
 
     engine = await run(
-        tmp_path / "engine.db", morning(), until=at("10:30:00"), models={"granger": trained}, leaders=LEADERS
+        tmp_path / "engine.db",
+        morning(),
+        until=at("10:30:00"),
+        models={"granger": trained},
+        leaders=LEADERS,
     )
 
     granger = await predictions_of(engine, "granger")

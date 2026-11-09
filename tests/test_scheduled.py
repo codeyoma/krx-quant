@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import pytest
@@ -43,14 +44,18 @@ from krx_quant.scheduled import (
     STATE_FILE,
     TRADER_REPORT,
     Attachment,
-    Facts,
     Job,
     JobRecord,
     JobState,
     Night,
     Ran,
+    Reader,
+    Reads,
     Scheduler,
+    SignalReviewFacts,
+    Sources,
     Target,
+    again_on_new_code,
     first_night,
     run_command,
     sections,
@@ -74,6 +79,7 @@ from tests.scheduled_doubles import (
     Runs,
     Told,
     at,
+    faking,
     saved,
     scheduling,
     settle,
@@ -82,22 +88,31 @@ from tests.trader_doubles import EngineApi, cost_map, cost_row, predictor
 from tests.waiting import until
 
 
-def every_night(night: Night) -> bool:
+def every_night(night: Night[Any]) -> bool:
     return night.record is None or night.record.day != night.day
 
 
-def never_ran(night: Night) -> bool:
+def never_ran(night: Night[Any]) -> bool:
     return not night.ran
 
 
 def job(
     name: str = "job",
-    due: Callable[[Night], bool] = never_ran,
+    due: Callable[[Night[Any]], bool] = never_ran,
     timeout: timedelta = timedelta(hours=1),
     targets: tuple[Target, ...] = (Target(1),),
     attach: tuple[Attachment, ...] = (),
-) -> Job:
-    return Job(name=name, due=due, command=(name, "--flag"), timeout=timeout, targets=targets, attach=attach)
+    facts: Reader[Any] | None = None,
+) -> Job[Any]:
+    return Job(
+        name=name,
+        due=due,
+        command=(name, "--flag"),
+        timeout=timeout,
+        targets=targets,
+        attach=attach,
+        facts=facts,
+    )
 
 
 class Writes(Runs):
@@ -206,6 +221,57 @@ async def test_a_job_that_would_end_after_05_30_waits_for_the_next_night(tmp_pat
         await until(lambda: runs.names() == ["short", "long"])
 
 
+class Given(Runs):
+    """Stand-in runs that keep each run's arguments and time limit."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__(clock)
+        self.given: list[tuple[tuple[str, ...], timedelta]] = []
+
+    async def __call__(
+        self,
+        args: Sequence[str],
+        timeout: timedelta,
+        child: Child | None = None,
+    ) -> Ran:
+        self.given.append((tuple(args), timeout))
+        return await super().__call__(args, timeout, child)
+
+
+async def test_a_job_that_resumes_starts_when_a_day_fits_and_is_told_the_night_s_end(tmp_path: Path) -> None:
+    # #643: a five-hour job that goes on by day starts at 03:00, when its half-hour day still fits.
+    training = NightTraining()
+    training.started(at(FRIDAY, "21:30"), at(MONDAY, "21:30"))
+    long = replace(job("long", every_night, timeout=timedelta(hours=5)), resumes=timedelta(minutes=30))
+    whole = job("whole", every_night, timeout=timedelta(hours=5))
+    assert (long.needs, whole.needs) == (timedelta(minutes=30), timedelta(hours=5))
+    clock = FakeClock(at(FRIDAY, "22:30"))
+    runs = Given(clock)
+    async with scheduling(
+        tmp_path, at(FRIDAY, "22:30"), [whole, long], training=training, clock=clock, runs=runs
+    ) as (_, _, told, _):
+        clock.set(at(SATURDAY, "03:00"))  # the training ends late
+        training.finished()
+        await until(lambda: runs.ended == ["long"])
+        end = at(SATURDAY, "05:30")
+        assert runs.given == [(("long", "--flag", "--until", end.isoformat()), end - at(SATURDAY, "03:00"))]
+        assert told.saying("whole(2026-10-16 밤)") == [
+            "예약 작업 whole(2026-10-16 밤): 지금 시작하면 제한 시간(5시간)이 05:30을 넘어 "
+            "다음 밤으로 미룹니다."
+        ]
+        # Early in a night it runs to its own limit at most.
+        clock.set(at(SATURDAY, "22:30"))
+        await until(lambda: runs.ended == ["long", "whole", "long"])
+        assert runs.given[-1][1] == timedelta(hours=5)
+        # Past its last start (05:00), not even a day fits: the next night.
+        clock.set(at(MONDAY, "05:10"))
+        await until(lambda: bool(told.saying("long(2026-10-18 밤)")))
+        assert told.saying("long(2026-10-18 밤)") == [
+            "예약 작업 long(2026-10-18 밤): 지금 시작하면 하루치(30분)도 05:30을 넘어 다음 밤으로 미룹니다."
+        ]
+        assert runs.ended == ["long", "whole", "long"]
+
+
 async def test_a_training_not_over_by_a_job_s_last_start_postpones_it(tmp_path: Path) -> None:
     training = NightTraining()
     training.started(at(FRIDAY, "23:30"), at(MONDAY, "21:30"))  # a catch-up after a late restart
@@ -296,30 +362,160 @@ async def test_a_collector_started_in_the_morning_waits_for_the_evening(tmp_path
         await until(lambda: len(runs.started) == 1)
 
 
-async def test_a_condition_sees_the_night_and_what_the_engine_knows(tmp_path: Path) -> None:
-    seen: list[Night] = []
+async def test_a_condition_sees_the_night_and_what_its_reader_read(tmp_path: Path) -> None:
+    seen: list[Night[Any]] = []
 
-    def due(night: Night) -> bool:
+    def due(night: Night[Any]) -> bool:
         seen.append(night)
         return False
 
-    facts = Facts(recorded_days=10, waiting=("kalman", "mandelbrot"), official=2)
-    async with scheduling(tmp_path, at(FRIDAY, "22:00"), [job(due=due)], facts=facts) as (clock, runs, _, _):
+    async def read(reads: Reads) -> tuple[str, ...]:
+        return ("kalman", "mandelbrot")
+
+    jobs = [job(due=due, facts=read), job("asks-nothing", due=due)]
+    async with scheduling(tmp_path, at(FRIDAY, "22:00"), jobs) as (clock, runs, _, _):
         clock.set(at(FRIDAY, "22:30"))
-        await until(lambda: len(seen) == 1)
-        clock.set(at(SATURDAY, "22:30"))
         await until(lambda: len(seen) == 2)
-    assert [(n.day, n.trading_day) for n in seen] == [(FRIDAY, True), (SATURDAY, False)]
-    assert seen[0].facts == facts and seen[0].commit == COMMIT and seen[0].record is None
+        clock.set(at(SATURDAY, "22:30"))
+        await until(lambda: len(seen) == 4)
+    assert [(n.day, n.trading_day) for n in seen[::2]] == [(FRIDAY, True), (SATURDAY, False)]
+    assert seen[0].facts == ("kalman", "mandelbrot") and seen[0].commit == COMMIT and seen[0].record is None
+    assert seen[1].facts is None, "a job without a reader asks nothing of the engine"
     assert not seen[0].ran
     assert runs.started == []
+
+
+class Readers:
+    """Readers that count their reads (#651): ``shared`` builds on ``base``."""
+
+    def __init__(self) -> None:
+        self.read: list[str] = []
+
+    async def base(self, reads: Reads) -> int:
+        self.read.append("base")
+        return 2
+
+    async def shared(self, reads: Reads) -> int:
+        self.read.append("shared")
+        return await reads(self.base) + 1
+
+    async def broken(self, reads: Reads) -> int:
+        self.read.append("broken")
+        raise OSError("cannot read")
+
+
+async def test_a_reader_is_read_once_a_night_when_a_job_that_asks_it_is_first_considered(
+    tmp_path: Path,
+) -> None:
+    readers = Readers()
+    seen: list[tuple[str, object]] = []
+
+    def asks(name: str) -> Callable[[Night[Any]], bool]:
+        def due(night: Night[Any]) -> bool:
+            seen.append((name, night.facts))
+            return False
+
+        return due
+
+    jobs = [
+        job("first", due=asks("first")),
+        job("second", due=asks("second"), facts=readers.shared),
+        job("third", due=asks("third"), facts=readers.shared),
+        job("fourth", due=asks("fourth"), facts=readers.base),
+    ]
+    async with scheduling(tmp_path, at(FRIDAY, "22:00"), jobs) as (clock, _, _, _):
+        clock.set(at(FRIDAY, "22:30"))
+        await until(lambda: len(seen) == 4)
+        assert readers.read == ["shared", "base"], "each once, the base for the reader built on it too"
+        clock.set(at(SATURDAY, "22:30"))
+        await until(lambda: len(seen) == 8)
+    assert seen[:4] == [("first", None), ("second", 3), ("third", 3), ("fourth", 2)]
+    assert readers.read == ["shared", "base"] * 2, "read again the next night"
+
+
+async def test_a_reader_that_fails_skips_the_jobs_that_ask_it_alone(tmp_path: Path) -> None:
+    readers = Readers()
+    jobs = [
+        job("broken", due=lambda night: True, facts=readers.broken),
+        job("broken-too", due=lambda night: True, facts=readers.broken),
+        job("fine", facts=readers.base),
+    ]
+    async with scheduling(tmp_path, at(FRIDAY, "22:00"), jobs) as (clock, runs, _, state):
+        clock.set(at(FRIDAY, "22:30"))
+        await until(lambda: runs.names() == ["fine"])
+        await until(lambda: state.jobs["fine"].outcome == OK)
+    assert readers.read == ["broken", "base"], "read once: a failure is not read again that night"
+    assert set(state.jobs) == {"fine"}
+
+
+async def test_a_job_that_refreshes_has_the_readers_read_again_for_the_jobs_after_it(tmp_path: Path) -> None:
+    readers = Readers()
+    seen: list[str] = []
+
+    def asks(name: str) -> Callable[[Night[Any]], bool]:
+        def due(night: Night[Any]) -> bool:
+            seen.append(name)
+            return name == "refreshes" and not night.ran
+
+        return due
+
+    jobs = [
+        job("before", due=asks("before"), facts=readers.base),
+        replace(job("refreshes", due=asks("refreshes"), facts=readers.base), refreshes=True),
+        job("after", due=asks("after"), facts=readers.base),
+    ]
+    async with scheduling(tmp_path, at(FRIDAY, "22:00"), jobs) as (clock, runs, _, _):
+        clock.set(at(FRIDAY, "22:30"))
+        await until(lambda: seen == ["before", "refreshes", "after"])
+    assert runs.names() == ["refreshes"]
+    assert readers.read == ["base", "base"], "read before it, and again after it ran"
+
+
+async def test_a_reader_reads_from_the_scheduler_s_sources(tmp_path: Path) -> None:
+    seen: list[Path] = []
+
+    async def read(reads: Reads) -> Path:
+        return reads.sources.settings.state_dir
+
+    def due(night: Night[Path]) -> bool:
+        seen.append(night.facts)
+        return False
+
+    s = Settings.from_env(
+        {"KIS_APP_KEY": "key", "KIS_APP_SECRET": "secret", "KRX_STATE_DIR": str(tmp_path / "state")},
+        dotenv_path=None,
+    )
+    sources = Sources(s, CALENDAR, FakeClock(at(FRIDAY, "22:00")))
+    async with scheduling(tmp_path, at(FRIDAY, "22:00"), [job(due=due, facts=read)], sources=sources) as (
+        clock,
+        _,
+        _,
+        _,
+    ):
+        clock.set(at(FRIDAY, "22:30"))
+        await until(lambda: bool(seen))
+    assert seen == [s.state_dir]
+    with pytest.raises(LookupError):
+        _ = sources.running  # no engine: a reader that asks it cannot read
+
+
+def test_a_job_that_runs_once_runs_again_after_a_failure_on_new_code() -> None:
+    def asked(record: JobRecord | None) -> bool:
+        return again_on_new_code(Night(FRIDAY, True, COMMIT, record, {}, None))
+
+    ran = JobRecord(THURSDAY, OK, at(THURSDAY, "22:30"), "older", 0, 1.0)
+    assert asked(None)
+    assert asked(replace(ran, outcome=INTERRUPTED)), "a run a restart cut has not run"
+    assert not asked(ran)
+    assert not asked(replace(ran, outcome=FAILED, commit=COMMIT)), "failed on this code: not again"
+    assert asked(replace(ran, outcome=FAILED))
 
 
 async def test_a_condition_is_asked_once_the_jobs_before_it_ran_that_night(tmp_path: Path) -> None:
     # What a job that runs one of its kind a night relies on (the pre-validations, #204).
     seen: list[JobRecord | None] = []
 
-    def second(night: Night) -> bool:
+    def second(night: Night[Any]) -> bool:
         seen.append(night.records.get("first"))
         return False
 
@@ -333,7 +529,7 @@ async def test_a_condition_is_asked_once_the_jobs_before_it_ran_that_night(tmp_p
 
 
 async def test_a_condition_that_fails_skips_its_job_only(tmp_path: Path) -> None:
-    def broken(night: Night) -> bool:
+    def broken(night: Night[Any]) -> bool:
         raise RuntimeError("bug")
 
     jobs = [job("broken", due=broken), job("fine")]
@@ -807,8 +1003,8 @@ async def test_labels_that_failed_after_the_comment_do_not_post_it_twice(tmp_pat
 # The jobs listed
 
 
-def night(day: date, record: JobRecord | None = None) -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, Facts())
+def night(day: date, record: JobRecord | None = None) -> Night[None]:
+    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, None)
 
 
 def test_the_jobs_have_unique_names_and_fit_in_the_night() -> None:
@@ -868,9 +1064,8 @@ def empty_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def fixed(day: date, days: int, n: int = 2, record: JobRecord | None = None) -> Night:
-    facts = Facts(official=n, signal_review_days=days)
-    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, facts)
+def fixed(day: date, days: int, n: int = 2, record: JobRecord | None = None) -> Night[SignalReviewFacts]:
+    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, SignalReviewFacts(days, n))
 
 
 def test_the_signal_review_runs_a_third_time_once_its_fixed_window_of_20_days_is_in() -> None:
@@ -908,8 +1103,10 @@ def test_the_signal_review_runs_a_third_time_once_its_fixed_window_of_20_days_is
     assert job.due(fixed(wednesday, 20, record=replace(ran, outcome=INTERRUPTED))), "a cut run is not a run"
 
 
-async def test_the_nightly_facts_count_the_fixed_window_s_days_in_the_engine_db(tmp_path: Path) -> None:
-    from krx_quant.scheduled import read_facts
+async def test_the_signal_review_s_facts_count_the_fixed_window_s_days_in_the_engine_db(
+    tmp_path: Path,
+) -> None:
+    from krx_quant.scheduled.research import read_signal_review
     from tests.daily_doubles import CALENDAR as DAILY_CALENDAR
     from tests.daily_doubles import NIGHT, engine_on
     from tests.daily_doubles import settings as daily_settings
@@ -938,21 +1135,19 @@ async def test_the_nightly_facts_count_the_fixed_window_s_days_in_the_engine_db(
     clock = FakeClock(NIGHT)
     e = engine_on(s, clock, [])
     try:
-        facts = await read_facts(s, DAILY_CALENDAR, clock, e)
+        facts = await Reads(Sources(s, DAILY_CALENDAR, clock, e))(read_signal_review)
     finally:
         e.store.close()
-    assert facts.signal_review_days == 3  # 11-04 to 11-06: the day before the window is not counted
+    assert facts.days == 3  # 11-04 to 11-06: the day before the window is not counted
 
 
 async def test_the_fixed_signal_review_job_runs_the_real_command(empty_server: Path) -> None:
     state = JobState.load(empty_server / STATE_FILE)
 
-    async def facts() -> Facts:
-        return Facts(official=1, signal_review_days=SIGNAL_REVIEW_FIXED_DAYS)
-
+    facts = SignalReviewFacts(SIGNAL_REVIEW_FIXED_DAYS, 1)
     async with fake_github() as hub, aiohttp.ClientSession() as session:
         scheduler = Scheduler(
-            [SIGNAL_REVIEW_FIXED],
+            faking([SIGNAL_REVIEW_FIXED], {SIGNAL_REVIEW_FIXED.facts: facts}),
             AT,
             CALENDAR,
             state,
@@ -960,7 +1155,6 @@ async def test_the_fixed_signal_review_job_runs_the_real_command(empty_server: P
             Told(),
             FakeClock(at(FRIDAY, "23:00")),
             commit=COMMIT,
-            facts=facts,
         )
         await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
     [body] = hub.bodies(206)
@@ -987,12 +1181,12 @@ async def test_a_job_waits_for_what_the_engine_knows_then_runs_once(tmp_path: Pa
     members = {THURSDAY: 0, FRIDAY: 1, SATURDAY: 1, SUNDAY: 2}
     clock = FakeClock(at(THURSDAY, "22:00"))
 
-    def facts() -> Facts:  # the first verdicts make one official on Friday
+    async def facts(reads: Reads) -> int:  # the first verdicts make one official on Friday
         night = (clock.now() - timedelta(hours=6)).date()
-        return Facts(official=members[night])
+        return members[night]
 
-    waits = job("waits", due=lambda night: night.facts.official > 0 and not night.ran)
-    async with scheduling(tmp_path, at(THURSDAY, "22:00"), [waits], facts=facts, clock=clock) as (
+    waits = job("waits", due=lambda night: night.facts > 0 and not night.ran, facts=facts)
+    async with scheduling(tmp_path, at(THURSDAY, "22:00"), [waits], clock=clock) as (
         _,
         runs,
         _,
@@ -1013,16 +1207,16 @@ async def test_a_job_waits_for_what_the_engine_knows_then_runs_once(tmp_path: Pa
 async def test_the_collector_runs_the_night_s_jobs(
     kis: FakeKis, empty_server: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The list as a job made here, whose real command is cheap on an empty server: the diagnosis
-    # (its job ``diagnose-203-187`` left ``JOBS``, #505).
-    diagnosis = Job(
-        name="diagnose",
+    # The list as a job made here, whose real command is cheap on an empty server: the signal review
+    # (the diagnosis was until its command was removed, #658).
+    review = Job(
+        name="signal-review",
         due=never_ran,
-        command=("diagnose", "--days", "20"),
+        command=("signal-review", "--days", "20"),
         timeout=timedelta(hours=1),
         targets=TWO_ISSUES.targets,
     )
-    monkeypatch.setattr("krx_quant.scheduled.JOBS", (diagnosis,))
+    monkeypatch.setattr("krx_quant.scheduled.JOBS", (review,))
     async with fake_github() as hub:
         settings = replace(
             settings_for(kis, empty_server),
@@ -1036,7 +1230,7 @@ async def test_the_collector_runs_the_night_s_jobs(
 
         def posted() -> bool:
             """Both comments are up and saved (the labels come between a comment and its save)."""
-            record = JobState.load(empty_server / "state" / STATE_FILE).jobs.get("diagnose")
+            record = JobState.load(empty_server / "state" / STATE_FILE).jobs.get("signal-review")
             return record is not None and record.comments.keys() == {203, 187}
 
         try:
@@ -1044,7 +1238,7 @@ async def test_the_collector_runs_the_night_s_jobs(
         finally:
             stop.set()
             await asyncio.wait_for(task, 10)
-    record = JobState.load(empty_server / "state" / STATE_FILE).jobs["diagnose"]
+    record = JobState.load(empty_server / "state" / STATE_FILE).jobs["signal-review"]
     assert record.outcome == OK and record.day == FRIDAY and record.comments.keys() == {203, 187}
 
 

@@ -21,8 +21,8 @@ The list of files with their SHA-256 and the counts (``manifest.json``) goes in 
 uploaded to the Object Store as ``KEY``, encrypted at rest (SSE-S3, ``ObjectStore.put``'s
 ``encrypted``). One object, so a backup is never half one night's and half another's: an upload cut
 midway leaves the last one. The last backup made is noted in ``state/state_backup.json`` (``MARK``),
-which the restore drill's condition reads (``scheduled.core.Facts``). A failure is a Telegram alert,
-cleared by the next backup that works (``keep_backed_up``); the next night tries again.
+which the restore drill's condition reads (``scheduled.upkeep.read_last_backup``). A failure is a
+Telegram alert, cleared by the next backup that works (``keep_backed_up``); the next night tries again.
 
 **Kept** 30 days: the bucket keeps every replaced version for 30 days (``deploy/create-aws.sh``), so
 the object under ``KEY`` holds the last night's backup and its versions the 30 nights before. That
@@ -118,14 +118,15 @@ FOLDERS = ("prevalidations", "models")
 # every module naming a file under ``experiments/`` has its pattern here.
 EXPERIMENTS = "experiments"
 EXPERIMENT_REPORTS = {
-    "krx_quant.climate_prior": "climate-prior-429.json",
     "krx_quant.neyman_variants": "neyman-variants-283.json",
     "krx_quant.neyman_backfill": "neyman-backfill-532.json",
 }
 # The reports a backup holds though their experiment's code is gone: each stays on the server as the
-# record of its result. The label-order experiment's (#529), removed once its result was in (none of
-# the five a candidate, the night of 2026-11-08): nothing writes or reads it any more.
-KEPT_REPORTS = ("normal-order-529.json",)
+# record of its result, and nothing writes or reads it any more. The label-order experiment's (#529),
+# removed once its result was in (none of the five a candidate, the night of 2026-11-08); the climate
+# prior's (#429), whose command went with #505's other kept research commands (#658; its result made
+# shannon read the prior, #435).
+KEPT_REPORTS = ("normal-order-529.json", "climate-prior-429.json")
 # Refused though its pattern names it (#604): an experiment report with one of these words in its
 # name or in a key of its JSON, at any depth. A name or a key is split into words at anything but a
 # letter or a digit and where a lower case letter meets an upper case one, then lowered; each word is

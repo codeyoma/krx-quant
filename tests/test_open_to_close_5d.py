@@ -66,6 +66,7 @@ from krx_quant.replay import replay_into
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
 from krx_quant.stats import DayOverlap, interval_json, session_index
+from krx_quant.touch import TARGET_VERSION
 
 FEE = 0.015 / 100
 SYMBOLS = ("005930", "000660")
@@ -376,6 +377,7 @@ def engine(db: Path, clock: FakeClock, source: Source) -> PredictionEngine:
         kind_algorithms=(),
         daily=source,
         daily_kinds=(OPEN_TO_CLOSE_5D,),
+        target_version=TARGET_VERSION,
     )
 
 
@@ -555,7 +557,7 @@ async def test_a_kind_awaiting_a_probe_is_listed_but_not_run(
     import krx_quant.scheduled.prevalidations as prevalidations
     from krx_quant.daily_features import DailyFiles
     from krx_quant.daily_training import DailyTrainer, prevalidate_daily
-    from krx_quant.scheduled import Facts, Night, daily_prevalidation_jobs
+    from krx_quant.scheduled import Night, PrevalidationFacts, daily_prevalidation_jobs
     from tests.daily_doubles import made_history
     from tests.test_daily_prevalidation import settings as walk_settings
 
@@ -579,6 +581,7 @@ async def test_a_kind_awaiting_a_probe_is_listed_but_not_run(
         daily_algorithms=[algorithm],
         daily_features=lambda a, s, d, p, b: FeatureVector(dict.fromkeys(a.features), a.features),
         daily_feature_names={"oc_1", "climate_up"},
+        target_version=TARGET_VERSION,
     )
     assert gated in e.daily_kinds, "listed: /v1/kinds shows it, with the reason"
     for day in (MONDAY, date(2026, 10, 13), date(2026, 10, 14), date(2026, 10, 15), date(2026, 10, 16)):
@@ -614,7 +617,7 @@ async def test_a_kind_awaiting_a_probe_is_listed_but_not_run(
     # The daily pre-validations' module looks the kind up (#500).
     monkeypatch.setattr(prevalidations, "daily_kind_named", lambda name: gated)
     [job] = daily_prevalidation_jobs([algorithm.name], {}, {algorithm.name: gated.name})
-    night = Night(date(2026, 10, 16), True, "c", None, {}, Facts(waiting=(algorithm.name,)))
+    night = Night(date(2026, 10, 16), True, "c", None, {}, PrevalidationFacts(waiting=(algorithm.name,)))
     assert not job.due(night)
 
 
@@ -628,7 +631,7 @@ async def test_the_kind_runs_now_that_the_dividends_were_measured(tmp_path: Path
     from krx_quant.algorithms.cox5d import Cox5d
     from krx_quant.daily_features import DailyFiles
     from krx_quant.daily_training import DailyTrainer
-    from krx_quant.scheduled import JOBS, OK, Facts, JobRecord, Night, _daily_simulation_due
+    from krx_quant.scheduled import JOBS, OK, JobRecord, Night, PrevalidationFacts, _daily_simulation_due
 
     assert OPEN_TO_CLOSE_5D.runs and OPEN_TO_CLOSE_5D.awaiting is None
     assert OPEN_TO_CLOSE_5D.as_dict([])["daily"]["awaiting"] is None
@@ -650,6 +653,7 @@ async def test_the_kind_runs_now_that_the_dividends_were_measured(tmp_path: Path
         daily_features=lambda a, s, d, p, b: FeatureVector(dict.fromkeys(a.features), a.features),
         daily_feature_names={"oc_1", "climate_up"},
         admits=lambda a: False,  # no pre-validation report yet
+        target_version=TARGET_VERSION,
     )
     await replay_into(e, clock, [], until=at(MONDAY, "08:51"))
     made = e.store.kind_recent(OPEN_TO_CLOSE_5D.name, 1, "005930", 10)
@@ -667,10 +671,12 @@ async def test_the_kind_runs_now_that_the_dividends_were_measured(tmp_path: Path
     assert model is not None and algorithm.fits, report["reason"]
     # The scheduled pre-validation of cox-5d is due the first night it waits.
     [job] = [j for j in JOBS if j.name == "prevalidate-cox-5d"]
-    night = Night(date(2026, 10, 23), True, "c", None, {}, Facts(waiting=("cox-5d",)))
+    night = Night(date(2026, 10, 23), True, "c", None, {}, PrevalidationFacts(waiting=("cox-5d",)))
     assert job.due(night)
     assert not job.due(
-        replace(night, facts=Facts(waiting=("cox-5d",), pending_answers=(OPEN_TO_CLOSE_5D.name,)))
+        replace(
+            night, facts=PrevalidationFacts(waiting=("cox-5d",), pending_answers=(OPEN_TO_CLOSE_5D.name,))
+        )
     )
     # A pass tonight: enrolled and simulated that night (#310: the review days are fixed).
     passed = {job.name: JobRecord(date(2026, 10, 23), OK, at(date(2026, 10, 23), "22:31"), "c", 0, 60.0)}

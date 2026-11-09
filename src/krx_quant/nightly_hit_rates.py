@@ -230,8 +230,8 @@ def compared_nights(
 
 def nights_with_hit_rates(settings: Settings) -> int:
     """How many of the latest ``SCANNED`` promotion lists carry ``hit_rate``, up to
-    ``HIT_RATE_NIGHTS`` (the scheduled job's ``Facts.hit_rate_nights``): 0 without the store, or when
-    it cannot be read (logged; the jobs' other conditions are read all the same)."""
+    ``HIT_RATE_NIGHTS`` (the scheduled job's ``scheduled.research.read_hit_rate_nights``): 0 without the
+    store, or when it cannot be read (logged; the jobs' other conditions are read all the same)."""
     store = open_store(settings)
     if store is None:
         return 0

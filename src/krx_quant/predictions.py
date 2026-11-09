@@ -729,6 +729,20 @@ def days_with_predictions(db: sqlite3.Connection, until: date, limit: int) -> li
     return days
 
 
+def within_days(days: Sequence[date], column: str) -> tuple[str, list[str]]:
+    """A condition on ``column`` (a time as stored) being on one of ``days`` (at least one), and its
+    parameters: the range lets SQLite use its index, the list leaves out the days in between."""
+    marks = ", ".join("?" * len(days))
+    return (
+        f"{column} >= ? AND {column} < ? AND substr({column}, 1, 10) IN ({marks})",
+        [
+            iso(datetime.combine(min(days), time(), KST)),
+            iso(datetime.combine(max(days) + timedelta(days=1), time(), KST)),
+            *(d.isoformat() for d in days),
+        ],
+    )
+
+
 def iso(at: datetime) -> str:
     return at.astimezone(KST).isoformat()
 
@@ -2459,17 +2473,6 @@ class PredictionStore:
             row["answer_path"] = None if row["answer_path"] is None else json.loads(row["answer_path"])
             out.append(row)
         return out
-
-    def day_classes(self, symbol: str, since: datetime, until: datetime) -> Mapping[Direction, int]:
-        """Classes (basis A) of the bar closes in ``[since, until]`` scored so far, once per bar."""
-        rows = self._db.execute(
-            "SELECT o.class_a, COUNT(DISTINCT p.bar_close) FROM outcomes o"
-            " JOIN predictions p ON p.id = o.prediction_id"
-            " WHERE p.symbol = ? AND p.bar_close BETWEEN ? AND ? AND o.class_a IS NOT NULL"
-            " GROUP BY o.class_a",
-            (symbol, iso(since), iso(until)),
-        ).fetchall()
-        return {Direction(r[0]): r[1] for r in rows}
 
     def day_touches(self, symbol: str, since: datetime, until: datetime) -> Mapping[Direction, int]:
         """Touch labels (this target version) of the bar closes in ``[since, until]`` stored so

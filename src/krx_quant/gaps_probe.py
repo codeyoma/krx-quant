@@ -53,7 +53,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -67,22 +67,18 @@ from krx_quant.backfill import BAR_SCHEMA, MINUTE_BARS_TR, stock_bars_path
 from krx_quant.config import Settings
 from krx_quant.feeds import KRX_TRADE, RAW_SCHEMA, TRADE, WS_FEEDS
 from krx_quant.feeds.base import KST
-from krx_quant.health import Gap, GapKind, Unread, read_batches, read_gaps
+from krx_quant.health import Unread, read_batches, read_gaps
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 from krx_quant.object_store import open_store
-from krx_quant.raw_days import RawDays
+from krx_quant.raw_days import SYSTEM, UNPARSED, RawDays
+from krx_quant.recording_quality import Group, group_line, groups_of, length_text
 
 TITLE = "WebSocket 결측과 종가 단일가 녹화 (#344)"
-# The collector's raw partitions of WebSocket frames that are not a feed's data: KIS's control
-# frames (PINGPONG, the replies to registrations) and the frames it could not parse.
-SYSTEM, UNPARSED = "_system", "_unparsed"
 WS_RAW = (*sorted(WS_FEEDS), SYSTEM, UNPARSED)
 # The closing auction window ends this long after the close (15:31): the print's random end is at
 # most 30 seconds, and ``auctions.recorded_prints`` reads the recorded print to here too.
 AFTER_CLOSE = timedelta(minutes=1)
 LINES_A_DAY = 30  # gap lines shown a day, the earliest; the rest are counted by reason
-KEYS_SHOWN = 6  # a feed's keys named in a gap line, up to this many; else counted
-_DISCONNECTED = GapKind.DISCONNECTED.value
 
 NOTES = (
     "읽은 것: gaps(결측 구간), raw의 WebSocket 프레임을 받은 시각,"
@@ -111,22 +107,6 @@ SECTIONS = (
 )
 
 
-@dataclass
-class Group:
-    """The gaps of one day with one start and reason: a disconnect's, one per subscription."""
-
-    start: datetime
-    reason: str
-    gaps: list[Gap] = field(default_factory=list)
-
-    @property
-    def disconnect(self) -> bool:
-        return self.reason.split(":", 1)[0] == _DISCONNECTED
-
-    def overlaps(self, start: datetime, end: datetime) -> bool:
-        return any(g.start < end and (g.end is None or g.end > start) for g in self.gaps)
-
-
 def _timestamps(batch: Any, column: str, unread: Unread, label: str) -> Any | None:
     """``batch``'s ``column`` if it is a timestamp column, else None (counted in ``unread``)."""
     values = batch.column(batch.schema.get_field_index(column))
@@ -142,14 +122,6 @@ def _between(values: Any, start: datetime, end: datetime | None) -> Any:
     if end is None:
         return mask
     return pc.and_(mask, pc.less(values, pa.scalar(end, type=values.type)))
-
-
-def groups_of(gaps: Sequence[Gap]) -> list[Group]:
-    """The gaps grouped by start and reason, in order of start."""
-    by: dict[tuple[datetime, str], Group] = {}
-    for gap in gaps:
-        by.setdefault((gap.start, gap.reason), Group(gap.start, gap.reason)).gaps.append(gap)
-    return sorted(by.values(), key=lambda g: (g.start, g.reason))
 
 
 def recorded_days(data_dir: Path, now: datetime) -> list[date]:
@@ -292,51 +264,6 @@ def _time(at: datetime, day: date) -> str:
     return local.strftime("%H:%M:%S" if local.date() == day else "%m-%d %H:%M:%S")
 
 
-def _length(span: timedelta) -> str:
-    seconds = span.total_seconds()
-    if seconds < 60:
-        return f"{seconds:.1f}초"
-    hours, rest = divmod(round(seconds), 3600)
-    minutes, seconds_left = divmod(rest, 60)
-    return f"{hours}시간 {minutes}분" if hours else f"{minutes}분 {seconds_left}초"
-
-
-def _lengths(group: Group) -> str:
-    """The group's lengths: one, or their range, and those with no end."""
-    spans = sorted(g.end - g.start for g in group.gaps if g.end is not None)
-    endless = len(group.gaps) - len(spans)
-    parts = []
-    if spans:
-        low, high = _length(spans[0]), _length(spans[-1])
-        parts.append(low if low == high else f"{low}–{high}")
-    if endless:
-        parts.append(f"끝 없음(수집기가 멈춤) {endless}")
-    return ", ".join(parts)
-
-
-def _covered(group: Group) -> str:
-    """The feeds and keys of a group: the feeds sharing a set of keys together."""
-    keys: dict[str, set[str]] = {}
-    for gap in group.gaps:
-        keys.setdefault(gap.feed, set()).add(gap.key)
-    feeds_of: dict[tuple[str, ...], list[str]] = {}
-    for feed, of_feed in keys.items():
-        feeds_of.setdefault(tuple(sorted(of_feed)), []).append(feed)
-    parts = []
-    for held, feeds in sorted(feeds_of.items(), key=lambda kv: sorted(kv[1])):
-        named = " ".join(held) if len(held) <= KEYS_SHOWN else f"키 {len(held)}개"
-        parts.append(f"{' '.join(sorted(feeds))}: {named}")
-    return " / ".join(parts)
-
-
-def group_line(group: Group, day: date) -> str:
-    feeds = len({g.feed for g in group.gaps})
-    return (
-        f"{_time(group.start, day)} {group.reason} · 피드 {feeds}개, 키 {len(group.gaps)}개 · "
-        f"길이 {_lengths(group)} · {_covered(group)}"
-    )
-
-
 def _by_reason(groups: Sequence[Group]) -> str:
     """The groups and gaps of each reason."""
     starts: Counter[str] = Counter(g.reason for g in groups)
@@ -420,10 +347,12 @@ def _silence(silence: Silence, until: datetime, day: date) -> str:
         assert after is not None
         return f"{_time(after, day)} 전에는 그날 프레임 없음"
     if after is None:
-        return f"{_time(first, day)}부터 {_time(until, day)}까지 프레임 없음({_length(until - first)} 넘게)"
+        return (
+            f"{_time(first, day)}부터 {_time(until, day)}까지 프레임 없음({length_text(until - first)} 넘게)"
+        )
     # In seconds, to set against the watchdog's (``KRX_WS_SILENCE_SECONDS``, 60 by default).
     span = after - first
-    said = f"{span.total_seconds():.1f}초" if span < timedelta(hours=1) else _length(span)
+    said = f"{span.total_seconds():.1f}초" if span < timedelta(hours=1) else length_text(span)
     return f"{said}({_time(first, day)}–{_time(after, day)})"
 
 

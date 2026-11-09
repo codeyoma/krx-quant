@@ -546,7 +546,6 @@ async def test_turing_follows_the_rule_too_its_exemption_ends_with_its_first_rev
         algorithms=algorithms,
         kind_algorithms=(),
         revisions=gate,
-        target_version=TARGET_VERSION,
     )
 
     assert last_change_of(db, "turing") == ("active", "probation", CODE_CHANGED)

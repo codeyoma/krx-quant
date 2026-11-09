@@ -33,7 +33,7 @@ import statistics
 from collections import Counter
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,19 +42,24 @@ import aiohttp
 from krx_quant import kis
 from krx_quant.archive import partition_batches
 from krx_quant.config import Settings
-from krx_quant.contracts import KOSPI200, NIGHT_END, NIGHT_OPEN, night_front_month
-from krx_quant.feeds import KOSPI200_FUTURES, NIGHT_FUTURES, NIGHT_FUTURES_BOOK, Feed
+from krx_quant.contracts import KOSPI200, night_front_month
+from krx_quant.feeds import KOSPI200_FUTURES, NIGHT_FUTURES, Feed
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.masters import MasterError, download
 from krx_quant.object_store import open_store
 from krx_quant.raw_days import RawDays
+from krx_quant.recording_quality import (
+    LOOK_BACK_DAYS,
+    NIGHT_TR_IDS,
+    Ack,
+    acknowledgements,
+    evening,
+    night_window,
+    subscribed_nights,
+)
+from krx_quant.recording_quality import NIGHT_FEEDS as FEEDS
 
-# Records received this long after 06:00 still count as the night's (a closing record).
-LATE = timedelta(minutes=10)
-LOOK_BACK_DAYS = 7  # the nights looked for before the one probed
-FEEDS = (NIGHT_FUTURES, NIGHT_FUTURES_BOOK)
-NIGHT_TR_IDS = frozenset(f.tr_id for f in FEEDS)
 # The night futures master KIS publishes beside the index one (stocks_info/domestic_cme_future_code.py:
 # "CME연계 야간선물"), read to see what it lists now that KRX runs its own night session.
 NIGHT_MASTER = "fo_cme_code.mst.zip"
@@ -62,71 +67,10 @@ INDEX_MASTER = "fo_idx_code_mts.mst.zip"
 MASTER_LINES = 10
 
 
-def night_window(day: date) -> tuple[datetime, datetime]:
-    """The night after ``day``'s session: 18:00 to 06:00 the next morning (and ``LATE``)."""
-    start = datetime.combine(day, NIGHT_OPEN, KST)
-    return start, datetime.combine(day + timedelta(days=1), time(0), KST) + NIGHT_END + LATE
-
-
-def evening(at: datetime) -> date:
-    """The evening whose night is going on at ``at``, or the day itself before 18:00."""
-    return (at.astimezone(KST) - NIGHT_END).date()
-
-
-@dataclass(frozen=True)
-class Ack:
-    """KIS's answer to a registration, as recorded raw."""
-
-    received_at: datetime
-    tr_id: str
-    key: str
-    ok: bool
-    message: str
-
-
 def _batches(partition: Path, columns: Sequence[str]) -> Iterator[dict[str, list[Any]]]:
     """A partition's rows, a batch at a time, each row once (``archive.partition_batches``)."""
     for _, batch in partition_batches(partition, columns):
         yield batch.to_pydict()
-
-
-def acknowledgements(raw: RawDays, day: date) -> list[Ack]:
-    """KIS's answers to the night feeds' registrations recorded on ``day``, in order."""
-    root = raw.feed(day, "_system")
-    acks: list[Ack] = []
-    for partition in sorted(root.glob("symbol=*")):
-        if partition.name == "symbol=_":  # heartbeats
-            continue
-        for batch in _batches(partition, ("received_at", "message")):
-            for at, text in zip(batch["received_at"], batch["message"], strict=True):
-                try:
-                    message = kis.parse_message(text)
-                except kis.KisError:
-                    continue
-                if isinstance(message, kis.SystemMessage) and message.tr_id in NIGHT_TR_IDS:
-                    acks.append(Ack(at, message.tr_id, message.tr_key or "", message.ok, message.message))
-    return sorted(acks, key=lambda a: a.received_at)
-
-
-def subscribed_nights(
-    raw: RawDays, calendar: MarketCalendar, before: date, back: int = LOOK_BACK_DAYS
-) -> list[date]:
-    """The trading days of the ``back`` days before ``before`` whose night the collector had
-    subscribed for when it began: KIS accepted its night trades' registration that day by
-    18:00. Oldest first. A day whose files cannot be read is left out."""
-    found = []
-    for n in range(back, 0, -1):
-        day = before - timedelta(days=n)
-        if not calendar.is_trading_day(day):
-            continue
-        opens = datetime.combine(day, NIGHT_OPEN, KST)
-        try:
-            acks = acknowledgements(raw, day)
-        except OSError:
-            continue
-        if any(a.ok and a.tr_id == NIGHT_FUTURES.tr_id and a.received_at <= opens for a in acks):
-            found.append(day)
-    return found
 
 
 @dataclass

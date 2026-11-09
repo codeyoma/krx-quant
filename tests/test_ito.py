@@ -90,9 +90,7 @@ def test_the_forecast_is_a_martingale_s() -> None:
 
 def test_training_picks_a_point_of_the_grid() -> None:
     bar_days = {("005930", d): random_walk(d, seed=i) for i, d in enumerate(DAYS)}
-    training = samples(
-        bar_days, MarketCalendar(dict.fromkeys(DAYS, True)), Ito.features, FEE, target_version=3
-    )
+    training = samples(bar_days, MarketCalendar(dict.fromkeys(DAYS, True)), Ito.features, FEE)
 
     model = Ito().fit(training)
 

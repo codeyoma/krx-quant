@@ -35,6 +35,7 @@ from krx_quant.notify import Alerts
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.predictions import PredictionStore
 from krx_quant.swap import NO_NIGHT, SWAP_AT, TrainingWatch, _train, show_night
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training_nights import Failure, Outcome, TrainingNights
 from tests.api_schema import check
 from tests.collector_doubles import settings_for
@@ -371,7 +372,12 @@ async def test_nights_that_all_failed_show_before_any_night_s_list_was_stored(tm
         nights.record(Outcome(day, False, at(day, "23:46"), -9, "turing", KILLED.reason))
     now = at(date(2026, 10, 16), "08:00")
     engine = PredictionEngine(
-        PredictionStore(tmp_path / "engine.db"), CALENDAR, ("005930",), 0.00015, FakeClock(now)
+        PredictionStore(tmp_path / "engine.db"),
+        CALENDAR,
+        ("005930",),
+        0.00015,
+        FakeClock(now),
+        target_version=TARGET_VERSION,
     )
     watch = TrainingWatch(nights, Sent(), CALENDAR, lambda: now)
 

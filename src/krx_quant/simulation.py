@@ -80,7 +80,7 @@ from krx_quant.algorithms import (
     register,
     register_kind_algorithms,
 )
-from krx_quant.baselines import baselines_for
+from krx_quant.baselines import TOUCH_BASELINES
 from krx_quant.config import Settings
 from krx_quant.daily import DailyAlgorithm, DailyKind, DailySample
 from krx_quant.daily_features import DailyFiles, samples
@@ -674,7 +674,7 @@ async def _replay_bar_close(
             tables: dict[str, Model] = {}
             for trainer in tables_of:
                 tables.update(trainer.tables_before(day))
-            climate = climate_of.climate_before(day) if settings.target_version >= 2 else None
+            climate = climate_of.climate_before(day)
         with usage.phase("replay"):
             # Let go once replayed, as pre-validation's days are (#383).
             await _replay_day(
@@ -696,7 +696,7 @@ async def _replay_bar_close(
     try:
         if any(c.kind is None for c in ready):
             names = {c.algorithm.name for c in ready if c.kind is None}
-            names |= {b.name for b in baselines_for(settings.target_version)}
+            names |= {b.name for b in TOUCH_BASELINES}
             rows = [r for r in replay_db.made_on(days) if r["algorithm"] in names]
             store.add_sim_predictions(run, rows, TARGET_VERSION)
         for kind in {c.kind.name: c.kind for c in ready if c.kind is not None}.values():
@@ -780,7 +780,7 @@ def _judge_bar_close(
         of_kind = [a.name for a in everyone if kind_of(a) == kind_name and a.name in standings]
         simulated = store.simulated(kind_name, TARGET_VERSION if kind is None else kind.answer_version)
         if kind is None:
-            baselines = frozenset(b.name for b in baselines_for(settings.target_version))
+            baselines = frozenset(b.name for b in TOUCH_BASELINES)
             scoring = DIRECTION_SCORING
         else:
             baselines = frozenset(b.name for b in kind.baselines)

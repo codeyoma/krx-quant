@@ -117,7 +117,7 @@ from krx_quant.algorithms import (
     register,
     register_kind_algorithms,
 )
-from krx_quant.baselines import baselines_for
+from krx_quant.baselines import TOUCH_BASELINES
 from krx_quant.climate import CLIMATE_DAYS, fit_climate
 from krx_quant.config import Settings
 from krx_quant.daily import DailyAlgorithm
@@ -148,6 +148,7 @@ from krx_quant.stats import (
     scored_by_algorithm,
     split,
 )
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import TrainingDay, finished_days, is_recorded, training_day
 
 log = logging.getLogger(__name__)
@@ -262,7 +263,7 @@ def _digest_code(digest: Any, cls: type, name: str) -> None:
 
 
 def admits(
-    state_dir: Path, target_version: int = 1, kinds: Sequence[Kind] = KINDS
+    state_dir: Path, target_version: int = TARGET_VERSION, kinds: Sequence[Kind] = KINDS
 ) -> Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], bool]:
     """Whether the engine may start a new algorithm: registered before pre-validation, or
     its latest report passed with the code it runs now, on the target it runs now (#169; a
@@ -304,7 +305,7 @@ class LastReport:
 def last_report(
     state_dir: Path,
     algorithm: Algorithm | KindAlgorithm | DailyAlgorithm,
-    target_version: int = 1,
+    target_version: int = TARGET_VERSION,
     kinds: Sequence[Kind] = KINDS,
 ) -> LastReport | None:
     """The algorithm's latest report as it stands for the code and target it runs now (the
@@ -339,7 +340,7 @@ class Refusal:
 
 
 def refusals(
-    state_dir: Path, target_version: int = 1, kinds: Sequence[Kind] = KINDS
+    state_dir: Path, target_version: int = TARGET_VERSION, kinds: Sequence[Kind] = KINDS
 ) -> Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], Refusal | None]:
     """The refusal of an algorithm whose latest report judged the code and target it runs now
     (``LastReport.judged``) and did not pass; None for any other: no report, one of other code,
@@ -357,7 +358,7 @@ def refusals(
 def left_out(
     state_dir: Path,
     statuses: Mapping[str, Standing],
-    target_version: int = 1,
+    target_version: int = TARGET_VERSION,
     kinds: Sequence[Kind] = KINDS,
 ) -> Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], Refusal | None]:
     """The refusal that leaves an algorithm out of the night's training and of the replays beside a
@@ -409,7 +410,7 @@ def _daily(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> bool:
 
 def judging(
     algorithm: Algorithm | KindAlgorithm | DailyAlgorithm,
-    target_version: int = 1,
+    target_version: int = TARGET_VERSION,
     kinds: Sequence[Kind] = KINDS,
 ) -> dict[str, Any]:
     """What a pre-validation of the algorithm judges now, which its report must match (``_stale``):
@@ -446,7 +447,7 @@ def revision_report(
     state_dir: Path,
     algorithm: Algorithm | KindAlgorithm | DailyAlgorithm,
     boundary: datetime,
-    target_version: int = 1,
+    target_version: int = TARGET_VERSION,
     kinds: Sequence[Kind] = KINDS,
 ) -> tuple[LastReport, str] | None:
     """The algorithm's latest report if it was made for its revision begun at ``boundary`` (#454,
@@ -764,7 +765,7 @@ async def _replay(
         usage = DayUsage(meter)  # its memory, logged (#383)
         with usage.phase("training"):
             model = trainer.before(day)
-            climate = trainer.climate_before(day) if settings.target_version >= 2 else None
+            climate = trainer.climate_before(day)
             tables = trainer.tables_before(day)  # its kind's baselines' (#180)
         versions[day] = model.version
         with usage.phase("replay"):
@@ -902,7 +903,7 @@ def _judge(
     these days (#262)."""
     name = candidate.name
     # Scored on the touch label (#170), against the target's baselines (#169).
-    names = {b.name for b in baselines_for(settings.target_version)}
+    names = {b.name for b in TOUCH_BASELINES}
     store = PredictionStore(db)
     try:
         statuses = store.status_counts(name)
@@ -1219,6 +1220,5 @@ class _WalkForward:
             features,
             s.fee_rate,
             self._leaders,
-            target_version=s.target_version,
             kinds=kinds,
         )

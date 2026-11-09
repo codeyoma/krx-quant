@@ -34,7 +34,7 @@ from krx_quant.notify import Alerts
 from krx_quant.object_store import LocalObjectStore, ObjectStore, S3ObjectStore, file_digest
 from krx_quant.process_log import Ran
 from krx_quant.rescore import EngineLock
-from krx_quant.scheduled import FAILED, INTERRUPTED, OK, Facts, JobRecord, Night
+from krx_quant.scheduled import FAILED, INTERRUPTED, OK, JobRecord, Night
 from krx_quant.scheduled.upkeep import RESTORE_DRILL, restore_drill_calls
 from krx_quant.state_backup import (
     KEY,
@@ -60,7 +60,7 @@ from tests.waiting import until
 NOW = datetime(2026, 11, 7, 5, 35, tzinfo=KST)
 BUCKET = "krx-quant-test"
 # The experiments' reports the state below holds, as their writers name them (#604) or as one is kept
-# after its code went (#529), made up.
+# after its code went (#529, #429), made up.
 EXPERIMENT_REPORTS = {
     "experiments/climate-prior-429.json": {"experiment": "climate-prior-429", "arms": {"a": {"n": 3}}},
     "experiments/normal-order-529.json": {
@@ -279,10 +279,11 @@ def test_each_module_that_writes_under_experiments_has_the_pattern_of_its_report
 
 
 def test_a_kept_report_has_no_writer_left_and_no_refused_word() -> None:
-    """The reports kept after their experiment's code went (#529's) are named by no module's pattern
-    and no module writes them; the backup still takes them (``EXPERIMENT_REPORTS`` above)."""
-    assert state_backup.KEPT_REPORTS == ("normal-order-529.json",)
+    """The reports kept after their experiment's code went (#529's, #429's) are named by no module's
+    pattern and no module writes them; the backup still takes them (``EXPERIMENT_REPORTS`` above)."""
+    assert state_backup.KEPT_REPORTS == ("normal-order-529.json", "climate-prior-429.json")
     assert importlib.util.find_spec("krx_quant.normal_order") is None
+    assert importlib.util.find_spec("krx_quant.climate_prior") is None
     for name in state_backup.KEPT_REPORTS:
         assert not any(fnmatchcase(name, p) for p in state_backup.EXPERIMENT_REPORTS.values()), name
         assert not state_backup.has_refused_word(name), name
@@ -781,8 +782,10 @@ def test_the_next_backup_is_the_next_05_35(now: datetime, then: datetime) -> Non
     assert next_backup(now) == then
 
 
-def night(day: date, record: JobRecord | None, backed_up: date | None = date(2026, 11, 7)) -> Night:
-    return Night(day, True, "c", record, {}, Facts(state_backup=backed_up))
+def night(
+    day: date, record: JobRecord | None, backed_up: date | None = date(2026, 11, 7)
+) -> Night[date | None]:
+    return Night(day, True, "c", record, {}, backed_up)
 
 
 def ran(day: date, outcome: str) -> JobRecord:

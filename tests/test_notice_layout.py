@@ -253,11 +253,15 @@ def test_the_time_no_connection_was_subscribed_within_the_window_is_counted() ->
 
 
 async def trade_and_record(
-    fake: FakeKis, account: FakeAccount, state: Path, events: Sequence[object]
+    fake: FakeKis,
+    account: FakeAccount,
+    state: Path,
+    events: Sequence[object],
+    columns: tuple[str, ...] = LAYOUT,
 ) -> list[StoredRecord]:
-    """The mock book's day on ``fake`` with the recorder subscribed beside it; the records kept once
-    every notice the account told is."""
-    account.notice_columns = LAYOUT
+    """The mock book's day on ``fake`` with the recorder subscribed beside it, the notice in
+    ``columns``; the records kept once every notice the account told is."""
+    account.notice_columns = columns
     account.hts_id = HTS_ID
     pushed: list[int] = []
     tell = account._tell

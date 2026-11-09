@@ -155,7 +155,6 @@ from krx_quant.algorithms.turing import ROUNDS
 from krx_quant.api import TERCILES, tercile, volatility_cuts
 from krx_quant.baselines import Forecast
 from krx_quant.climate import direction
-from krx_quant.climate_prior import ArmStats, arm_stats
 from krx_quant.config import Settings
 from krx_quant.consensus import slot
 from krx_quant.features import BARRIER_SIGMA, BARRIER_WIDTH, DEFAULT_HALF_SPREAD, FeatureVector, Leaders
@@ -169,9 +168,11 @@ from krx_quant.prevalidation import _WalkForward
 from krx_quant.pricing import Direction, most_likely
 from krx_quant.sample_store import night_reads
 from krx_quant.stats import (
+    ArmStats,
     Lift,
     Paired,
     Scored,
+    arm_stats,
     day_lift,
     gains_by_day,
     lift,
@@ -593,12 +594,16 @@ def walk_into(
     *,
     diagnose: bool = False,
     name: str = "neyman variants",
+    stop: Callable[[], bool] | None = None,
 ) -> list[date]:
     """``walk``'s days, each handed to ``add``; the days with fewer than ``min_scored`` bar closes
-    with a label left out (returned). Its memory a day (#383), logged as ``name``'s."""
+    with a label left out (returned). Its memory a day (#383), logged as ``name``'s. ``stop``, asked
+    before each day, ends the walk there when it says so (#643: the backfill's night is over)."""
     short: list[date] = []
     meter = Meter()
     for n, day in enumerate(days, 1):
+        if stop is not None and stop():
+            break
         usage = DayUsage(meter)
         with usage.phase("training"):
             samples = _labelled(trainer.samples_on(day))
@@ -1305,9 +1310,9 @@ class Progress:
 
 
 def progress(settings: Settings, now: datetime) -> Progress:
-    """The experiment's ``Progress`` from its report and the recorded days (``Facts.neyman_variants``):
-    a small file and the day folders. One that cannot be read says no discovery (logged): the job
-    then runs, and its command says why it cannot."""
+    """The experiment's ``Progress`` from its report and the recorded days
+    (``scheduled.research.read_neyman_variants``): a small file and the day folders. One that cannot be
+    read says no discovery (logged): the job then runs, and its command says why it cannot."""
     try:
         saved = read_report(settings.state_dir / REPORT)
         if not saved or not saved.get("discovery"):

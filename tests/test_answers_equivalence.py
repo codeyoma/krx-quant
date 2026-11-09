@@ -134,7 +134,7 @@ DAYS: dict[str, tuple[date, dict[str, Any]]] = {
 }
 
 
-def _made(events: list[Event], day: date, *, target_version: int, answered: Sequence[Kind] = ANSWERED) -> str:
+def _made(events: list[Event], day: date, *, answered: Sequence[Kind] = ANSWERED) -> str:
     made, answers, left_out = recorded_day(
         events,
         CALENDAR,
@@ -143,7 +143,6 @@ def _made(events: list[Event], day: date, *, target_version: int, answered: Sequ
         NAMES,
         FEE,
         LEADERS,
-        target_version=target_version,
         kinds=answered,
     )
     return fingerprint(TrainingDay("mid", made, answers, left_out))
@@ -159,16 +158,13 @@ def _same(after: str, before: str) -> None:
 
 
 @pytest.mark.parametrize("name", DAYS)
-@pytest.mark.parametrize("target_version", [3, 1])
-def test_a_recorded_day_is_made_as_before(
-    name: str, target_version: int, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_recorded_day_is_made_as_before(name: str, monkeypatch: pytest.MonkeyPatch) -> None:
     day, options = DAYS[name]
     events = made_up_day(day, **options)
 
     with before_630(monkeypatch):
-        before = _made(events, day, target_version=target_version, answered=oracle_kinds(ANSWERED))
-    after = _made(events, day, target_version=target_version)
+        before = _made(events, day, answered=oracle_kinds(ANSWERED))
+    after = _made(events, day)
 
     _same(after, before)
     # The day has what the comparison is meant to cover.

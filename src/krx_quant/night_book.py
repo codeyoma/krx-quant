@@ -32,7 +32,7 @@ nights of a file share one row group at most.
 
 A night is measured afresh on each run: nothing is kept but the state file (``STATE``), which holds each
 night's figures and whose count of complete nights the measuring job's condition reads
-(``scheduled.Facts.night_book_nights``). The collector reads that count, so this module imports no probe
+(``scheduled.probes.read_night_book_nights``). The collector reads that count, so this module imports no probe
 (#552).
 
 **Who reads the book.** The verdict reads the syntax tree of every module of the installed package and
@@ -100,7 +100,7 @@ STATE = "night-book-605.json"
 RECEIVED = FEED.schema.field(RAW_SCHEMA.field("received_at").name).name
 
 # The names that read the book, beside its TR ID: its feed, its schema and columns, and the night feeds
-# together (``health.NIGHT_FEEDS``, ``night_probe.FEEDS`` imported under that name).
+# together (``health.NIGHT_FEEDS``, ``recording_quality.NIGHT_FEEDS``).
 BOOK_NAMES = frozenset({"NIGHT_FUTURES_BOOK", "NIGHT_BOOK_SCHEMA", "NIGHT_BOOK_COLUMNS", "NIGHT_FEEDS"})
 # The modules that name the book to record, check or report it, not to predict with it (paths under the
 # package), and what they do with it.
@@ -341,8 +341,8 @@ def save(state_dir: Path, nights: Sequence[NightBytes], now: datetime) -> None:
 
 
 def complete_nights(state_dir: Path) -> int:
-    """How many complete nights the last measure found (``scheduled.Facts.night_book_nights``): 0 without
-    a state file or with one that cannot be read, so that the measure runs and writes it again."""
+    """How many complete nights the last measure found (``scheduled.probes.read_night_book_nights``): 0
+    without a state file or with one that cannot be read, so that the measure runs and writes it again."""
     try:
         data = json.loads((state_dir / STATE).read_text())
         return sum(1 for n in data["nights"] if n["complete"] is True)
@@ -553,7 +553,8 @@ def verdict_report(
         then = (
             f"할 일(에이전트, PR 하나): 수집기의 구독 계획(collector.subscription_plan)에서"
             f" {FEED.tr_id}를 빼고, 기록 품질 리포트(#570)가 기대하는 야간 피드(recording_quality 5절이 읽는"
-            ' night_probe.FEEDS)와 health.NIGHT_FEEDS, 문서(kis-feeds.md의 구독 표와 "야간선물 (#264)",'
+            " recording_quality.NIGHT_FEEDS)와 health.NIGHT_FEEDS,"
+            ' 문서(kis-feeds.md의 구독 표와 "야간선물 (#264)",'
             f" events.md, operations.md)를 맞춘다. 야간 체결({NIGHT_FUTURES.tr_id})과 지난 기록은 그대로"
             " 둔다. 그 PR이 이 이슈를 닫는다."
         )

@@ -243,21 +243,17 @@ class Reacher:
 
 
 @pytest.mark.parametrize(
-    ("version", "spread", "p_up"),
+    ("spread", "p_up"),
     [
-        (1, 100, 0.158655),  # 1 − Φ(2/2): ending two ticks up
-        (2, 100, 0.211300),  # 2·(1 − Φ(2.5/2)): reaching two ticks and half the one-tick spread
-        (2, 300, 0.080118),  # 2·(1 − Φ(3.5/2)): k is 2 at 81,350 too, half the spread 1.5
+        # Until #659, on the four-minute move: 1 − Φ(2/2) = 0.158655, ending two ticks up.
+        (100, 0.211300),  # 2·(1 − Φ(2.5/2)): reaching two ticks and half the one-tick spread
+        (300, 0.080118),  # 2·(1 − Φ(3.5/2)): k is 2 at 81,350 too, half the spread 1.5
     ],
 )
-async def test_the_algorithms_forecast_the_engines_target(
-    tmp_path: Path, version: int, spread: int, p_up: float
-) -> None:
+async def test_the_algorithms_forecast_the_engines_target(tmp_path: Path, spread: int, p_up: float) -> None:
     events = steady_book(at("09:00:30"), at("09:10:00"), 81_200, 81_200 + spread, every=10)
 
-    made = await served(
-        tmp_path / "engine.db", events, "09:10:00", "reacher", target_version=version, algorithms=[Reacher()]
-    )
+    made = await served(tmp_path / "engine.db", events, "09:10:00", "reacher", algorithms=[Reacher()])
 
     assert made["09:05"]["p_up"] == pytest.approx(p_up, abs=1e-6)
 

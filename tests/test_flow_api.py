@@ -24,6 +24,7 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.replay import replay_into
 from krx_quant.supply import KIS, write_supply
+from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import check
 from tests.replay_events import trade
 
@@ -123,6 +124,7 @@ def engine_at(tmp_path: Path, now: datetime) -> tuple[PredictionEngine, FakeCloc
         algorithms=(),
         kinds=(DIRECTION_KIND,),
         kind_algorithms=(),
+        target_version=TARGET_VERSION,
     )
     return engine, clock
 

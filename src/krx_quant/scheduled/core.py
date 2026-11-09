@@ -1,12 +1,14 @@
 """The scheduled jobs' machinery (#215; a module of its own since #500): what a job is (``Job``,
-``Target``, ``Attachment``), what its condition is asked with (``Night``, and ``Facts``: read by
-``read_facts`` at night and by ``session_facts`` in the session), the state file (``JobState``) and
-the scheduler that runs the due jobs and posts their results (``Scheduler``). How they run is in the
-package's docstring (``krx_quant.scheduled``); the jobs are in its family modules.
+``Target``, ``Attachment``), what its condition is asked with (``Night``), how its facts are read
+(``Reads``, from ``Sources``), the state file (``JobState``) and the scheduler that runs the due jobs
+and posts their results (``Scheduler``). How they run is in the package's docstring
+(``krx_quant.scheduled``); the jobs are in its family modules.
 
-A condition that needs more of what the engine knows adds a field to ``Facts`` and reads it in
-``read_facts`` (or ``session_facts``), here: every job's facts are read in one place, once a night,
-and again after a job that says so (``Job.refreshes``, #599: the queue screen's order).
+It knows no job nor experiment (#651): a job that asks what the engine knows brings the function
+that reads it (``Job.facts``, a ``Reader``), in its family's module, and its condition gets what that
+returned (``Night.facts``). The scheduler reads it when the job is first considered on a night, once
+however many jobs ask the same reader, and again after a job that says so (``Job.refreshes``, #599:
+the queue screen's order).
 """
 
 from __future__ import annotations
@@ -21,35 +23,18 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from time import monotonic
-from typing import Any, Protocol
+from typing import Any, Generic, Protocol, TypeVar, cast
 
-from krx_quant.algorithms import Algorithm, KindAlgorithm
 from krx_quant.clock import SessionClock
 from krx_quant.config import JOBS_UNTIL, Settings
-from krx_quant.daily import DailyAlgorithm
-from krx_quant.daily_features import pending_inputs
 from krx_quant.engine import PredictionEngine
 from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub, GitHubError, comment_body
-from krx_quant.holdout import days_in_window
-from krx_quant.kind_registry import DAILY_KINDS
-from krx_quant.market_calendar import MarketCalendar, first_whole_day
-from krx_quant.neyman_variants import Progress as NeymanVariants
-from krx_quant.neyman_variants import progress as neyman_variants_progress
-from krx_quant.night_book import complete_nights as night_book_nights
-from krx_quant.nightly_hit_rates import nights_with_hit_rates
-from krx_quant.predictions import DB_NAME, Revision
-from krx_quant.prevalidation import LastReport, last_report, revision_report
+from krx_quant.market_calendar import MarketCalendar
 from krx_quant.process_log import KRX_QUANT, Child, run_logged
 from krx_quant.process_log import Ran as Ran  # a job's process, once it ended
-from krx_quant.queue_screen import queue_order
 from krx_quant.redaction import redact
-from krx_quant.signal_review import fixed_days
-from krx_quant.smt_experiment import days_in_holdout as smt_days_in_holdout
-from krx_quant.state_backup import last_backup
 from krx_quant.swap import NightTraining
-from krx_quant.trader.mock_check import trader_in_mock
-from krx_quant.training import finished_days, is_recorded
 
 # The package's logger: the lines name ``krx_quant.scheduled``, as before the split (#500).
 log = logging.getLogger("krx_quant.scheduled")
@@ -236,83 +221,65 @@ class JobState:
         tmp.replace(self.path)
 
 
-@dataclass(frozen=True)
-class Revising:
-    """A running bar-close algorithm's changed code, waiting for its pre-validation (#454)."""
-
-    boundary: datetime  # when the engine first ran it
-    since: date  # its first whole trading day: the days it is judged on start there
-    recorded_days: int  # the recorded days from ``since``, as ``prevalidate --revision`` counts them
-    report: LastReport | None  # its latest report if made for this revision; None without one
+F = TypeVar("F")  # what a job's condition asks: the facts its reader returns
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
-class Facts:
-    """What the engine knows that a condition may ask, read once a night."""
+class Sources:
+    """What the jobs' facts are read from (#651): the settings, the market's calendar, the clock and
+    the running engine (None where there is none: a test's scheduler)."""
 
-    recorded_days: int = 0  # recorded days, as ``prevalidate`` counts them (MIN_DAYS, #204)
-    waiting: tuple[str, ...] = ()  # the algorithms waiting for their pre-validation (#204)
-    official: int = 0  # the consensus members: active algorithms on the engine's target (#206)
-    # The latest pre-validation report of each registered algorithm that has one (#204).
-    reports: Mapping[str, LastReport] = field(default_factory=dict)
-    # The daily features whose data on this server is behind their version (#297,
-    # ``daily_features.pending_inputs``): a pre-validation reading them waits for it.
-    pending_inputs: tuple[str, ...] = ()
-    # The daily algorithms on a probation that waits for its simulation (#298,
-    # ``PredictionEngine.to_simulate``).
-    simulating_daily: tuple[str, ...] = ()
-    # The daily kinds whose answers of the latest days are not all in on this server
-    # (``DailyKind.pending``, #264: ``open_to_close``'s closing auction prices): their algorithms'
-    # simulation and scheduled walk-forward wait for them.
-    pending_answers: tuple[str, ...] = ()
-    # The bar-close kinds' algorithms on a probation that waits for its simulation (#298).
-    simulating: tuple[str, ...] = ()
-    # The running bar-close algorithms whose changed code waits for its pre-validation (#454,
-    # ``PredictionEngine.revising``), by name.
-    revising: Mapping[str, Revising] = field(default_factory=dict)
-    # Whether the trader's KIS key, secret and account are set (``Settings.trader_kis``, #403): the
-    # order probe's session job waited for them once it had said they were not (it left ``JOBS``,
-    # #484); kept for a session job that orders on the mock account.
-    trader_kis: bool = False
-    # Whether the trader's live key, secret and account are set (``Settings.trader_live_kis``, #408):
-    # the live account's read waits for them.
-    trader_live_kis: bool = False
-    # Whether the trader last started in mock mode (#405, ``mock_check.trader_in_mock``): it may hold
-    # 005930 and order on the mock account in the session, so the order probe's session job did not
-    # run then (it left ``JOBS``, #484); kept for a session job that orders on the mock account.
-    trader_mock: bool = False
-    # How many of the latest nights' promotion lists carry the hit rates beside the swap (#437,
-    # ``nightly_hit_rates.nights_with_hit_rates``, up to ``HIT_RATE_NIGHTS``): their summary waits for
-    # them.
-    hit_rate_nights: int = 0
-    # How many days of turing's holdout window are in the engine DB (#447, ``holdout.days_in_window``,
-    # up to ``holdout.DAYS``): its judging waits for the window to be full.
-    holdout_days: int = 0
-    # Where neyman's variants experiment stands (#455, ``neyman_variants.progress``, read from its
-    # report and the day folders): its window's N once discovered, whether it was judged, and the
-    # recorded days after 2026-11-02 that can be in the window.
-    neyman_variants: NeymanVariants = field(default_factory=NeymanVariants)
-    # How many of the first ``SIGNAL_REVIEW_FIXED_DAYS`` days with predictions from
-    # ``SIGNAL_REVIEW_FROM`` are in the engine DB (#206, ``signal_review.fixed_days``): the signal
-    # review's fixed window waits for them all.
-    signal_review_days: int = 0
-    # How many days of the SMT experiment's holdout are in (#523, ``smt_experiment.days_in_holdout``, up to
-    # ``smt_experiment.DAYS``, read from the day folders and the engine DB read-only): its verdict waits
-    # for them all.
-    smt_holdout_days: int = 0
-    # The day of the last backup of the server's state this server made (#576, ``state_backup.MARK``):
-    # the restore drill waits for one.
-    state_backup: date | None = None
-    # How many complete nights the night futures' book's measure found (#605, ``night_book.complete_nights``,
-    # read from its state file): the measure stops at ``night_book.NIGHTS``.
-    night_book_nights: int = 0
-    # The order of the bar-close pre-validations the latest queue screen set (#599,
-    # ``queue_screen.queue_order``): none without a screen of the last few nights.
-    queue: tuple[str, ...] = ()
+    settings: Settings
+    calendar: MarketCalendar
+    clock: SessionClock
+    engine: PredictionEngine | None = None
+
+    @property
+    def running(self) -> PredictionEngine:
+        """The running engine; a reader that asks it cannot read without one."""
+        if self.engine is None:
+            raise LookupError("no running engine to read the jobs' facts from")
+        return self.engine
+
+
+class Reads:
+    """The facts read for one turn of the jobs (#651): a night's, until a job that refreshes them
+    (``Job.refreshes``) or the quiet night's turn; a session job's own. Each reader is read once, when
+    the first job that asks it is considered: ``await reads(reader)``, which a reader also calls for
+    the readers it builds on. One that raised raises again, unread."""
+
+    def __init__(self, sources: Sources | None) -> None:
+        self._sources = sources
+        self._read: dict[Any, Any] = {}
+        self._failed: dict[Any, BaseException] = {}
+
+    @property
+    def sources(self) -> Sources:
+        if self._sources is None:
+            raise LookupError("the scheduler has no sources to read the jobs' facts from")
+        return self._sources
+
+    async def __call__(self, reader: Reader[T]) -> T:
+        if reader in self._failed:
+            raise self._failed[reader]
+        if reader not in self._read:
+            try:
+                self._read[reader] = await reader(self)
+            except Exception as e:
+                self._failed[reader] = e
+                raise
+        return cast(T, self._read[reader])
+
+
+# What reads a job's facts (``Job.facts``): from the night's ``Reads``, its sources and the readers it
+# builds on. The files are read in worker threads; the engine's database only on the event loop's (its
+# connection belongs to it), in a few small queries.
+Reader = Callable[[Reads], Awaitable[T]]
 
 
 @dataclass(frozen=True)
-class Night:
+class Night(Generic[F]):
     """What a job's condition is asked with."""
 
     day: date  # the night's day: from KRX_JOBS_AT on it to 05:30 the next morning; a session job's day
@@ -320,7 +287,7 @@ class Night:
     commit: str  # the code running
     record: JobRecord | None  # this job's last run; None if it never ran
     records: Mapping[str, JobRecord]  # every job's last run
-    facts: Facts
+    facts: F  # what its reader (``Job.facts``) read; None for a job without one
 
     @property
     def ran(self) -> bool:
@@ -329,20 +296,24 @@ class Night:
 
 
 @dataclass(frozen=True)
-class Job:
-    """A scheduled job: when it runs (``due``), what (``krx-quant`` arguments) for how long
-    at most, and where its result goes."""
+class Job(Generic[F]):
+    """A scheduled job: when it runs (``due``, asked with what ``facts`` reads), what (``krx-quant``
+    arguments) for how long at most, and where its result goes."""
 
     name: str  # unique: the job's key in the state file
-    due: Callable[[Night], bool]
+    due: Callable[[Night[F]], bool]
     command: tuple[str, ...]
     timeout: timedelta
     targets: tuple[Target, ...]
     label: tuple[str, ...] = (READY_FOR_AGENT,)  # set on each issue once the comment is up
     unlabel: tuple[str, ...] = (READY_FOR_HUMAN, NEEDS_TRIAGE)  # taken off then
     attach: tuple[Attachment, ...] = ()  # files it writes, posted with its output
+    # What its condition asks of what the engine and the server know (#651): read when the job is first
+    # considered on a night, and handed to its conditions as ``Night.facts``. None: it asks nothing but
+    # the night and the runs (``Night.facts`` is None).
+    facts: Reader[F] | None = None
     # The later jobs this one gives way to (#376): None, or which of them. See ``Scheduler``.
-    gives_way_to: Callable[[Job], bool] | None = None
+    gives_way_to: Callable[[Job[Any]], bool] | None = None
     # A session job (#403): the time (KST) it runs from on a trading day, not at night; its time
     # limit must end by ``SESSION_UNTIL``. None: a night's job.
     session: time | None = None
@@ -356,20 +327,33 @@ class Job:
     # Its condition on a quiet night (#546, a second pre-validation's): asked again once every job of
     # the night had its turn, in the list's order; one due then runs if its time limit still ends by
     # 05:30. None: asked once a night, in its turn.
-    quiet: Callable[[Night], bool] | None = None
+    quiet: Callable[[Night[F]], bool] | None = None
     # Whether the night's facts are read again once it ran (#599: the queue screen sets the order the
     # pre-validations after it go by). False: the later jobs ask the facts read before it.
     refreshes: bool = False
     # The algorithm whose first pre-validation it runs (#599): the quiet night's turn asks those jobs,
-    # among their places in the list, in the queue screen's order (``Facts.queue``). None: in the list's.
+    # among their places in the list, in the order ``order`` reads (the queue screen's). None: in the
+    # list's.
     queued: str | None = None
+    order: Reader[tuple[str, ...]] | None = None
+    # A night's job that goes on by day across nights (#643): the time one of its days takes at most.
+    # It starts when that still ends by 05:30, not its whole limit; its command is told the night's end
+    # (``--until``) and starts no day it could not end by then, keeps each day it ended, and the next
+    # night's run goes on from there (its condition asks it again while days are left). It is stopped
+    # at 05:30 at the latest (its limit at most). None: it starts only when its whole limit ends by 05:30.
+    resumes: timedelta | None = None
+
+    @property
+    def needs(self) -> timedelta:
+        """What must still fit before 05:30 for it to start: a day (``resumes``), else its limit."""
+        return self.resumes if self.resumes is not None else self.timeout
 
 
 # A job that gave way on this many nights since it last ran gives way no more: it runs first (#376).
 GIVE_WAY_NIGHTS = 2
 
 
-def in_queue(jobs: Sequence[Job], queue: Sequence[str]) -> list[Job]:
+def in_queue(jobs: Sequence[Job[Any]], queue: Sequence[str]) -> list[Job[Any]]:
     """``jobs`` in their order, but those queued (``Job.queued``, #599) in ``queue``'s order among their
     own places; one ``queue`` does not name after those it does, in its place's order."""
     places = [i for i, job in enumerate(jobs) if job.queued is not None]
@@ -418,7 +402,7 @@ def window(day: date, at: time) -> tuple[datetime, datetime]:
 SESSION_UNTIL = time(15, 15)
 
 
-def session_window(job: Job, day: date) -> tuple[datetime, datetime]:
+def session_window(job: Job[Any], day: date) -> tuple[datetime, datetime]:
     """A session job's window on ``day``: from its time to ``SESSION_UNTIL``."""
     assert job.session is not None
     return datetime.combine(day, job.session, KST), datetime.combine(day, SESSION_UNTIL, KST)
@@ -446,17 +430,20 @@ class Scheduler:
     night if it can still start by its own last start, else the next night. Once a night; and once it
     gave way on ``GIVE_WAY_NIGHTS`` nights since it last ran (while it stayed due) it runs first.
     Once every job had its turn, those with a condition for a quiet night (``Job.quiet``, #546: a
-    second pre-validation) are asked it, and one due runs if it can still end by 05:30. The facts are
-    read when the first job's turn comes, and again after a job that says so (``Job.refreshes``, #599).
+    second pre-validation) are asked it, and one due runs if it can still end by 05:30. A job's facts
+    (``Job.facts``) are read when it is first considered, once a night for every job that asks the same
+    reader (``Reads``), and again after a job that says so (``Job.refreshes``, #599) and for the quiet
+    night's turn. A job that goes on by day across nights (``Job.resumes``, #643) starts when a day of
+    it still ends by 05:30, is told that end (``--until``) and is stopped there at the latest.
 
     The session jobs (``Job.session``, #403) run apart from the nights: on each trading day, in the
     list's order, each from its time if it can still end by ``SESSION_UNTIL``, asked its condition
-    with ``session_facts``. A collector started later in the session runs a job due at once; one
-    started after it waits for the next trading day."""
+    with its facts read then (cheap ones: the live engine runs beside it). A collector started later in
+    the session runs a job due at once; one started after it waits for the next trading day."""
 
     def __init__(
         self,
-        jobs: Sequence[Job],
+        jobs: Sequence[Job[Any]],
         at: time,
         calendar: MarketCalendar,
         state: JobState,
@@ -467,8 +454,7 @@ class Scheduler:
         commit: str = "unknown",
         secrets: Sequence[str] = (),
         training: NightTraining | None = None,
-        facts: Callable[[], Awaitable[Facts]] | None = None,
-        session_facts: Callable[[], Awaitable[Facts]] | None = None,
+        sources: Sources | None = None,
         runner: Runner = run_command,
         ran: Callable[[str, JobRecord], None] | None = None,
     ) -> None:
@@ -482,19 +468,18 @@ class Scheduler:
         self._commit = commit
         self._secrets = tuple(secrets)
         self._training = training or NightTraining()
-        self._facts = facts
-        self._session_facts = session_facts
+        self._sources = sources
         self._runner = runner
         # Each run's end, a cut one's too, as it is kept (#614): the readiness line keeps them until a
         # line that told them went, as the state keeps a job's last run alone.
         self._ran = ran or (lambda name, record: None)
 
     @property
-    def _night_jobs(self) -> list[Job]:
+    def _night_jobs(self) -> list[Job[Any]]:
         return [j for j in self._jobs if j.session is None]
 
     @property
-    def _session_jobs(self) -> list[Job]:
+    def _session_jobs(self) -> list[Job[Any]]:
         return [j for j in self._jobs if j.session is not None]
 
     async def run(self) -> None:
@@ -539,7 +524,7 @@ class Scheduler:
             await self._clock.sleep_until(start)
             if self._clock.now() >= end or self._cut(job, day):
                 continue  # the session is over, or a restart cut its run today: the next trading day
-            due = self._due(job, day, await self._read_session_facts())
+            due = await self._due(job, day, Reads(self._sources))
             if not due:
                 if due is False:
                     self._waits_no_more(job)
@@ -552,16 +537,7 @@ class Scheduler:
                 continue
             await self._run(job, day)
 
-    async def _read_session_facts(self) -> Facts:
-        if self._session_facts is None:
-            return Facts()
-        try:
-            return await self._session_facts()
-        except Exception:
-            log.exception("could not read what the scheduled session jobs' conditions ask")
-            return Facts()
-
-    def _job_named(self, name: str) -> Job | None:
+    def _job_named(self, name: str) -> Job[Any] | None:
         return next((j for j in self._jobs if j.name == name), None)
 
     async def recover(self) -> None:
@@ -593,32 +569,34 @@ class Scheduler:
         way to; then the quiet night's turn (``_quiet_turn``, #546)."""
         _, end = window(day, self._at)
         await self._post_unposted()
-        facts: Facts | None = None
+        reads = Reads(self._sources)  # each job's facts, read when it is first considered
         queue = self._night_jobs
         gave_way: set[str] = set()  # the jobs that gave way tonight: once a night each
         while queue:
             job = queue.pop(0)
             if self._cut(job, day):
                 continue  # cut by a restart tonight: the next night runs it
-            if facts is None:
-                facts = await self._read_facts()
-            due = self._due(job, day, facts)
+            due = await self._due(job, day, reads)
             if not due:
                 if due is False:
                     self._waits_no_more(job)
                 continue
-            latest = end - job.timeout  # the last start that ends by 05:30
+            latest = end - job.needs  # the last start that ends by 05:30 (a day of one that resumes)
             if not await self._training_done(latest):
                 await self._notify(
                     f"예약 작업 {job.name}({day} 밤): 밤 학습이 {latest:%H:%M}까지 끝나지 않아 "
                     "다음 밤으로 미룹니다."
                 )
             elif self._clock.now() > latest:
+                if job.resumes is not None:
+                    limit = f"하루치({_duration(job.resumes)})도"
+                else:
+                    limit = f"제한 시간({_duration(job.timeout)})이"
                 await self._notify(
-                    f"예약 작업 {job.name}({day} 밤): 지금 시작하면 제한 시간({_duration(job.timeout)})이 "
+                    f"예약 작업 {job.name}({day} 밤): 지금 시작하면 {limit} "
                     f"{JOBS_UNTIL:%H:%M}을 넘어 다음 밤으로 미룹니다."
                 )
-            elif job.name not in gave_way and (ahead := await self._gives_way(job, queue, day, facts)):
+            elif job.name not in gave_way and (ahead := await self._gives_way(job, queue, day, reads)):
                 gave_way.add(job.name)
                 at = queue.index(ahead) + 1
                 while at < len(queue) and queue[at].name in gave_way:
@@ -627,24 +605,25 @@ class Scheduler:
             else:
                 await self._run(job, day)
                 if job.refreshes:
-                    facts = None  # read again for the next job (#599)
+                    reads = Reads(self._sources)  # read again for the next jobs (#599)
         await self._quiet_turn(day)
 
     async def _quiet_turn(self, day: date) -> None:
         """The night of ``day`` once every job had its turn (#546): the jobs with a condition for a
         quiet night (``Job.quiet``) are asked it, in the list's order (those queued in the queue
-        screen's, #599: ``in_queue``), on the facts read again (a run tonight may have changed them);
+        screen's, #599: ``in_queue``, read by ``Job.order``), on the facts read again (a run tonight may
+        have changed them);
         one due runs if its time limit still ends by 05:30. One that would not is only logged: it had
         its turn, and waits for the next night's."""
         asked = [j for j in self._night_jobs if j.quiet is not None and not self._cut(j, day)]
         if not asked:
             return
         _, end = window(day, self._at)
-        facts = await self._read_facts()
-        for job in in_queue(asked, facts.queue):
-            if not self._due(job, day, facts, quiet=True):
+        reads = Reads(self._sources)
+        for job in in_queue(asked, await self._order(asked, reads)):
+            if not await self._due(job, day, reads, quiet=True):
                 continue
-            latest = end - job.timeout
+            latest = end - job.needs
             if self._clock.now() > latest or not await self._training_done(latest):
                 log.info(
                     "scheduled job %s: due on the quiet night of %s, but its time limit (%s) would pass %s",
@@ -656,14 +635,22 @@ class Scheduler:
                 continue
             await self._run(job, day)
 
-    def _cut(self, job: Job, day: date) -> bool:
+    def _cut(self, job: Job[Any], day: date) -> bool:
         """Whether a restart cut ``job``'s run on the night of ``day``."""
         record = self._state.jobs.get(job.name)
         return record is not None and record.outcome == INTERRUPTED and record.day == day
 
-    def _due(self, job: Job, day: date, facts: Facts, *, quiet: bool = False) -> bool | None:
+    async def _due(self, job: Job[Any], day: date, reads: Reads, *, quiet: bool = False) -> bool | None:
         """Whether ``job`` is due on the night of ``day``, asked now (``quiet``: by its condition on a
-        quiet night, ``Job.quiet``); None if its condition failed."""
+        quiet night, ``Job.quiet``) with its facts (``Job.facts``) as ``reads`` has them; None if its
+        condition failed, or its facts could not be read."""
+        facts = None
+        if job.facts is not None:
+            try:
+                facts = await reads(job.facts)
+            except Exception:
+                log.exception("could not read what the condition of the scheduled job %s asks", job.name)
+                return None
         record = self._state.jobs.get(job.name)
         night = Night(
             day, self._calendar.is_trading_day(day), self._commit, record, dict(self._state.jobs), facts
@@ -675,12 +662,14 @@ class Scheduler:
             log.exception("the condition of the scheduled job %s failed", job.name)
             return None
 
-    def _waits_no_more(self, job: Job) -> None:
+    def _waits_no_more(self, job: Job[Any]) -> None:
         """``job`` is not due: the nights it gave way while it waited count no more (#376)."""
         if self._state.gave_way.pop(job.name, None) is not None:
             self._state.save()
 
-    async def _gives_way(self, job: Job, queue: Sequence[Job], day: date, facts: Facts) -> Job | None:
+    async def _gives_way(
+        self, job: Job[Any], queue: Sequence[Job[Any]], day: date, reads: Reads
+    ) -> Job[Any] | None:
         """The job of ``queue`` (the rest of the night's, in turn) that ``job`` gives way to tonight
         (#376): the first it gives way to that is due and could start now, but not once ``job`` ran
         to its time limit. None if there is none (both fit), or if ``job`` gave way on
@@ -690,21 +679,20 @@ class Scheduler:
         _, end = window(day, self._at)
         now = self._clock.now()
         ended = now + job.timeout  # at the latest: its limit, not how long it last took
-        ahead = next(
-            (
-                later
-                for later in queue
-                if job.gives_way_to(later)
-                and now <= end - later.timeout < ended
+        ahead = None
+        for later in queue:
+            if (
+                job.gives_way_to(later)
+                and now <= end - later.needs < ended
                 and not self._cut(later, day)
-                and self._due(later, day, facts)
-            ),
-            None,
-        )
+                and await self._due(later, day, reads)
+            ):
+                ahead = later
+                break
         if ahead is None:
             return None
         nights = [n for n in self._state.gave_way.get(job.name, []) if n != day]
-        last_start = end - ahead.timeout
+        last_start = end - ahead.needs
         if len(nights) >= GIVE_WAY_NIGHTS:
             log.info(
                 "scheduled job %s gave way on %d nights since it last ran (%s): it runs before %s",
@@ -738,14 +726,17 @@ class Scheduler:
         )
         return ahead
 
-    async def _read_facts(self) -> Facts:
-        if self._facts is None:
-            return Facts()
+    async def _order(self, jobs: Sequence[Job[Any]], reads: Reads) -> tuple[str, ...]:
+        """The order the queued of ``jobs`` go by (``Job.order``, #599: the queue screen's), read by the
+        first that has one; none (the list's) without, or when it cannot be read."""
+        order = next((job.order for job in jobs if job.order is not None), None)
+        if order is None:
+            return ()
         try:
-            return await self._facts()
+            return await reads(order)
         except Exception:
-            log.exception("could not read what the scheduled jobs' conditions ask")
-            return Facts()
+            log.exception("could not read the order of the queued scheduled jobs")
+            return ()
 
     async def _training_done(self, latest: datetime) -> bool:
         """Wait while the night's training runs or is due; whether it was over by ``latest``."""
@@ -762,19 +753,25 @@ class Scheduler:
                 timer.cancel()
         return True
 
-    async def _run(self, job: Job, day: date) -> None:
+    async def _run(self, job: Job[Any], day: date) -> None:
         started = self._clock.now()
         # Left RUNNING if the collector stops meanwhile: the next start calls it interrupted.
         self._state.jobs[job.name] = JobRecord(day, RUNNING, started, self._commit)
         self._state.gave_way.pop(job.name, None)  # it runs: the nights it gave way count no more
         self._state.save()
         before = {a.path: _stamp(self._files / a.path) for a in job.attach}
-        log.info("scheduled job %s: krx-quant %s", job.name, " ".join(job.command))
+        args, limit = job.command, job.timeout
+        if job.resumes is not None and job.session is None:
+            # By day across nights (#643): told the night's end, and stopped there at the latest.
+            _, end = window(day, self._at)
+            args = (*job.command, "--until", end.isoformat())
+            limit = max(min(job.timeout, end - started), timedelta(0))
+        log.info("scheduled job %s: krx-quant %s", job.name, " ".join(args))
         began = monotonic()
         try:
             ran = await self._runner(
-                job.command,
-                job.timeout,
+                args,
+                limit,
                 Child.job(job.name, day),
             )
         except Exception as e:
@@ -813,7 +810,7 @@ class Scheduler:
         """Where the jobs' attachments are: the state directory, the state file's."""
         return self._state.path.parent
 
-    def _verdict(self, job: Job, ran: Ran, started: datetime) -> str | None:
+    def _verdict(self, job: Job[Any], ran: Ran, started: datetime) -> str | None:
         """What ``job``'s run ``ran``, started at ``started``, judged (#440): PASSED on exit 0, REFUSED
         on exit 1 with a refusal of its own in ``Job.report``; None for a job without a report, and
         for a run that judged nothing (it raised, ran out of time, was killed, or wrote no report)."""
@@ -826,7 +823,7 @@ class Scheduler:
         return None
 
     def _attachments(
-        self, job: Job, before: Mapping[str, tuple[int, int, int] | None]
+        self, job: Job[Any], before: Mapping[str, tuple[int, int, int] | None]
     ) -> tuple[list[tuple[str, str]], list[str]]:
         """The files of ``job`` this run wrote, each (title, masked text); and a line for each
         it did not (one left by an earlier run would pass for this run's)."""
@@ -848,7 +845,7 @@ class Scheduler:
 
     def _result(
         self,
-        job: Job,
+        job: Job[Any],
         target: Target,
         record: JobRecord,
         ran: Ran,
@@ -916,7 +913,7 @@ class Scheduler:
             await self._notify(line)
 
 
-def _calls(job: Job, ran: Ran) -> bool:
+def _calls(job: Job[Any], ran: Ran) -> bool:
     """Whether ``job``'s run ``ran`` changes its issues' labels (``Job.label_if``); a condition that
     fails says yes: someone looks."""
     if job.label_if is None:
@@ -950,12 +947,12 @@ def _stamp(path: Path) -> tuple[int, int, int] | None:
     return found.st_ino, found.st_mtime_ns, found.st_size
 
 
-def _when(job: Job) -> str:
+def _when(job: Job[Any]) -> str:
     """When a job runs, as its lines say: at night, or in the session (#403)."""
     return "밤" if job.session is None else "장중"
 
 
-def _what(job: Job, record: JobRecord) -> str:
+def _what(job: Job[Any], record: JobRecord) -> str:
     """What came of a run, as its comment and its line say it (#440): 성공 (통과 for a pre-validation
     that passed), 거부 (it judged to the end and refused: not a failure, though it exits 1), and the
     failures, by how they ended: 시간 초과, 신호로 죽음 (the kernel's out-of-memory killer sends
@@ -985,7 +982,7 @@ def _code(exit_code: int | None) -> str:
     return str(exit_code)
 
 
-def _heading(job: Job, record: JobRecord) -> str:
+def _heading(job: Job[Any], record: JobRecord) -> str:
     commit = record.commit if record.commit == "unknown" else record.commit[:12]
     return (
         f"**예약 작업 `{job.name}`** · {record.day} {_when(job)} · {_what(job, record)} · 커밋 `{commit}` · "
@@ -993,7 +990,7 @@ def _heading(job: Job, record: JobRecord) -> str:
     )
 
 
-def _outcome_line(job: Job, record: JobRecord, links: Sequence[str], why_not: str | None) -> str:
+def _outcome_line(job: Job[Any], record: JobRecord, links: Sequence[str], why_not: str | None) -> str:
     if record.timed_out:
         how = f"제한 시간 {_duration(job.timeout)}을 넘어 멈춤"
     elif record.exit_code is None:
@@ -1025,128 +1022,24 @@ def _duration(span: float | timedelta | None) -> str:
     return f"{seconds}초"
 
 
-def recorded_days(data_dir: Path, symbols: Sequence[str], now: datetime) -> int:
-    """The recorded days ``prevalidate`` would replay, as it counts them."""
-    return sum(1 for d in finished_days(data_dir, symbols, now) if is_recorded(data_dir, d, symbols))
-
-
-def prevalidation_reports(
-    state_dir: Path, algorithms: Sequence[Algorithm | KindAlgorithm | DailyAlgorithm], target_version: int
-) -> dict[str, LastReport]:
-    """The latest pre-validation report of each of ``algorithms`` that has one, as it stands for
-    the code and target it runs now."""
-    reports = {a.name: last_report(state_dir, a, target_version) for a in algorithms}
-    return {name: report for name, report in reports.items() if report is not None}
-
-
-def revising_facts(
-    settings: Settings,
-    calendar: MarketCalendar,
-    now: datetime,
-    revising: Sequence[tuple[Algorithm | KindAlgorithm, Revision]],
-) -> dict[str, Revising]:
-    """Each of ``revising`` (``PredictionEngine.revising``) as the revision jobs ask (#454): its first
-    whole trading day, the recorded days from it and its report made for this revision."""
-    if not revising:
-        return {}
-    recorded = [
-        d
-        for d in finished_days(settings.data_dir, settings.symbols, now)
-        if is_recorded(settings.data_dir, d, settings.symbols)
-    ]
-    out = {}
-    for algorithm, revision in revising:
-        since = first_whole_day(calendar, revision.boundary)
-        found = revision_report(settings.state_dir, algorithm, revision.boundary, settings.target_version)
-        out[algorithm.name] = Revising(
-            revision.boundary,
-            since,
-            sum(1 for d in recorded if d >= since),
-            None if found is None else found[0],
-        )
-    return out
-
-
-# The signal review's fixed window (#206, ``research.SIGNAL_REVIEW_FIXED``): the days
-# ``Facts.signal_review_days`` counts, read here by ``read_facts``.
-SIGNAL_REVIEW_FROM = date(2026, 11, 4)
-SIGNAL_REVIEW_FIXED_DAYS = 20
-
-
-async def read_facts(
-    settings: Settings, calendar: MarketCalendar, clock: SessionClock, engine: PredictionEngine
-) -> Facts:
-    """What the jobs' conditions ask tonight (``Facts``). The files are read in worker threads; the
-    engine's database only on the event loop's (its connection belongs to it), and those reads are
-    a few small queries."""
-    recorded = await asyncio.to_thread(recorded_days, settings.data_dir, settings.symbols, clock.now())
-    everyone: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
-        *engine.registered,
-        *engine.kind_registered,
-        *engine.daily_registered,
-    ]
-    reports = await asyncio.to_thread(
-        prevalidation_reports, settings.state_dir, everyone, settings.target_version
-    )
-    daily = sorted({f for a in engine.daily_registered for f in a.features})
-    pending = await asyncio.to_thread(pending_inputs, daily, settings.state_dir, settings.symbols)
-    answers = await asyncio.to_thread(pending_answers, settings, calendar, clock.now())
-    simulating, simulating_daily = engine.to_simulate()  # the engine's database: on this thread
-    revising = engine.revising()  # likewise (#454)
-    return Facts(
-        recorded_days=recorded,
-        waiting=tuple(engine.waiting()),
-        official=len(engine.members()),
-        reports=reports,
-        pending_inputs=tuple(pending),
-        simulating_daily=tuple(simulating_daily),
-        simulating=tuple(simulating),
-        revising=await asyncio.to_thread(revising_facts, settings, calendar, clock.now(), revising),
-        pending_answers=tuple(answers),
-        trader_kis=settings.trader_kis,
-        trader_live_kis=settings.trader_live_kis,
-        hit_rate_nights=await asyncio.to_thread(nights_with_hit_rates, settings),
-        holdout_days=await asyncio.to_thread(days_in_window, settings.state_dir / DB_NAME),
-        neyman_variants=await asyncio.to_thread(neyman_variants_progress, settings, clock.now()),
-        signal_review_days=await asyncio.to_thread(
-            fixed_days, settings.state_dir / DB_NAME, SIGNAL_REVIEW_FROM, SIGNAL_REVIEW_FIXED_DAYS
-        ),
-        smt_holdout_days=await asyncio.to_thread(smt_days_in_holdout, settings, calendar, clock.now()),
-        state_backup=await asyncio.to_thread(last_backup, settings.state_dir),
-        night_book_nights=await asyncio.to_thread(night_book_nights, settings.state_dir),
-        queue=await asyncio.to_thread(queue_order, settings.state_dir, clock.now()),
-    )
-
-
-async def session_facts(settings: Settings) -> Facts:
-    """What the session jobs' conditions ask (#403): the settings, and the mode the trader last
-    started in (#405, one small read of its store), nothing else beside the live engine in the
-    market's hours."""
-    mock = await asyncio.to_thread(trader_in_mock, settings.state_dir)
-    return Facts(trader_kis=settings.trader_kis, trader_mock=mock)
-
-
-def pending_answers(settings: Settings, calendar: MarketCalendar, now: datetime) -> list[str]:
-    """The daily kinds whose answers of the latest days are not all in (``Facts.pending_answers``)."""
-    out = []
-    for kind in DAILY_KINDS:
-        why = (
-            None if kind.pending is None else kind.pending(settings.data_dir, calendar, settings.symbols, now)
-        )
-        if why is not None:
-            log.info("%s: %s", kind.name, why)
-            out.append(kind.name)
-    return out
-
-
-# The conditions a one-off job of any family asks most. No job in ``JOBS`` asks them now: those that
-# did ran, posted their results and left it (#505). They stay for the next one-off job.
-def _first_trading_night(night: Night) -> bool:
+# The conditions a one-off job of any family asks most. No job in ``JOBS`` asks the first two now: those
+# that did ran, posted their results and left it (#505). They stay for the next one-off job. The third
+# is the retry rule of the jobs that run once and again after a failure on new code (#651).
+def _first_trading_night(night: Night[Any]) -> bool:
     """Once, on the night of the first trading day it is asked on: the first after the
     deploy that brings the job."""
     return night.trading_day and not night.ran
 
 
-def _first_night(night: Night) -> bool:
+def _first_night(night: Night[Any]) -> bool:
     """Once, on the first night it is asked on, trading or not."""
     return not night.ran
+
+
+def again_on_new_code(night: Night[Any]) -> bool:
+    """The retry rule of a job that runs once (#651): not run to its end yet (a run a restart cut has
+    not); or failed, and the code running is other now."""
+    record = night.record
+    return not night.ran or (
+        record is not None and record.outcome == FAILED and record.commit != night.commit
+    )

@@ -70,13 +70,13 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS
-from krx_quant.baselines import Forecast, baselines_for
+from krx_quant.baselines import TOUCH_BASELINES, Forecast
 from krx_quant.config import Settings
 from krx_quant.consensus import FINAL, NAMES, NO_WEIGHTS, Weights, pool
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.lifecycle import Standing, Status
 from krx_quant.market_view import HORIZON
-from krx_quant.predictions import days_with_predictions, iso, read_only, scored_rows
+from krx_quant.predictions import days_with_predictions, iso, read_only, scored_rows, within_days
 from krx_quant.pricing import Direction
 from krx_quant.signals import BLOCKED, SENT, Blocked, Judged, Signal, SignalRule, Signals
 from krx_quant.skill import calls_by_day, skill_text
@@ -86,9 +86,11 @@ from krx_quant.stats import (
     Prices,
     Scored,
     entry,
+    interval_text,
     leaderboard,
     mean_interval,
     on_target,
+    points_text,
     scored_by_algorithm,
     split,
     t_quantile,
@@ -202,7 +204,7 @@ def signal_review(
     )
     sections: list[tuple[str, list[str]]] = [("1. 신호 설정과 엔진이 남긴 신호", _settings(settings, data))]
     if data is not None and data.days:
-        baselines = frozenset(b.name for b in baselines_for(settings.target_version))
+        baselines = frozenset(b.name for b in TOUCH_BASELINES)
         algorithms, base = split(data.scored, baselines)
         for name, standing in data.standings.items():  # registered, not scored yet: unranked
             if name not in _KINDS and standing.status is not Status.RETIRED:
@@ -271,20 +273,6 @@ def _official(standings: Mapping[str, Standing]) -> list[str]:
 # Reading
 
 
-def _within(days: Sequence[date], column: str) -> tuple[str, list[str]]:
-    """A condition on ``column`` (a time as stored) being on one of ``days``: the range lets
-    SQLite use its index, the list leaves out the days in between."""
-    marks = ", ".join("?" * len(days))
-    return (
-        f"{column} >= ? AND {column} < ? AND substr({column}, 1, 10) IN ({marks})",
-        [
-            iso(datetime.combine(min(days), time(), KST)),
-            iso(datetime.combine(max(days) + timedelta(days=1), time(), KST)),
-            *(d.isoformat() for d in days),
-        ],
-    )
-
-
 def read(
     conn: sqlite3.Connection, settings: Settings, until: date, days: int, since: date | None = None
 ) -> Review:
@@ -345,7 +333,7 @@ def days_from(conn: sqlite3.Connection, since: date, limit: int, until: date | N
 
 def fixed_days(db: Path, since: date, limit: int) -> int:
     """How many of the first ``limit`` days with predictions from ``since`` are in
-    (``scheduled.Facts.signal_review_days``, #206): 0 without the DB, or when it cannot be read
+    (``scheduled.research.read_signal_review``, #206): 0 without the DB, or when it cannot be read
     (logged; the jobs' other conditions are read all the same)."""
     try:
         with read_only(db) as conn:
@@ -357,7 +345,7 @@ def fixed_days(db: Path, since: date, limit: int) -> int:
 
 def _runs(conn: sqlite3.Connection, days: Sequence[date]) -> list[tuple[str, datetime, dict[str, Any]]]:
     """The engine's starts and the signals it kept, on ``days``, oldest first."""
-    on, params = _within(days, "at")
+    on, params = within_days(days, "at")
     out = []
     for kind, at, detail in conn.execute(
         f"SELECT kind, at, detail FROM runs WHERE kind IN (?, ?, ?) AND {on} ORDER BY at, id",
@@ -374,19 +362,17 @@ def _runs(conn: sqlite3.Connection, days: Sequence[date]) -> list[tuple[str, dat
 def _scored(conn: sqlite3.Connection, days: Sequence[date], target_version: int) -> dict[str, list[Scored]]:
     """Each predictor's scored predictions on ``days`` as the leaderboard reads them (special
     ones left out; an algorithm's by models of the engine's target only), a day at a time."""
-    baselines = {b.name for b in baselines_for(target_version)} | set(NAMES)
+    baselines = {b.name for b in TOUCH_BASELINES} | set(NAMES)
     out: dict[str, list[Scored]] = {}
     for day in days:
-        rows = scored_rows(conn, [day], None, False)
-        if target_version >= 2:
-            rows = on_target(rows, baselines, target_version)
+        rows = on_target(scored_rows(conn, [day], None, False), baselines, target_version)
         for name, records in scored_by_algorithm(rows).items():
             out.setdefault(name, []).extend(records)
     return out
 
 
 def _finals(conn: sqlite3.Connection, days: Sequence[date]) -> dict[Key, _Final]:
-    on, params = _within(days, "p.bar_close")
+    on, params = within_days(days, "p.bar_close")
     pooled: dict[int, list[str]] = {}
     for prediction_id, name in conn.execute(
         f"SELECT q.prediction_id, q.algorithm FROM pooled q JOIN predictions p ON p.id = q.prediction_id"
@@ -419,7 +405,7 @@ def _members(
     out: dict[Key, dict[str, _Member]] = {}
     if not names:
         return out
-    on, params = _within(days, "p.bar_close")
+    on, params = within_days(days, "p.bar_close")
     marks = ", ".join("?" * len(names))
     for r in conn.execute(
         "SELECT p.symbol, p.algorithm, p.bar_close, p.p_up, p.p_flat, p.p_down, p.expected_ticks,"
@@ -431,7 +417,7 @@ def _members(
     ):
         out.setdefault((r["symbol"], r["bar_close"]), {})[r["algorithm"]] = _Member(
             Forecast(r["p_up"], r["p_flat"], r["p_down"], r["expected_ticks"]),
-            target_version < 2 or r["target_version"] == target_version,
+            r["target_version"] == target_version,
             r["mid_close"],
             bool(r["special"]),
         )
@@ -440,7 +426,7 @@ def _members(
 
 def _answers(conn: sqlite3.Connection, days: Sequence[date]) -> dict[Key, _Answer]:
     """The touch answers of the bar closes on ``days`` (what every prediction is scored on)."""
-    on, params = _within(days, "bar_close")
+    on, params = within_days(days, "bar_close")
     return {
         (r["symbol"], r["bar_close"]): _Answer(
             None if r["class"] is None else Direction(r["class"]), r["path"]
@@ -737,22 +723,23 @@ def verdict(back: Comparison, up: Comparison) -> tuple[float, str]:
     rise, fall = up.difference, back.difference
     if rise is not None and rise.low is not None and rise.low > 0 and up.above.a_day >= MIN_A_DAY:
         return 0.75, (
-            f"0.75로 올린다({up.above.name} − {up.below.name}의 하한 {_points(rise.low)} > 0 · "
+            f"0.75로 올린다({up.above.name} − {up.below.name}의 하한 {points_text(rise.low)} > 0 · "
             f"{up.above.name} 하루 {up.above.a_day:.1f}번 ≥ {MIN_A_DAY})"
         )
     if fall is not None and fall.value <= 0:
         return (
             0.6,
-            f"0.60으로 되돌린다({back.above.name} − {back.below.name}의 점추정 {_points(fall.value)} ≤ 0)",
+            f"0.60으로 되돌린다({back.above.name} − {back.below.name}의 점추정"
+            f" {points_text(fall.value)} ≤ 0)",
         )
     if rise is None:
         not_up = NOT_JUDGED
     else:
-        short = [] if rise.low is not None and rise.low > 0 else [f"하한 {_points(rise.low)} ≤ 0"]
+        short = [] if rise.low is not None and rise.low > 0 else [f"하한 {points_text(rise.low)} ≤ 0"]
         if up.above.a_day < MIN_A_DAY:
             short.append(f"하루 {up.above.a_day:.1f}번 < {MIN_A_DAY}")
         not_up = ", ".join(short)
-    not_back = NOT_JUDGED if fall is None else f"점추정 {_points(fall.value)} > 0"
+    not_back = NOT_JUDGED if fall is None else f"점추정 {points_text(fall.value)} > 0"
     return 0.7, f"0.70 유지(0.75 갈래: {not_up} · 0.60 갈래: {not_back})"
 
 
@@ -764,19 +751,6 @@ def _probability(p: float) -> str:
     0.60, a row of its own)."""
     text = f"{p:.2f}"
     return text if float(text) == p else repr(p)
-
-
-def _ratio(i: Interval | None) -> str:
-    if i is None:
-        return "—"
-    if i.low is None or i.high is None:
-        return f"{i.value:.1%}"
-    return f"{i.value:.1%} [{i.low * 100:.1f}–{i.high * 100:.1f}%]"
-
-
-def _points(value: float | None) -> str:
-    """A difference of ratios, in percentage points."""
-    return "—" if value is None else f"{value * 100:+.1f}%p"
 
 
 def _rule(rule: Mapping[str, Any] | SignalRule | None) -> str:
@@ -822,7 +796,9 @@ def _by_class(records: Sequence[Scored]) -> str:
     parts = []
     for d in Direction:
         called = [r.correct for r in records if r.predicted is d]
-        parts.append(f"{CALLED[d]} 예측 {len(called):,} 적중 {_ratio(wilson(sum(called), len(called)))}")
+        parts.append(
+            f"{CALLED[d]} 예측 {len(called):,} 적중 {interval_text(wilson(sum(called), len(called)))}"
+        )
     return " · ".join(parts)
 
 
@@ -835,11 +811,11 @@ def _entry_line(head: str, e: Entry, records: Sequence[Scored]) -> str:
     s = e.summary
     parts = [f"{head} 채점 {s.n:,}"]
     if s.n:
-        parts += [f"정답률 {_ratio(s.accuracy)}", _by_class(records), _skill(records)]
+        parts += [f"정답률 {interval_text(s.accuracy)}", _by_class(records), _skill(records)]
         if e.lifts:
             parts.append(
-                f"가장 약한 lift {_points(e.weakest_lift)} (짝 하한 {_points(e.lift_low)} · "
-                f"거래일 하한 {_points(e.day_low)})"
+                f"가장 약한 lift {points_text(e.weakest_lift)} (짝 하한 {points_text(e.lift_low)} · "
+                f"거래일 하한 {points_text(e.day_low)})"
             )
         per = s.pnl.per_trade
         parts.append(f"닿음 손익 {'—' if per is None else f'{per.value:+.2f}'}틱/번 ({s.pnl.trades:,}번)")
@@ -976,11 +952,11 @@ def _cell(
             f"막힘 {len(judged) - len(sent):,}",
             *(
                 f"{CALLED[d]} {sum(1 for o in sent if o.signal.direction is d):,}번 적중 "
-                f"{_ratio(wilson(sum(hits[d]), len(hits[d])))}"
+                f"{interval_text(wilson(sum(hits[d]), len(hits[d])))}"
                 + (_by_days(up_by_day) if d is Direction.UP else "")
                 for d in (Direction.UP, Direction.DOWN)
             ),
-            f"합쳐 {_ratio(wilson(sum(both), len(both)))}",
+            f"합쳐 {interval_text(wilson(sum(both), len(both)))}",
             f"정답 없음 {unlabeled:,}",
             f"닿음 손익 {'—' if mean is None else f'{mean.value:+.2f}'}틱/번",
         ]
@@ -1027,7 +1003,7 @@ def _band_lines(comparisons: Sequence[Comparison]) -> list[str]:
             + (
                 NOT_JUDGED
                 if d is None
-                else f"{_points(d.value)} [{_points(d.low)}, {_points(d.high)}] {d.n}일"
+                else f"{points_text(d.value)} [{points_text(d.low)}, {points_text(d.high)}] {d.n}일"
             ),
         ]
     return lines

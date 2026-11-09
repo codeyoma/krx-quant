@@ -639,7 +639,6 @@ async def test_a_recorded_day_trains_on_the_range_answers_the_engine_scores(tmp_
         ("velocity",),
         FEE,
         Leaders(),
-        target_version=TARGET_VERSION,
         kinds=(RANGE,),
     )
 

@@ -72,14 +72,16 @@ from krx_quant.scheduled import (
     PREVALIDATION_ISSUE,
     QUEUE_SCREEN,
     STATE_FILE,
-    Facts,
     JobRecord,
     JobState,
     Night,
+    PrevalidationFacts,
     Ran,
     Scheduler,
     in_queue,
     prevalidation_job_name,
+    read_prevalidation_facts,
+    read_queue,
     screened_order,
 )
 from krx_quant.scheduled.prevalidations import prevalidation_tonight, prevalidations_quiet
@@ -93,7 +95,7 @@ from tests.prevalidation_doubles import settings as recorded_settings
 from tests.replay_doubles import busy_morning, record
 from tests.replay_events import at as replay_at
 from tests.replay_events import run
-from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, Runs, Told
+from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, Runs, Told, faking
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 DAY = date(2026, 9, 14)
@@ -364,21 +366,6 @@ def test_a_barrier_candidate_s_folds_learn_and_score_its_kind_s_answers(tmp_path
     answered = sum(1 for d in days for x in trainer.kind_samples_on(d) if x.label is not None)
     directions = sum(1 for d in days for x in trainer.samples_on(d) if x.outcome is not None)
     assert result.calls == answered and answered != directions, "its answers, not the touch labels"
-
-
-def test_on_the_four_minute_move_a_direction_candidate_s_score_is_unknown(tmp_path: Path) -> None:
-    """``KRX_TARGET_VERSION=1``: its persistence reads mid-points the samples lack; given none it would
-    be a second always flat, so the screen leaves the score unknown rather than wrong."""
-    s = replace(quiet_settings(tmp_path), target_version=1)
-
-    result = screen(s, "alpha", algorithms=[ALPHA], kind_algorithms=[], kinds=[], now=AFTER)
-
-    assert (result.score, result.calls, result.lifts) == (None, 0, {})
-    assert result.why == queue_screen.TOUCH_ONLY
-    assert Screened.from_dict(result.as_dict()) == result
-
-
-# The order
 
 
 def test_a_score_s_seat_and_an_arrival_s_seat_by_turns_the_bound_first() -> None:
@@ -713,8 +700,8 @@ def test_the_command_says_when_no_day_was_recorded(
 
 def night(
     *, queue: Sequence[str] = (), recorded: int = MIN_DAYS, runs: dict[str, JobRecord] | None = None
-) -> Night:
-    facts = Facts(recorded_days=recorded, waiting=ORDER, queue=tuple(queue))
+) -> Night[PrevalidationFacts]:
+    facts = PrevalidationFacts(recorded_days=recorded, waiting=ORDER, queue=tuple(queue))
     records = {prevalidation_job_name(n): r for n, r in (runs or {}).items()}
     return Night(FRIDAY, True, COMMIT, None, records, facts)
 
@@ -783,12 +770,15 @@ async def test_the_night_s_pre_validations_go_by_the_order_its_screen_set_that_n
     clock = FakeClock(datetime.combine(FRIDAY, time(22, 30), KST))
     runs = Screens(clock, queue)
 
-    async def facts() -> Facts:
-        return Facts(recorded_days=MIN_DAYS, waiting=ORDER, queue=tuple(queue))
+    def facts() -> PrevalidationFacts:  # read again after the screen, and for the quiet turn
+        return PrevalidationFacts(recorded_days=MIN_DAYS, waiting=ORDER, queue=tuple(queue))
+
+    def order() -> tuple[str, ...]:  # the quiet turn's order (``Job.order``)
+        return tuple(queue)
 
     async with aiohttp.ClientSession() as session:
         scheduler = Scheduler(
-            [QUEUE_SCREEN, *FIRST_ONES],
+            faking([QUEUE_SCREEN, *FIRST_ONES], {read_prevalidation_facts: facts, read_queue: order}),
             AT,
             CALENDAR,
             JobState.load(tmp_path / STATE_FILE),
@@ -796,7 +786,6 @@ async def test_the_night_s_pre_validations_go_by_the_order_its_screen_set_that_n
             Told(),
             clock,
             commit=COMMIT,
-            facts=facts,
             runner=runs,
         )
         await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
