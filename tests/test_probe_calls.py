@@ -13,7 +13,8 @@ import pytest
 
 from krx_quant import probe_calls
 from krx_quant.fake_kis import FakeKis
-from krx_quant.probe_calls import Calls
+from krx_quant.kis import KisError
+from krx_quant.probe_calls import Calls, kis_error
 from krx_quant.supply_probe import MAX_FAILED_IN_A_ROW, PACE, probe_supply
 from tests.collector_doubles import settings_for
 
@@ -90,3 +91,13 @@ async def test_a_probe_s_calls_go_its_pace_apart_and_stop_at_its_limit_of_failur
     assert calls == failed == MAX_FAILED_IN_A_ROW == len(kis.rest_requests)
     assert clock.waits == [PACE] * (MAX_FAILED_IN_A_ROW - 1)
     assert f"KIS: {calls} calls, {failed} failed" in lines
+
+
+def test_a_refusal_is_reported_by_its_code_and_message_only() -> None:
+    error = KisError(
+        "FHPST04830000 {'FID_INPUT_ISCD': '005930'}: HTTP 500 "
+        "{'rt_cd': '1', 'msg_cd': 'EGW00201', 'msg1': '초당 거래건수를 초과하였습니다.', "
+        "'output': [{'x': '7314159'}]}"
+    )
+    assert kis_error(error) == "error HTTP 500 EGW00201 초당 거래건수를 초과하였습니다."
+    assert kis_error(KisError("something else")) == "error (no code)"

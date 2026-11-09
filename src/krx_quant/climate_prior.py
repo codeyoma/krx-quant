@@ -56,7 +56,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -100,7 +99,7 @@ from krx_quant.market_calendar import calendar_store
 from krx_quant.prevalidation import PREVALIDATION_DAYS, _WalkForward
 from krx_quant.pricing import Direction
 from krx_quant.sample_store import night_reads
-from krx_quant.stats import Interval, Lift, Scored, day_lift, lift, mean_interval, wilson
+from krx_quant.stats import ArmStats, Interval, Lift, Scored, arm_stats, day_lift, lift
 from krx_quant.training import finished_days, is_recorded
 
 log = logging.getLogger(__name__)
@@ -172,61 +171,6 @@ class Fold:
             "scored": self.scored,
             "no_book": self.no_book,
         }
-
-
-@dataclass(frozen=True)
-class ArmStats:
-    """An arm's statistics on the bar closes every arm predicted."""
-
-    n: int
-    accuracy: Interval | None
-    coverage: Interval | None  # the up and down calls' share
-    directional_precision: Interval | None  # of the up and down calls, those that happened
-    brier: Interval | None
-    recall: dict[Direction, Interval | None]  # of each class that happened, the share called
-    precision: dict[Direction, Interval | None]  # of each class called, the share that happened
-    predicted: dict[Direction, int]
-    happened: dict[Direction, int]
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "n": self.n,
-            "accuracy": _interval(self.accuracy),
-            "coverage": _interval(self.coverage),
-            "directional_precision": _interval(self.directional_precision),
-            "brier": _interval(self.brier),
-            "by_class": {
-                d.value: {
-                    "recall": _interval(self.recall[d]),
-                    "precision": _interval(self.precision[d]),
-                    "predicted": self.predicted[d],
-                    "happened": self.happened[d],
-                }
-                for d in CLASSES
-            },
-        }
-
-
-def arm_stats(records: Sequence[Scored]) -> ArmStats:
-    """``records``' hit rate, coverage, Brier score and each class's recall and precision, with
-    95% Wilson intervals (normal for the Brier score's mean), as the leaderboard's."""
-    predicted = Counter(r.predicted for r in records)
-    happened = Counter(r.outcome for r in records)
-    hits = Counter(r.outcome for r in records if r.correct)
-    directional = [r for r in records if r.predicted is not Direction.FLAT]
-    return ArmStats(
-        n=len(records),
-        accuracy=wilson(sum(hits.values()), len(records)),
-        coverage=wilson(len(directional), len(records)),
-        directional_precision=wilson(sum(r.correct for r in directional), len(directional)),
-        brier=mean_interval(
-            [sum((r.probability(d) - (d is r.outcome)) ** 2 for d in CLASSES) for r in records]
-        ),
-        recall={d: wilson(hits[d], happened[d]) for d in CLASSES},
-        precision={d: wilson(hits[d], predicted[d]) for d in CLASSES},
-        predicted={d: predicted[d] for d in CLASSES},
-        happened={d: happened[d] for d in CLASSES},
-    )
 
 
 @dataclass(frozen=True)

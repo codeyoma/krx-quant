@@ -33,7 +33,7 @@ The lift is turing's accuracy gained over ``baseline-climate``, paired by symbol
 Nothing is judged before the window is full. A scheduled job runs it once, on the first night it
 is (``scheduled.ERROR_HOLDOUT``, ``days_in_window``), and posts it on #447. It reads the engine DB
 without writing to it (``predictions.read_only``): turing's and the climate baseline's scored
-predictions a day at a time (``error_breakdown.read_scored``) and σ̂₄ (``read_sigmas``). No price,
+predictions a day at a time (``read_scored``) and σ̂₄ (``read_sigmas``). No price,
 market value or σ̂₄ cut is printed.
 
 #449's regime gate (``climate_gate.py``) reuses the window, the cuts and the verdict:
@@ -42,6 +42,7 @@ market value or σ̂₄ cut is printed.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from collections.abc import Callable, Sequence
@@ -51,13 +52,23 @@ from pathlib import Path
 from typing import Literal
 
 from krx_quant.api import tercile, volatility_cuts
+from krx_quant.barriers import ANSWER_VERSION as BARRIER_VERSION
+from krx_quant.barriers import NAME as BARRIER
+from krx_quant.baselines import baselines_for
 from krx_quant.climate import CLIMATE
-from krx_quant.consensus import slot
-from krx_quant.error_breakdown import Key, read_scored, read_sigmas
+from krx_quant.consensus import NAMES, slot
 from krx_quant.feeds.base import KST
-from krx_quant.predictions import SCORED, TOUCH_JOIN, iso, read_only
-from krx_quant.signal_review import _points
-from krx_quant.stats import Lift, Scored, day_lift, gains_by_day, lift
+from krx_quant.predictions import SCORED, TOUCH_JOIN, iso, read_only, scored_rows, within_days
+from krx_quant.stats import (
+    Lift,
+    Scored,
+    day_lift,
+    gains_by_day,
+    lift,
+    on_target,
+    points_text,
+    scored_by_algorithm,
+)
 from krx_quant.touch import TARGET_VERSION
 
 log = logging.getLogger(__name__)
@@ -73,6 +84,7 @@ LEVEL = 0.9875  # each interval's: Bonferroni over the four hypotheses, 1 − 0.
 
 STANDS, FAILS, TOO_FEW = "섰다", "서지 않음", "표본 부족"
 Sign = Literal[1, -1]  # the lift a hypothesis claims: above 0, or below
+Key = tuple[str, str]  # (symbol, bar close as stored)
 
 
 # The window
@@ -107,7 +119,7 @@ def window_days(
 
 
 def _scored_on(conn: sqlite3.Connection, algorithm: str, day: date, target: int) -> bool:
-    """Whether ``algorithm`` has a prediction on ``day`` that ``error_breakdown.read_scored`` reads:
+    """Whether ``algorithm`` has a prediction on ``day`` that ``read_scored`` reads:
     scored on its touch answer (``predictions.SCORED``), not special, by a model of ``target``."""
     row = conn.execute(
         f"SELECT 1 FROM predictions p JOIN outcomes o ON o.prediction_id = p.id {TOUCH_JOIN}"
@@ -132,6 +144,51 @@ def days_in_window(db: Path) -> int:
     except sqlite3.Error:
         log.exception("could not count the holdout window's days (#447) in the engine DB")
         return 0
+
+
+# Reading (``error_breakdown`` reads the same, #431)
+
+
+def read_scored(
+    conn: sqlite3.Connection, days: Sequence[date], target_version: int, algorithm: str
+) -> dict[str, list[Scored]]:
+    """``algorithm``'s and the climate baseline's scored predictions on ``days`` as the leaderboard
+    reads them (special ones left out; an algorithm's by models of ``target_version`` only: the
+    engine's in ``error_breakdown``, the pre-registered one in the holdout), a day at a time, as
+    ``signal_review`` reads them."""
+    baselines = {b.name for b in baselines_for(target_version)} | set(NAMES)
+    wanted = {algorithm, CLIMATE}
+    out: dict[str, list[Scored]] = {}
+    for day in days:
+        rows = [r for r in scored_rows(conn, [day], None, False) if r["algorithm"] in wanted]
+        if target_version >= 2:
+            rows = on_target(rows, baselines, target_version)
+        for name, records in scored_by_algorithm(rows).items():
+            out.setdefault(name, []).extend(records)
+    return out
+
+
+def read_sigmas(conn: sqlite3.Connection, days: Sequence[date]) -> dict[Key, float]:
+    """σ̂₄ at each bar close of ``days`` the barrier answered with one, in basis points of its
+    mid-point (σ̂₄ ticks × the tick ÷ the mid-point): in basis points, not ticks, as
+    ``PredictionStore.barrier_widths``, because a tick changes size at band edges."""
+    on, params = within_days(days, "bar_close")
+    out: dict[Key, float] = {}
+    for symbol, bar_close, path in conn.execute(
+        f"SELECT symbol, bar_close, path FROM kind_answers WHERE kind = ? AND answer_version = ? AND {on}",
+        [BARRIER, BARRIER_VERSION, *params],
+    ):
+        try:
+            found = json.loads(path or "{}")
+        except ValueError:
+            continue
+        if not isinstance(found, dict):
+            continue
+        sigma, tick, anchor = found.get("sigma"), found.get("tick"), found.get("anchor")
+        if sigma is None or not tick or not anchor or anchor < 0:
+            continue
+        out[(symbol, bar_close)] = float(sigma) * float(tick) * 1e4 / float(anchor)
+    return out
 
 
 def discovery_days() -> list[date]:
@@ -312,7 +369,7 @@ def hypothesis_line(h: Hypothesis, j: Judged) -> str:
         return f"{head} · {TOO_FEW}"
     return (
         f"{head} · 정답률 {_ratio(j.accuracy)} · 기후 정답률(짝) {_ratio(j.baseline)}"
-        f" · lift {_points(j.lift.value)} · 짝 구간 {_span(j.lift)} · 거래일 구간 {_span(j.by_day)}"
+        f" · lift {points_text(j.lift.value)} · 짝 구간 {_span(j.lift)} · 거래일 구간 {_span(j.by_day)}"
         f" · {j.verdict}"
     )
 
@@ -324,4 +381,4 @@ def _ratio(value: float | None) -> str:
 def _span(i: Lift | None) -> str:
     if i is None or i.low is None or i.high is None:
         return "—"
-    return f"[{_points(i.low)}, {_points(i.high)}]"
+    return f"[{points_text(i.low)}, {points_text(i.high)}]"

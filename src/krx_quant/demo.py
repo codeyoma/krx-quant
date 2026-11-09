@@ -97,7 +97,8 @@ from krx_quant.backfill import (
     bars_key,
     stock_bars_path,
 )
-from krx_quant.base_rates import write_base_rates
+from krx_quant.base_rates import PERIODS as BASE_RATE_PERIODS
+from krx_quant.base_rates import DayPrices, write_base_rates
 from krx_quant.candles import EX_CODE, PERIODS, period_start, read_candles, write_candles, write_krx_days
 from krx_quant.clock import FakeClock
 from krx_quant.closing_flow import (
@@ -156,8 +157,6 @@ from krx_quant.products import PRODUCTS
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
 from krx_quant.replay import replay, replay_into
-from krx_quant.structure_check import PERIODS as BASE_RATE_PERIODS
-from krx_quant.structure_check import DayPrices
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
@@ -482,7 +481,7 @@ def write_demo_supply(state_dir: Path) -> None:
 
 
 # Each demo symbol's made-up flat share and median k in the four base-rate periods (#307), in
-# the order of ``structure_check.PERIODS``, and the trading days with bars in each.
+# the order of ``base_rates.PERIODS``, and the trading days with bars in each.
 _BASE_RATES = {
     "005930": ((0.893, 0.742, 0.615, 0.503), (2, 2, 2, 2)),
     "000660": ((0.709, 0.481, 0.312, 0.172), (5, 5, 1, 1)),

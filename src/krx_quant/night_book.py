@@ -100,7 +100,7 @@ STATE = "night-book-605.json"
 RECEIVED = FEED.schema.field(RAW_SCHEMA.field("received_at").name).name
 
 # The names that read the book, beside its TR ID: its feed, its schema and columns, and the night feeds
-# together (``health.NIGHT_FEEDS``, ``night_probe.FEEDS`` imported under that name).
+# together (``health.NIGHT_FEEDS``, ``recording_quality.NIGHT_FEEDS``).
 BOOK_NAMES = frozenset({"NIGHT_FUTURES_BOOK", "NIGHT_BOOK_SCHEMA", "NIGHT_BOOK_COLUMNS", "NIGHT_FEEDS"})
 # The modules that name the book to record, check or report it, not to predict with it (paths under the
 # package), and what they do with it.
@@ -553,7 +553,8 @@ def verdict_report(
         then = (
             f"할 일(에이전트, PR 하나): 수집기의 구독 계획(collector.subscription_plan)에서"
             f" {FEED.tr_id}를 빼고, 기록 품질 리포트(#570)가 기대하는 야간 피드(recording_quality 5절이 읽는"
-            ' night_probe.FEEDS)와 health.NIGHT_FEEDS, 문서(kis-feeds.md의 구독 표와 "야간선물 (#264)",'
+            " recording_quality.NIGHT_FEEDS)와 health.NIGHT_FEEDS,"
+            ' 문서(kis-feeds.md의 구독 표와 "야간선물 (#264)",'
             f" events.md, operations.md)를 맞춘다. 야간 체결({NIGHT_FUTURES.tr_id})과 지난 기록은 그대로"
             " 둔다. 그 PR이 이 이슈를 닫는다."
         )

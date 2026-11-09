@@ -41,7 +41,7 @@ from krx_quant.feeds import (
 )
 from krx_quant.feeds.base import KST
 from krx_quant.footprint import PEAK_START, PEAK_STEP, Meter
-from krx_quant.health import FeedHealth, Unread, read_batches
+from krx_quant.health import FeedHealth, Gap, Unread, read_batches
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.process_log import Ran
@@ -863,3 +863,40 @@ def test_the_job_labels_the_issue_only_past_a_threshold_or_on_failure() -> None:
     assert recording_quality_calls(Ran(1, quiet, ""))
     assert recording_quality_calls(Ran(None, "", ""))
     assert recording_quality_calls(Ran(-9, quiet, "", timed_out=True))
+
+
+def test_a_disconnect_s_gaps_are_one_group_and_one_line() -> None:
+    day = date(2026, 11, 5)
+    at = datetime(2026, 11, 5, 9, 6, 38, tzinfo=KST)
+    reason = "disconnected: websocket closed by KIS (code 1006)"
+    gaps = [
+        Gap("H0UNASP0", "005930", at, at + timedelta(seconds=2.1), reason),
+        Gap("H0UNASP0", "000660", at, at + timedelta(seconds=2.9), reason),
+        Gap("H0UNCNT0", "005930", at, None, reason),
+        Gap("H0UNCNT0", "005930", at, at + timedelta(minutes=1), "stale: no data 180s"),
+    ]
+    groups = quality.groups_of(gaps)
+    assert [(g.reason, len(g.gaps), g.disconnect) for g in groups] == [
+        (reason, 3, True),
+        (gaps[3].reason, 1, False),
+    ]
+    assert quality.group_line(groups[0], day) == (
+        f"09:06:38 {reason} · 피드 2개, 키 3개 · 길이 2.1초–2.9초, 끝 없음(수집기가 멈춤) 1"
+        " · H0UNASP0: 000660 005930 / H0UNCNT0: 005930"
+    )
+    assert quality.group_line(groups[0], date(2026, 11, 4)).startswith("11-05 09:06:38 ")
+    assert [quality.length_text(timedelta(seconds=s)) for s in (59.94, 62, 3_725)] == [
+        "59.9초",
+        "1분 2초",
+        "1시간 2분",
+    ]
+
+
+def test_the_night_after_a_day_runs_to_six_and_its_late_minutes() -> None:
+    day = date(2026, 11, 5)
+    start, end = quality.night_window(day)
+    assert (start, end) == (datetime(2026, 11, 5, 18, tzinfo=KST), datetime(2026, 11, 6, 6, 10, tzinfo=KST))
+    assert quality.evening(datetime(2026, 11, 6, 5, 59, tzinfo=KST)) == day, (
+        "before 06:00, the evening before"
+    )
+    assert quality.evening(datetime(2026, 11, 6, 6, 0, tzinfo=KST)) == date(2026, 11, 6)

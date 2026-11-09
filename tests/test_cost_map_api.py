@@ -17,7 +17,7 @@ import pytest
 from aiohttp.test_utils import TestClient
 
 from krx_quant.barriers import PERSIST
-from krx_quant.base_rates import NOT_COMPUTED, keep_base_rates
+from krx_quant.base_rates import NOT_COMPUTED, PERIODS, keep_base_rates
 from krx_quant.cost_map import NOT_SYMMETRIC
 from krx_quant.kinds import Answer
 from krx_quant.lifecycle import Status
@@ -26,7 +26,7 @@ from krx_quant.open_to_close import ANSWER_VERSION as OTC_VERSION
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import NewKindPrediction, PredictionStore
 from krx_quant.pricing import Direction
-from krx_quant.structure_check import PERIODS, structure_check
+from krx_quant.structure_check import structure_check
 from krx_quant.touch import TouchResult
 from tests.api_doubles import (
     OUTCOMES,
@@ -41,7 +41,7 @@ from tests.api_doubles import (
 )
 from tests.api_schema import check
 from tests.replay_events import DAY, at
-from tests.test_structure_check import SYMBOL, bar, flat_bar, write_bars
+from tests.test_base_rates import SYMBOL, bar, flat_bar, write_bars
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 FEE = 0.00015
@@ -356,7 +356,7 @@ async def test_the_daily_kind_s_row_is_in_basis_points_without_a_breakeven(tmp_p
 
 
 async def test_the_period_base_rates_are_structure_check_s(tmp_path: Path) -> None:
-    """The bar rule's labels of a day after the listing (``test_structure_check``'s): 376
+    """The bar rule's labels of a day after the listing (``test_base_rates``'s): 376
     windows, four of them up; the history task keeps them, the cost map serves them."""
     day = date(2026, 6, 8)
     price = 81_200

@@ -820,7 +820,7 @@ turing 오류 분석 2026-10-12 – 2026-10-13 (2일, 예측이 있는 날)
 - **판정.** 거래일마다 낸 lift(그날 짝들의 평균 정답률 차이, 날마다 같은 무게)의 Student t 구간으로만 한다(`stats.day_lift`). 가설이 넷이라 본페로니로 각 98.75% 구간이다(1 − 0.05 ÷ 4). 양의 가설은 하한 > 0일 때만, 음의 가설은 상한 < 0일 때만 `섰다`이고, 아니면 `서지 않음`이다. 반대 방향으로 뚜렷해도 `서지 않음`이다.
 - **최소 표본.** 칸의 채점이 200개 미만이거나 짝이 있는 거래일이 10일보다 적으면 `표본 부족`이고 판정하지 않는다. `KRX_MIN_SAMPLE`을 따르지 않는다(고정이다).
 - **짝 구간.** 같은 98.75%의 정규 구간이다. 예측을 서로 독립으로 센다(4분 창이 다음 세 봉 마감과 겹치고 종목이 함께 움직여 실제보다 좁다). 참고용이고 판정에 쓰지 않는다.
-- `error-breakdown`처럼 엔진 DB를 쓰지 않고 읽는다. 채점된 예측은 창의 날마다 읽고 turing과 `baseline-climate`의 것만 남긴다(`error_breakdown.read_scored`). 가격, 시세 값, σ̂₄ 경계 값은 싣지 않는다. 그래서 공개 이슈에 올려도 된다.
+- `error-breakdown`처럼 엔진 DB를 쓰지 않고 읽는다. 채점된 예측은 창의 날마다 읽고 turing과 `baseline-climate`의 것만 남긴다(`holdout.read_scored`, #650 전에는 `error_breakdown.read_scored`였다. 읽는 것은 그대로다). 가격, 시세 값, σ̂₄ 경계 값은 싣지 않는다. 그래서 공개 이슈에 올려도 된다.
 
 ```bash
 docker compose run --rm engine error-holdout
@@ -1028,7 +1028,7 @@ KOSPI200 야간선물 호가(`H0MFASP0`)는 밤마다 약 78만 레코드다(202
 
 - **잰다.** 2026-11-06 저녁의 밤부터 완전한 밤 7개를 밤마다 끝까지 잰다. raw 층과 parsed 층(`events`)의 바이트를 따로 재고, 둘 다 합친 파일(`data.parquet`, 서버와 S3에 남는 것)의 바이트다.
 - **판정한다.** 2026-11-20 밤, 완전한 밤 7개의 raw+parsed 합의 중앙값이 100 MiB(밤당, 30일이면 약 3 GiB)를 넘고 실전 모델 중에 이 호가를 읽는 것이 없으면 `H0MFASP0` 구독을 멈춘다. 그렇지 않으면 계속 기록한다. 어느 경우든 야간 체결(`H0MFCNT0`)과 지난 기록은 그대로 둔다.
-- **멈추는 변경은 따로 PR로 한다.** 판정을 본 에이전트가 한다. 그 PR은 #570 리포트가 기대하는 야간 피드(`recording_quality` 5절이 읽는 `night_probe.FEEDS`)와 `health.NIGHT_FEEDS`, 문서(kis-feeds.md의 구독 표와 "야간선물 (#264)", events.md, 이 문서)도 맞춘다. 이 명령과 예약 작업은 재고 판정만 한다.
+- **멈추는 변경은 따로 PR로 한다.** 판정을 본 에이전트가 한다. 그 PR은 #570 리포트가 기대하는 야간 피드(`recording_quality` 5절이 읽는 `recording_quality.NIGHT_FEEDS`, #650 전에는 `night_probe.FEEDS`)와 `health.NIGHT_FEEDS`, 문서(kis-feeds.md의 구독 표와 "야간선물 (#264)", events.md, 이 문서)도 맞춘다. 이 명령과 예약 작업은 재고 판정만 한다.
 
 ```bash
 docker compose run --rm engine night-book-bytes            # 잰 밤들

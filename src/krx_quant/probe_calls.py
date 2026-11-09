@@ -10,13 +10,17 @@ its time) and the words its report stops with stay with each probe.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import aiohttp
+
+from krx_quant.kis import KisError
 
 # A call that did not get through, or whose answer could not be read: aiohttp's errors, OSError
 # (timeouts too: ``TimeoutError`` is one) and ValueError (a body that is not JSON). A probe catches
 # its source's own refusal (``KisError``, ``TossError``) before these.
 CALL_ERRORS = (aiohttp.ClientError, OSError, ValueError)
+REQUEST_TIMEOUT = 15.0  # seconds a KIS or Toss call of a probe may take
 
 
 class Calls:
@@ -52,3 +56,19 @@ class Calls:
         else:
             self.failed += 1
             self.failed_in_a_row += 1
+
+
+_HTTP = re.compile(r"HTTP (\d+)")
+_CODE = re.compile(r"'(?:msg_cd|error_code)': '([^']*)'")
+_MESSAGE = re.compile(r"'(?:msg1|error_description)': ['\"]([^'\"]*)")
+
+
+def kis_error(error: KisError) -> str:
+    """KIS's refusal, by its status, code and message only (the rest of the body is left out)."""
+    text = str(error)
+    parts = [
+        f"HTTP {m.group(1)}" if (m := _HTTP.search(text)) else "",
+        m.group(1) if (m := _CODE.search(text)) else "",
+        m.group(1).strip() if (m := _MESSAGE.search(text)) else "",
+    ]
+    return "error " + (" ".join(p for p in parts if p) or "(no code)")
