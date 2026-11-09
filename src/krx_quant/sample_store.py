@@ -27,20 +27,21 @@ The key (``day_key``) is a digest of everything the samples are made of:
   after it (``days_to_expiry``, the only thing they ask of later days), and the first day it
   knows when that is within reach;
 - what the samples mean (``semantics``, #645): ``SAMPLE_SEMANTICS``, a version raised by hand when
-  a change to the code can change a sample on some day; ``GOLDEN``, the digest of the samples made
-  from the fixed days of ``tests/test_sample_store.py`` (every feature and kind the night reads, a
-  recorded day with the touch target and with the four-minute move, and a backfilled one); and the
-  Python, NumPy and PyArrow versions.
+  a change to the code can change a sample on some day; ``GOLDEN``, the digest of the golden samples
+  (``tests/golden/sample_store_days.json.gz``: what the fixed days of ``tests/test_sample_store.py``
+  make, with every feature and kind the night reads, a recorded day with the touch target and with
+  the four-minute move, and a backfilled one); and the Python, NumPy and PyArrow versions.
 
 Until #645 the key held the digest of the code itself (``code_digest``), so any change to it but a
 comment made every day again on the next night, hours of it, though most changed no sample. The code
 is not in the key now, and two tests stand in for it: the golden one makes the fixed days and fails
-when their samples' digest is not ``GOLDEN`` (any feature value, label, kind answer, touch term or
-their order: ``tests/test_sample_store.py`` changes each and sees it fail), and the review gate fails
-when ``code_digest()`` is not ``REVIEWED_CODE``. A change that moves the golden digest changes
-``GOLDEN`` and so the key by itself; one the fixed days cannot show (a branch they never take) is the
-author's to judge when the gate stops it: ``REVIEWED_CODE`` alone when it changes no sample on any
-day, with ``SAMPLE_SEMANTICS`` raised when it can, or when that is not certain.
+when their samples are not the golden ones (any label, kind answer, string, count or order exactly; a
+number beyond the CPU's last bits: ``tests/test_sample_store.py`` changes each and sees it fail), and
+the review gate fails when ``code_digest()`` is not ``REVIEWED_CODE``. A change that changes the
+golden samples rewrites their file and ``GOLDEN``, and so the key, by itself; one the fixed days
+cannot show (a branch they never take) is the author's to judge when the gate stops it:
+``REVIEWED_CODE`` alone when it changes no sample on any day, with ``SAMPLE_SEMANTICS`` raised when
+it can, or when that is not certain.
 
 A day is read from the store only when the stored key is the one asked for, whole. A file cut
 short (it is written aside and renamed, so only a disk's crash leaves one), unreadable or of
@@ -117,11 +118,9 @@ log = logging.getLogger(__name__)
 STORE_DIR = "training-samples"  # under the state directory
 FORMAT = 1  # the file's layout; another is a miss
 # What the samples mean (#645, module doc). Raise SAMPLE_SEMANTICS when a change can change a sample
-# on any day, whatever the golden test says; GOLDEN is ``golden_digest`` of the test's fixed days as
-# Linux makes them (the server's and CI's; the same on arm64 and x86-64, while a Mac's C maths library
-# differs in the last bit of a few logarithms, so the test checks it on Linux alone); REVIEWED_CODE is
-# ``code_digest()`` as last reviewed. GOLDEN and SAMPLE_SEMANTICS are
-# in every day's key (a change to either makes every day again), REVIEWED_CODE is not.
+# on any day, whatever the golden test says; GOLDEN is ``golden_digest`` of the golden samples' file;
+# REVIEWED_CODE is ``code_digest()`` as last reviewed. GOLDEN and SAMPLE_SEMANTICS are in every
+# day's key (a change to either makes every day again), REVIEWED_CODE is not.
 SAMPLE_SEMANTICS = 1
 GOLDEN = "9ad340d6e42b4493126df0bcd9d9ec3b"
 REVIEWED_CODE = "27cd65b408826d27"
@@ -283,13 +282,12 @@ def semantics() -> list[Any]:
     return [SAMPLE_SEMANTICS, GOLDEN, runtime]
 
 
-def golden_digest(days: Iterable[tuple[TrainingDay, Sequence[str]]]) -> str:
-    """The digest of ``days`` (each with the features stored, in that order) as the store keeps
-    them (``content``): every sample's fields, feature values and touch terms, every answer, the bar
-    closes left out, in their order."""
+def golden_digest(days: Iterable[Mapping[str, Any]]) -> str:
+    """The digest of ``days`` as the store keeps them (``content``): every sample's fields, feature
+    values and touch terms, every answer, the bar closes left out, in their order."""
     h = hashlib.sha256()
-    for found, names in days:
-        h.update(json.dumps(content(found, names), separators=(",", ":")).encode())
+    for found in days:
+        h.update(json.dumps(found, separators=(",", ":")).encode())
         h.update(b"\0")
     return h.hexdigest()[:32]
 

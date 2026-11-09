@@ -15,6 +15,7 @@ import importlib
 import inspect
 import json
 import math
+import os
 import shutil
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -512,26 +513,102 @@ def golden(market: Path) -> list[tuple[TrainingDay, tuple[str, ...]]]:
     ]
 
 
+# The golden samples, as ``sample_store.content`` gives them: made on Linux from the code of #655.
+GOLDEN_FILE = Path(__file__).parent / "golden" / "sample_store_days.json.gz"
+# The same code on another CPU gives a few numbers another last bit or two: NumPy picks its vector
+# kernels by the CPU (``np.exp`` and the sums of the excitations and of a barrier's sigma on AVX-512,
+# AVX2, SSE or NEON), and a Mac's C maths library rounds some logarithms otherwise. GitHub's runners
+# are of more than one CPU, so a digest of the values was not the same on every run (#645: one
+# 2.3e-16 apart at most, 12 numbers of 300,000 between x86-64 without AVX and arm64, 67 on a Mac).
+# Numbers are the same within this band (4,500 times that); everything else exactly.
+REL_TOL, ABS_TOL = 1e-12, 1e-14
+
+
+def as_stored(days: Sequence[tuple[TrainingDay, Sequence[str]]]) -> list[Any]:
+    """``days`` as the store's file holds them, read back (JSON's floats, lists and NaN)."""
+    stored: list[Any] = json.loads(json.dumps([sample_store.content(found, names) for found, names in days]))
+    return stored
+
+
+def differences(found: Any, expected: Any, where: str = "", out: list[str] | None = None) -> list[str]:
+    """Where ``found`` is not ``expected`` (at most ten): numbers beyond the band, anything else at
+    all (a type, a string, a label, None, a length, a key, an order)."""
+    out = [] if out is None else out
+    if len(out) >= 10:
+        return out
+    if isinstance(found, float) and isinstance(expected, float):
+        same = found == expected or (math.isnan(found) and math.isnan(expected))
+        if not same and not math.isclose(found, expected, rel_tol=REL_TOL, abs_tol=ABS_TOL):
+            out.append(f"{where}: {found!r}, golden {expected!r}")
+    elif type(found) is not type(expected):
+        out.append(f"{where}: {found!r}, golden {expected!r}")
+    elif isinstance(found, list):
+        if len(found) != len(expected):
+            out.append(f"{where}: {len(found)} items, golden {len(expected)}")
+        for i, (f, e) in enumerate(zip(found, expected, strict=False)):
+            differences(f, e, f"{where}[{i}]", out)
+    elif isinstance(found, dict):
+        if list(found) != list(expected):
+            out.append(f"{where}: keys {list(found)[:5]}…, golden {list(expected)[:5]}…")
+        else:
+            for k in found:
+                differences(found[k], expected[k], f"{where}.{k}", out)
+    elif found != expected:
+        out.append(f"{where}: {found!r}, golden {expected!r}")
+    return out
+
+
+@pytest.fixture(scope="module")
+def stored_golden(golden: list[tuple[TrainingDay, tuple[str, ...]]]) -> list[Any]:
+    return as_stored(golden)
+
+
 # Making the three days takes some seconds more than the 30 s default on a loaded runner.
 @pytest.mark.timeout(120)
-def test_the_fixed_days_make_the_golden_samples(golden: list[tuple[TrainingDay, tuple[str, ...]]]) -> None:
-    """What stands in the key for the code (#645): the same days make the same samples, bit for bit.
-    On Linux, as the server and CI make them: a Mac's C maths library gives a few logarithms and
-    exponentials another last bit (``kospi200f_moves``, ``reversion_speed``, ``session_sigma``), so
-    its digest is another (Linux on arm64 and on x86-64 agree)."""
-    if sys.platform != "linux":
-        pytest.skip(
-            "GOLDEN is Linux's samples (the server's, CI's); this platform's maths differ in the last bit"
-        )
-    found = sample_store.golden_digest(golden)
-    assert found == sample_store.GOLDEN, (
-        f"the fixed days' samples changed (golden digest {found}): the stored days no longer match "
-        "what the code makes. Set sample_store.GOLDEN to it (every day is made again on the next "
-        "night) and say in the PR why the samples changed; if only a dependency's version did, the key "
-        "already changes with it."
+def test_the_fixed_days_make_the_golden_samples(
+    golden: list[tuple[TrainingDay, tuple[str, ...]]], stored_golden: list[Any]
+) -> None:
+    """What stands in the key for the code (#645): the same days make the golden samples, each label,
+    answer, count and order exactly and each number within the CPU's last bits (``REL_TOL``).
+    ``KRX_WRITE_GOLDEN=1`` writes what they make as the golden samples, when they changed and why is
+    said in the PR."""
+    if os.environ.get("KRX_WRITE_GOLDEN") == "1":
+        text = json.dumps(stored_golden, separators=(",", ":"))
+        GOLDEN_FILE.write_bytes(gzip.compress(text.encode(), compresslevel=9, mtime=0))
+    expected = json.loads(gzip.decompress(GOLDEN_FILE.read_bytes()))
+    digest = sample_store.golden_digest(expected)
+    assert digest == sample_store.GOLDEN, (
+        f"{GOLDEN_FILE.name} is not the golden samples the key holds: set sample_store.GOLDEN to "
+        f"{digest} (every day is made again on the next night)"
+    )
+    changed = differences(stored_golden, expected)
+    assert not changed, (
+        "the fixed days' samples changed, so the stored days no longer match what the code makes: "
+        f"{changed}. If they should, write them with KRX_WRITE_GOLDEN=1 (on Linux, as the server makes "
+        "them) and set sample_store.GOLDEN as this test then says, and say in the PR why they changed."
     )
     assert all(found.samples and found.answers for found, _ in golden)
     assert golden[0][0].left_out["vi"] > 0 and golden[2][0].reference == "close"
+
+
+def test_another_cpu_s_last_bits_are_the_golden_samples(
+    golden: list[tuple[TrainingDay, tuple[str, ...]]], stored_golden: list[Any]
+) -> None:
+    """The band holds what another CPU gives: every number of a day four ulps off, and the stored
+    days are the same."""
+
+    def jitter(value: Any) -> Any:
+        if isinstance(value, float) and math.isfinite(value):
+            for _ in range(4):
+                value = math.nextafter(value, math.inf)
+            return value
+        if isinstance(value, list):
+            return [jitter(v) for v in value]
+        if isinstance(value, dict):
+            return {k: jitter(v) for k, v in value.items()}
+        return value
+
+    assert not differences(jitter(stored_golden), stored_golden)
 
 
 def _first_float(found: TrainingDay) -> tuple[int, str]:
@@ -588,8 +665,9 @@ def _swap_samples(found: TrainingDay) -> TrainingDay:
     return dataclasses.replace(found, samples=samples)
 
 
-def _ulp(value: float) -> float:
-    return math.nextafter(value, math.inf)
+def _off(value: float) -> float:
+    """``value`` a part in a billion off: beyond any CPU's last bits (``REL_TOL``)."""
+    return value * (1 + 1e-9) if value else 1e-9
 
 
 def _other_label(answer: Answer, labels: Sequence[str]) -> Answer:
@@ -607,7 +685,7 @@ def _touch(found: TrainingDay) -> TrainingDay:
     i = next(i for i, s in enumerate(found.samples) if s.features.touch is not None)
     s = found.samples[i]
     assert s.features.touch is not None
-    touch = TouchTerms(_ulp(s.features.touch.half_spread))
+    touch = TouchTerms(_off(s.features.touch.half_spread))
     return _sample(found, i, features=FeatureVector(s.features, list(s.features), touch))
 
 
@@ -619,21 +697,21 @@ def _outcome(found: TrainingDay) -> TrainingDay:
 
 def _change_ticks(found: TrainingDay) -> TrainingDay:
     i = next(i for i, s in enumerate(found.samples) if s.change_ticks is not None)
-    return _sample(found, i, change_ticks=_ulp(float(found.samples[i].change_ticks or 0.0)))
+    return _sample(found, i, change_ticks=_off(float(found.samples[i].change_ticks or 0.0)))
 
 
 def _labels() -> list[str]:
     return sorted({c for k in NIGHT_READS.kinds for c in k.classes})
 
 
-# Each a change of one thing a day's samples hold (``golden_digest``); the day it is made to and the
-# features' order (None: as made).
+# Each a change of one thing a day's samples hold (``sample_store.content``); the day it is made to,
+# and whether the features are stored in the other order.
 MUTATIONS: dict[str, tuple[int, Callable[[TrainingDay], TrainingDay], bool]] = {
-    "a feature value by one ulp": (0, lambda f: _nudged(f, _first_float(f), lambda v: _ulp(v)), False),
+    "a feature value by a part in a billion": (0, lambda f: _nudged(f, _first_float(f), _off), False),
     "a feature value lost": (0, lambda f: _feature(f, _first_float(f), None), False),
-    "a series value by one ulp": (
+    "a series value by a part in a billion": (
         0,
-        lambda f: _nudged(f, _first_series(f), lambda v: (_ulp(v[0]), *v[1:])),
+        lambda f: _nudged(f, _first_series(f), lambda v: (_off(v[0]), *v[1:])),
         False,
     ),
     "the features' order": (0, lambda f: f, True),
@@ -650,7 +728,7 @@ MUTATIONS: dict[str, tuple[int, Callable[[TrainingDay], TrainingDay], bool]] = {
     ),
     "a sample's symbol": (0, lambda f: _sample(f, 0, symbol="000660"), False),
     "a sample's reference": (0, lambda f: _sample(f, 0, reference="close"), False),
-    "the touch terms by one ulp": (0, _touch, False),
+    "the touch terms by a part in a billion": (0, _touch, False),
     "a kind's answer": (0, lambda f: _answer(f, lambda a: _other_label(a, _labels())), False),
     "a kind's answer unscorable": (
         0,
@@ -671,16 +749,16 @@ MUTATIONS: dict[str, tuple[int, Callable[[TrainingDay], TrainingDay], bool]] = {
 
 @pytest.mark.parametrize("mutation", list(MUTATIONS))
 def test_any_change_to_the_samples_fails_the_golden_test(
-    golden: list[tuple[TrainingDay, tuple[str, ...]]], mutation: str
+    golden: list[tuple[TrainingDay, tuple[str, ...]]], stored_golden: list[Any], mutation: str
 ) -> None:
-    """The golden digest is strong enough: one feature value off by an ulp, a label, a kind's answer,
-    any order changed, and it is another."""
+    """The golden test is strong enough: one number a part in a billion off, a label, a kind's
+    answer, any order changed, and the samples are not the golden ones."""
     day, mutate, reorder = MUTATIONS[mutation]
     found, names = golden[day]
     changed = list(golden)
     changed[day] = (mutate(found), tuple(reversed(names)) if reorder else names)
 
-    assert sample_store.golden_digest(changed) != sample_store.golden_digest(golden)
+    assert differences(as_stored(changed), stored_golden)
 
 
 def test_the_code_that_makes_samples_is_as_last_reviewed() -> None:

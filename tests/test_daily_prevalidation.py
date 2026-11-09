@@ -47,6 +47,7 @@ from krx_quant.scheduled import (
 from krx_quant.scheduled import (
     Night as JobNight,
 )
+from krx_quant.touch import TARGET_VERSION
 from tests.daily_doubles import SYMBOLS, made_history
 
 FEE = 0.015 / 100
@@ -267,6 +268,7 @@ async def test_the_engine_forecasts_cox_at_0850_once_it_passed(tmp_path: Path) -
         daily_algorithms=DAILY_ALGORITHMS,
         daily_features=LiveFeatures(OPEN_TO_CLOSE, s.data_dir, s.state_dir, calendar, SYMBOLS, FEE),
         daily_feature_names=DAILY_FEATURES,
+        target_version=TARGET_VERSION,
     )
     assert engine.store.statuses()["cox"].status is Status.PROBATION
     await replay_into(engine, clock, [], until=datetime.combine(monday, time(8, 51), KST))
@@ -337,6 +339,7 @@ def _engine(s: Settings, clock: FakeClock) -> PredictionEngine:
         daily_algorithms=DAILY_ALGORITHMS,
         daily_feature_names=DAILY_FEATURES,
         admits=admits(s.state_dir),
+        target_version=TARGET_VERSION,
     )
 
 

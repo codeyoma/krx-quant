@@ -45,17 +45,27 @@ def _climate_prior(days: int) -> int:
     return 0
 
 
-def _neyman_variants(backfill: bool = False) -> int:
+def _moment(text: str) -> datetime:
+    """A time with its offset (``--until``); one without is read as KST."""
+    try:
+        found = datetime.fromisoformat(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(f"not an ISO 8601 time: {text!r}") from e
+    return found if found.tzinfo is not None else found.replace(tzinfo=KST)
+
+
+def _neyman_variants(backfill: bool = False, until: datetime | None = None) -> int:
     """Neyman's variants experiment (#455): its next step's lines (the discovery, the window's
-    progress or its verdict), or with ``backfill`` its verdict on the backfilled days (#532); exit 1
-    without a recorded day in the discovery period (without a discovery, for the backfill), with a
-    report that cannot be read, or a discovery that cannot set N."""
+    progress or its verdict), or with ``backfill`` its verdict on the backfilled days (#532), walked
+    by day until ``until`` at most and gone on with by the next run (#643); exit 1 without a recorded
+    day in the discovery period (without a discovery, for the backfill), with a report that cannot be
+    read, or a discovery that cannot set N."""
     from krx_quant.neyman_backfill import neyman_backfill
     from krx_quant.neyman_variants import neyman_variants
 
     settings = Settings.from_env(require_kis=False)
     try:
-        run = neyman_backfill(settings) if backfill else neyman_variants(settings)
+        run = neyman_backfill(settings, until=until) if backfill else neyman_variants(settings)
     except (FileNotFoundError, ValueError) as e:
         print(e, file=sys.stderr)
         return 1
@@ -290,7 +300,15 @@ def add(sub: Commands) -> None:
         help="judge the three comparisons as registered on the backfilled days before the discovery's"
         " training instead, once (#532)",
     )
-    neyman_variants_cmd.set_defaults(run=lambda args: _neyman_variants(args.backfill))
+    neyman_variants_cmd.add_argument(
+        "--until",
+        type=_moment,
+        default=None,
+        help="with --backfill: start no day that would end after this time (ISO 8601 with its offset);"
+        " the days walked are kept and the next run goes on from there (#643; the scheduled job passes"
+        " the night's 05:30)",
+    )
+    neyman_variants_cmd.set_defaults(run=lambda args: _neyman_variants(args.backfill, args.until))
     sub.add_parser(
         "diagnose",
         help="print the measurements the open decisions need; reads only, writes nothing",

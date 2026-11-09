@@ -502,7 +502,7 @@ class PredictionEngine:
         revisions: RevisionGate | None = None,
         commit: str = "unknown",
         review_rules: Rules | None = None,
-        target_version: int = 1,
+        target_version: int,  # no default: the settings' (KRX_TARGET_VERSION, #647)
         climate: Model | None = None,
         kinds: Sequence[PredictionKind] = KINDS,
         kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,

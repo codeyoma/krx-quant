@@ -66,6 +66,7 @@ from krx_quant.replay import replay_into
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
 from krx_quant.stats import DayOverlap, interval_json, session_index
+from krx_quant.touch import TARGET_VERSION
 
 FEE = 0.015 / 100
 SYMBOLS = ("005930", "000660")
@@ -376,6 +377,7 @@ def engine(db: Path, clock: FakeClock, source: Source) -> PredictionEngine:
         kind_algorithms=(),
         daily=source,
         daily_kinds=(OPEN_TO_CLOSE_5D,),
+        target_version=TARGET_VERSION,
     )
 
 
@@ -579,6 +581,7 @@ async def test_a_kind_awaiting_a_probe_is_listed_but_not_run(
         daily_algorithms=[algorithm],
         daily_features=lambda a, s, d, p, b: FeatureVector(dict.fromkeys(a.features), a.features),
         daily_feature_names={"oc_1", "climate_up"},
+        target_version=TARGET_VERSION,
     )
     assert gated in e.daily_kinds, "listed: /v1/kinds shows it, with the reason"
     for day in (MONDAY, date(2026, 10, 13), date(2026, 10, 14), date(2026, 10, 15), date(2026, 10, 16)):
@@ -650,6 +653,7 @@ async def test_the_kind_runs_now_that_the_dividends_were_measured(tmp_path: Path
         daily_features=lambda a, s, d, p, b: FeatureVector(dict.fromkeys(a.features), a.features),
         daily_feature_names={"oc_1", "climate_up"},
         admits=lambda a: False,  # no pre-validation report yet
+        target_version=TARGET_VERSION,
     )
     await replay_into(e, clock, [], until=at(MONDAY, "08:51"))
     made = e.store.kind_recent(OPEN_TO_CLOSE_5D.name, 1, "005930", 10)

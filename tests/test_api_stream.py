@@ -52,7 +52,9 @@ def engine_at(db: Path, start: datetime) -> tuple[PredictionEngine, FakeClock]:
         FixedAlgorithm("first", features=("velocity",), unique=("velocity",), forecast=UP),
         FixedAlgorithm("second", features=("acceleration",), unique=("acceleration",), forecast=UP),
     ]
-    return PredictionEngine(store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms), clock
+    return PredictionEngine(
+        store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms, target_version=TARGET_VERSION
+    ), clock
 
 
 def the_fast_one_first(events: list[dict[str, Any]]) -> None:
@@ -79,7 +81,14 @@ async def test_a_client_receives_predictions_the_consensus_and_outcomes_as_they_
     first = [e for e in events if e.get("bar_close") == "2026-10-12T09:01:00+09:00"]
     the_fast_one_first(first)
     made = {p["algorithm"] for e in first if e["type"] == "prediction" for p in e["predictions"]}
-    assert made == {"baseline-flat", "baseline-persist", "baseline-random", "first", "second"}
+    assert made == {
+        "baseline-climate",
+        "baseline-flat",
+        "baseline-persist",
+        "baseline-random",
+        "first",
+        "second",
+    }
     [final] = [e for e in first if e.get("kind") == "final"]
     assert final["predictions"][0]["p_up"] == UP.p_up and final["predictions"][0]["symbol"] == SYMBOL
     assert final["predictions"][0]["votes"] == {"up": 2, "flat": 0, "down": 0}, "first and second, both up"
@@ -138,6 +147,7 @@ async def test_the_fast_consensus_comes_first_with_a_kind_s_event_between_the_tw
         kinds=(TEST_KIND,),
         kind_algorithms=[late],
         consensus_timing=Timing(fast_seconds=0.05),  # "second" is held past it
+        target_version=TARGET_VERSION,
     )
     app = create_app(engine)
 
@@ -230,7 +240,9 @@ OTHER = "000660"
 async def test_the_bar_being_made_is_sent_once_a_poll_with_its_last_values(tmp_path: Path) -> None:
     store = PredictionStore(tmp_path / "engine.db")
     clock = FakeClock(at("09:30:00"))
-    engine = PredictionEngine(store, CALENDAR, (SYMBOL, OTHER), FEE, clock, algorithms=[])
+    engine = PredictionEngine(
+        store, CALENDAR, (SYMBOL, OTHER), FEE, clock, algorithms=[], target_version=TARGET_VERSION
+    )
     app = create_app(engine, stream_poll_seconds=0.01)
     stream = app[STREAM_KEY]
 

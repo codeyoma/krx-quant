@@ -14,7 +14,6 @@ import logging
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -22,7 +21,7 @@ import pyarrow.parquet as pq
 
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm, Model, load_models
 from krx_quant.archive import partition_files
-from krx_quant.backfill import PreviousDay
+from krx_quant.assembly import Mode, build_engine
 from krx_quant.climate import CLIMATE, load_climate, load_tables
 from krx_quant.clock import FakeClock
 from krx_quant.config import Settings
@@ -45,7 +44,6 @@ from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kind_registry import KINDS
 from krx_quant.kinds import Kind
 from krx_quant.lifecycle import Rules
-from krx_quant.macro import day_regime
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, AlgorithmSummary, PredictionStore
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
@@ -82,7 +80,7 @@ async def replay(
     refused: Refused | None = None,
     revisions: RevisionGate | None = None,
     review_rules: Rules | None = None,
-    target_version: int = 1,
+    target_version: int,  # no default: the settings' (KRX_TARGET_VERSION, #647)
     climate: Model | None = None,
     kinds: Sequence[Kind] = KINDS,
     kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
@@ -309,34 +307,28 @@ async def replay_recorded(
     kinds: Sequence[Kind] = KINDS,
     kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
 ) -> PredictionEngine:
-    """``day``'s recorded ``events``, all day, through an engine set up as the server's (its
-    settings, calendar, macro regimes, the previous trading days' backfilled bars and target
-    version) storing into ``db``; with the touch target, the climate baseline's table
-    ``climate`` (its defaults without); the ``kinds`` besides the direction with their
-    algorithms (#179)."""
+    """``day``'s recorded ``events``, all day, through an engine set up as the server's
+    (``assembly.build_engine``, ``Mode.REPLAY``: its settings, calendar, macro regimes, the previous
+    trading days' backfilled bars and target version) storing into ``db``; with the touch target,
+    the climate baseline's table ``climate`` (its defaults without); the ``kinds`` besides the
+    direction with their algorithms (#179)."""
     start = datetime.combine(day, time(), KST)
     calendar = calendar or calendar_store(settings).calendar
-    return await replay(
-        events,
-        db=db,
-        calendar=calendar,
-        symbols=settings.symbols,
-        fee_rate=settings.fee_rate,
-        start=start,
-        until=start + timedelta(days=1) - timedelta(microseconds=1),
-        algorithms=algorithms,
+    clock = FakeClock(start)
+    engine = build_engine(
+        settings,
+        Mode.REPLAY,
+        PredictionStore(db),
+        clock,
+        calendar,
         models=models,
-        budget=Budget.of(settings),
-        min_sample=settings.min_sample,
-        leaders=Leaders.of(settings),
-        regimes=partial(day_regime, settings.data_dir),
-        review_rules=Rules.of(settings),
-        target_version=settings.target_version,
         climate=climate,
+        algorithms=algorithms,
         kinds=kinds,
         kind_algorithms=kind_algorithms,
-        previous=PreviousDay(settings.data_dir, calendar),  # range_prev_day (#181)
     )
+    await replay_into(engine, clock, events, until=start + timedelta(days=1) - timedelta(microseconds=1))
+    return engine
 
 
 def sqlite_files(db: Path) -> list[Path]:
