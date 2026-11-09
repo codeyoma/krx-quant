@@ -5,7 +5,7 @@ running challenger's):
 
 - the picks (``selection.pick``): the cost map's cells, read from the Engine API at the
   start and every day at ``PICK_AT`` (08:30), under the champion policy read from the store then
-  (#399, ``policy.apply``: its cells, in its order, at its θ, whatever the cost map's verdict, #472;
+  (#399, ``buyable.under_policy``: its cells, in its order, at its θ, whatever the cost map's verdict, #472;
   #471: no λ), and under each
   challenger running that day for its paper book (#400). A cost map that cannot be read is asked
   for again every ``PICK_RETRY_SECONDS``, and no cell trades until it is read: a pick is never
@@ -105,11 +105,11 @@ from krx_quant.trader import (
     live,
     review,
 )
+from krx_quant.trader.book import Rules
 from krx_quant.trader.cells import EngineReader
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import CONTROL_SECONDS
 from krx_quant.trader.mock import Timing
-from krx_quant.trader.paper import Rules
 from krx_quant.trader.quotes import BestQuote, follow_quotes
 from krx_quant.trader.selection import NO_COST_MAP, pick
 from krx_quant.trader.settings import TraderSettings

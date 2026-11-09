@@ -34,9 +34,7 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader import CAPITAL, SYMBOL, replay
-from krx_quant.trader.cells import Cell, open_engine_db, special_windows
-from krx_quant.trader.money import net_of
-from krx_quant.trader.paper import (
+from krx_quant.trader.book import (
     COOLING_DOWN,
     EXPIRED,
     HOLDING,
@@ -50,6 +48,8 @@ from krx_quant.trader.paper import (
     TIME,
     Rules,
 )
+from krx_quant.trader.cells import Cell, open_engine_db, special_windows
+from krx_quant.trader.money import net_of
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.replay import (
     GAP,
@@ -141,8 +141,8 @@ def replayed(
 def both(
     state: Path, events: Sequence[Event], picks: Sequence[Pick], capital: int = CAPITAL
 ) -> tuple[list[dict[str, Any]], list[Trade], Pass]:
-    """The paper trader's trades (oldest first) on ``events``, and the replay's on the database it read
-    and the same quotes recorded."""
+    """The paper book's trades (oldest first) on ``events``, and the replay's on the database it read
+    and the same quotes recorded: each adapter's fills, checked against the rules' (``filled``)."""
     models(state)
     paper = Day(state, picks=picks, rules=Rules(fee_rate=FEE, capital=capital)).run(events)
     record_quotes(state / "data", [e for e in events if isinstance(e, BestQuote)])
@@ -150,30 +150,47 @@ def both(
     return list(reversed(paper)), trades, done
 
 
-def as_paper(trades: Sequence[Trade]) -> list[tuple[Any, ...]]:
-    return [
-        (t.cell, t.entry_at, t.entry, t.quantity, t.exit_at, t.exit, t.reason, pytest.approx(t.net))
-        for t in trades
-    ]
+# A trade's fills: its cell, entry (time, price, shares) and exit (time, price, why).
+Leg = tuple[Cell, datetime, float, int, datetime, float, str]
 
 
-def of_paper(trades: Sequence[dict[str, Any]]) -> list[tuple[Any, ...]]:
-    return [
-        (
-            Cell(t["kind"], t["predictor"]),
-            datetime.fromisoformat(t["entry"]["at"]),
-            t["entry"]["price"],
-            t["entry"]["quantity"],
-            datetime.fromisoformat(t["exit"]["at"]),
-            t["exit"]["price"],
-            t["exit"]["reason"],
-            t["net"],
+def legs(trades: Sequence[Trade]) -> list[Leg]:
+    """The replay's fills on the recorded arrays, each trade's net checked exactly: the round trip's
+    (``money.net_of``), as every book keeps it."""
+    for t in trades:
+        assert t.net == net_of(t.entry, t.exit, t.quantity, FEE), t
+    return [(t.cell, t.entry_at, t.entry, t.quantity, t.exit_at, t.exit, t.reason) for t in trades]
+
+
+def paper_legs(trades: Sequence[dict[str, Any]]) -> list[Leg]:
+    """The paper book's fills on the collector's quotes (``GET /v1/trader/trades``' trades), each net
+    checked as ``legs`` checks the replay's."""
+    found = []
+    for t in trades:
+        entry, out = t["entry"], t["exit"]
+        assert t["net"] == net_of(entry["price"], out["price"], entry["quantity"], FEE), t
+        found.append(
+            (
+                Cell(t["kind"], t["predictor"]),
+                datetime.fromisoformat(entry["at"]),
+                entry["price"],
+                entry["quantity"],
+                datetime.fromisoformat(out["at"]),
+                out["price"],
+                out["reason"],
+            )
         )
-        for t in trades
-    ]
+    return found
 
 
-# The same trades as the paper trader.
+def filled(paper: Sequence[dict[str, Any]], trades: Sequence[Trade], expected: Sequence[Leg]) -> None:
+    """Each adapter's fills against the rules' (#652, ``book.py``): the paper book's on its quotes and
+    the replay's on them recorded, each to ``expected``."""
+    assert legs(trades) == list(expected), "the replay's fills"
+    assert paper_legs(paper) == list(expected), "the paper book's fills"
+
+
+# The fills of each adapter (#652): the paper book on its quotes, the replay on them recorded.
 
 # One cell's day: a take-profit, a rise held off, a stop on the best bid, a time exit on the quote before
 # the barrier, a target reached already, a time exit on the quote after it. Each signal alone, a share;
@@ -227,7 +244,16 @@ def test_the_replay_makes_the_paper_trader_s_trades_on_one_cell(tmp_path: Path) 
     rises are cooling down, and the 11:00 one, past 10:54, buys."""
     paper, trades, done = both(tmp_path, ONE_CELL, [pick(BARRIER)])
 
-    assert of_paper(paper) == as_paper(trades)
+    filled(
+        paper,
+        trades,
+        [
+            (BARRIER, at("10:00:02.5"), 70_100, 9, at("10:02:00"), 70_250, TAKE_PROFIT),
+            (BARRIER, at("10:10:02.4"), 70_100, 9, at("10:11:30"), 69_800, STOP_LOSS),
+            (BARRIER, at("10:20:02.3"), 70_100, 9, at("10:24:00"), 70_000, TIME),
+            (BARRIER, at("11:00:02.5"), 70_100, 9, at("11:01:00"), 70_250, TAKE_PROFIT),
+        ],
+    )
     assert [(t.entry_at, t.entry, t.quantity, t.reason, t.exit_at, t.exit) for t in trades] == [
         (at("10:00:02.5"), 70_100, 9, TAKE_PROFIT, at("10:02:00"), 70_250),
         (at("10:10:02.4"), 70_100, 9, STOP_LOSS, at("10:11:30"), 69_800),
@@ -266,7 +292,15 @@ def test_the_daily_limit_sells_and_stops_the_replay_as_it_does_the_paper_trader(
 
     done, trades, _ = replayed(tmp_path, [pick(BARRIER)], days=(TODAY, SECOND))
 
-    assert of_paper(paper) == as_paper(trades)
+    filled(
+        paper,
+        trades,
+        [
+            (BARRIER, at("10:00:02.5"), 70_100, 9, at("10:01:00"), 59_500, STOP_LOSS),
+            (BARRIER, at("10:10:02.5"), 70_100, 9, at("10:11:00"), 69_860, DAILY_LIMIT),
+            (BARRIER, at("2026-10-15 10:00:02.5"), 70_100, 9, at("2026-10-15 10:01:00"), 70_250, TAKE_PROFIT),
+        ],
+    )
     assert [(t.reason, t.exit) for t in trades] == [
         (STOP_LOSS, 59_500),
         (DAILY_LIMIT, 69_860),
@@ -296,7 +330,14 @@ def test_a_buy_whose_own_quote_reaches_the_daily_limit_is_sold_on_it_as_the_pape
 
     paper, trades, done = both(tmp_path, events, [pick(BARRIER)])
 
-    assert of_paper(paper) == as_paper(trades)
+    filled(
+        paper,
+        trades,
+        [
+            (BARRIER, at("10:00:02.5"), 70_100, 9, at("10:01:00"), 59_500, STOP_LOSS),
+            (BARRIER, at("10:10:02.5"), 70_100, 9, at("10:10:02.5"), 69_860, DAILY_LIMIT),
+        ],
+    )
     assert [(t.reason, t.entry_at, t.exit_at, t.exit) for t in trades] == [
         (STOP_LOSS, at("10:00:02.5"), at("10:01:00"), 59_500),
         (DAILY_LIMIT, at("10:10:02.5"), at("10:10:02.5"), 69_860),
@@ -329,7 +370,15 @@ def test_the_rank_waits_are_the_paper_trader_s(tmp_path: Path) -> None:
 
     paper, trades, done = both(tmp_path, events, [pick(BARRIER), pick(FIFTEEN, role="baseline")])
 
-    assert of_paper(paper) == as_paper(trades)
+    filled(
+        paper,
+        trades,
+        [
+            (FIFTEEN, at("11:00:04.5"), 70_200, 8, at("11:01:00"), 70_250, TAKE_PROFIT),
+            (FIFTEEN, at("11:10:11.2"), 70_200, 8, at("11:11:00"), 70_250, TAKE_PROFIT),
+            (BARRIER, at("11:20:03.5"), 70_100, 9, at("11:21:00"), 70_250, TAKE_PROFIT),
+        ],
+    )
     assert [(t.cell, t.decided_at, t.entry_at, t.entry) for t in trades] == [
         (FIFTEEN, at("11:00:04"), at("11:00:04.5"), 70_200),
         (FIFTEEN, at("11:10:11"), at("11:10:11.2"), 70_200),
@@ -355,7 +404,13 @@ def test_a_special_window_counts_from_when_it_was_known(tmp_path: Path) -> None:
 
     paper, trades, done = both(tmp_path, events, [pick(BARRIER)])
 
-    assert of_paper(paper) == as_paper(trades)
+    filled(
+        paper,
+        trades,
+        [
+            (BARRIER, at("12:30:02.5"), 70_100, 9, at("12:32:30"), 70_250, TAKE_PROFIT),
+        ],
+    )
     assert [(t.bar_close, t.reason) for t in trades] == [(at("12:30:00"), TAKE_PROFIT)]
     assert done.results[0].skipped == {SPECIAL: 1}
 
@@ -371,7 +426,13 @@ def test_the_direction_is_stopped_on_the_best_bid_as_the_paper_trader_stops_it(t
 
     paper, trades, _ = both(tmp_path, events, [pick(DIRECTION, role="consensus")])
 
-    assert of_paper(paper) == as_paper(trades)
+    filled(
+        paper,
+        trades,
+        [
+            (DIRECTION, at("13:00:02.5"), 70_100, 9, at("13:01:00"), 69_800, STOP_LOSS),
+        ],
+    )
     [trade] = trades
     assert (trade.reason, trade.exit) == (STOP_LOSS, 69_800)
 
@@ -463,7 +524,13 @@ def test_the_clock_sells_on_the_last_quote_before_the_barrier_when_none_comes_af
 
     paper, trades, _ = both(tmp_path, events, [pick(BARRIER)])
 
-    assert of_paper(paper) == as_paper(trades)
+    filled(
+        paper,
+        trades,
+        [
+            (BARRIER, at("14:30:02.5"), 70_100, 9, at("14:34:00"), 70_100, TIME),
+        ],
+    )
     [trade] = trades
     assert (trade.exit_at, trade.exit, trade.reason) == (at("14:34:00"), 70_100, TIME)
 
@@ -592,7 +659,13 @@ def test_a_quote_not_newer_than_the_one_before_is_passed_over(tmp_path: Path) ->
 
     paper, trades, _ = both(tmp_path, events, [pick(BARRIER)])
 
-    assert of_paper(paper) == as_paper(trades)
+    filled(
+        paper,
+        trades,
+        [
+            (BARRIER, at("10:00:02.5"), 70_100, 9, at("10:01:00"), 70_250, TAKE_PROFIT),
+        ],
+    )
     assert trades[0].entry == 70_100
 
 

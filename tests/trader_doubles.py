@@ -37,10 +37,11 @@ from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
 from krx_quant.trader import SYMBOL, cohort, practice, review
 from krx_quant.trader import policy as policies
+from krx_quant.trader.book import Rules
 from krx_quant.trader.cells import Cell, EngineReader
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import ask
-from krx_quant.trader.paper import PaperTrader, Rules
+from krx_quant.trader.paper import PaperTrader
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.replay import Signals
 from krx_quant.trader.selection import Pick, Selection, kelly

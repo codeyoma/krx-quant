@@ -22,7 +22,7 @@ never chosen again.
 ``Selection.practisable``: a verdict at a market order's round trip, ``pass`` or ``fail``, and a
 sound row), each replayed alone a share at each θ of the re-fit's grid (#470, ``replay.Signals``:
 its rises on its kind's days of the cost map, by the paper trader's rules and fills, none of a day a
-pick would have held it off, #603, ``replay.inactive_days``): the cell and θ
+pick would have held it off, #603, ``buyable.inactive_days``): the cell and θ
 whose net per signal in ticks has the greatest day-level 95% lower bound (``Signals.per_signal``),
 below 0 too, of those that bought at least ``MIN_TRADES`` times on at least two days; of two alike,
 the greater mean, then the kinds' order, the roles', the lower θ.
@@ -56,8 +56,8 @@ from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.stats import Interval
 from krx_quant.trader import ROLES, SYMBOL, TRADED_KINDS, review
 from krx_quant.trader import policy as policies
+from krx_quant.trader.book import Rules
 from krx_quant.trader.cells import Cell, open_engine_db, special_windows
-from krx_quant.trader.paper import Rules
 from krx_quant.trader.refit import THRESHOLDS, cost_map_days
 from krx_quant.trader.replay import GAPPED, NO_RECORDING, Replayer, Signals, Source
 from krx_quant.trader.selection import GONE, PREDICTOR_INACTIVE, CostMapError, Pick, choose, read_cost_map

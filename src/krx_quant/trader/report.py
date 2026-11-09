@@ -100,11 +100,11 @@ from krx_quant.trader import (
     review,
 )
 from krx_quant.trader import policy as policies
+from krx_quant.trader.book import Rules, cooldowns
 from krx_quant.trader.cells import Cell, open_engine_db
 from krx_quant.trader.db import iso
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import Pause, pause_of
-from krx_quant.trader.paper import Rules, cooldowns
 from krx_quant.trader.refit import (
     BOOTSTRAP,
     FEW_DAYS,
@@ -1529,7 +1529,7 @@ def _pick_section(report: Report) -> str:
 
 def _no_cell(report: Report, pick: Mapping[str, Any]) -> str:
     """Why no cell traded (#560): what held it, not only the pick's name for it. Since #480 a champion's
-    cells trade whatever the cost map's verdicts (``policy.apply``), so the pick's ``no_pass`` or
+    cells trade whatever the cost map's verdicts (``buyable.under_policy``), so the pick's ``no_pass`` or
     ``not_in_policy`` means the champion had no cell to trade: it has none, or each was held (a
     predictor gone, #469)."""
     reason = pick["reason"]

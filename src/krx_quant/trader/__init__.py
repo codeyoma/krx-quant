@@ -75,9 +75,9 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
 - **Limits and pauses** (``limits.py``, #396): the loss is the net realized P&L plus the open
   position's at the best bid, after its costs; a day's of 10% of the capital stops the day (sold
   at once, trading again the next trading day), a cumulative one of 20% stops the trader until
-  ``krx-quant trade rearm``. The risk rules (#471, ``paper.risk_held``): three net losses in a row
+  ``krx-quant trade rearm``. The risk rules (#471, ``book.risk_held``): three net losses in a row
   stop new buys for 30 minutes, and at most 20 buy orders go a day, those refused counted; the mock
-  practice's buys besides at least 15 minutes apart (#598, ``paper.spaced``). The
+  practice's buys besides at least 15 minutes apart (#598, ``book.spaced``). The
   screen's two pauses (``POST /v1/trader/pause``: new entries, or that and a sale now) last until
   ``krx-quant trade resume`` on the server. They hold the trades the trader makes, the champion's: no
   policy changes them.
@@ -147,7 +147,7 @@ CUMULATIVE_LOSS_PERCENT = 20.0
 # the θ frozen for its review cycle (#474; this one before). Before the first champion nothing but
 # the practice trades (#469).
 THRESHOLD = 0.6
-# The risk rules (#471, spec #468 4 "크기", 7 "위험 규칙"; ``money.size``, ``paper.risk_held``), the
+# The risk rules (#471, spec #468 4 "크기", 7 "위험 규칙"; ``money.size``, ``book.risk_held``), the
 # code's at most: ``.env`` may narrow them, never widen them, and no policy touches them. A trade's loss
 # budget, in percent of the capital it trades on (the live first period's cap below the capital); the
 # net losses in a row that stop new buys for ``COOLDOWN``; the buy orders a day, those refused counted.
@@ -155,7 +155,7 @@ RISK_PER_TRADE_PERCENT = 0.5
 LOSS_STREAK = 3
 COOLDOWN = timedelta(minutes=30)
 DAILY_BUY_ORDERS = 20
-# The mock practice's spacing (#598, ``paper.spaced``): a practice rise buys only at a bar close at
+# The mock practice's spacing (#598, ``book.spaced``): a practice rise buys only at a bar close at
 # least this long after the bar close of the day's last practice buy order. Not a risk rule: the
 # practice's alone, so that its buys reach the afternoon and the time exits by 15:15 (on 2026-11-04
 # and 11-05 its 20 buys were gone by 13:14 and 11:04). 20 buys this far apart span 4 h 45 m, inside

@@ -22,9 +22,9 @@ from krx_quant.config import Settings
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
 from krx_quant.trader import policy as policies
+from krx_quant.trader.book import BELOW_THRESHOLD, OUTRANKED, Rules
+from krx_quant.trader.buyable import under_champion, under_policy
 from krx_quant.trader.cells import Cell
-from krx_quant.trader.desk import under_champion
-from krx_quant.trader.paper import BELOW_THRESHOLD, OUTRANKED, Rules
 from krx_quant.trader.policy import PolicyCell, PolicyError
 from krx_quant.trader.run import run_trader
 from krx_quant.trader.selection import (
@@ -82,7 +82,7 @@ def test_the_champion_s_cells_trade_at_its_threshold_sized_by_the_loss_budget(tm
     kept = champion(tmp_path, cell(BARRIER, threshold=0.7))
     passing = Selection((replace(pick(BARRIER), kelly=2.0),))
 
-    under = policies.apply(kept, passing)
+    under = under_policy(kept, passing)
     trades = Day(tmp_path, selection=under, rules=Rules(fee_rate=FEE)).run(
         [
             Read("10:00:02.3", [Barrier("10:00:00", p=(0.65, 0.2, 0.15))]),
@@ -117,7 +117,7 @@ def test_the_champion_s_cell_trades_whatever_its_verdict_and_one_passing_it_lack
         ]
     )
 
-    under = policies.apply(kept, choose(body))
+    under = under_policy(kept, choose(body))
 
     [traded] = under.picks
     assert (traded.cell, traded.low, traded.threshold) == (FIFTEEN, 0.66, 0.7)
@@ -133,7 +133,7 @@ def test_without_the_cost_map_no_champion_s_cell_trades(tmp_path: Path) -> None:
     kept with why."""
     kept = champion(tmp_path, cell(BARRIER))
 
-    under = policies.apply(kept, Selection((), reason=NO_COST_MAP, detail="starting"))
+    under = under_policy(kept, Selection((), reason=NO_COST_MAP, detail="starting"))
 
     assert (under.picks, under.reason, under.detail) == ((), NO_COST_MAP, "starting")
     assert [(c["predictor"], c["traded"], c["why"]) for c in under.cells] == [("breiman", False, NO_COST_MAP)]
@@ -145,7 +145,7 @@ def test_the_champion_s_order_ranks_the_rises_of_a_bar_close(tmp_path: Path) -> 
     kept = champion(tmp_path, cell(FIFTEEN, role="baseline", threshold=0.6), cell(BARRIER, threshold=0.6))
     ranked = Selection((pick(BARRIER, low=0.70, p_star=0.62), pick(FIFTEEN, role="baseline", low=0.66)))
 
-    under = policies.apply(kept, ranked)
+    under = under_policy(kept, ranked)
     trades = Day(tmp_path, selection=under).run(
         [
             Read(
@@ -318,8 +318,8 @@ def decided(state: Path) -> int:
 def test_an_empty_champion_trades_nothing(tmp_path: Path) -> None:
     kept = champion(tmp_path)
 
-    under = policies.apply(kept, Selection((pick(BARRIER),)))
-    nothing = policies.apply(kept, Selection((), reason=NO_PASS))
+    under = under_policy(kept, Selection((pick(BARRIER),)))
+    nothing = under_policy(kept, Selection((), reason=NO_PASS))
 
     assert (under.picks, under.reason) == ((), NOT_IN_POLICY)
     assert nothing.reason == NO_PASS, "why none passes stays the cost map's"

@@ -1341,7 +1341,7 @@ class TraderStore:
     ) -> list[tuple[datetime, float]]:
         """A book's trades of ``mode`` exited at or after ``since`` (its day's 00:00), each one's exit
         time and net, in the order they exited: the risk rules' losses in a row (#471,
-        ``paper.risk_held``). By the exit, not the entry: a position carried overnight (the trader down
+        ``book.risk_held``). By the exit, not the entry: a position carried overnight (the trader down
         at its time barrier, a sale not settled, ``mock.py``) counts on the day it is sold."""
         return day_exits(self._db, mode, since, None, challenger, shadow, practice)
 
@@ -1354,14 +1354,14 @@ class TraderStore:
         practice: bool = False,
     ) -> int:
         """A book's buy orders of ``mode`` since ``since`` (its day's 00:00), the risk rules' day count
-        (#471, ``paper.risk_held``): the KIS book's (#405: ``mock``, ``live``) each buy it sent or tried
+        (#471, ``book.risk_held``): the KIS book's (#405: ``mock``, ``live``) each buy it sent or tried
         to send, kept before it is (``unfilled_buys``, #406: those KIS refused, of which nothing filled
         or whose answer was lost too); a paper book's each buy it filled (a trade)."""
         return day_buys(self._db, mode, since, None, challenger, shadow, practice)
 
     def last_practice_buy(self, mode: str, since: datetime) -> datetime | None:
         """The bar close of the champion's book's last practice buy order of ``mode`` since ``since``
-        (its day's 00:00), what the practice's spacing counts from (#598, ``paper.spaced``): of the KIS
+        (its day's 00:00), what the practice's spacing counts from (#598, ``book.spaced``): of the KIS
         book (``mock``, ``live``) each practice buy it sent or tried to send (``unfilled_buys``, kept
         before it is, by its decision: those KIS refused, of which nothing filled or whose answer was
         lost too), as ``day_buys`` counts them; of a paper book each practice buy it filled. None
@@ -1932,7 +1932,7 @@ def read_trader(
     last, with its verdict), in the mode it runs in (#405); the review cycle in force and its
     evaluation version (#469, ``review.state``), counted on ``sessions`` (the engine's market
     calendar; by default one that guesses the weekdays trade); the loss budget and the risk rules'
-    state as the trader wrote it (#475, ``paper.risk_state``). Its fields null without a store (an
+    state as the trader wrote it (#475, ``book.risk_state``). Its fields null without a store (an
     engine without a state folder, a trader not started yet)."""
     body: dict[str, Any] = dict.fromkeys(TRADER_FIELDS)
     body |= {"updated_at": None, "alive": False, "controls": []}

@@ -186,7 +186,7 @@ from krx_quant.kis_orders import (
 from krx_quant.market_calendar import Phase, Session
 from krx_quant.pricing import tick_size
 from krx_quant.trader import LIVE, MOCK, SYMBOL
-from krx_quant.trader.cells import Signal
+from krx_quant.trader.book import HOLDING, TAKE_PROFIT, TIME, Busy, Rules, mid_of
 from krx_quant.trader.limits import ORDER_FAILED, SALE, Notify
 from krx_quant.trader.live import kis_days
 from krx_quant.trader.mock_check import DIFFERENT as CHECK_DIFFERENT
@@ -194,7 +194,7 @@ from krx_quant.trader.mock_check import NO_ORDERS as CHECK_NO_ORDERS
 from krx_quant.trader.mock_check import SAME as CHECK_SAME
 from krx_quant.trader.mock_check import Check, failures, ledger_orders, probe_window
 from krx_quant.trader.money import NO_SHARES, commission, open_net
-from krx_quant.trader.paper import TAKE_PROFIT, TIME, PaperTrader, Rules, _Waiting, mid_of
+from krx_quant.trader.paper import PaperTrader, _Waiting
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.reconcile import LOST_AFTER, Finding, Outside, Window, candidates, compare
 from krx_quant.trader.store import (
@@ -422,11 +422,15 @@ class MockTrader(PaperTrader):
 
     # The paper book's hooks.
 
-    def _busy(self) -> bool:
-        return super()._busy() or self._work is not None or self._live_buy is not None or not self._reconciled
-
-    def _held_off(self, signal: Signal) -> str:
-        return RECONCILING if not self._reconciled else super()._held_off(signal)
+    def _busy_with(self) -> Busy:
+        """Not reconciled yet (#406): ``reconciling``; else the paper book's, or an order in flight of
+        no signal known (a buy left open on KIS, a sale): ``holding``."""
+        if not self._reconciled:
+            return RECONCILING
+        found = super()._busy_with()
+        if found is None and (self._work is not None or self._live_buy is not None):
+            return HOLDING
+        return found
 
     def _fill_buy(self, waiting: _Waiting, quote: BestQuote, quantity: int) -> None:
         self._start(self._enter(waiting, quote, quantity))
