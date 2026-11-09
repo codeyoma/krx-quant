@@ -311,53 +311,11 @@ SESSION_MEMORY = Job(
 )
 
 
-# The inverse ETF's KRX book (#606, ``inverse_book_probe.py``): ``probe-inverse-book-606`` read the
-# frames the collector recorded raw of 0193L0's ``H0STASP0`` on the first trading night after the
-# deploy that brought it (2026-11-06: 37,469 records, all of the example's 63 fields, the burden within
-# #606's bounds), posted on #606 and left ``JOBS`` (#505) in the PR that makes events of them and
-# replays the down calls on them (#634, ``scheduled.research``'s ``INVERSE_REPLAY``). ``krx-quant
-# probe-inverse-book`` stays for a run by hand.
-
-
-# What the feeds already registered said of the market-wide halt of 2026-11-06 (#625,
-# ``market_halt_probe.py``): a circuit breaker stopped the books and the trades at 09:03:33, the
-# books came back at 09:23:33 and the trades at 09:33:37, and the engine knew it only by the
-# exchange's rules from the index, with an outage alert for each silent feed. Before the engine reads a halt
-# from a field (the trades' halt flag and market-operation codes, the books' time code), that
-# morning's raw frames from 09:00 to 09:40 are read: which fields changed, to which values, and when.
-# Once, on the first night after the deploy that brings it, trading or not (the day read is
-# recorded already); again after a failure on other code. The command reads files only (a raw day the
-# archive pruned is read back from the Object Store) and writes nothing; forty minutes of the
-# recorded feeds are read in seconds, and fifteen minutes is a bound, short so that the jobs after
-# it keep their starts.
-MARKET_HALT_ISSUE = 625
-
-
-def _first_market_halt(night: Night) -> bool:
-    """On the first night, trading or not (after a failure, again on other code)."""
-    return _again_on_other_code(night)
-
-
-MARKET_HALT = Job(
-    name="probe-market-halt-625",
-    due=_first_market_halt,
-    command=("probe-market-halt", "--day", "2026-11-06", "--from", "09:00", "--until", "09:40"),
-    timeout=timedelta(minutes=15),
-    targets=(
-        Target(
-            MARKET_HALT_ISSUE,
-            note=(
-                "2026-11-06 서킷브레이커 때 이미 구독 중인 피드가 무엇을 말했는지 본 것이다(#625의 1단계): "
-                "그날 09:00–09:40에 받은 raw 프레임에서 1절 구독 응답과 장운영정보(`H0STMKO0` 등)를 "
-                "구독했는지, 2절 피드별 분당 레코드 수, 3절 키마다 가장 긴 침묵(앞뒤 레코드의 받은 시각과 "
-                "자체 시각), 4절 코드 필드(체결의 `TRHT_YN`, `NEW_MKOP_CLS_CODE` 등, 호가의 "
-                "`HOUR_CLS_CODE` 등)의 값이 바뀐 시각, 5절 REST 답(VI 현황), 6절 거래소 규칙의 조건을 "
-                "틱에서 본 시각. 에이전트가 정지와 재개를 알려 주는 필드가 있는지, 제때 오는지를 이 이슈에 "
-                "적고 2·3단계를 설계한다. 종료 코드 3은 그 창에 받은 레코드가 없었다는 뜻이다. 다시 "
-                "돌리기(읽기만, 엔진 옆에서 돌아도 된다): `docker compose run --rm engine "
-                "probe-market-halt --day 2026-11-06`. 출력에는 시세 값이 없다(필드 이름, 코드 값, 개수, "
-                "시각만)."
-            ),
-        ),
-    ),
-)
+# The inverse ETF's KRX book (#606): ``probe-inverse-book-606`` read the frames the collector recorded
+# raw of 0193L0's ``H0STASP0`` on the first trading night after the deploy that brought it (2026-11-06:
+# 37,469 records, all of the example's 63 fields, the burden within #606's bounds), posted on #606 and
+# left ``JOBS`` (#505) in the PR that makes events of them and replays the down calls on them (#634,
+# ``scheduled.research``'s ``INVERSE_REPLAY``). What a market-wide halt's recorded frames said
+# (#625): ``probe-market-halt-625`` read 2026-11-06's 09:00-09:40, ran on 11-07, and the engine reads
+# the halt from those fields since (``special.py``). Both commands went with their modules once their
+# questions were settled (#644).

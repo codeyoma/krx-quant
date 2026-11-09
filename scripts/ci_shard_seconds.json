@@ -130,7 +130,6 @@
  "tests/test_revisions.py": 17.04,
  "tests/test_route_counts.py": 0.07,
  "tests/test_sample_keys_probe.py": 0.48,
- "tests/test_sample_profile.py": 6.52,
  "tests/test_sample_store.py": 164.78,
  "tests/test_samuelson.py": 1.62,
  "tests/test_scheduled.py": 9.29,
