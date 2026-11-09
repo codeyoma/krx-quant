@@ -34,6 +34,8 @@ from krx_quant.github import GitHub, GitHubError, comment_body
 from krx_quant.holdout import days_in_window
 from krx_quant.kind_registry import DAILY_KINDS
 from krx_quant.market_calendar import MarketCalendar, first_whole_day
+from krx_quant.neyman_backfill import Progress as NeymanBackfill
+from krx_quant.neyman_backfill import progress as neyman_backfill_progress
 from krx_quant.neyman_variants import Progress as NeymanVariants
 from krx_quant.neyman_variants import progress as neyman_variants_progress
 from krx_quant.night_book import complete_nights as night_book_nights
@@ -292,6 +294,9 @@ class Facts:
     # report and the day folders): its window's N once discovered, whether it was judged, and the
     # recorded days after 2026-11-02 that can be in the window.
     neyman_variants: NeymanVariants = field(default_factory=NeymanVariants)
+    # Whether the backfill's verdict on neyman's variants is in (#532, ``neyman_backfill.progress``,
+    # read from its report): it goes on by day across nights until it is (#643).
+    neyman_backfill: NeymanBackfill = field(default_factory=NeymanBackfill)
     # How many of the first ``SIGNAL_REVIEW_FIXED_DAYS`` days with predictions from
     # ``SIGNAL_REVIEW_FROM`` are in the engine DB (#206, ``signal_review.fixed_days``): the signal
     # review's fixed window waits for them all.
@@ -363,6 +368,17 @@ class Job:
     # The algorithm whose first pre-validation it runs (#599): the quiet night's turn asks those jobs,
     # among their places in the list, in the queue screen's order (``Facts.queue``). None: in the list's.
     queued: str | None = None
+    # A night's job that goes on by day across nights (#643): the time one of its days takes at most.
+    # It starts when that still ends by 05:30, not its whole limit; its command is told the night's end
+    # (``--until``) and starts no day it could not end by then, keeps each day it ended, and the next
+    # night's run goes on from there (its condition asks it again while days are left). It is stopped
+    # at 05:30 at the latest (its limit at most). None: it starts only when its whole limit ends by 05:30.
+    resumes: timedelta | None = None
+
+    @property
+    def needs(self) -> timedelta:
+        """What must still fit before 05:30 for it to start: a day (``resumes``), else its limit."""
+        return self.resumes if self.resumes is not None else self.timeout
 
 
 # A job that gave way on this many nights since it last ran gives way no more: it runs first (#376).
@@ -448,6 +464,8 @@ class Scheduler:
     Once every job had its turn, those with a condition for a quiet night (``Job.quiet``, #546: a
     second pre-validation) are asked it, and one due runs if it can still end by 05:30. The facts are
     read when the first job's turn comes, and again after a job that says so (``Job.refreshes``, #599).
+    A job that goes on by day across nights (``Job.resumes``, #643) starts when a day of it still ends
+    by 05:30, is told that end (``--until``) and is stopped there at the latest.
 
     The session jobs (``Job.session``, #403) run apart from the nights: on each trading day, in the
     list's order, each from its time if it can still end by ``SESSION_UNTIL``, asked its condition
@@ -607,15 +625,19 @@ class Scheduler:
                 if due is False:
                     self._waits_no_more(job)
                 continue
-            latest = end - job.timeout  # the last start that ends by 05:30
+            latest = end - job.needs  # the last start that ends by 05:30 (a day of one that resumes)
             if not await self._training_done(latest):
                 await self._notify(
                     f"예약 작업 {job.name}({day} 밤): 밤 학습이 {latest:%H:%M}까지 끝나지 않아 "
                     "다음 밤으로 미룹니다."
                 )
             elif self._clock.now() > latest:
+                if job.resumes is not None:
+                    limit = f"하루치({_duration(job.resumes)})도"
+                else:
+                    limit = f"제한 시간({_duration(job.timeout)})이"
                 await self._notify(
-                    f"예약 작업 {job.name}({day} 밤): 지금 시작하면 제한 시간({_duration(job.timeout)})이 "
+                    f"예약 작업 {job.name}({day} 밤): 지금 시작하면 {limit} "
                     f"{JOBS_UNTIL:%H:%M}을 넘어 다음 밤으로 미룹니다."
                 )
             elif job.name not in gave_way and (ahead := await self._gives_way(job, queue, day, facts)):
@@ -644,7 +666,7 @@ class Scheduler:
         for job in in_queue(asked, facts.queue):
             if not self._due(job, day, facts, quiet=True):
                 continue
-            latest = end - job.timeout
+            latest = end - job.needs
             if self._clock.now() > latest or not await self._training_done(latest):
                 log.info(
                     "scheduled job %s: due on the quiet night of %s, but its time limit (%s) would pass %s",
@@ -695,7 +717,7 @@ class Scheduler:
                 later
                 for later in queue
                 if job.gives_way_to(later)
-                and now <= end - later.timeout < ended
+                and now <= end - later.needs < ended
                 and not self._cut(later, day)
                 and self._due(later, day, facts)
             ),
@@ -704,7 +726,7 @@ class Scheduler:
         if ahead is None:
             return None
         nights = [n for n in self._state.gave_way.get(job.name, []) if n != day]
-        last_start = end - ahead.timeout
+        last_start = end - ahead.needs
         if len(nights) >= GIVE_WAY_NIGHTS:
             log.info(
                 "scheduled job %s gave way on %d nights since it last ran (%s): it runs before %s",
@@ -769,12 +791,18 @@ class Scheduler:
         self._state.gave_way.pop(job.name, None)  # it runs: the nights it gave way count no more
         self._state.save()
         before = {a.path: _stamp(self._files / a.path) for a in job.attach}
-        log.info("scheduled job %s: krx-quant %s", job.name, " ".join(job.command))
+        args, limit = job.command, job.timeout
+        if job.resumes is not None and job.session is None:
+            # By day across nights (#643): told the night's end, and stopped there at the latest.
+            _, end = window(day, self._at)
+            args = (*job.command, "--until", end.isoformat())
+            limit = max(min(job.timeout, end - started), timedelta(0))
+        log.info("scheduled job %s: krx-quant %s", job.name, " ".join(args))
         began = monotonic()
         try:
             ran = await self._runner(
-                job.command,
-                job.timeout,
+                args,
+                limit,
                 Child.job(job.name, day),
             )
         except Exception as e:
@@ -1108,6 +1136,7 @@ async def read_facts(
         hit_rate_nights=await asyncio.to_thread(nights_with_hit_rates, settings),
         holdout_days=await asyncio.to_thread(days_in_window, settings.state_dir / DB_NAME),
         neyman_variants=await asyncio.to_thread(neyman_variants_progress, settings, clock.now()),
+        neyman_backfill=await asyncio.to_thread(neyman_backfill_progress, settings),
         signal_review_days=await asyncio.to_thread(
             fixed_days, settings.state_dir / DB_NAME, SIGNAL_REVIEW_FROM, SIGNAL_REVIEW_FIXED_DAYS
         ),
