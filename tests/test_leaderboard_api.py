@@ -447,7 +447,7 @@ async def test_ranking_needs_enough_pairs_and_only_candidates_share_the_adjustme
 
 
 async def test_a_replayed_morning_reaches_the_leaderboard(tmp_path: Path) -> None:
-    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"))
+    engine = await run(tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=1)
 
     async with TestClient(TestServer(create_app(engine, min_sample=50))) as client:
         body = await get(client, "/v1/leaderboard")

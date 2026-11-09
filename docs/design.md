@@ -97,6 +97,7 @@
 | `flow.py` | `/v1/symbols/{symbol}/flow`의 답(#306): 녹화한 프로그램매매, 회원사, 외국인·기관 추정 가집계를 그날 1분마다(앞 값을 끌어오지 않는다), 추정 구간, 상위 5개 창구, 지금까지의 합과 전 거래일 같은 시각의 합, 확정 일별 수급 |
 | `cost_map.py`, `base_rates.py` | `/v1/cost-map`의 답(#307): 종목마다 왕복 비용(매도세·수수료·스프레드 1틱, 지정가·시장가, 인버스, 틱 구간 경계), 방향이 있는 종류마다 폭·비용·손익분기 맞힘률 p*와 최종 합의·active 알고리즘 가운데 순위 1위(#594)·가장 센 기준 예측의 맞힘률(순위표와 같은 통계). 기간 기준율(`structure-check` 3절의 4분 도달 정답 비율)을 이력 작업이 밤마다 계산해 `state/base_rates.json`에 둔다 |
 | `briefing.py` | `/v1/briefing`의 답(#304): 장전 브리핑의 밤사이 미국, 야간선물, 종목마다 장 마감 뒤·프리마켓·예상 시가·수급, 08:50 시가→종가 예측과 그 입력, 그날 일정. 파일만 읽고 `cox`의 입력과 같은 규칙을 쓴다 |
+| `assembly.py` | 엔진 조립(#647, 아래 "엔진 조립"): 설정과 모드(live, replay, demo)로 서버와 같은 엔진을 만드는 함수 하나(`build_engine`). 수집기, 녹화한 날의 재생(사전 검증, 수습 시뮬레이션, `krx-quant replay`), 데모가 모두 쓴다 |
 | `replay.py`, `demo.py`, `fake_kis.py`, `notify.py` | 재생, 화면 개발용 데모 엔진, 가짜 KIS, 텔레그램 알림 |
 | `cli/` (`__init__.py`, `core.py`, `engine.py`, `trader.py`, `data.py`, `probes.py`, `research.py`, `tools.py`) | 명령(#578): `main`과 parser, 명령 묶음이 같이 쓰는 것(`Command`, `positive`), 묶음마다 그 명령과 처리 함수. `python -m krx_quant.cli`는 `__main__.py`다 |
 | `prevalidation.py` | 새 알고리즘 사전 검증: 최근 20거래일 재생과 엔진의 등록 관문(#24) |
@@ -151,6 +152,26 @@
 > **삭제됨** (2026-10-23, #360): `log_files.py`의 로그 파일(`state/logs/<종류>/<날>.log`, `KRX_LOG_DAYS`·`KRX_LOG_MAX_MB` 안에서 지우기)과 `logs_bundle.py`(`krx-quant logs-bundle`, 가린 꾸러미). 이유: 사용자가 로그를 Grafana Cloud Loki로만 남기기로 정했다(2026-10-23). 대신: `loki.py`. 엔진이 띄운 프로세스를 돌리고 출력을 읽는 부분은 `process_log.py`(이름을 바꿨다)에 남았다.
 
 > **삭제됨** (2026-10-08, 0f5800c): `src/krx_quant/feeds.py` 한 파일. 이유 기록 없음(전체 구독 계획 #3을 넣은 커밋에서 나뉘었다). 대신: `feeds/` 패키지(`base.py`, `stock.py`, `market.py`)와 `masters.py`, `polling.py`, `ratelimit.py`.
+
+### 엔진 조립 (#647)
+
+예측 엔진(`PredictionEngine`)은 `assembly.py`의 `build_engine(settings, mode, …)` 하나로 만든다. 수집기(live), 녹화한 날의 재생(replay: 사전 검증, 수습 시뮬레이션, `krx-quant replay`), 데모(demo)가 모두 이 함수를 쓴다. 규칙은 이렇다.
+
+- 설정에서 오는 것은 모드와 상관없이 같다: 종목, 수수료, 시간 예산(`KRX_ALGORITHM_SECONDS`, `KRX_CPU_BUDGET_SECONDS`), 순위표 최소 표본, 선행 시계열(지수, 미국 종목, ETF), 상태 판정 규칙, 정답 버전(`KRX_TARGET_VERSION`), 매크로 국면(07:30 읽기), 전 거래일의 백필 1분봉. 그래서 실시간 엔진에 설정을 하나 더하면 재생도 같이 받는다. 사전 검증이 빠뜨릴 길이 없다.
+- 모드가 정하는 것은 이것뿐이다(`assembly.MODE_OPTIONS`).
+
+  | 부분 | live | replay | demo |
+  |---|---|---|---|
+  | 관문(사전 검증 통과, 거절, 코드 개정. `admits`, `refused`, `revisions`) | 서버의 것(`state/`에서 읽는다) | 부른 쪽이 준 것. 없으면 받은 알고리즘이 모두 돈다 | 데모의 것 |
+  | 하루 한 번 예측 종류(#264: KRX 일봉, 알고리즘, 08:50 피처) | 있다 | 없다 | 있다 |
+  | live 전용: 루프 감시(#538), 봉 마감 뒤 GC(#621), 돌리는 커밋(`KRX_COMMIT`), 상태가 보여 주는 신호 설정(#617) | 있다 | 없다 | 없다 |
+
+- 부른 쪽이 주는 것은 모드의 입력뿐이다: 저장소, 시계, 달력, 모델과 기후 표, 알고리즘과 종류(사전 검증의 후보), live가 아니면 관문. 알림(`notify`, `signals`)은 수집기가 HTTP 세션을 연 뒤에 붙인다.
+- 엔진의 키워드 인자는 모두 조립이 설정에서 정하거나, 일부러 기본값에 둔 것으로 `tests/test_assembly.py`의 `LEFT_TO_DEFAULTS`에 이유와 함께 적는다. 새 인자를 어느 쪽에도 넣지 않으면 시험이 실패한다. 같은 설정으로 만든 live와 replay의 옵션은 모드가 정한 부분만 다르다(같은 시험).
+- 정답 버전에는 기본값이 없다: `PredictionEngine`과 시험용 재생 도구 `replay.replay()`는 `target_version`을 꼭 받는다(mypy가 빠진 곳을 잡는다). 조립은 설정의 값을 넘긴다.
+
+  > **바뀜** (2026-11-09, #661): `PredictionEngine`과 `replay()`의 `target_version` 기본값 1(옛 정답) → 기본값 없음. 엔진은 수집기, 녹화한 날의 재생, 데모가 저마다 33개 인자로 조립했다 → `build_engine` 하나로. 이유: 설정과 서버의 기본은 3인데 생성자의 기본은 1이었고, 시험에서 엔진을 만드는 44곳 가운데 9곳만 값을 넘겼다. 새 실시간 설정을 재생이 빠뜨려도 잡을 장치가 없었다(#647).
+- 데모(`demo.py`)는 데모 설정(`demo_settings`: 가상 종목과 수수료, 도달 정답, 선행 시계열 없음, 나머지는 서버의 기본값)으로 조립한다. 지난 거래일은 replay 모드(하루 한 번 종류 없음), 아침은 demo 모드다. 예측은 전과 같다. 지난 거래일에도 서버처럼 매크로 국면을 읽어서, 국면이 없던 날마다 `runs`에 `no_regime` 한 줄이 남는다.
 
 ## 3. 저장소와 upstream 동기화
 

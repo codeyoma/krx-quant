@@ -21,6 +21,7 @@ from krx_quant.kinds import DIRECTION_KIND
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
+from krx_quant.touch import TARGET_VERSION
 from tests.api_doubles import listening
 from tests.api_schema import check
 from tests.daily_doubles import SYMBOLS, made_history
@@ -47,6 +48,7 @@ def daily_engine(tmp_path: Path, start: datetime) -> tuple[PredictionEngine, Fak
         kinds=(DIRECTION_KIND,),
         kind_algorithms=(),
         daily=StoredDays(tmp_path / "data"),
+        target_version=TARGET_VERSION,
     )
     return engine, clock
 
@@ -188,6 +190,7 @@ async def test_a_starting_engine_answers_the_days_predicted_before_in_answer_ver
         kinds=(DIRECTION_KIND,),
         kind_algorithms=(),
         daily=StoredDays(tmp_path / "data"),
+        target_version=TARGET_VERSION,
     )
     clock = engine.clock  # type: ignore[assignment]
     await replay_into(engine, clock, [], until=at("07:21", tuesday))

@@ -537,7 +537,14 @@ async def morning(db: Path, rule: SignalRule) -> None:
     store.mark_target(TARGET_VERSION, at("08:00:00"))
     clock = FakeClock(at("09:00:00"))
     engine = PredictionEngine(
-        store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms, signals=Signals(rule, lambda _: None)
+        store,
+        CALENDAR,
+        (SYMBOL,),
+        FEE,
+        clock,
+        algorithms=algorithms,
+        signals=Signals(rule, lambda _: None),
+        target_version=TARGET_VERSION,
     )
     await replay_into(engine, clock, MORNING, until=at("09:30:30"), display_delay=timedelta(seconds=3))
     store.close()

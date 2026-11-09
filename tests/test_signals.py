@@ -94,7 +94,16 @@ async def morning(
             store.add_status(f"m{n}", at("08:00:00"), None, Status.ACTIVE, "test")
     store.mark_target(TARGET_VERSION, at("08:00:00"))  # active on the touch target already (#170)
     clock = FakeClock(at(start))
-    engine = PredictionEngine(store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms, signals=signals)
+    engine = PredictionEngine(
+        store,
+        CALENDAR,
+        (SYMBOL,),
+        FEE,
+        clock,
+        algorithms=algorithms,
+        signals=signals,
+        target_version=TARGET_VERSION,
+    )
     fed = busy_morning(end=until) if events is None else events
     later = sorted((e for e in fed if e[1]["received_at"] >= at(start)), key=lambda e: e[1]["received_at"])
     await replay_into(engine, clock, later, until=at(until), display_delay=display_delay)
@@ -169,7 +178,9 @@ async def test_every_client_reads_why_a_final_consensus_is_not_to_be_acted_on(tm
     store.add_status("m0", at("08:00:00"), None, Status.ACTIVE, "test")
     store.mark_target(TARGET_VERSION, at("08:00:00"))
     clock = FakeClock(at("09:00:00"))
-    engine = PredictionEngine(store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms)
+    engine = PredictionEngine(
+        store, CALENDAR, (SYMBOL,), FEE, clock, algorithms=algorithms, target_version=TARGET_VERSION
+    )
     events.sort(key=lambda e: e[1]["received_at"])
     await replay_into(engine, clock, events, until=at("09:05:30"), display_delay=timedelta(seconds=3))
 
