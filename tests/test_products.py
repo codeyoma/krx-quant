@@ -6,7 +6,6 @@ from __future__ import annotations
 from collections import Counter
 from datetime import date
 
-from krx_quant import structure_check
 from krx_quant.products import INVERSE_PRODUCTS, LISTED, PRODUCTS, Structure, products_of
 
 
@@ -48,7 +47,3 @@ def test_the_inverse_products_come_from_the_list() -> None:
     assert all(p in PRODUCTS and p.inverse for p in INVERSE_PRODUCTS.values())
     assert {(p.listed, p.exposure) for p in INVERSE_PRODUCTS.values()} == {(date(2026, 5, 27), 2)}
     assert "009150" not in INVERSE_PRODUCTS
-
-
-def test_the_structure_check_s_listing_period_starts_on_the_products_listing() -> None:
-    assert structure_check.LISTING == LISTED

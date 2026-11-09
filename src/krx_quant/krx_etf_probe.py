@@ -76,11 +76,10 @@ from krx_quant.krx_net_assets import (
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.nav_probe import UNITS, grouped, latest_trading_day, legend
 from krx_quant.net_assets import DAILY, DAILY_DATE, PRICE, Query, one_object, row_list
-from krx_quant.probe_calls import CALL_ERRORS, Calls
+from krx_quant.probe_calls import CALL_ERRORS, REQUEST_TIMEOUT, Calls, kis_error
 from krx_quant.probe_fields import day_of, describe, flags
 from krx_quant.products import PRODUCTS, Product
 from krx_quant.redaction import MASK
-from krx_quant.supply_probe import REQUEST_TIMEOUT, kis_error
 
 Out = Callable[[str], None]
 

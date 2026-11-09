@@ -20,9 +20,10 @@ from krx_quant.contracts import KOSPI200, night_front_month
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST, kst_nearest
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.night_probe import master_lines, report, subscribed_nights
+from krx_quant.night_probe import master_lines, report
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.raw_days import RawDays
+from krx_quant.recording_quality import subscribed_nights
 from krx_quant.scheduled import run_command
 from tests.collector_doubles import TRADE_KEY, Clock, collect, serve_masters, settings_for
 from tests.kis_frames import FUTURES_COLUMNS, frame, master_zips, night_book_frame, night_futures_frame

@@ -48,11 +48,12 @@ correlation.
 
 **Fixed and recorded.** The rule's version (``SCREEN_VERSION``) is in each score's key with the
 candidate's code digest, its target or kind's answer version and the samples' key (the days, the
-symbols, the fee rate, what the nights read, the code that makes samples and the sample store's file
-of each day the folds read, ``screen_key``): a score of the same key is not screened again
-(``cached``), and a new recorded day screens every one again. Every screen is kept (``HISTORY``); the
-latest (``QUEUE``) is what the night's pre-validations go by. A night's screen of the same days is not
-new evidence beside the one before it: tuning the score on what it ordered needs days it has not seen.
+symbols, the fee rate, what the nights read, what the samples mean (``sample_store.semantics``) and
+the sample store's file of each day the folds read, ``screen_key``): a score of the same key is not
+screened again (``cached``), and a new recorded day screens every one again. Every screen is kept
+(``HISTORY``); the latest (``QUEUE``) is what the night's pre-validations go by. A night's screen of
+the same days is not new evidence beside the one before it: tuning the score on what it ordered needs
+days it has not seen.
 #262's correction counts the pre-validations run on the same days, not this choice among them.
 
 **Resources.** Each candidate is screened in its own process (``screen-queue --candidate``), one after
@@ -109,7 +110,7 @@ from krx_quant.pricing import Direction
 from krx_quant.pricing import most_likely as most_likely_direction
 from krx_quant.process_log import KRX_QUANT
 from krx_quant.sample_store import STORE_DIR, NightReads, night_reads
-from krx_quant.sample_store import code_digest as samples_code
+from krx_quant.sample_store import semantics as samples_semantics
 from krx_quant.stats import Lift, day_lift
 from krx_quant.touch import WINDOW
 from krx_quant.training import finished_days, is_recorded
@@ -505,7 +506,7 @@ def screen_key(
             "symbols": list(settings.symbols),
             "fee_rate": repr(float(settings.fee_rate)),
             "reads": [list(night.names), [k.name for k in night.kinds]],
-            "code": samples_code(),
+            "semantics": samples_semantics(),
             "store": {d.isoformat(): _stored(store, d) for d in read},
         },
     }

@@ -1,9 +1,9 @@
 usage: krx-quant [-h]
-                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,bar-close-times,session-memory,smt,climate-prior,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,bar-close-times,session-memory,smt,climate-prior,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
     replay              replay a recorded day through the engine into its own
                         database (no KIS needed)
@@ -55,6 +55,13 @@ positional arguments:
                         order inquiry (KRX_TRADER_KIS_*, read-only): each
                         column's shape, lengths, values' count and matches; no
                         value, order number, account or price
+    fill-notice-columns
+                        tell the mock fill notice's column 10 (CNTG_QTY) from
+                        17 (ODER_QTY) on the recorded orders of more than one
+                        share that something filled of, joined as fill-notice-
+                        layout joins them (#648), and count the orders whose
+                        notice was lost while the recorder was disconnected:
+                        counts alone; no value, order number, account or price
     probe-live-account  read the trader's live account with
                         KRX_TRADER_LIVE_KIS_* by inquiry calls alone (#408):
                         the price, the balance, the orderable cash and the
@@ -107,17 +114,6 @@ positional arguments:
     probe-gaps          summarize every recorded day's gaps and the closing
                         auction window's frames, trades and bars (#344), read-
                         only; prints no market value
-    check-closing-flow  summarize what the closing flow kept (#305): the net
-                        assets by day and when they came, the 15:20 rows, the
-                        days, and the integrated and KRX one-minute bars'
-                        closing auction values against the recorded prints
-                        (asks KIS for the KRX bars); writes nothing, no market
-                        value
-    check-krx-net-assets
-                        summarize the ETF net assets kept from the KRX Open
-                        API (#305): the days, when they came, which day's
-                        listed units the net asset total matches, KRX against
-                        KIS; reads the state file only, prints no value
     probe-sample-keys   what changed the key of the days the sample store
                         holds since the night stored them (#565): their input
                         files in the Object Store, the training cache and the
@@ -138,22 +134,12 @@ positional arguments:
     smt                 count a day's SMT divergences (#520), made again from
                         its recording or backfilled bars, beside the engine's
                         live ones; reads only, no price
-    climate-prior       compare the climate baseline, shannon and shannon with
-                        each slot's class frequencies on the pre-validation's
-                        folds (#429; reads the training samples, replays
-                        nothing)
     neyman-variants     neyman's variants (#455): the discovery that fixes the
                         window's N, then the verdict on the window after
                         2026-11-02 once it is full (reads the training
                         samples, replays nothing)
-    diagnose            print the measurements the open decisions need; reads
-                        only, writes nothing
     signal-review       print what choosing the Telegram signal settings needs
                         (#206); reads only, writes nothing
-    error-breakdown     print where an algorithm errs (#431): confusion
-                        matrices and lift over the climate baseline by symbol,
-                        30-minute slot, spread and volatility; exploratory,
-                        reads only, writes nothing
     error-holdout       print turing's four pre-registered hypotheses of
                         #431's report judged on the fixed holdout (#447): the
                         first 10 trading days after 2026-10-30; reads only,
@@ -174,10 +160,6 @@ positional arguments:
                         (#437), by algorithm over the latest nights:
                         mismatches, what a hit-rate-first rule would have
                         chosen; reads the store only, no price
-    daily-check         print what the daily kinds did on the latest trading
-                        days (#264); reads only, writes nothing
-    structure-check     measure the research's market-structure claims on the
-                        stored bars and candles; reads only
     inverse-replay      replay the explicit down calls through the inverse
                         ETF's recorded KRX quotes (#606): one share at the
                         first ask after the call, sold at the bid on the

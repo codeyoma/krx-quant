@@ -9,7 +9,7 @@ night feeds never go stale (``health.NIGHT_FEEDS``). So after the nightly traini
 the day's files and the engine's own status, in five sections:
 
 1. **Disconnects in the session** (``gaps``, the session's open to its close, 09:00–15:30 on most
-   days): each disconnect that overlaps it on one line (``gaps_probe.group_line``: a disconnect
+   days): each disconnect that overlaps it on one line (``group_line``: a disconnect
    opens a gap per subscription, one start and reason), counted by length (under ``SHORT``, to
    ``LONG``, ``LONG`` and over: a book older than 60 s leaves its windows unscored), the ones outside
    the session counted; and per feed, its disconnects and stale gaps in the session, how many and
@@ -37,10 +37,10 @@ the day's files and the engine's own status, in five sections:
 4. **REST failures** (``/v1/status``'s ``kis.polls``, #441): the engine counts each poll's calls
    and failures by kind for today (KST) since it started, in memory only. They are the report's day
    only while the engine's day is it: after midnight they are the next day's, and said unknown.
-5. **The night's recording** (``night_probe``'s window: the evening of the trading day before, 18:00
+5. **The night's recording** (``night_window``: the evening of the trading day before, 18:00
    to 06:00 and its ten late minutes): whether KIS took the night trades' registration by 18:00, the
    night trades' and book's records (the frames' header counts) and events, against the median of
-   the nights subscribed for in the week before it (``night_probe.subscribed_nights``).
+   the nights subscribed for in the week before it (``subscribed_nights``).
 
 **When it calls an agent.** The report's second line is #402's ``에이전트 차례:`` line
 (``trader.report.AGENT``), and the job labels the issue only on a night whose line names a reason
@@ -81,22 +81,21 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from krx_quant import kis
+from krx_quant.archive import partition_batches
 from krx_quant.backfill import BAR_SCHEMA, BARS_FINAL_AT, MINUTE_BARS_TR, stock_bars_path
 from krx_quant.collector import SHORT_FRAMES_EXPECTED
 from krx_quant.config import Settings
-from krx_quant.contracts import NIGHT_OPEN
+from krx_quant.contracts import NIGHT_END, NIGHT_OPEN
 from krx_quant.doctor import Status, api_candidates, fetch_status
-from krx_quant.feeds import KRX_TRADE, NIGHT_FUTURES, RAW_SCHEMA, TRADE, WS_FEEDS, Feed
+from krx_quant.feeds import KRX_TRADE, NIGHT_FUTURES, NIGHT_FUTURES_BOOK, RAW_SCHEMA, TRADE, WS_FEEDS, Feed
 from krx_quant.feeds.base import KST
 from krx_quant.footprint import PEAK_START, Meter, give_back
-from krx_quant.gaps_probe import UNPARSED, Group, group_line, groups_of
 from krx_quant.health import Gap, GapKind, Unread, read_batches, read_gaps
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
-from krx_quant.night_probe import FEEDS as NIGHT_FEEDS
-from krx_quant.night_probe import LATE, acknowledgements, evening, night_window, subscribed_nights
 from krx_quant.object_store import open_store
 from krx_quant.poll_outages import SUSTAINED_FAILURES
-from krx_quant.raw_days import RawDays
+from krx_quant.raw_days import SYSTEM, UNPARSED, RawDays
 from krx_quant.reference import BAR, Bar, BarBuilder
 from krx_quant.trader.report import AGENT, NO_CALL
 
@@ -249,6 +248,84 @@ class Found:
 
 
 # 1. Disconnects in the session.
+
+
+# A disconnect's gaps, one line for each (``gaps_probe`` prints them too, #344).
+KEYS_SHOWN = 6  # a feed's keys named in a gap line, up to this many; else counted
+_DISCONNECTED = GapKind.DISCONNECTED.value
+
+
+@dataclass
+class Group:
+    """The gaps of one day with one start and reason: a disconnect's, one per subscription."""
+
+    start: datetime
+    reason: str
+    gaps: list[Gap] = field(default_factory=list)
+
+    @property
+    def disconnect(self) -> bool:
+        return self.reason.split(":", 1)[0] == _DISCONNECTED
+
+    def overlaps(self, start: datetime, end: datetime) -> bool:
+        return any(g.start < end and (g.end is None or g.end > start) for g in self.gaps)
+
+
+def groups_of(gaps: Sequence[Gap]) -> list[Group]:
+    """The gaps grouped by start and reason, in order of start."""
+    by: dict[tuple[datetime, str], Group] = {}
+    for gap in gaps:
+        by.setdefault((gap.start, gap.reason), Group(gap.start, gap.reason)).gaps.append(gap)
+    return sorted(by.values(), key=lambda g: (g.start, g.reason))
+
+
+def length_text(span: timedelta) -> str:
+    """A gap's length: seconds with a tenth under a minute, else minutes and seconds, or hours and
+    minutes."""
+    seconds = span.total_seconds()
+    if seconds < 60:
+        return f"{seconds:.1f}초"
+    hours, rest = divmod(round(seconds), 3600)
+    minutes, seconds_left = divmod(rest, 60)
+    return f"{hours}시간 {minutes}분" if hours else f"{minutes}분 {seconds_left}초"
+
+
+def _lengths(group: Group) -> str:
+    """The group's lengths: one, or their range, and those with no end."""
+    spans = sorted(g.end - g.start for g in group.gaps if g.end is not None)
+    endless = len(group.gaps) - len(spans)
+    parts = []
+    if spans:
+        low, high = length_text(spans[0]), length_text(spans[-1])
+        parts.append(low if low == high else f"{low}–{high}")
+    if endless:
+        parts.append(f"끝 없음(수집기가 멈춤) {endless}")
+    return ", ".join(parts)
+
+
+def _covered(group: Group) -> str:
+    """The feeds and keys of a group: the feeds sharing a set of keys together."""
+    keys: dict[str, set[str]] = {}
+    for gap in group.gaps:
+        keys.setdefault(gap.feed, set()).add(gap.key)
+    feeds_of: dict[tuple[str, ...], list[str]] = {}
+    for feed, of_feed in keys.items():
+        feeds_of.setdefault(tuple(sorted(of_feed)), []).append(feed)
+    parts = []
+    for held, feeds in sorted(feeds_of.items(), key=lambda kv: sorted(kv[1])):
+        named = " ".join(held) if len(held) <= KEYS_SHOWN else f"키 {len(held)}개"
+        parts.append(f"{' '.join(sorted(feeds))}: {named}")
+    return " / ".join(parts)
+
+
+def group_line(group: Group, day: date) -> str:
+    """A disconnect's line: its start and reason, the feeds and keys it opened a gap for, and their
+    lengths."""
+    feeds = len({g.feed for g in group.gaps})
+    return (
+        f"{_time(group.start, day)} {group.reason} · 피드 {feeds}개, 키 {len(group.gaps)}개 · "
+        f"길이 {_lengths(group)} · {_covered(group)}"
+    )
 
 
 def _clip(gap: Gap, start: datetime, end: datetime) -> tuple[datetime, datetime] | None:
@@ -992,6 +1069,77 @@ def polls_section(found: Found, polls: Polls) -> list[str]:
 # 5. The night's recording.
 
 
+# The night after a trading day's session, and KIS's answers to its feeds' registrations
+# (``night_probe`` reads them too, #264).
+# Records received this long after 06:00 still count as the night's (a closing record).
+LATE = timedelta(minutes=10)
+LOOK_BACK_DAYS = 7  # the nights looked for before the one read
+NIGHT_FEEDS = (NIGHT_FUTURES, NIGHT_FUTURES_BOOK)
+NIGHT_TR_IDS = frozenset(f.tr_id for f in NIGHT_FEEDS)
+
+
+def night_window(day: date) -> tuple[datetime, datetime]:
+    """The night after ``day``'s session: 18:00 to 06:00 the next morning (and ``LATE``)."""
+    start = datetime.combine(day, NIGHT_OPEN, KST)
+    return start, datetime.combine(day + timedelta(days=1), time(0), KST) + NIGHT_END + LATE
+
+
+def evening(at: datetime) -> date:
+    """The evening whose night is going on at ``at``, or the day itself before 18:00."""
+    return (at.astimezone(KST) - NIGHT_END).date()
+
+
+@dataclass(frozen=True)
+class Ack:
+    """KIS's answer to a registration, as recorded raw."""
+
+    received_at: datetime
+    tr_id: str
+    key: str
+    ok: bool
+    message: str
+
+
+def acknowledgements(raw: RawDays, day: date) -> list[Ack]:
+    """KIS's answers to the night feeds' registrations recorded on ``day``, in order."""
+    root = raw.feed(day, SYSTEM)
+    acks: list[Ack] = []
+    for partition in sorted(root.glob("symbol=*")):
+        if partition.name == "symbol=_":  # heartbeats
+            continue
+        for _, table in partition_batches(partition, ("received_at", "message")):
+            batch = table.to_pydict()
+            for at, text in zip(batch["received_at"], batch["message"], strict=True):
+                try:
+                    message = kis.parse_message(text)
+                except kis.KisError:
+                    continue
+                if isinstance(message, kis.SystemMessage) and message.tr_id in NIGHT_TR_IDS:
+                    acks.append(Ack(at, message.tr_id, message.tr_key or "", message.ok, message.message))
+    return sorted(acks, key=lambda a: a.received_at)
+
+
+def subscribed_nights(
+    raw: RawDays, calendar: MarketCalendar, before: date, back: int = LOOK_BACK_DAYS
+) -> list[date]:
+    """The trading days of the ``back`` days before ``before`` whose night the collector had
+    subscribed for when it began: KIS accepted its night trades' registration that day by
+    18:00. Oldest first. A day whose files cannot be read is left out."""
+    found = []
+    for n in range(back, 0, -1):
+        day = before - timedelta(days=n)
+        if not calendar.is_trading_day(day):
+            continue
+        opens = datetime.combine(day, NIGHT_OPEN, KST)
+        try:
+            acks = acknowledgements(raw, day)
+        except OSError:
+            continue
+        if any(a.ok and a.tr_id == NIGHT_FUTURES.tr_id and a.received_at <= opens for a in acks):
+            found.append(day)
+    return found
+
+
 @dataclass
 class Night:
     """One night feed's recording in a night's window."""
@@ -1011,7 +1159,7 @@ def read_night(
     budget: Budget | None = None,
 ) -> Night:
     """The frames and records of ``feed`` received in the night after ``evening_of`` (both days'
-    partitions, ``night_probe.night_window``), and, if asked, its events."""
+    partitions, ``night_window``), and, if asked, its events."""
     budget = budget or Budget()
     tr_id = feed.tr_id
     start, end = night_window(evening_of)

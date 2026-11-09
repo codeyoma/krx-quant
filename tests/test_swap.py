@@ -91,7 +91,14 @@ def store(tmp_path: Path) -> ObjectStore:
 def engine(tmp_path: Path) -> PredictionEngine:
     calendar = MarketCalendar({NIGHT: True, MORNING: True, date(2026, 10, 14): True})
     clock = FakeClock(at(MORNING, "07:00"))
-    return PredictionEngine(PredictionStore(tmp_path / "engine.db"), calendar, ("005930",), 0.00015, clock)
+    return PredictionEngine(
+        PredictionStore(tmp_path / "engine.db"),
+        calendar,
+        ("005930",),
+        0.00015,
+        clock,
+        target_version=TARGET_VERSION,
+    )
 
 
 async def morning(store: ObjectStore, tmp_path: Path, engine: PredictionEngine, day: date = MORNING) -> Any:
@@ -216,7 +223,7 @@ async def test_the_swap_s_line_leaves_out_the_models_of_algorithms_their_pre_val
     # scheduled pre-validation runs after the night), and the engine's gate does not run it.
     state = tmp_path / "state"
     kalman = next(a for a in ALGORITHMS if a.name == "kalman")
-    refuse(state, kalman, target_version=1)
+    refuse(state, kalman, target_version=TARGET_VERSION)
     calendar = MarketCalendar({NIGHT: True, MORNING: True})
     engine = PredictionEngine(
         PredictionStore(tmp_path / "engine.db"),
@@ -224,8 +231,9 @@ async def test_the_swap_s_line_leaves_out_the_models_of_algorithms_their_pre_val
         ("005930",),
         0.00015,
         FakeClock(at(MORNING, "07:00")),
-        admits=admits(state),
-        refused=refusals(state),
+        admits=admits(state, TARGET_VERSION),
+        refused=refusals(state, TARGET_VERSION),
+        target_version=TARGET_VERSION,
     )
     trained = Model("kalman-20261012-def456", {}, "2026-09-14..2026-10-07")
     promoted = {"newton": TRAINED, "kalman": trained}

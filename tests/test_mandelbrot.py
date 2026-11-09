@@ -395,6 +395,7 @@ def test_it_is_registered_with_the_range_and_waits_for_its_pre_validation(tmp_pa
         FakeClock(at("08:00:00")),
         algorithms=[],
         admits=admits(tmp_path, 2),
+        target_version=TARGET_VERSION,
     )
     assert NAME in engine.waiting()
     engine.store.close()
