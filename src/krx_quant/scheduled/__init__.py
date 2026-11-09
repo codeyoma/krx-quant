@@ -63,7 +63,7 @@ jobs ask it (the pre-validations share ``read_prevalidation_facts``). Removing a
 reader with it. The names other modules import from ``krx_quant.scheduled`` are exported here
 (``__all__``).
 
-> **바뀜** (2026-11-10, #PRNUM): every job's condition was asked with one ``Facts``, a field per
+> **바뀜** (2026-11-10, #668): every job's condition was asked with one ``Facts``, a field per
 > experiment, which ``core.read_facts`` read whole each night → each job reads its own facts
 > (``Job.facts``), read only when it is considered. 이유: the core knew every experiment, and adding
 > or removing one changed the core, its family's module and the tests together.
