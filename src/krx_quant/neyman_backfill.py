@@ -63,10 +63,12 @@ long, less on a long training: the run goes on by day. Told when to stop (``unti
 ``--until``), it starts no day it could not end by then (by the slowest of tonight's days), and each
 day it ended is kept (``CHECKPOINT``: its fold, and each bar close's symbol, time, answer, the four
 arms' calls and σ̂₄), so the next night's run goes on from the first day left. The kept days are read
-only with the same code (``code_key``: this module's, ``neyman_variants``', ``training``'s,
-``features``' and ``touch``'s, neyman's package's digest and the walk-forward's class), the same list
-and the same input (``input_key``: the settings that make the samples and each data file of the days
-up to the last listed, by its size and time); with any other, they are set aside and the run starts
+only with the same code (``code_key``: this module's, ``neyman_variants``', the algorithm modules they
+and neyman import, ``turing``'s shared tree settings among them, neyman's package's digest, the
+walk-forward's class and the code that makes samples, ``sample_store.code_digest``), the same list and
+the same input (``input_key``: the settings that make the samples, the days with data up to the last
+listed one, and each such day's sample key, ``sample_store.day_key``: the files it reads by their
+SHA-256 and the trading calendar around it); with any other, they are set aside and the run starts
 from the first day. A day kept gives the tally the walk gave it, so the verdict on days walked over
 several nights is the verdict on them walked in one. The verdict comes once, after the last day, by the
 same rule.
@@ -74,6 +76,7 @@ same rule.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib
 import inspect
@@ -86,6 +89,7 @@ from datetime import date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
 from statistics import NormalDist
+from types import ModuleType
 from typing import Any
 
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm
@@ -135,10 +139,12 @@ from krx_quant.neyman_variants import (
 from krx_quant.neyman_variants import (
     REPORT as VARIANTS_REPORT,
 )
+from krx_quant.object_store import file_digest
 from krx_quant.predictions import iso
 from krx_quant.prevalidation import _WalkForward, code_digest
 from krx_quant.pricing import Direction, most_likely
-from krx_quant.sample_store import night_reads
+from krx_quant.sample_store import code_digest as samples_code
+from krx_quant.sample_store import day_key, night_reads, read_files
 from krx_quant.stats import Interval, wilson
 from krx_quant.training import finished_days, is_recorded, previous_days_needed, training_day
 
@@ -313,53 +319,84 @@ class Tally:
 
 # The days kept across nights (#643)
 
-# The modules whose code makes a day's calls, beside neyman's package and the walk-forward's class.
-CODE = (
-    "krx_quant.neyman_backfill",
-    "krx_quant.neyman_variants",
-    "krx_quant.training",
-    "krx_quant.features",
-    "krx_quant.touch",
-)
+# The modules whose code makes a day's calls, beside the algorithm code they import (``_algorithm_code``),
+# neyman's package's digest, the walk-forward's class and the code that makes samples
+# (``sample_store.code_digest``).
+CODE = ("krx_quant.neyman_backfill", "krx_quant.neyman_variants")
 _CALL = {UP: "u", FLAT: "f", DOWN: "d"}
 _DIRECTION = {v: k for k, v in _CALL.items()}
 
 
+def _algorithm_code() -> list[str]:
+    """The algorithm modules (``krx_quant.algorithms.<name>``) that neyman's package and ``CODE``
+    import from, by name: the tree models' shared settings among them (``turing``'s ``BOOSTING`` and
+    ``ROUNDS``), which neyman's own digest leaves out."""
+    found: set[str] = set()
+    for module in (importlib.import_module(Neyman.__module__), *map(importlib.import_module, CODE)):
+        tree = ast.parse(Path(_source(module)).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("krx_quant.algorithms."):
+                found.add(str(node.module))
+    return sorted(found)
+
+
+def _source(module: ModuleType) -> str:
+    if module.__file__ is None:
+        raise ValueError(f"{module.__name__}: no source file to digest")
+    return module.__file__
+
+
 def code_key() -> str:
-    """A digest of the code that makes a day's calls (``CODE``, neyman's package by
-    ``prevalidation.code_digest``, and ``_WalkForward``'s class): kept days are read only with it."""
+    """A digest of the code that makes a day's calls: ``CODE``'s modules and the algorithm modules
+    they and neyman import (``_algorithm_code``: a package whole), neyman's package by
+    ``prevalidation.code_digest``, ``_WalkForward``'s class, and the code that makes a day's samples
+    (``sample_store.code_digest``). Kept days are read only with it."""
     digest = hashlib.sha256()
-    for name in CODE:
-        module = importlib.import_module(name)
-        assert module.__file__ is not None
-        digest.update(name.encode() + b"\0" + Path(module.__file__).read_bytes())
+    for name in [*CODE, *_algorithm_code()]:
+        path = Path(_source(importlib.import_module(name)))
+        files = sorted(path.parent.rglob("*.py")) if path.name == "__init__.py" else [path]
+        for f in files:
+            digest.update(f"\0{name}\0{f.name}\0".encode() + f.read_bytes())
     digest.update(b"\0neyman\0" + code_digest(Neyman()).encode())
     digest.update(b"\0walk\0" + inspect.getsource(_WalkForward).encode())
+    digest.update(b"\0samples\0" + samples_code().encode())
     return digest.hexdigest()[:16]
 
 
-def input_key(settings: Settings, listed: Listed) -> str:
-    """A digest of what a day's samples are made from: the settings that make them, the list, and
-    each file of the data directory's day folders up to the last listed day, by its path, size and
-    time (``bars/``, ``events/``)."""
+def input_key(
+    settings: Settings, listed: Listed, available: Sequence[date], calendar: MarketCalendar, leaders: Leaders
+) -> str:
+    """A digest of what the listed days' samples are made from: the settings that make them, the list,
+    the days with data up to the last listed day (the windows are taken from them), and each such
+    day's sample key as the sample store makes it (``sample_store.day_key`` with neyman's features:
+    the files it reads by their SHA-256, the calendar's sessions around it, the options expiry)."""
     s = settings
     digest = hashlib.sha256()
     made = [s.symbols, s.etf_symbols, s.index_codes, s.us_symbols, s.fee_rate, s.target_version]
     digest.update(json.dumps([list(x) if isinstance(x, tuple) else x for x in made]).encode())
     digest.update(json.dumps(listed.as_dict(), sort_keys=True).encode())
     last = max([*listed.days, *listed.short], default=None)
-    for top in ("bars", "events"):
-        for folder in sorted((s.data_dir / top).glob("date=*")):
-            try:
-                day = date.fromisoformat(folder.name.removeprefix("date="))
-            except ValueError:
-                continue
-            if last is None or day > last:
-                continue
-            for f in sorted(p for p in folder.rglob("*") if p.is_file()):
-                found = f.stat()
-                where = f.relative_to(s.data_dir).as_posix()
-                digest.update(f"{where}\0{found.st_size}\0{found.st_mtime_ns}\n".encode())
+    days = [d for d in available if last is not None and d <= last]
+    digest.update(json.dumps([d.isoformat() for d in days]).encode())
+    known: dict[str, str] = {}  # a file's digest once: a bar file is read by the 20 days after it
+    for day in days:
+        for path in read_files(s.data_dir, day, calendar, s.symbols, FEATURES, leaders, ()):
+            where = path.relative_to(s.data_dir).as_posix()
+            if where not in known:
+                known[where] = file_digest(path)
+        key = day_key(
+            s.data_dir,
+            day,
+            calendar,
+            s.symbols,
+            FEATURES,
+            s.fee_rate,
+            leaders,
+            target_version=s.target_version,
+            kinds=(),
+            digests=known,
+        )
+        digest.update(f"{day}\0{key.digest}\n".encode())
     return digest.hexdigest()[:16]
 
 
@@ -707,7 +744,8 @@ def neyman_backfill(
     )
     tally = Tally()
     checkpoint = Checkpoint(
-        settings.state_dir / CHECKPOINT, {"code": code_key(), "input": input_key(settings, listed)}
+        settings.state_dir / CHECKPOINT,
+        {"code": code_key(), "input": input_key(settings, listed, available, calendar, leaders)},
     )
     kept, set_aside = checkpoint.restore(tally, listed)
 

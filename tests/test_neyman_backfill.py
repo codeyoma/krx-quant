@@ -557,27 +557,47 @@ def test_days_kept_with_other_code_or_input_are_set_aside(tmp_path: Path) -> Non
     assert Checkpoint(path, {"code": "c1", "input": "i1"}).restore(Tally(), listed_of(days[1:])) == (0, None)
 
 
-def test_the_keys_follow_the_code_the_settings_the_list_and_the_data(data: Path, tmp_path: Path) -> None:
+def test_the_keys_follow_the_code_the_settings_the_list_the_calendar_and_the_data(
+    data: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The code: the tree models' shared settings neyman's own digest leaves out, and the sample code.
+    assert "krx_quant.algorithms.turing" in module._algorithm_code()
+    code = module.code_key()
+    assert module.code_key() == code and len(code) == 16
+    monkeypatch.setattr(module, "samples_code", lambda: "another")
+    assert module.code_key() != code
+    monkeypatch.undo()
+    # The input.
     s = settings_of(data, tmp_path)
     listed = Listed(WHEN, DAYS[0], DAYS[-TRAINING_DAYS], date(2026, 7, 13), 2, 200, [DAYS[3]], [DAYS[2]])
-    assert module.code_key() == module.code_key() and len(module.code_key()) == 16
-    key = module.input_key(s, listed)
-    assert module.input_key(s, listed) == key
-    assert module.input_key(replace(s, fee_rate=s.fee_rate + 0.0001), listed) != key
-    assert module.input_key(s, replace(listed, days=[DAYS[3], DAYS[5]])) != key
-    # A day folder after the last listed day is not read; one before it is.
-    later, earlier = data / "bars" / f"date={DAYS[9]}", data / "bars" / f"date={DAYS[1]}"
-    (later / "note.txt").write_text("x")
-    try:
-        assert module.input_key(s, listed) == key
-    finally:
-        (later / "note.txt").unlink()
-    (earlier / "note.txt").write_text("x")
-    try:
-        assert module.input_key(s, listed) != key
-    finally:
-        (earlier / "note.txt").unlink()
-    assert module.input_key(s, listed) == key
+    leaders, calendar = Leaders.of(s), MarketCalendar()
+
+    def key_of(
+        s: Settings = s,
+        listed: Listed = listed,
+        available: list[date] = DAYS,
+        calendar: MarketCalendar = calendar,
+    ) -> str:
+        return module.input_key(s, listed, available, calendar, leaders)
+
+    key = key_of()
+    assert key_of() == key
+    assert key_of(s=replace(s, fee_rate=s.fee_rate + 0.0001)) != key
+    assert key_of(listed=replace(listed, days=[DAYS[3], DAYS[5]])) != key
+    assert key_of(available=[d for d in DAYS if d != DAYS[1]]) != key, "the days the windows are taken from"
+    # The trading calendar: a day corrected near the listed days.
+    assert key_of(calendar=MarketCalendar({date(2026, 5, 29): False})) != key
+    assert key_of(calendar=MarketCalendar({date(2026, 1, 2): False})) == key, "one far before is not read"
+    # A data file a listed day's samples read, by its content; one after the last listed day is not.
+    for day, changes in ((DAYS[1], True), (DAYS[9], False)):
+        path = data / bars_key(day, MINUTE_BARS_TR, SYMBOLS[0])
+        before = path.read_bytes()
+        write_bars(data, day, 200)
+        try:
+            assert (key_of() != key) is changes, day
+        finally:
+            path.write_bytes(before)
+    assert key_of() == key
 
 
 # The made-up days walked once whole and once over three runs (each fitting ten tree models on each of
@@ -636,8 +656,9 @@ def test_days_walked_over_several_nights_give_the_verdict_of_one_walk(
 
 
 @pytest.mark.timeout(240)
-def test_days_kept_with_other_code_are_walked_again_from_the_first(
-    data: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("change", ["code", "samples", "calendar"])
+def test_days_kept_with_other_code_or_calendar_are_walked_again_from_the_first(
+    data: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
 ) -> None:
     s = settings_of(data, tmp_path)
     night = datetime(2026, 11, 10, 3, 0, tzinfo=KST)
@@ -648,8 +669,15 @@ def test_days_kept_with_other_code_are_walked_again_from_the_first(
 
     first = one_day()
     assert first.stage == module.GOES_ON and "1 of 3 listed days walked" in "\n".join(first.lines)
-    monkeypatch.setattr(module, "code_key", lambda: "another")
+    if change == "code":
+        monkeypatch.setattr(module, "code_key", lambda: "another")
+    elif change == "samples":  # code shared with the night's samples, outside neyman's package
+        monkeypatch.setattr(module, "samples_code", lambda: "another")
+    else:  # the stored trading calendar corrected: a day before the made-up days closed
+        store = s.state_dir / "market_calendar.json"
+        store.write_text(json.dumps({"refreshed_on": None, "open_days": {"2026-05-29": False}}))
     again = one_day()
     text = "\n".join(again.lines)
     assert "1 of 3 listed days walked" in text and "this run: 1 days" in text
-    assert "from the first day (the days kept were set aside: another code)" in text
+    why = "input" if change == "calendar" else "code"
+    assert f"from the first day (the days kept were set aside: another {why})" in text
