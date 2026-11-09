@@ -172,7 +172,7 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.footprint import resident_mb
@@ -255,6 +255,97 @@ class _Waiting:
         return self.decided_at + rules.quote_wait
 
 
+class Fills(Protocol):
+    """How a live book's buys fill and its positions sell (#652): the one seam between the book
+    (``PaperTrader``: the decisions, the limits, the ledger) and where its orders go. Two adapters: the
+    paper fills on the collector's quotes (``QuoteFills``), and the KIS book's orders (``mock.KisFills``),
+    whose orders' lives stay inside it. The replay's fills on the recorded arrays (``replay.Fills``)
+    resolve a whole round trip at once, vectorised, and are asked by the replay's own book
+    (``replay.Policy``), on the same rules (``book.py``).
+
+    The book calls: ``bind`` once, as it is made, and ``attach`` once it is ready (a restart's orders
+    taken up); ``busy`` with what the book itself holds (it may add its own reason); ``buy`` for a buy
+    the first quote after its decision lets fill, of ``quantity`` shares; ``sell`` when an exit rule, a
+    pause or a loss limit sells the position at a price on a quote; ``open_net`` to mark the position
+    at a bid; ``quoted``, ``stalled``, ``ticked`` after it took a quote, a stall or the clock; ``state``
+    to finish ``GET /v1/trader``'s body; ``start``, ``idle``, ``close`` around the trader's run.
+    ``halts``: whether a market halt holds its fills (#625: the paper fills', never KIS's)."""
+
+    halts: bool
+
+    def bind(self, book: PaperTrader) -> None: ...
+
+    def attach(self) -> None: ...
+
+    def busy(self, held: Busy) -> Busy: ...
+
+    def buy(self, waiting: _Waiting, quote: BestQuote, quantity: int) -> None: ...
+
+    def sell(self, trade: OpenTrade, at: datetime, price: float, reason: str, quote: BestQuote) -> None: ...
+
+    def open_net(self, trade: OpenTrade, bid: float) -> float: ...
+
+    def quoted(self) -> None: ...
+
+    def stalled(self, stall: Stall, at: datetime) -> None: ...
+
+    def ticked(self, now: datetime) -> None: ...
+
+    def state(self, body: dict[str, Any]) -> dict[str, Any]: ...
+
+    async def start(self) -> None: ...
+
+    async def idle(self) -> None: ...
+
+    async def close(self, timeout: float | None = None) -> None: ...
+
+
+class QuoteFills:
+    """The paper fills (module doc "Fills"): a buy filled whole at once at the quote's ask, a sale at
+    the price its exit rule names; nothing in flight, nothing to reconcile."""
+
+    halts = True
+
+    def bind(self, book: PaperTrader) -> None:
+        self.book = book
+
+    def attach(self) -> None:
+        """Nothing kept outside the store: a restart goes on with the open trade alone."""
+
+    def busy(self, held: Busy) -> Busy:
+        return held
+
+    def buy(self, waiting: _Waiting, quote: BestQuote, quantity: int) -> None:
+        self.book.bought(waiting, quote, quantity)
+
+    def sell(self, trade: OpenTrade, at: datetime, price: float, reason: str, quote: BestQuote) -> None:
+        self.book.sold(trade, at, price, reason, quote)
+
+    def open_net(self, trade: OpenTrade, bid: float) -> float:
+        return open_net(trade, bid, self.book.rules.fee_rate)
+
+    def quoted(self) -> None:
+        pass
+
+    def stalled(self, stall: Stall, at: datetime) -> None:
+        pass
+
+    def ticked(self, now: datetime) -> None:
+        pass
+
+    def state(self, body: dict[str, Any]) -> dict[str, Any]:
+        return body
+
+    async def start(self) -> None:
+        """Before it trades: nothing in paper."""
+
+    async def idle(self) -> None:
+        """Until no order is in flight: a paper fill is at once, so at once."""
+
+    async def close(self, timeout: float | None = None) -> None:
+        """The trader stopping: nothing in flight in paper."""
+
+
 class PaperTrader:
     """The picked cells' paper trades, from the picks (``select``), the special windows
     (``on_special``), the cells' predictions (``on_signal``), the quotes (``on_quote``), the
@@ -272,7 +363,11 @@ class PaperTrader:
     a challenger's book is, its trades the champion policy's paper record (``champion`` 0, ``shadow``
     1), never the trader's; ``carry`` also goes on with the paper champion book's trade left open by
     paper mode. Every book sizes by the loss budget and keeps the risk rules on its own orders and
-    trades (#471, module doc)."""
+    trades (#471, module doc).
+
+    Its buys fill and its positions sell through ``fills`` (#652, ``Fills``): the paper fills on the
+    collector's quotes by default (``QuoteFills``), the champion's orders on KIS in mock and live mode
+    (``mock.KisFills``, ``mock.kis_book``)."""
 
     def __init__(
         self,
@@ -289,11 +384,14 @@ class PaperTrader:
         carry: bool = False,
         practice: bool = False,
         since: datetime | None = None,
+        fills: Fills | None = None,
     ) -> None:
+        self.fills: Fills = fills or QuoteFills()
+        self.fills.bind(self)
         self.store = store
         self.rules = rules
-        self._sessions = sessions
-        self._started_at = started_at
+        self.sessions = sessions
+        self.started_at = started_at
         self.mode = mode
         self.challenger = challenger
         self.shadow = shadow
@@ -325,11 +423,11 @@ class PaperTrader:
                 day_realized,
             )
         # A sale the status asks for sells at the first quote received after this (#396).
-        self._sell_after: datetime | None = None
+        self.sell_after: datetime | None = None
         self._written: tuple[datetime, dict[str, Any]] | None = None  # the state last written
         # The risk rules' state last read from the store, and when (#475, ``_risk_state``).
         self._risk_read: tuple[datetime, dict[str, Any]] | None = None
-        self._dirty = True  # a change to write at once
+        self.dirty = True  # a change to write at once
         self._selection: int | None = None  # the picks' row in the store
         self._policy: int | None = challenger  # the policy version the picks are under (#399)
         self._picks: dict[Cell, tuple[int, Pick]] = {}  # each picked cell's rank and pick
@@ -338,12 +436,12 @@ class PaperTrader:
         self._halts: list[tuple[datetime, datetime]] = []  # the market halts' spans (#625, ``halt_spans``)
         self._read: dict[datetime, set[Cell]] = {}  # the cells read of each recent bar close
         self._pending: dict[datetime, list[Rise]] = {}  # rises waiting, by bar close
-        self._last: BestQuote | None = None  # the latest quote received
+        self.last: BestQuote | None = None  # the latest quote received
         self._waiting: _Waiting | None = None
-        self._stall: Stall | None = None  # the collector's quotes stalled since (#407)
-        self._returned: Stall | None = None  # the stall the quote being taken is the first after
+        self.stall: Stall | None = None  # the collector's quotes stalled since (#407)
+        self.returned: Stall | None = None  # the stall the quote being taken is the first after
         self._linked: tuple[int, int] | None = None  # the (trade, stall) kept as open through it
-        self._open: OpenTrade | None = (
+        self.position: OpenTrade | None = (
             store.open_trade(mode, challenger)
             if not shadow
             # A shadow goes on with its own trade left open (the practice shadow with its own, #427); in
@@ -352,10 +450,18 @@ class PaperTrader:
             else store.open_trade(mode, shadow=True, practice=self.practice)
             or (store.open_trade(mode) if carry else None)
         )
-        if self._open is not None:
-            log.info("%s going on with trade %s, open since before this start", self._whose(), self._open.id)
-        if challenger is not None:
-            return
+        if self.position is not None:
+            log.info(
+                "%s going on with trade %s, open since before this start", self._whose(), self.position.id
+            )
+        if challenger is None:
+            self._resume(started_at)
+        self.fills.attach()
+
+    def _resume(self, started_at: datetime) -> None:
+        """The champion's or a shadow's book at its start: the buys waiting for a quote when the trader
+        stopped given up; the champion's pauses and limits applied, and its state written."""
+        store, mode, shadow = self.store, self.mode, self.shadow
         dropped = store.drop_unfilled(mode, RESTARTED)  # every book's of the mode: none is waiting at a start
         if shadow:
             if dropped:
@@ -369,17 +475,21 @@ class PaperTrader:
         if self.guard.status != RUNNING:
             log.warning("trader: starting %s", self.guard.status)
         self.on_controls(started_at)  # asked for while it was not running
-        self._enforce(started_at)
+        self.enforce(started_at)
         self.write(started_at)
 
     async def start(self) -> None:
-        """Before it trades: nothing in paper (``mock.py`` reconciles the KIS account first, #406)."""
+        """Before it trades: its fills' (the KIS book reconciles the KIS account first, #406)."""
+        await self.fills.start()
 
     async def idle(self) -> None:
-        """Until no order is in flight: a paper book's fill at once, so at once (``mock.py``'s waits)."""
+        """Until no order is in flight: a paper fill is at once (the KIS book waits for its order)."""
+        await self.fills.idle()
 
-    async def close(self, timeout: float = 0.0) -> None:
-        """The trader stopping: nothing in flight in paper (``mock.py``'s waits for its order)."""
+    async def close(self, timeout: float | None = None) -> None:
+        """The trader stopping: its fills' (the KIS book waits ``timeout`` seconds for its order, its
+        own wait unless given)."""
+        await self.fills.close(timeout)
 
     @property
     def guard(self) -> Guard:
@@ -481,31 +591,32 @@ class PaperTrader:
         if waiting is not None and touching(
             self._special, waiting.signal.symbol, waiting.signal.bar_close, waiting.plan.time_barrier
         ):
-            self._give_up(waiting, SPECIAL)
+            self.give_up(waiting, SPECIAL)
 
     def on_stall(self, stall: Stall, at: datetime) -> None:
         """The collector's quotes stalled, seen at ``at`` (#407, module doc): nothing new bought (the
         buy waiting for its quote given up, the rises waiting skipped, ``quotes_stalled``); the open
         trade kept as open through it."""
-        self._stall = stall
+        self.stall = stall
         if self._waiting is not None:
-            self._give_up(self._waiting, STALLED)
+            self.give_up(self._waiting, STALLED)
         for close in list(self._pending):
             for c in self._pending.pop(close):
                 self._skip(c.signal, at, STALLED)
-        self._link_stall()
-        self._dirty = True
+        self.link_stall()
+        self.dirty = True
+        self.fills.stalled(stall, at)
 
     def on_recover(self, stall: Stall, at: datetime) -> None:
         """The quotes back at ``at`` (#407): the quote that ends ``stall`` comes next (``on_quote``);
         the open trade's exit made on it keeps that it waited for the quotes (``WAITED``)."""
-        self._stall = None
-        self._returned = stall if self._open is not None else None
-        self._dirty = True
+        self.stall = None
+        self.returned = stall if self.position is not None else None
+        self.dirty = True
 
-    def _link_stall(self) -> None:
+    def link_stall(self) -> None:
         """The open trade kept as open through the stall, once (``trade_stalls``)."""
-        stall, trade = self._stall, self._open
+        stall, trade = self.stall, self.position
         if stall is None or trade is None or self._linked == (trade.id, stall.id):
             return
         self.store.add_trade_stall(trade.id, stall.id)
@@ -522,7 +633,7 @@ class PaperTrader:
         elif cell not in self._picks:
             self._skip(signal, at, NOT_PICKED)
         else:
-            session = self._sessions(kst_day(signal.bar_close))
+            session = self.sessions(kst_day(signal.bar_close))
             _, picked = self._picks[cell]
             planned = plan(signal, self.rules, session, at, self._special, picked.threshold)
             admit(self._pending, signal, planned, at, self._skip, self._not_now)
@@ -530,38 +641,42 @@ class PaperTrader:
 
     def on_quote(self, quote: BestQuote) -> None:
         """A quote from the stream (in mock mode during a stall, KIS's REST one, #407). One not newer
-        than the latest (a reconnect's first) is passed over."""
+        than the latest (a reconnect's first) is passed over. Its fills follow it (``Fills.quoted``)."""
+        self._on_quote(quote)
+        self.fills.quoted()
+
+    def _on_quote(self, quote: BestQuote) -> None:
         if self._in_halt(quote.received_at):
             return  # a market halt's quote (#625): not one to fill on
-        standing = self._last
+        standing = self.last
         if standing is not None and quote.received_at <= standing.received_at:
-            self._returned = None  # the first quote after a stall, passed over: none waited on it
+            self.returned = None  # the first quote after a stall, passed over: none waited on it
             return
-        self._last = quote
+        self.last = quote
         try:
             self._take(quote, standing)
         finally:
-            self._returned = None  # the first quote taken after a stall alone waited through it
+            self.returned = None  # the first quote taken after a stall alone waited through it
 
     def _take(self, quote: BestQuote, standing: BestQuote | None) -> None:
         """``quote`` taken, ``standing`` the latest before it: the buy waiting, the exits, the limits."""
-        if quote.received_at < self._started_at:
+        if quote.received_at < self.started_at:
             return  # the book as it stood before this run: no trigger
         if self._waiting is not None:
             self._buy(self._waiting, quote)
-        elif self._open is not None:
-            self._follow(self._open, quote, standing)
-        trade = self._open
+        elif self.position is not None:
+            self._follow(self.position, quote, standing)
+        trade = self.position
         if trade is None:
             return
         status = self.status
-        if status in SALE and quote.received_at > (self._sell_after or self._started_at):
+        if status in SALE and quote.received_at > (self.sell_after or self.started_at):
             self._exit(trade, quote.received_at, quote.bid, SALE[status], quote)
             return
         reached = self.holds.mark(self._unrealized(trade, quote.bid), quote.received_at, trade.practice)
         if reached is not None:
-            self._dirty = True
-            self._enforce(quote.received_at, quote)
+            self.dirty = True
+            self.enforce(quote.received_at, quote)
 
     def on_controls(self, now: datetime) -> None:
         """The pauses, resumes and re-arms asked for and not read yet (#396), read at ``now``, in
@@ -573,10 +688,10 @@ class PaperTrader:
         for control in controls:
             self.guard.apply(control, now)
         if controls:
-            self._dirty = True
-            self._enforce(now)
+            self.dirty = True
+            self.enforce(now)
 
-    def _enforce(self, at: datetime, quote: BestQuote | None = None) -> None:
+    def enforce(self, at: datetime, quote: BestQuote | None = None) -> None:
         """What the status asks for at ``at``: nothing bought (a buy waiting for its quote given up,
         the rises waiting skipped, the status their reason); the open position sold if it sells, at
         ``quote``'s bid if the status began on it, else at the next quote's."""
@@ -584,44 +699,45 @@ class PaperTrader:
         if status == RUNNING:
             return
         if self._waiting is not None:
-            self._give_up(self._waiting, status)
+            self.give_up(self._waiting, status)
         for close in list(self._pending):
             for c in self._pending.pop(close):
                 self._skip(c.signal, at, status)
-        trade = self._open
+        trade = self.position
         if trade is None or status not in SALE:
             return
         if quote is not None:
             self._exit(trade, quote.received_at, quote.bid, SALE[status], quote)
-        elif self._sell_after is None:
-            self._sell_after = at
+        elif self.sell_after is None:
+            self.sell_after = at
             log.info("trader: %s: trade %s sells at the next quote", status, trade.id)
 
     def _in_halt(self, at: datetime) -> bool:
-        """Whether a market halt holds this book's fills at ``at`` (#625, ``halt_spans``): a paper book's;
-        the KIS book's never (``mock.MockTrader``: its orders and fills are KIS's)."""
-        return halted(self._halts, at)
+        """Whether a market halt holds this book's fills at ``at`` (#625, ``halt_spans``): the paper
+        fills'; the KIS book's never (``Fills.halts``: its orders and fills are KIS's)."""
+        return self.fills.halts and halted(self._halts, at)
 
     def on_time(self, now: datetime) -> None:
         """The clock: a rise that waited long enough for the cells ranked above it is decided, a
         buy whose quote did not come is given up, a time barrier passed is sold on the last quote
         before it; a new day's figures (#396); the champion's state written."""
         if self.holds.roll(now):
-            self._dirty = True
+            self.dirty = True
         self._settle(now)
         grace = self.rules.grace
         waiting = self._waiting
         if waiting is not None and now >= waiting.deadline(self.rules) + grace:
-            self._give_up(waiting, NO_QUOTE)
-        trade = self._open
+            self.give_up(waiting, NO_QUOTE)
+        trade = self.position
         if trade is not None and not self._in_halt(now):  # no time exit by the clock in a halt (#625)
-            sale = clock_exit(trade, self._last, now, self.rules, trade.time_barrier >= self._started_at)
+            sale = clock_exit(trade, self.last, now, self.rules, trade.time_barrier >= self.started_at)
             if sale is not None:
                 self._exit(trade, sale.at, sale.price, sale.reason, sale.quote)
         for close in [c for c in self._read if c < now - timedelta(hours=1) and c not in self._pending]:
             del self._read[close]
         if self._guard is not None:
             self.write(now, force=False)
+        self.fills.ticked(now)
 
     def write(self, now: datetime, force: bool = True) -> None:
         """The state (``state``) and the day's ledger into the store: at once if something changed
@@ -629,20 +745,20 @@ class PaperTrader:
         else every ``HEARTBEAT``. The snapshot also carries the process's resident memory then
         (#547, ``store.RESIDENT``), which is not the state: its moves alone write nothing."""
         body = self.state(now)
-        if self._written is not None and not (force or self._dirty):
+        if self._written is not None and not (force or self.dirty):
             at, written = self._written
             if now - at < (SNAPSHOT_SECONDS if body != written else HEARTBEAT):
                 return
         self.store.put_snapshot(now, {**body, RESIDENT: resident_mb()})
         guard = self.guard
-        if self._sessions(guard.day) is not None:  # a trading day's ledger
+        if self.sessions(guard.day) is not None:  # a trading day's ledger
             self.store.put_day(self.mode, guard.day, guard.ledger(), now)
         self._written = (now, body)
-        self._dirty = False
+        self.dirty = False
 
     def state(self, now: datetime | None = None) -> dict[str, Any]:
         """The trader's state at ``now`` (#396; its start's if None): what ``GET /v1/trader`` gives."""
-        guard, trade, last = self.guard, self._open, self._last
+        guard, trade, last = self.guard, self.position, self.last
         position = None
         cost = 0.0
         if trade is not None:
@@ -666,10 +782,10 @@ class PaperTrader:
             }
         limits = guard.limits
         since = guard.since
-        return {
+        body = {
             "mode": self.mode,
             "status": guard.status,
-            "started_at": iso(self._started_at),
+            "started_at": iso(self.started_at),
             "capital": self.rules.capital,
             "cash": self.rules.capital + guard.realized_all - cost,
             "position": position,
@@ -718,15 +834,16 @@ class PaperTrader:
             "live": self.live,
             "practice": self.practice_state,
             # #475: the loss budget and the risk rules' state (#471) of the champion's book's day.
-            "risk": self._risk_state(now or self._started_at),
+            "risk": self._risk_state(now or self.started_at),
         }
+        return self.fills.state(body)
 
     def _risk_state(self, at: datetime) -> dict[str, Any]:
         """``risk_state`` at ``at``, read from the store again when something changed (a buy or an exit
         makes the book dirty) or ``SNAPSHOT_SECONDS`` after the last read: ``state`` is asked at every
         tick of the clock, the store's day read at most every second (a cooldown ends to the second)."""
         kept = self._risk_read
-        if kept is not None and not self._dirty and timedelta(0) <= at - kept[0] < SNAPSHOT_SECONDS:
+        if kept is not None and not self.dirty and timedelta(0) <= at - kept[0] < SNAPSHOT_SECONDS:
             return kept[1]
         since, book = midnight(at), self._book()
         found = risk_state(
@@ -741,17 +858,21 @@ class PaperTrader:
 
     def _busy_with(self) -> Busy:
         """What it is busy with, as ``book.not_now`` asks: the buy waiting for its quote, or the position
-        held (``Taken``); None. The KIS book adds its own (``mock.MockTrader``)."""
+        held (``Taken``); None; and what its fills add (``Fills.busy``: the KIS book's ``reconciling``,
+        an order in flight)."""
         held = self._waiting.signal if self._waiting is not None else None
+        trade = self.position
+        found: Busy = None
         if held is not None:
-            return Taken(Cell(held.kind, held.predictor), held.bar_close)
-        trade = self._open
-        return None if trade is None else Taken(Cell(trade.kind, trade.predictor), trade.bar_close)
+            found = Taken(Cell(held.kind, held.predictor), held.bar_close)
+        elif trade is not None:
+            found = Taken(Cell(trade.kind, trade.predictor), trade.bar_close)
+        return self.fills.busy(found)
 
     def _unrealized(self, trade: OpenTrade, bid: float) -> float:
-        """What the open ``trade`` nets sold at ``bid`` now (``money.open_net``); the mock book counts
-        what of it is sold already at its fills (#405)."""
-        return open_net(trade, bid, self.rules.fee_rate)
+        """What the open ``trade`` nets sold at ``bid`` now (``Fills.open_net``: ``money.open_net``; the
+        KIS book counts what of it is sold already at its fills, #405)."""
+        return self.fills.open_net(trade, bid)
 
     def _rank(self, cell: Cell) -> int:
         return self._picks[cell][0] if cell in self._picks else len(self._picks)
@@ -766,7 +887,7 @@ class PaperTrader:
             busy=self._busy_with(),
             rank=self._rank,
             risk=self._risk,
-            stalled=self._stall is not None,
+            stalled=self.stall is not None,
             spacing=self._spacing,
         )
 
@@ -823,7 +944,7 @@ class PaperTrader:
             if pick.quantity is not None
             else f"a loss budget of {self.rules.budget(self._capital()):.0f} won",
         )
-        self._waiting = _Waiting(decision, signal, pick, planned, at, mid_of(self._last))
+        self._waiting = _Waiting(decision, signal, pick, planned, at, mid_of(self.last))
 
     def _skip(self, signal: Signal, at: datetime, reason: str) -> None:
         self._add_decision(signal, at, SKIP, reason)
@@ -849,11 +970,11 @@ class PaperTrader:
         if quote.received_at <= waiting.decided_at:
             return  # received before the decision, though it came after it
         if self.status != RUNNING:
-            self._give_up(waiting, self.status)
+            self.give_up(waiting, self.status)
             return
         reason = refused(waiting.decided_at, waiting.plan, quote, self.rules)
         if reason is not None:
-            self._give_up(waiting, reason)
+            self.give_up(waiting, reason)
             return
         capital = self._capital()
         cash = self.rules.capital + self.holds.realized_all  # nothing open: one at a time
@@ -869,7 +990,7 @@ class PaperTrader:
             waiting.pick.quantity,
         )
         if isinstance(quantity, str):
-            self._give_up(waiting, quantity)
+            self.give_up(waiting, quantity)
             return
         self._waiting = None
         self._fill_buy(waiting, quote, quantity)
@@ -879,15 +1000,18 @@ class PaperTrader:
         return self.rules.capital if self.cap is None else min(self.rules.capital, self.cap)
 
     def _fill_buy(self, waiting: _Waiting, quote: BestQuote, quantity: int) -> None:
-        """The buy decided, of ``quantity`` shares at ``quote``'s ask: in paper, filled whole at once.
-        The mock book (#405, ``mock.MockTrader``) orders it on KIS instead."""
-        self._open = self.store.enter(
-            waiting.decision, self._entry(waiting, quote.received_at, quote.ask, quantity, quote.received_at)
-        )
-        self._dirty = True
-        log.info("%s bought %s at %s (trade %s)", self._whose(), quantity, quote.ask, self._open.id)
+        """The buy decided, of ``quantity`` shares at ``quote``'s ask, to its fills (``Fills.buy``)."""
+        self.fills.buy(waiting, quote, quantity)
 
-    def _entry(
+    def bought(self, waiting: _Waiting, quote: BestQuote, quantity: int) -> None:
+        """A paper buy filled whole at once at ``quote``'s ask (``QuoteFills``): its trade opened."""
+        self.position = self.store.enter(
+            waiting.decision, self.entry(waiting, quote.received_at, quote.ask, quantity, quote.received_at)
+        )
+        self.dirty = True
+        log.info("%s bought %s at %s (trade %s)", self._whose(), quantity, quote.ask, self.position.id)
+
+    def entry(
         self, waiting: _Waiting, at: datetime, price: float, quantity: int, quote_at: datetime
     ) -> Entry:
         """The trade ``waiting`` enters: ``quantity`` shares filled at ``price`` at ``at``."""
@@ -930,33 +1054,40 @@ class PaperTrader:
             decided_mid=waiting.mid,
         )
 
-    def _give_up(self, waiting: _Waiting, reason: str) -> None:
+    def give_up(self, waiting: _Waiting, reason: str) -> None:
         self._waiting = None
         self.store.unfilled(waiting.decision, reason)
         log.info("%s no buy on %s (%s)", self._whose(), waiting.signal.bar_close.strftime("%H:%M"), reason)
 
     def _follow(self, trade: OpenTrade, quote: BestQuote, standing: BestQuote | None) -> None:
         # At the time barrier, the last quote before it sells only if the trader was running then.
-        sale = exit_on(trade, quote, standing, self.rules, trade.time_barrier >= self._started_at)
+        sale = exit_on(trade, quote, standing, self.rules, trade.time_barrier >= self.started_at)
         if sale is not None:
             self._exit(trade, sale.at, sale.price, sale.reason, sale.quote)
 
     def _exit(self, trade: OpenTrade, at: datetime, price: float, reason: str, quote: BestQuote) -> None:
+        """The position sold at ``price`` at ``at`` for ``reason``, on ``quote``: by its fills
+        (``Fills.sell``)."""
+        self.fills.sell(trade, at, price, reason, quote)
+
+    def sold(self, trade: OpenTrade, at: datetime, price: float, reason: str, quote: BestQuote) -> None:
+        """A paper sale filled whole at ``price`` at ``at`` (``QuoteFills``): the trade's exit, its net
+        counted by the limits."""
         trip = round_trip(
             trade.entry_price, trade.quantity, trade.buy_fee, price * trade.quantity, self.rules.fee_rate
         )
         # The day the exit is counted in, rolled before the exit is kept: a day read again after it
         # would hold it already (an exit the clock had not reached the day of yet, #396).
         if self.holds.roll(at):
-            self._dirty = True
-        if self._returned is not None:  # made on the first quote after a stall: it waited (#407)
-            self.store.stall_effect(trade.id, self._returned.id, WAITED)
+            self.dirty = True
+        if self.returned is not None:  # made on the first quote after a stall: it waited (#407)
+            self.store.stall_effect(trade.id, self.returned.id, WAITED)
         # The sale's decision (#475): on the quote it is made on; a take-profit rests from the buy.
         sold = (None, None) if reason == TAKE_PROFIT else (at, mid_of(quote))
         self.store.exit(trade, Exit(at, price, reason, trip.sell_fee, trip.tax, quote.received_at, *sold))
-        self._open = None
-        self._sell_after = None
-        self._dirty = True
+        self.position = None
+        self.sell_after = None
+        self.dirty = True
         net = trip.net  # as the store keeps it
         log.info(
             "%s sold %s at %s (%s, trade %s): net %.0f won",
@@ -968,4 +1099,4 @@ class PaperTrader:
             net,
         )
         if self.holds.exited(net, at, trade.practice) is not None:  # its realized loss reached a limit
-            self._enforce(at)
+            self.enforce(at)

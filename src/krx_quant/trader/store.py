@@ -73,7 +73,7 @@ by the nightly re-fit (#399, from the engine's container).
   by the nightly job: its number, its day, the champion then and its record's figures, its α and
   level, whether it passed, and with one extra adverse tick a leg;
 - ``order_checks`` (#408): each KIS trading day's orders in the ledger against KIS's day order
-  inquiry, compared by the KIS book after that day's session (``mock.MockTrader``,
+  inquiry, compared by the KIS book after that day's session (``mock.KisFills``,
   ``mock_check.Check``): the verdict (``same``, ``different``, ``no_orders``) and its counts;
 - ``live_probes`` (#408, ``live_probe.py``): each read of the live account by inquiry calls alone,
   checked against the fields the broker reads: whether it passed, and each call's code, rows and

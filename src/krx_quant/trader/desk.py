@@ -6,7 +6,7 @@ same cells' predictions and the same quotes, in one process.
   map's cells (``buyable.under_champion``, ``buyable.under_policy``: #472, its cells whatever their
   verdict; none before the first champion, #469), for the
   champion's book (``paper.PaperTrader``: the trades the trader makes, which its loss limits and
-  pauses hold; in mock mode ``mock.MockTrader``, #405, its orders on KIS's mock server); and each
+  pauses hold; in mock mode ``mock.KisFills``, #405, its orders on KIS's mock server); and each
   challenger that runs that day (``policy.running_versions``: the members of the cohort of that
   day's review cycle, #473, at most three, entered before that day's 08:30, so a cohort formed on a
   review night runs from the next trading day, the cycle's first) applied to the same cells, for its
@@ -37,7 +37,7 @@ same cells' predictions and the same quotes, in one process.
   book, keeps each stall and sends one thirty seconds long and its return to Telegram once each
   (#624); every book is told (``on_stall``, ``on_recover``: no new buy meanwhile; the mock champion
   reads KIS's REST quotes, the paper books wait), and so is a book made during one.
-- **Mock mode** (#405): the champion's book (``mock.MockTrader``) is the execution layer alone: its
+- **Mock mode** (#405): the champion's book (``mock.KisFills``) is the execution layer alone: its
   KIS orders, its trades of mode ``mock``, the limits and pauses, the state and ledger. At the start
   (``start``, #406) it reconciles the KIS account with the ledger before any book trades. Beside it
   the champion policy keeps a paper shadow (``shadow``: ``paper.PaperTrader`` in paper, held by no
@@ -128,7 +128,7 @@ from krx_quant.trader import KIS_MODES, LIVE, MOCK, PAPER, buyable, live, policy
 from krx_quant.trader.book import Rules
 from krx_quant.trader.cells import Cell, Signal
 from krx_quant.trader.limits import RUNNING, Notify
-from krx_quant.trader.mock import MockTrader, Timing
+from krx_quant.trader.mock import Timing, kis_book
 from krx_quant.trader.paper import PaperTrader
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Selection
@@ -144,7 +144,7 @@ RUN_OR_LIMIT = (RUNNING, DAILY_LIMIT, CUMULATIVE_LIMIT)
 class Desk:
     """The champion's book and the challengers' (module doc), into ``store``; the arguments are the
     champion's book's (``paper.PaperTrader``). In ``mock`` mode (#405) the champion's book orders
-    through ``broker`` (``mock.MockTrader``, its fills read at ``clock``'s time, waiting ``timing``),
+    through ``broker`` (``mock.KisFills``, its fills read at ``clock``'s time, waiting ``timing``),
     and the champion policy's paper shadow (``shadow``) keeps its paper record; the challengers'
     books are in paper as ever. More than ``stall_after`` without a quote in continuous trading is a
     stall of the quotes (#407; None watches nothing). With ``practice`` (#427, mock mode alone) the
@@ -183,7 +183,7 @@ class Desk:
         if mode in KIS_MODES:
             if broker is None or clock is None:
                 raise ValueError(f"the {mode} mode's champion orders through a broker, at a clock")
-            self.champion = MockTrader(
+            self.champion = kis_book(
                 store, rules, sessions, started_at, broker, clock, notify, timing, mode=mode
             )
         else:
@@ -425,7 +425,7 @@ class Desk:
 
     async def start(self) -> None:
         """Before anything trades: in mock mode the champion's book reconciles the KIS account with
-        the ledger (#406, ``mock.MockTrader.start``)."""
+        the ledger (#406, ``mock.KisFills.start``)."""
         await self.champion.start()
 
     async def idle(self) -> None:

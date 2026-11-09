@@ -26,7 +26,8 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.trader import MOCK, SYMBOL
 from krx_quant.trader.book import Rules
 from krx_quant.trader.cells import EngineReader
-from krx_quant.trader.mock import MockTrader, Timing
+from krx_quant.trader.mock import Timing, kis_book
+from krx_quant.trader.paper import PaperTrader
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Selection
 from krx_quant.trader.store import (
@@ -177,7 +178,7 @@ class MockDay:
                     per_second=1000,
                     pause=0.01,
                 )
-                book = MockTrader(
+                book = kis_book(
                     store,
                     self.rules,
                     self.calendar.session,
@@ -216,7 +217,7 @@ class MockDay:
     async def _on(
         self,
         event: Event,
-        book: MockTrader,
+        book: PaperTrader,
         engine: PredictionStore,
         reader: EngineReader,
         store: TraderStore,
