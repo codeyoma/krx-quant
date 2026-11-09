@@ -1,6 +1,0 @@
-usage: krx-quant probe-inverse-book [-h] [--day DAY]
-
-options:
-  -h, --help  show this help message and exit
-  --day DAY   the trading day to read, YYYY-MM-DD (default: the latest whose
-              session is over)

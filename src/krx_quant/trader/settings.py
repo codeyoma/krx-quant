@@ -34,7 +34,8 @@ narrow the capital, never widen it (#393).
   way. Read in every mode, used with the practice alone.
 
 ``KRX_TRADER_KIND`` and ``KRX_TRADER_PREDICTOR`` (#394: the one cell traded) are gone: the cost map
-picks the cells (#395). One still set is not read; the trader says so at its start (``ignored``).
+picks the cells (#395). One still set is not read, and since #644 nothing says so: in the 14 days
+before 2026-11-09 the trader's warning for them was logged by no start.
 """
 
 from __future__ import annotations
@@ -63,8 +64,6 @@ from krx_quant.trader import (
 
 DEFAULT_QUOTES_URL = "ws://127.0.0.1:8081/v1/quotes"
 DEFAULT_ENGINE_URL = "http://127.0.0.1:8080"
-# Settings no longer read (#395: the cost map picks the cells).
-GONE = ("KRX_TRADER_KIND", "KRX_TRADER_PREDICTOR")
 _HOST = re.compile(r"^https?://[^/\s]+$")  # a scheme and a host, with its port: no path
 # KRX_TRADER_MOCK_PRACTICE's values (#427).
 ON, OFF = "on", "off"
@@ -86,7 +85,6 @@ class TraderSettings:
     quotes_url: str = DEFAULT_QUOTES_URL
     engine_url: str = DEFAULT_ENGINE_URL
     poll_seconds: float = 0.5  # how often the engine's database is read for new predictions
-    ignored: tuple[str, ...] = ()  # the settings found that are no longer read (``GONE``)
     # The mock book practises a cell on a day no champion cell trades (#427, ``desk.Desk``), its buys
     # this many minutes apart at least (#598).
     mock_practice: bool = False
@@ -162,7 +160,6 @@ class TraderSettings:
             daily_buy_orders=orders,
             quotes_url=quotes_url,
             engine_url=engine_url,
-            ignored=tuple(name for name in GONE if values.get(name, "").strip()),
             mock_practice=practice == ON,
             practice_spacing_minutes=spacing,
         )

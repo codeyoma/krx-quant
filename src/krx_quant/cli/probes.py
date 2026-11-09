@@ -6,7 +6,7 @@ trader's (``cli.trader``)."""
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime, time
+from datetime import date, datetime
 
 from krx_quant.cli.core import Commands
 from krx_quant.config import Settings
@@ -89,24 +89,6 @@ def _session_memory(day: date | None, night: bool) -> int:
 
     now = datetime.now(KST)
     report, code = session_memory(Settings.from_env(require_kis=False), now, tonight(now) if night else day)
-    print(report)
-    return code
-
-
-def _probe_inverse_book(day: date | None) -> int:
-    """What the collector recorded of the inverse ETF's KRX book (#606)."""
-    from krx_quant.inverse_book_probe import probe_inverse_book
-
-    report, code = probe_inverse_book(Settings.from_env(require_kis=False), datetime.now(KST), day)
-    print(report)
-    return code
-
-
-def _probe_market_halt(day: date, start: time, end: time) -> int:
-    """What a day's recorded frames say of a market-wide halt (#625)."""
-    from krx_quant.market_halt_probe import probe_market_halt
-
-    report, code = probe_market_halt(Settings.from_env(require_kis=False), day, start, end)
     print(report)
     return code
 
@@ -200,37 +182,3 @@ def add(sub: Commands) -> None:
         " job runs it; exit 1 when the engine stored no rest that day",
     )
     memory_cmd.set_defaults(run=lambda args: _session_memory(args.day, args.tonight))
-    inverse_cmd = sub.add_parser(
-        "probe-inverse-book",
-        help="summarize a recorded day of the inverse ETF's KRX book (#606): KIS's answers, the frames'"
-        " fields and times, the best quotes, the gaps and what recording it costs; read-only, no market"
-        " value",
-    )
-    inverse_cmd.add_argument(
-        "--day",
-        type=date.fromisoformat,
-        help="the trading day to read, YYYY-MM-DD (default: the latest whose session is over)",
-    )
-    inverse_cmd.set_defaults(run=lambda args: _probe_inverse_book(args.day))
-    halt_cmd = sub.add_parser(
-        "probe-market-halt",
-        help="what a day's recorded frames say of a market-wide halt (#625): the registrations, the"
-        " records received each minute by feed, each key's longest silence, the feeds' code and flag"
-        " fields' values over time, the REST answers, and when the exchange's rules call a breaker and a"
-        " sidecar from the ticks; read-only, no market value",
-    )
-    halt_cmd.add_argument("--day", type=date.fromisoformat, required=True, help="the day to read, YYYY-MM-DD")
-    halt_cmd.add_argument(
-        "--from",
-        dest="start",
-        type=time.fromisoformat,
-        default=time(9, 0),
-        help="the window's start by receipt, HH:MM in KST (default: 09:00)",
-    )
-    halt_cmd.add_argument(
-        "--until",
-        type=time.fromisoformat,
-        default=time(9, 40),
-        help="the window's end by receipt, HH:MM in KST (default: 09:40)",
-    )
-    halt_cmd.set_defaults(run=lambda args: _probe_market_halt(args.day, args.start, args.until))

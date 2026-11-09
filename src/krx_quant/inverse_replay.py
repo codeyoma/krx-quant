@@ -630,8 +630,7 @@ def _tell(state_dir: Path, day: date) -> None:
 
 def probed_day(calendar: MarketCalendar, now: datetime) -> date:
     """The trading day a run at ``now`` reads up to: today's once its session is over, else the
-    trading day before; a run after midnight (the scheduled jobs run until 05:30) reads the evening's.
-    ``probe-inverse-book``'s default day too."""
+    trading day before; a run after midnight (the scheduled jobs run until 05:30) reads the evening's."""
     local = now.astimezone(KST)
     day = (local - timedelta(hours=6)).date()
     session = calendar.session(day)

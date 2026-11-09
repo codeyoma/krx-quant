@@ -1,9 +1,9 @@
 usage: krx-quant [-h]
-                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,bar-close-times,session-memory,probe-inverse-book,probe-market-halt,smt,sample-profile,climate-prior,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,bar-close-times,session-memory,smt,climate-prior,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,bar-close-times,session-memory,probe-inverse-book,probe-market-halt,smt,sample-profile,climate-prior,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,check-closing-flow,check-krx-net-assets,probe-sample-keys,bar-close-times,session-memory,smt,climate-prior,neyman-variants,diagnose,signal-review,error-breakdown,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,daily-check,structure-check,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
     replay              replay a recorded day through the engine into its own
                         database (no KIS needed)
@@ -135,24 +135,9 @@ positional arguments:
                         engine's memory before and after, the server's and the
                         engine's memory by hour from 15:00, the server's now;
                         read-only, no price
-    probe-inverse-book  summarize a recorded day of the inverse ETF's KRX book
-                        (#606): KIS's answers, the frames' fields and times,
-                        the best quotes, the gaps and what recording it costs;
-                        read-only, no market value
-    probe-market-halt   what a day's recorded frames say of a market-wide halt
-                        (#625): the registrations, the records received each
-                        minute by feed, each key's longest silence, the feeds'
-                        code and flag fields' values over time, the REST
-                        answers, and when the exchange's rules call a breaker
-                        and a sidecar from the ticks; read-only, no market
-                        value
     smt                 count a day's SMT divergences (#520), made again from
                         its recording or backfilled bars, beside the engine's
                         live ones; reads only, no price
-    sample-profile      make one recorded day's training samples from scratch,
-                        as a night does, and time each stage and the top
-                        functions (#512); reads only, into a temporary
-                        directory, no price
     climate-prior       compare the climate baseline, shannon and shannon with
                         each slot's class frequencies on the pre-validation's
                         folds (#429; reads the training samples, replays
