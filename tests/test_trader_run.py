@@ -230,12 +230,7 @@ def test_the_engine_s_database_is_opened_read_only(tmp_path: Path) -> None:
 
 def test_the_trader_s_settings_and_their_defaults() -> None:
     default = TraderSettings.from_env({}, None)
-    assert (default.mode, default.threshold, default.capital, default.ignored) == (
-        "paper",
-        0.6,
-        1_000_000,
-        (),
-    )
+    assert (default.mode, default.threshold, default.capital) == ("paper", 0.6, 1_000_000)
     assert default.quotes_url == "ws://127.0.0.1:8081/v1/quotes"
     assert default.engine_url == "http://127.0.0.1:8080"
     chosen = TraderSettings.from_env(
@@ -254,30 +249,6 @@ def test_the_trader_s_settings_and_their_defaults() -> None:
         quotes_url="ws://engine:8081/v1/quotes",
         engine_url="http://engine:8080",
     )
-
-
-async def test_the_cell_settings_of_394_are_no_longer_read(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """#395: the cost map picks the cells. A server .env still naming one is not refused: the trader
-    starts and says the settings are not read."""
-    found = TraderSettings.from_env(
-        {"KRX_TRADER_KIND": "barrier_15m", "KRX_TRADER_PREDICTOR": "breiman"}, None
-    )
-    assert found.ignored == ("KRX_TRADER_KIND", "KRX_TRADER_PREDICTOR")
-    settings = Settings(kis_app_key="", kis_app_secret="", state_dir=tmp_path, fee_rate=FEE)
-    trader = replace(
-        found,
-        quotes_url=f"ws://127.0.0.1:{free_port()}/v1/quotes",
-        engine_url=f"http://127.0.0.1:{free_port()}",
-        poll_seconds=0.01,
-    )
-    stop = asyncio.Event()
-    task = asyncio.create_task(run_trader(settings, trader, stop=stop, now=lambda: at("10:00:00")))
-    await until(lambda: "KRX_TRADER_PREDICTOR is no longer read" in caplog.text)
-    stop.set()
-    await asyncio.wait_for(task, 5)
-    assert "KRX_TRADER_KIND is no longer read" in caplog.text
 
 
 @pytest.mark.parametrize(

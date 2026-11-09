@@ -30,7 +30,6 @@ FIRST = (
     "bar-close-times-589",
     "session-memory-623",
     "inverse-replay-606",
-    "probe-market-halt-625",
     "signal-review-206-1201",
     "probe-live-account-408",
     "error-holdout-447",
@@ -38,10 +37,9 @@ FIRST = (
     "nightly-hit-rates-437",
     "restore-drill-577",
 )
-# Between the daily kinds' pre-validations and the bar-close ones: the simulations, then the measure of
-# where making a day's samples spends its time (#512), which gives way to a pre-validation as they do,
-# then the queue screen (#599), which orders the bar-close ones and gives way to them too.
-SIMULATIONS = ("simulate-daily-298", "simulate-bar-close-298", "sample-profile-512", "screen-queue-599")
+# Between the daily kinds' pre-validations and the bar-close ones: the simulations, then the queue
+# screen (#599), which orders the bar-close ones and gives way to them as the simulations do.
+SIMULATIONS = ("simulate-daily-298", "simulate-bar-close-298", "screen-queue-599")
 # After the bar-close pre-validations: the experiments.
 LAST = (
     "neyman-variants-283",
@@ -85,9 +83,14 @@ RETIRED = {
     "fill-notice-layout-403": ("fill-notice-layout",),
     # #529: none of the five is a candidate (2026-11-08 night).
     "normal-order-529": ("normal-order",),
+    # #644: each ran once and its question is settled (#606's on 2026-11-06, #625's on 11-07, #512's
+    # on 11-07, its fix in #630).
+    "probe-inverse-book-606": ("probe-inverse-book",),
+    "probe-market-halt-625": ("probe-market-halt", "--day", "2026-11-06"),
+    "sample-profile-512": ("sample-profile",),
 }
-# The commands removed with their modules once their questions were settled: the probes (#563) and
-# the concluded experiments (#559, #529). The user decided both on 2026-11-05, over #505's "the
+# The commands removed with their modules once their questions were settled: the probes (#563, #644)
+# and the concluded experiments (#559, #529, #644). The user decided both on 2026-11-05, over #505's "the
 # commands stay". ``probe-candles`` ran by hand only (#111).
 REMOVED = (
     "probe-candles",
@@ -101,14 +104,20 @@ REMOVED = (
     "poisson-link",
     "turing-prior",
     "normal-order",
+    "probe-inverse-book",
+    "probe-market-halt",
+    "sample-profile",
 )
-# The concluded experiments' modules, removed with their commands (#559, #529).
+# The concluded experiments' and probes' modules, removed with their commands (#559, #529, #644).
 REMOVED_MODULES = (
     "krx_quant.trader.passive",
     "krx_quant.cost_map_audit",
     "krx_quant.poisson_link",
     "krx_quant.turing_prior",
     "krx_quant.normal_order",
+    "krx_quant.inverse_book_probe",
+    "krx_quant.market_halt_probe",
+    "krx_quant.sample_profile",
 )
 
 
@@ -149,7 +158,7 @@ def test_every_job_a_family_defines_is_listed_once() -> None:
 def test_the_retired_jobs_are_gone_and_their_commands_stay() -> None:
     """Left in, a lost state file would run them again on closed issues; by hand, each still runs,
     unless its command was removed since."""
-    assert len(RETIRED) == 30
+    assert len(RETIRED) == 33
     assert sorted(set(RETIRED) & {j.name for j in JOBS}) == []
     parser = cli._parser()
     for name, argv in RETIRED.items():
@@ -167,5 +176,5 @@ def test_the_removed_probes_are_no_command_and_no_job_runs_one() -> None:
 
 
 def test_the_concluded_experiments_modules_are_gone() -> None:
-    """#559, #529: removed with their commands (``REMOVED``), nothing is left to import."""
+    """#559, #529, #644: removed with their commands (``REMOVED``), nothing is left to import."""
     assert [m for m in REMOVED_MODULES if importlib.util.find_spec(m) is not None] == []

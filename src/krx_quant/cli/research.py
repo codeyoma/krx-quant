@@ -31,22 +31,6 @@ def _smt(day: date | None) -> int:
     return 0 if made is not None or live else 1
 
 
-def _sample_profile(day: date | None, algorithms: list[str], limit: int, top: int) -> int:
-    """Where making a recorded day's samples spends its time (#512); each run printed as it ends."""
-    from krx_quant.sample_profile import sample_profile
-
-    settings = Settings.from_env(require_kis=False)
-    return sample_profile(
-        settings,
-        datetime.now(KST),
-        lambda line: print(line, flush=True),
-        day=day,
-        algorithms=algorithms,
-        limit=timedelta(minutes=limit),
-        top=top,
-    )
-
-
 def _climate_prior(days: int) -> int:
     """The climate prior experiment for shannon (#429): its lines; exit 1 without a recorded day."""
     from krx_quant.climate_prior import REPORT, climate_prior_experiment, lines
@@ -204,33 +188,6 @@ def _structure_check(days: int | None) -> int:
     return 0
 
 
-def _sample_profile_arguments(parser: argparse.ArgumentParser) -> None:
-    from krx_quant.sample_profile import LIMIT, PROFILED, TOP
-
-    parser.add_argument(
-        "--day", type=date.fromisoformat, help="the recorded day, YYYY-MM-DD (default: the latest finished)"
-    )
-    parser.add_argument(
-        "--algorithms",
-        nargs="+",
-        default=list(PROFILED),
-        help=f"the algorithms also profiled alone, with their own features (default: {' '.join(PROFILED)})",
-    )
-    parser.add_argument(
-        "--limit",
-        type=positive,
-        default=round(LIMIT.total_seconds() / 60),
-        help="minutes for every run together; a run still going stops there, the rest do not start"
-        f" (default {round(LIMIT.total_seconds() / 60)})",
-    )
-    parser.add_argument(
-        "--top",
-        type=positive,
-        default=TOP,
-        help=f"functions listed by own time (default {TOP})",
-    )
-
-
 def _prediction_days_arguments(parser: argparse.ArgumentParser) -> None:
     """``climate-prior``'s: the pre-validation's days."""
     from krx_quant.prevalidation import PREVALIDATION_DAYS
@@ -326,12 +283,6 @@ def add(sub: Commands) -> None:
     )
     smt_cmd.add_argument("--day", type=date.fromisoformat, help="the day, YYYY-MM-DD (default: today)")
     smt_cmd.set_defaults(run=lambda args: _smt(args.day))
-    sub.add_parser(
-        "sample-profile",
-        help="make one recorded day's training samples from scratch, as a night does, and time each stage"
-        " and the top functions (#512); reads only, into a temporary directory, no price",
-        arguments=_sample_profile_arguments,
-    ).set_defaults(run=lambda args: _sample_profile(args.day, args.algorithms, args.limit, args.top))
     sub.add_parser(
         "climate-prior",
         help="compare the climate baseline, shannon and shannon with each slot's class frequencies on"
