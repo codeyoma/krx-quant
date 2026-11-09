@@ -25,10 +25,10 @@ built) is the rest. The day's key (the input files' SHA-256) is reckoned once, b
 outside them: a night takes the digests the Object Store keeps. Hashing reads every file first, as a
 night's fetch does when it checks its cached copies, so the runs read them warm, as the night does.
 
-The code that makes samples is not changed for this: its digest keys the sample store
-(``sample_store.code_digest``), and a change would make every day again on the next night. The stages
-are timed from outside instead: for a run, the methods ``_TIMED`` lists are wrapped (and put back after
-it), and the events reach ``training.recorded_day`` through a reader that times them, as
+The code that makes samples is not changed for this: a change to it stops at the sample store's review
+gate (``sample_store.REVIEWED_CODE``), and until #645 it made every day again on the next night. The
+stages are timed from outside instead: for a run, the methods ``_TIMED`` lists are wrapped (and put
+back after it), and the events reach ``training.recorded_day`` through a reader that times them, as
 ``training.training_day`` hands them over for a recorded day. A wrapped call charges its stage until it
 returns, a wrapped call inside it the inner one's, so the stages add up to the run's time. A wrapped
 call costs about 0.3 µs more on a Mac (the server is about three times slower), three or four of them
