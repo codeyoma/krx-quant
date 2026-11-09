@@ -147,7 +147,7 @@ CUMULATIVE_LOSS_PERCENT = 20.0
 # the θ frozen for its review cycle (#474; this one before). Before the first champion nothing but
 # the practice trades (#469).
 THRESHOLD = 0.6
-# The risk rules (#471, spec #468 4 "크기", 7 "위험 규칙"; ``paper.size``, ``paper.risk_held``), the
+# The risk rules (#471, spec #468 4 "크기", 7 "위험 규칙"; ``money.size``, ``paper.risk_held``), the
 # code's at most: ``.env`` may narrow them, never widen them, and no policy touches them. A trade's loss
 # budget, in percent of the capital it trades on (the live first period's cap below the capital); the
 # net losses in a row that stop new buys for ``COOLDOWN``; the buy orders a day, those refused counted.

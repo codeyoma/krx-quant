@@ -163,7 +163,8 @@ from krx_quant.trader import CAPITAL, PAPER, THRESHOLD, cohort, review
 from krx_quant.trader import SYMBOL as TRADER_SYMBOL
 from krx_quant.trader import policy as policies
 from krx_quant.trader.limits import Guard
-from krx_quant.trader.paper import PaperTrader, costs, shares, unrealized
+from krx_quant.trader.money import commission, open_net, round_trip, settled, shares
+from krx_quant.trader.paper import PaperTrader
 from krx_quant.trader.paper import Rules as TraderRules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.store import API, CLI, PAUSE, RESUME, TraderStore
@@ -569,7 +570,7 @@ def write_demo_trader(state_dir: Path, books: Sequence[Event]) -> None:
     """The trader's store (``state/trader.sqlite3``, replaced) with a made-up trade at each of
     ``_DEMO_ENTRIES``, filled on 005930's quotes in ``books`` as paper fills are (``trader/paper.py``):
     the buy at the ask of the first quote after the decision, as many shares as the capital and the
-    cash buy (``paper.shares``), its barriers w ticks either side of the mid-point then, and its exit
+    cash buy (``money.shares``), its barriers w ticks either side of the mid-point then, and its exit
     as ``_demo_exit`` finds it (the time barrier four minutes after the bar close).
 
     With them the trader's runs, its pause and resume (``_DEMO_PAUSE``, ``_DEMO_RESUME``), each day's
@@ -838,7 +839,7 @@ def _demo_trade(
         entry_at=bought_at,
         entry_price=ask,
         quantity=quantity,
-        buy_fee=ask * quantity * _FEE,
+        buy_fee=commission(ask, quantity, _FEE),
         quote_at=bought_at,
         role=role,
         p_star=p_star,
@@ -859,9 +860,9 @@ def _demo_trade(
         for at, held_bid, _ in after:
             if at >= out.at:
                 break
-            guard.mark(unrealized(trade, held_bid, _FEE), at)
+            guard.mark(open_net(trade, held_bid, _FEE), at)
     store.exit(trade, out)
-    net = (out.price - entry.entry_price) * quantity - entry.buy_fee - out.sell_fee - out.tax
+    net = settled(entry.entry_price, quantity, entry.buy_fee, out.price * quantity, out.sell_fee, out.tax).net
     if guard is not None:
         guard.exited(net, out.at)
         store.put_day(mode, guard.day, guard.ledger(), out.at)
@@ -890,7 +891,7 @@ def _demo_exit(entry: TraderEntry, held: Sequence[tuple[datetime, float, float]]
         at, price, reason, quote_at, sold = entry.time_barrier, held[-1][1], "time", held[-1][0], held[-1]
     else:
         return None
-    cost = costs(entry.entry_price, price, entry.quantity, _FEE)
+    cost = round_trip(entry.entry_price, entry.quantity, entry.buy_fee, price * entry.quantity, _FEE)
     decided = (None, None) if sold is None else (at, (sold[1] + sold[2]) / 2)
     return TraderExit(at, price, reason, cost.sell_fee, cost.tax, quote_at, *decided)
 

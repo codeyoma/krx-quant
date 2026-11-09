@@ -72,14 +72,16 @@ from krx_quant.scheduled import (
     PREVALIDATION_ISSUE,
     QUEUE_SCREEN,
     STATE_FILE,
-    Facts,
     JobRecord,
     JobState,
     Night,
+    PrevalidationFacts,
     Ran,
     Scheduler,
     in_queue,
     prevalidation_job_name,
+    read_prevalidation_facts,
+    read_queue,
     screened_order,
 )
 from krx_quant.scheduled.prevalidations import prevalidation_tonight, prevalidations_quiet
@@ -93,7 +95,7 @@ from tests.prevalidation_doubles import settings as recorded_settings
 from tests.replay_doubles import busy_morning, record
 from tests.replay_events import at as replay_at
 from tests.replay_events import run
-from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, Runs, Told
+from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, Runs, Told, faking
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 DAY = date(2026, 9, 14)
@@ -698,8 +700,8 @@ def test_the_command_says_when_no_day_was_recorded(
 
 def night(
     *, queue: Sequence[str] = (), recorded: int = MIN_DAYS, runs: dict[str, JobRecord] | None = None
-) -> Night:
-    facts = Facts(recorded_days=recorded, waiting=ORDER, queue=tuple(queue))
+) -> Night[PrevalidationFacts]:
+    facts = PrevalidationFacts(recorded_days=recorded, waiting=ORDER, queue=tuple(queue))
     records = {prevalidation_job_name(n): r for n, r in (runs or {}).items()}
     return Night(FRIDAY, True, COMMIT, None, records, facts)
 
@@ -768,12 +770,15 @@ async def test_the_night_s_pre_validations_go_by_the_order_its_screen_set_that_n
     clock = FakeClock(datetime.combine(FRIDAY, time(22, 30), KST))
     runs = Screens(clock, queue)
 
-    async def facts() -> Facts:
-        return Facts(recorded_days=MIN_DAYS, waiting=ORDER, queue=tuple(queue))
+    def facts() -> PrevalidationFacts:  # read again after the screen, and for the quiet turn
+        return PrevalidationFacts(recorded_days=MIN_DAYS, waiting=ORDER, queue=tuple(queue))
+
+    def order() -> tuple[str, ...]:  # the quiet turn's order (``Job.order``)
+        return tuple(queue)
 
     async with aiohttp.ClientSession() as session:
         scheduler = Scheduler(
-            [QUEUE_SCREEN, *FIRST_ONES],
+            faking([QUEUE_SCREEN, *FIRST_ONES], {read_prevalidation_facts: facts, read_queue: order}),
             AT,
             CALENDAR,
             JobState.load(tmp_path / STATE_FILE),
@@ -781,7 +786,6 @@ async def test_the_night_s_pre_validations_go_by_the_order_its_screen_set_that_n
             Told(),
             clock,
             commit=COMMIT,
-            facts=facts,
             runner=runs,
         )
         await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)

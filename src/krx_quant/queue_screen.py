@@ -748,9 +748,9 @@ def read_queue(state_dir: Path) -> dict[str, Any] | None:
 
 
 def queue_order(state_dir: Path, now: datetime) -> tuple[str, ...]:
-    """The order the latest screen set, as the night's pre-validations go by it (``Facts.queue``, the
-    Engine API's ``queue``); none without one, one that cannot be read, or one of a night more than
-    ``QUEUE_KEPT_DAYS`` days before ``now``'s."""
+    """The order the latest screen set, as the night's pre-validations go by it
+    (``scheduled.prevalidations.read_queue``, the Engine API's ``queue``); none without one, one that
+    cannot be read, or one of a night more than ``QUEUE_KEPT_DAYS`` days before ``now``'s."""
     data = read_queue(state_dir)
     if data is None:
         return ()

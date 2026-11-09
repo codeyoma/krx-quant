@@ -54,7 +54,6 @@ from krx_quant.scheduled import (
     NIGHTLY_HIT_RATES,
     OK,
     STATE_FILE,
-    Facts,
     JobRecord,
     JobState,
     Night,
@@ -66,7 +65,7 @@ from tests.algorithm_doubles import FrequencyAlgorithm, stand_in_card, stand_in_
 from tests.fake_github import REPO, TOKEN, fake_github
 from tests.kind_doubles import TEST_KIND, DriftFrequency
 from tests.nightly_doubles import DAYS, FEE, FINISHED, NIGHT, archive_bars, read
-from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at
+from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at, faking
 from tests.test_nightly import night, outcomes
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
@@ -483,8 +482,7 @@ def test_the_job_runs_once_on_the_first_night_ten_lists_carry_the_hit_rates() ->
     ran = JobRecord(SATURDAY, OK, at(SATURDAY, "22:30"), COMMIT, 0, 5.0)
 
     def asked(day: date, nights: int, record: JobRecord | None = None, commit: str = COMMIT) -> bool:
-        facts = Facts(hit_rate_nights=nights)
-        return job.due(Night(day, CALENDAR.is_trading_day(day), commit, record, {}, facts))
+        return job.due(Night(day, CALENDAR.is_trading_day(day), commit, record, {}, nights))
 
     assert not asked(FRIDAY, HIT_RATE_NIGHTS - 1), "too few nights"
     assert asked(FRIDAY, HIT_RATE_NIGHTS) and asked(SATURDAY, HIT_RATE_NIGHTS), "trading or not"
@@ -505,12 +503,9 @@ async def test_the_job_runs_the_real_command_and_posts_to_437(
     stored_nights(tmp_path / "store")
     state = JobState.load(tmp_path / STATE_FILE)
 
-    async def facts() -> Facts:
-        return Facts(hit_rate_nights=HIT_RATE_NIGHTS)
-
     async with fake_github() as hub, aiohttp.ClientSession() as session:
         scheduler = Scheduler(
-            [NIGHTLY_HIT_RATES],
+            faking([NIGHTLY_HIT_RATES], {NIGHTLY_HIT_RATES.facts: HIT_RATE_NIGHTS}),
             AT,
             CALENDAR,
             state,
@@ -518,7 +513,6 @@ async def test_the_job_runs_the_real_command_and_posts_to_437(
             Told(),
             FakeClock(at(FRIDAY, "23:00")),
             commit=COMMIT,
-            facts=facts,
         )
         await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
     [body] = hub.bodies(437)

@@ -21,8 +21,8 @@ The list of files with their SHA-256 and the counts (``manifest.json``) goes in 
 uploaded to the Object Store as ``KEY``, encrypted at rest (SSE-S3, ``ObjectStore.put``'s
 ``encrypted``). One object, so a backup is never half one night's and half another's: an upload cut
 midway leaves the last one. The last backup made is noted in ``state/state_backup.json`` (``MARK``),
-which the restore drill's condition reads (``scheduled.core.Facts``). A failure is a Telegram alert,
-cleared by the next backup that works (``keep_backed_up``); the next night tries again.
+which the restore drill's condition reads (``scheduled.upkeep.read_last_backup``). A failure is a
+Telegram alert, cleared by the next backup that works (``keep_backed_up``); the next night tries again.
 
 **Kept** 30 days: the bucket keeps every replaced version for 30 days (``deploy/create-aws.sh``), so
 the object under ``KEY`` holds the last night's backup and its versions the 30 nights before. That

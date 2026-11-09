@@ -12,7 +12,7 @@ from krx_quant.consensus import FINAL
 from krx_quant.feeds import KST
 from krx_quant.loop_watch import LOOP_HELD, Collected, held_detail
 from krx_quant.predictions import DB_NAME, NewKindPrediction, NewPrediction, PredictionStore
-from krx_quant.scheduled import BAR_CLOSE_TIMES, FAILED, INTERRUPTED, OK, Facts, JobRecord, Night
+from krx_quant.scheduled import BAR_CLOSE_TIMES, FAILED, INTERRUPTED, OK, JobRecord, Night
 from krx_quant.trader.store import DB_NAME as TRADER_DB_NAME
 from krx_quant.trader.store import TraderStore
 
@@ -173,8 +173,8 @@ def test_the_job_reads_its_own_night_s_day_never_an_earlier_one(tmp_path: Path) 
     assert BAR_CLOSE_TIMES.command == ("bar-close-times", "--tonight")
 
 
-def night(day: date, trading: bool, record: JobRecord | None, commit: str = "c1") -> Night:
-    return Night(day, trading, commit, record, {}, Facts())
+def night(day: date, trading: bool, record: JobRecord | None, commit: str = "c1") -> Night[None]:
+    return Night(day, trading, commit, record, {}, None)
 
 
 def test_the_job_runs_on_trading_nights_until_a_run_ends_ok() -> None:

@@ -49,7 +49,7 @@ from krx_quant.raw_days import RawDays
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.recording_quality import Polls, polls_of, report, report_day
 from krx_quant.reference import BarBuilder
-from krx_quant.scheduled import JOBS, RECORDING_QUALITY, Facts, JobRecord, Night, recording_quality_calls
+from krx_quant.scheduled import JOBS, RECORDING_QUALITY, JobRecord, Night, recording_quality_calls
 from krx_quant.trader.report import AGENT
 from tests.kis_frames import BOOK_COLUMNS, MEMBER_COLUMNS, TRADE_COLUMNS, book_frame, frame, trade_frame
 
@@ -836,8 +836,8 @@ def test_the_command_reads_a_pruned_day_from_the_object_store(
     assert frames in capsys.readouterr().out
 
 
-def night(day: date, record: JobRecord | None = None) -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), "abc", record, {}, Facts())
+def night(day: date, record: JobRecord | None = None) -> Night[None]:
+    return Night(day, CALENDAR.is_trading_day(day), "abc", record, {}, None)
 
 
 def test_the_job_runs_each_trading_night_after_the_trader_s_report() -> None:

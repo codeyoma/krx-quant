@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import time, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import pytest
@@ -26,14 +27,17 @@ from krx_quant.scheduled import (
     RUNNING,
     SESSION_UNTIL,
     STATE_FILE,
-    Facts,
     Job,
     JobState,
+    MockSessionFacts,
     Night,
+    Reader,
+    Reads,
     Scheduler,
+    Sources,
     Target,
     Unposted,
-    session_facts,
+    read_mock_session,
     session_window,
 )
 from krx_quant.trader.store import DB_NAME as TRADER_DB
@@ -60,15 +64,24 @@ from tests.waiting import until
 TEN = time(10, 0)
 
 
-def each_day(night: Night) -> bool:
+def each_day(night: Night[Any]) -> bool:
     return night.record is None or night.record.day != night.day
 
 
 def session_job(
-    name: str = "day-job", due: object = each_day, timeout: timedelta = timedelta(minutes=15)
-) -> Job:
+    name: str = "day-job",
+    due: object = each_day,
+    timeout: timedelta = timedelta(minutes=15),
+    facts: Reader[Any] | None = None,
+) -> Job[Any]:
     assert callable(due)
-    return Job(name=name, due=due, command=(name,), timeout=timeout, targets=(Target(1),), session=TEN)
+    return Job(
+        name=name, due=due, command=(name,), timeout=timeout, targets=(Target(1),), session=TEN, facts=facts
+    )
+
+
+def sources(settings: Settings) -> Sources:
+    return Sources(settings, CALENDAR, FakeClock(at(FRIDAY, "10:00")))
 
 
 async def test_a_session_job_runs_at_its_time_on_trading_days_and_never_at_night(tmp_path: Path) -> None:
@@ -138,28 +151,31 @@ async def test_a_session_job_cut_by_a_restart_runs_the_next_trading_day(tmp_path
         await until(lambda: runs.started == [("day-job", at(MONDAY, "10:00"))])
 
 
-async def test_a_session_job_is_asked_with_the_session_s_facts_and_posts_as_a_session_s(
+async def test_a_session_job_is_asked_with_its_facts_read_at_its_time_and_posts_as_a_session_s(
     tmp_path: Path,
 ) -> None:
-    seen: list[Night] = []
+    seen: list[Night[Any]] = []
+    read: list[datetime] = []
 
-    def due(night: Night) -> bool:
+    def due(night: Night[Any]) -> bool:
         seen.append(night)
         return night.record is None
 
-    night_facts, day_facts = Facts(recorded_days=12), Facts(trader_kis=True)
+    clock = FakeClock(at(FRIDAY, "09:00"))
+
+    async def facts(reads: Reads) -> MockSessionFacts:
+        read.append(clock.now())
+        return MockSessionFacts(trader_kis=True)
+
     async with fake_github() as hub:
         async with scheduling(
-            tmp_path,
-            at(FRIDAY, "09:00"),
-            [session_job(due=due)],
-            github=hub,
-            facts=night_facts,
-            session_facts=day_facts,
-        ) as (clock, _, told, state):
+            tmp_path, at(FRIDAY, "09:00"), [session_job(due=due, facts=facts)], github=hub, clock=clock
+        ) as (_, _, told, state):
             clock.set(at(FRIDAY, "10:00"))
             await until(lambda: "day-job" in state.jobs and bool(state.jobs["day-job"].comments))
-        assert [n.facts for n in seen] == [day_facts] and seen[0].day == FRIDAY and seen[0].trading_day
+        assert [n.facts for n in seen] == [MockSessionFacts(trader_kis=True)]
+        assert seen[0].day == FRIDAY and seen[0].trading_day
+        assert read == [at(FRIDAY, "10:00")], "read at its time, not at night"
         assert hub.bodies(1)[-1].startswith("**예약 작업 `day-job`** · 2026-10-16 장중 · 성공 · 커밋 ")
         assert told[-1].startswith("예약 작업 day-job(2026-10-16 장중): 성공, 종료 코드 0")
 
@@ -185,7 +201,7 @@ async def test_the_session_loop_leaves_the_results_not_posted_to_the_night(tmp_p
         assert hub.bodies(7) == ["body"] and state.unposted == []
 
 
-async def test_the_session_facts_are_the_settings_alone() -> None:
+async def test_the_mock_session_s_facts_are_the_settings_and_the_trader_s_last_mode() -> None:
     keyed = Settings(
         kis_app_key="",
         kis_app_secret="",
@@ -193,8 +209,9 @@ async def test_the_session_facts_are_the_settings_alone() -> None:
         trader_kis_app_secret="b" * 40,
         trader_kis_account="98765432-01",
     )
-    assert await session_facts(keyed) == Facts(trader_kis=True)
-    assert await session_facts(replace(keyed, trader_kis_account=None)) == Facts()
+    assert await Reads(sources(keyed))(read_mock_session) == MockSessionFacts(trader_kis=True)
+    unkeyed = replace(keyed, trader_kis_account=None)
+    assert await Reads(sources(unkeyed))(read_mock_session) == MockSessionFacts()
 
 
 # The order probe's job, retired (#484)
@@ -217,8 +234,12 @@ def test_each_session_job_ends_by_15_15_after_the_opening() -> None:
         assert job.session is not None and job.session >= time(9, 5)
 
 
-async def test_the_session_facts_read_the_mode_the_trader_last_started_in(tmp_path: Path) -> None:
+async def test_the_mock_session_s_facts_read_the_mode_the_trader_last_started_in(tmp_path: Path) -> None:
     settings = Settings(kis_app_key="", kis_app_secret="", state_dir=tmp_path)
+
+    async def session_facts(settings: Settings) -> MockSessionFacts:
+        return await Reads(sources(settings))(read_mock_session)
+
     assert (await session_facts(settings)).trader_mock is False, "no trader yet"
     store = TraderStore(tmp_path / TRADER_DB)
     try:

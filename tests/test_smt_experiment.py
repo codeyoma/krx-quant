@@ -39,7 +39,6 @@ from krx_quant.scheduled import (
     OK,
     SMT_DISCOVERY,
     SMT_HOLDOUT,
-    Facts,
     JobRecord,
     Night,
 )
@@ -420,8 +419,8 @@ def test_the_holdout_command_judges_the_window_once_it_is_full(
 # The scheduled jobs
 
 
-def night(day: date, days: int = 0, record: JobRecord | None = None, commit: str = "abc") -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), commit, record, {}, Facts(smt_holdout_days=days))
+def night(day: date, days: int = 0, record: JobRecord | None = None, commit: str = "abc") -> Night[int]:
+    return Night(day, CALENDAR.is_trading_day(day), commit, record, {}, days)
 
 
 def test_the_discovery_runs_once_on_the_first_night_and_the_verdict_once_its_window_is_full() -> None:

@@ -49,7 +49,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore, read_only
 from krx_quant.process_log import Ran
 from krx_quant.raw_days import RawDays
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night
+from krx_quant.scheduled import FAILED, JOBS, OK, JobRecord, Night
 from krx_quant.scheduled.research import INVERSE_REPLAY, INVERSE_REPLAY_ISSUE, inverse_replay_calls
 from krx_quant.trader import SYMBOL
 from krx_quant.trader.cells import Cell
@@ -394,8 +394,8 @@ def test_no_recorded_day_exits_3(tmp_path: Path) -> None:
     assert "호가가 기록된 거래일이 없다" in out
 
 
-def night(day: date, record: JobRecord | None = None) -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), "new", record, {}, Facts())
+def night(day: date, record: JobRecord | None = None) -> Night[None]:
+    return Night(day, CALENDAR.is_trading_day(day), "new", record, {}, None)
 
 
 def ran(day: date, outcome: str = OK) -> JobRecord:

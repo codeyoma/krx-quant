@@ -20,7 +20,7 @@ import pytest
 from krx_quant.fake_kis import FakeAccount, FakeKis
 from krx_quant.kis_orders import MOCK_FILL_NOTICE_COLUMNS, SIDE_BUY, SIDE_SELL, Servers
 from krx_quant.process_log import Ran
-from krx_quant.scheduled import FILL_NOTICE_COLUMNS, JOBS, OK, Facts, JobRecord, Night
+from krx_quant.scheduled import FILL_NOTICE_COLUMNS, JOBS, OK, JobRecord, Night
 from krx_quant.trader import notice_columns
 from krx_quant.trader.fill_notices import DB_NAME, TR_ID, Recorded, StoredConnection, StoredRecord
 from krx_quant.trader.notice_columns import (
@@ -238,7 +238,7 @@ def test_an_order_placed_while_no_connection_was_subscribed_is_counted_when_its_
 # The job
 
 
-def night(facts: Facts, record: JobRecord | None = None, day: date = date(2026, 11, 19)) -> Night:
+def night(facts: int, record: JobRecord | None = None, day: date = date(2026, 11, 19)) -> Night[int]:
     return Night(day, CALENDAR.is_trading_day(day), "c0ffee", record, {}, facts)
 
 
@@ -246,18 +246,18 @@ def test_the_job_waits_for_enough_orders_and_runs_once() -> None:
     assert FILL_NOTICE_COLUMNS in JOBS and FILL_NOTICE_COLUMNS.command == ("fill-notice-columns",)
     assert [t.issue for t in FILL_NOTICE_COLUMNS.targets] == [648]
     due = FILL_NOTICE_COLUMNS.due
-    assert not due(night(Facts(fill_notice_apart=APART - 1)))
-    assert due(night(Facts(fill_notice_apart=APART)))
-    assert not due(night(Facts(fill_notice_apart=APART), day=date(2026, 11, 21)))  # a Saturday
+    assert not due(night(APART - 1))
+    assert due(night(APART))
+    assert not due(night(APART, day=date(2026, 11, 21)))  # a Saturday
     thursday = date(2026, 11, 19)
     ran = JobRecord(thursday, OK, at("22:30:00"), "c0ffee", 0, 30.0)
-    assert not due(night(Facts(fill_notice_apart=APART), ran, date(2026, 11, 20)))
+    assert not due(night(APART, ran, date(2026, 11, 20)))
     failed = JobRecord(thursday, "failed", at("22:30:00"), "c0ffee", 4, 30.0)
-    assert not due(night(Facts(fill_notice_apart=APART), failed, thursday))
-    assert due(night(Facts(fill_notice_apart=APART), failed, date(2026, 11, 20)))
+    assert not due(night(APART, failed, thursday))
+    assert due(night(APART, failed, date(2026, 11, 20)))
     # Too few orders joined to a notice (3): again the next trading night, posted without a label.
     too_few = JobRecord(thursday, "failed", at("22:30:00"), "c0ffee", PARTIAL, 30.0)
-    assert due(night(Facts(fill_notice_apart=APART), too_few, date(2026, 11, 20)))
+    assert due(night(APART, too_few, date(2026, 11, 20)))
     label = FILL_NOTICE_COLUMNS.label_if
     assert label is not None
     assert not label(Ran(PARTIAL, "", "")) and label(Ran(DONE, "", "")) and label(Ran(4, "", ""))

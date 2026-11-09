@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 
@@ -21,12 +23,14 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.process_log import Child
 from krx_quant.scheduled import (
     STATE_FILE,
-    Facts,
     Job,
     JobRecord,
     JobState,
     Ran,
+    Reader,
+    Reads,
     Scheduler,
+    Sources,
 )
 from krx_quant.swap import NightTraining
 from tests.fake_github import REPO, TOKEN, FakeGitHub
@@ -80,6 +84,23 @@ class Runs:
         return self.ran
 
 
+def faking(jobs: Sequence[Job[Any]], facts: Mapping[Any, object]) -> list[Job[Any]]:
+    """``jobs`` with each reader of ``facts`` (``Job.facts``, ``Job.order``) in place of one that returns
+    its value, or what it returns if it is a function, called at each read (as a night reads them)."""
+    fakes = {reader: _fake(value) for reader, value in facts.items()}
+    return [
+        replace(job, facts=fakes.get(job.facts, job.facts), order=fakes.get(job.order, job.order))
+        for job in jobs
+    ]
+
+
+def _fake(value: object) -> Reader[Any]:
+    async def read(reads: Reads) -> object:
+        return value() if callable(value) else value
+
+    return read
+
+
 class Told(list[str]):
     async def __call__(self, text: str) -> bool:
         self.append(text)
@@ -93,14 +114,13 @@ class Told(list[str]):
 async def scheduling(
     tmp_path: Path,
     start: datetime,
-    jobs: Sequence[Job],
+    jobs: Sequence[Job[Any]],
     *,
     runs: Runs | None = None,
     github: FakeGitHub | None = None,
     token: str | None = TOKEN,
     training: NightTraining | None = None,
-    facts: Facts | Callable[[], Facts] | None = None,
-    session_facts: Facts | None = None,
+    sources: Sources | None = None,
     told: Told | None = None,
     secrets: Sequence[str] = (),
     clock: FakeClock | None = None,
@@ -111,14 +131,6 @@ async def scheduling(
     runs = runs or Runs(clock)
     told = Told() if told is None else told
     state = JobState.load(tmp_path / STATE_FILE)
-
-    async def read_facts() -> Facts:
-        if callable(facts):  # read each night, as the collector does
-            return facts()
-        return facts or Facts()
-
-    async def read_session_facts() -> Facts:
-        return session_facts or Facts()
 
     async with aiohttp.ClientSession() as session:
         hub = GitHub(session, token if github else None, REPO, github.url if github else "http://127.0.0.1:9")
@@ -133,8 +145,7 @@ async def scheduling(
             commit=COMMIT,
             secrets=secrets,
             training=training,
-            facts=read_facts,
-            session_facts=read_session_facts,
+            sources=sources,
             runner=runs,
             ran=ran,
         )

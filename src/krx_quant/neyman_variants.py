@@ -1310,9 +1310,9 @@ class Progress:
 
 
 def progress(settings: Settings, now: datetime) -> Progress:
-    """The experiment's ``Progress`` from its report and the recorded days (``Facts.neyman_variants``):
-    a small file and the day folders. One that cannot be read says no discovery (logged): the job
-    then runs, and its command says why it cannot."""
+    """The experiment's ``Progress`` from its report and the recorded days
+    (``scheduled.research.read_neyman_variants``): a small file and the day folders. One that cannot be
+    read says no discovery (logged): the job then runs, and its command says why it cannot."""
     try:
         saved = read_report(settings.state_dir / REPORT)
         if not saved or not saved.get("discovery"):

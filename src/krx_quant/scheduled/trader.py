@@ -11,11 +11,14 @@ concluded (#559). The mock fill notice's layout left too once it had joined ever
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass
 from datetime import timedelta
 
 from krx_quant.process_log import Ran
-from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, Night, Target
-from krx_quant.trader.notice_columns import APART, PARTIAL
+from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, Night, Reads, Target
+from krx_quant.trader.mock_check import trader_in_mock
+from krx_quant.trader.notice_columns import APART, PARTIAL, apart_orders
 from krx_quant.trader.report import PRACTICE_HEADING, PRACTICE_TRADES, calls_agent
 
 # The trader's night (#399, #400, #402, #393 "정책과 자기 개선", "리포트와 에이전트"): every trading
@@ -53,7 +56,7 @@ from krx_quant.trader.report import PRACTICE_HEADING, PRACTICE_TRADES, calls_age
 TRADER_REPORT_ISSUE = 417
 
 
-def _every_trading_night(night: Night) -> bool:
+def _every_trading_night(night: Night[None]) -> bool:
     """Every trading day's night, once; a run a restart cut runs the next trading night."""
     if not night.trading_day:
         return False
@@ -107,7 +110,23 @@ TRADER_REPORT = Job(
 # The order probe's session job ``probe-kis-orders-403`` (#403) left ``JOBS`` here (#484): its run of
 # 2026-10-30 did every step but the fill notice, which the job above measured instead, and left in, it
 # would order again on the same mock account once the trader is back in paper. ``krx-quant
-# probe-kis-orders`` stays for a run by hand.
+# probe-kis-orders`` stays for a run by hand. What its condition asked stays for a session job that
+# orders on the mock account (``read_mock_session``): such a job waited for the trader's keys, and did
+# not run while the trader last started in mock mode (it may hold 005930 and order on that account).
+
+
+@dataclass(frozen=True)
+class MockSessionFacts:
+    """What a session job ordering on the mock account asks (#403, #405): a small read, beside the live
+    engine in the market's hours."""
+
+    trader_kis: bool = False  # the trader's KIS key, secret and account are set (``Settings.trader_kis``)
+    trader_mock: bool = False  # the trader last started in mock mode (``mock_check.trader_in_mock``)
+
+
+async def read_mock_session(reads: Reads) -> MockSessionFacts:
+    settings = reads.sources.settings
+    return MockSessionFacts(settings.trader_kis, await asyncio.to_thread(trader_in_mock, settings.state_dir))
 
 
 # The fill notice's columns 10 and 17 (#648): every mock order was of one share on 2026-11-04, so the
@@ -115,7 +134,7 @@ TRADER_REPORT = Job(
 # several fills, which the trader's mock places only once a champion with cells trades by its loss
 # budget (the practice buys one share, ``selection.PRACTICE_SHARES``). So on the first trading night
 # with ``notice_columns.APART`` (20) orders of more than one share that something filled of on the
-# recorded days (``Facts.fill_notice_apart``, the ledger's count), ``fill-notice-columns`` measures
+# recorded days (``read_fill_notice_apart``, the ledger's count), ``fill-notice-columns`` measures
 # each column against them (read-only: the records, the ledger, each day's KIS inquiry with the
 # trader's key) and counts the orders whose notice was lost while the recorder was disconnected. It
 # runs once: a run with fewer than 20 of those orders joined to a notice record (3: the condition
@@ -126,10 +145,16 @@ TRADER_REPORT = Job(
 FILL_NOTICE_COLUMNS_ISSUE = 648
 
 
-def _once_enough_orders_tell_the_columns_apart(night: Night) -> bool:
+async def read_fill_notice_apart(reads: Reads) -> int:
+    """How many of the mock trader's orders of more than one share that something filled of are on the
+    days the fill notice recorder kept (``notice_columns.apart_orders``)."""
+    return await asyncio.to_thread(apart_orders, reads.sources.settings.state_dir)
+
+
+def _once_enough_orders_tell_the_columns_apart(night: Night[int]) -> bool:
     """On a trading night with ``APART`` telling orders recorded, until a run succeeded (exit 0); a
     failed run, the next trading night."""
-    if not night.trading_day or night.facts.fill_notice_apart < APART:
+    if not night.trading_day or night.facts < APART:
         return False
     record = night.record
     if record is None or record.outcome not in (OK, FAILED):
@@ -145,6 +170,7 @@ def fill_notice_columns_calls(ran: Ran) -> bool:
 FILL_NOTICE_COLUMNS = Job(
     name="fill-notice-columns-648",
     due=_once_enough_orders_tell_the_columns_apart,
+    facts=read_fill_notice_apart,
     command=("fill-notice-columns",),
     timeout=timedelta(minutes=10),
     label_if=fill_notice_columns_calls,
@@ -171,7 +197,7 @@ FILL_NOTICE_COLUMNS = Job(
 
 # The live account's answers (#408, CODING_STANDARDS "External data is probed before it is used"): the
 # trader's broker reads the live server's answers by the fields measured on the mock server (#403), and
-# no agent orders live. So on a trading night once the live key is set (``Facts.trader_live_kis``),
+# no agent orders live. So on a trading night once the live key is set (``read_live_kis``),
 # ``probe-live-account`` reads the live account by inquiry calls alone (the price, the balance, the
 # orderable cash, the day's order inquiry), checks every field the broker reads against how it reads
 # it, and keeps the result in the trader's store; the live mode orders only once one passed
@@ -181,9 +207,14 @@ FILL_NOTICE_COLUMNS = Job(
 LIVE_PROBE_ISSUE = 417
 
 
-def _a_night_until_the_live_account_was_read(night: Night) -> bool:
+async def read_live_kis(reads: Reads) -> bool:
+    """Whether the trader's live key, secret and account are set (``Settings.trader_live_kis``, #408)."""
+    return reads.sources.settings.trader_live_kis
+
+
+def _a_night_until_the_live_account_was_read(night: Night[bool]) -> bool:
     """On a trading night once the live key is set, until a run passed (exit 0)."""
-    if not night.trading_day or not night.facts.trader_live_kis:
+    if not night.trading_day or not night.facts:
         return False
     record = night.record
     if record is None or record.outcome not in (OK, FAILED):
@@ -194,6 +225,7 @@ def _a_night_until_the_live_account_was_read(night: Night) -> bool:
 LIVE_PROBE = Job(
     name="probe-live-account-408",
     due=_a_night_until_the_live_account_was_read,
+    facts=read_live_kis,
     command=("probe-live-account",),
     timeout=timedelta(minutes=5),
     targets=(

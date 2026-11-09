@@ -40,8 +40,8 @@ from krx_quant.scheduled import (
     FAILED,
     JOBS,
     OK,
-    Facts,
     JobRecord,
+    PrevalidationFacts,
     prevalidation_job_name,
 )
 from krx_quant.scheduled import (
@@ -174,7 +174,12 @@ def test_a_run_before_the_krx_history_is_stored_records_the_old_version_and_the_
     ran = JobRecord(LAST, OK, NOW - timedelta(minutes=30), "abc", 1, 60.0)
     pending = ("foreign_net", "institution_net")
     night = JobNight(
-        LAST + timedelta(days=1), True, "abc", ran, {job.name: ran}, Facts(0, ("cox",), 0, {"cox": found})
+        LAST + timedelta(days=1),
+        True,
+        "abc",
+        ran,
+        {job.name: ran},
+        PrevalidationFacts(0, ("cox",), {"cox": found}),
     )
     assert job.due(night), "its data is in: it runs"
     assert not job.due(replace(night, facts=replace(night.facts, pending_inputs=pending))), "it waits"
@@ -226,10 +231,10 @@ def test_the_night_refits_cox_on_the_krx_days_and_always_promotes_it(tmp_path: P
 
 def job_night(
     day: date, waiting: tuple[str, ...], report: object = None, record: JobRecord | None = None
-) -> JobNight:
+) -> JobNight[PrevalidationFacts]:
     reports = {} if report is None else {"cox": report}
     records = {} if record is None else {prevalidation_job_name("cox"): record}
-    return JobNight(day, True, "abc", record, records, Facts(0, waiting, 0, reports))  # type: ignore[arg-type]
+    return JobNight(day, True, "abc", record, records, PrevalidationFacts(0, waiting, reports))  # type: ignore[arg-type]
 
 
 def test_the_scheduled_walk_forward_does_not_wait_for_recorded_days_nor_its_turn() -> None:
@@ -349,7 +354,7 @@ def test_a_report_on_answer_version_1_has_cox_on_probation_judged_again_before_i
     """#264: answer version 2 ends the day at the closing auction. Cox's report of version 1
     (2026-10-19's) no longer stands, and Cox, enrolled on probation, does not run until a new
     pre-validation passes: it waits for one, and the scheduled job runs it, once its kind's closes
-    are all kept (``Facts.pending_answers``). One judged live already (active) runs on."""
+    are all kept (``PrevalidationFacts.pending_answers``). One judged live already (active) runs on."""
     s = settings(tmp_path, signal=0.6, days=900)
     cox = DAILY_ALGORITHMS[0]
     report = {
@@ -380,7 +385,12 @@ def test_a_report_on_answer_version_1_has_cox_on_probation_judged_again_before_i
     [job] = [j for j in JOBS if j.name == "prevalidate-cox"]
     ran = JobRecord(LAST, OK, NOW - timedelta(minutes=30), "abc", 0, 60.0)
     night = JobNight(
-        LAST + timedelta(days=3), True, "abc", ran, {job.name: ran}, Facts(0, ("cox",), 0, {"cox": found})
+        LAST + timedelta(days=3),
+        True,
+        "abc",
+        ran,
+        {job.name: ran},
+        PrevalidationFacts(0, ("cox",), {"cox": found}),
     )
     assert job.due(night), "judged again on version 2"
     waiting = replace(night, facts=replace(night.facts, pending_answers=("open_to_close",)))
