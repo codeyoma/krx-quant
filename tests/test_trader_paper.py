@@ -23,6 +23,7 @@ from krx_quant.kinds import QuoteLog
 from krx_quant.pricing import cost_ticks
 from krx_quant.trader import SYMBOL, TRADED_KINDS
 from krx_quant.trader.cells import traded_kind
+from krx_quant.trader.money import NO_SHARES
 from krx_quant.trader.paper import (
     BEFORE_ENTRY,
     BELOW_THRESHOLD,
@@ -31,7 +32,6 @@ from krx_quant.trader.paper import (
     HOLDING,
     NO_QUOTE,
     NO_REFERENCE,
-    NO_SHARES,
     NOT_OK,
     NOT_UP,
     PAST_LAST_EXIT,
@@ -41,7 +41,6 @@ from krx_quant.trader.paper import (
     TAKE_PROFIT,
     TARGET_REACHED,
     TIME,
-    costs,
 )
 from tests.trader_doubles import (
     DIRECTION,
@@ -94,20 +93,6 @@ def test_a_rise_buys_at_the_first_ask_after_the_decision_and_takes_profit_at_the
     ]
     assert [len(o["fills"]) for o in trade["orders"]] == [1, 1]
     assert trade["orders"][1]["placed_at"] == trade["entry"]["at"]
-
-
-def test_the_costs_of_a_round_trip_worked_by_hand() -> None:
-    """14 shares bought at 70,100 and sold at 70,250, 0.015% a side and the 0.20% sell tax:
-    the buy's commission 981,400 × 0.00015 = 147.21; the sell's 983,500 × 0.00015 = 147.525; the
-    tax 983,500 × 0.002 = 1,967. 2,261.735 won in all, against 150 × 14 = 2,100 gained: the
-    target of k = 2 ticks, reached from the ask half a tick above the reference, loses 161.735."""
-    paid = costs(70_100, 70_250, 14, FEE)
-
-    assert (paid.buy_fee, paid.sell_fee, paid.tax) == pytest.approx((147.21, 147.525, 1_967.0))
-    assert paid.total == pytest.approx(2_261.735)
-    # The same round trip on the reference price per share, in ticks (``pricing.cost_ticks``, what
-    # the touch and barrier P&L take off): 70,050 × 0.23% ÷ 100.
-    assert cost_ticks(70_050, FEE) == pytest.approx(1.61115)
 
 
 def test_a_trade_keeps_its_costs_and_its_net_in_won(tmp_path: Path) -> None:

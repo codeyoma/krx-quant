@@ -61,7 +61,7 @@ nothing changes a θ by it.
 
 **The whole policy** (#472): the cells kept, in their rank at their θ, replayed together one position
 at a time as the paper book would have traded them (``replay.Policy``: the rank waits, sized by the
-trader's loss budget, ``paper.size``, held by its risk rules and loss limits, #471). Its daily net in
+trader's loss budget, ``money.size``, held by its risk rules and loss limits, #471). Its daily net in
 won over the days its cells were recorded (a day without a trade 0) must have a day-level lower bound
 (``LEVEL``, 95%: one policy) above 0: else the policy is not kept, and the night's output and log say
 why (``Refitted.rejected``). A fit keeping no cell keeps an empty policy, as before: it trades

@@ -34,7 +34,7 @@ one wrong loses W + C (the target and the stop are W ticks off, the cost paid bo
 fractions of the price g = (W − C) × tick ÷ price and ℓ = (W + C) × tick ÷ price. The growth
 p log(1 + f g) + (1 − p) log(1 − f ℓ) is greatest at f* = p ÷ ℓ − (1 − p) ÷ g, positive exactly
 when p > p* = (W + C) ÷ 2W. It is a diagnosis alone (``Pick.kelly``, #471): a trade's loss budget
-sizes the buy (``paper.size``).
+sizes the buy (``money.size``).
 
 > **바뀜** (2026-11-03, #478): the trader bought ``KELLY_FRACTION`` (a half) of f*, cut to 0–1
 > (``Pick.fraction``), of the capital → f* sizes nothing. 이유: spec #468 4 "크기": with stops a few
@@ -131,7 +131,7 @@ class Pick:
     # for the review cycle (#474); None: the trader's ``Rules.threshold``.
     threshold: float | None = None
     # The shares it buys, within the cash and the capital, in place of a loss budget's (#427: a practice
-    # cell's one); None: the loss budget's (#471, ``paper.size``).
+    # cell's one); None: the loss budget's (#471, ``money.size``).
     quantity: int | None = None
     # The mock book's practice cell (#427, module doc), not a champion's.
     practice: bool = False

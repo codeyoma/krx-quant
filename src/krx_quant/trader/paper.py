@@ -52,7 +52,7 @@ finds the position taken (``holding``).
 **Size** (#471, spec #468 4 "크기", ``size``). A trade's loss budget over what a share loses at its
 stop, rounded down: ⌊budget ÷ (ask − stop + one tick + the commissions and the sell tax)⌋. The budget
 is ``Rules.risk_percent`` (``KRX_TRADER_RISK_PER_TRADE_PERCENT``, 0.5%) of the capital; a share's loss
-(``at_risk``) is the best ask it is bought at less the stop, the commissions and the sell tax at those
+(``money.at_risk``) is the best ask it is bought at less the stop, the commissions and the sell tax at those
 prices (the buy's at the ask, the sale's at the stop) and one adverse tick (the stop sells at the
 first best bid at or below the stop: a tick under it, the stop's band's, at worst). The spread is not
 counted again: the ask is above the bid by it already. Within the cash and the capital, the buy's commission
@@ -131,8 +131,9 @@ is kept as open through the stall (``trade_stalls``). When the quotes come again
 first quote after the stall (the stop crossed, the time barrier passed, a pause selling meanwhile)
 keeps that on its trade (``waited``). The mock book reads KIS's REST quotes instead (``mock.py``).
 
-**Costs** (``costs``): the commission (``KRX_FEE_PERCENT``) on the buy's and the sell's notional
-and the sell tax (``pricing.SELL_TAX``) on the sell's; the net P&L is the gross less them, in won.
+**Costs** (``money.round_trip``, #652): the commission (``KRX_FEE_PERCENT``) on the buy's and the
+sell's notional and the sell tax (``pricing.SELL_TAX``) on the sell's; the net P&L is the gross less
+them, in won.
 Unlike the touch P&L and the barrier P&L (``stats.touch_profit``, ``barriers.barrier_profit``), which
 cost the round trip on the reference price per share in ticks, a trade pays on its fills.
 
@@ -150,7 +151,7 @@ measured from the target.
 
 **One set of rules** (#470): the entry (``plan``, ``admit``), the priority (``settle``), the buy's fill
 (``refused``, ``size``), the risk rules (``risk_held``, #471), the exits (``exit_on``, ``clock_exit``)
-and the costs (``costs``, ``net_of``) are functions of this module that the paper book calls, and so
+and the costs (``money.py``, #652) are functions the paper book calls, and so
 does the nightly re-fit's replay of the recorded days (``replay.py``), with the loss limits a
 challenger's book simulates (``limits.Simulated``): the same predictions and the same quotes make the
 same trades there (``tests/test_trader_replay.py``).
@@ -167,7 +168,6 @@ snapshot also carries the process's resident memory for the engine's heartbeat (
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -177,7 +177,6 @@ from krx_quant.feeds.base import KST, kst_day
 from krx_quant.footprint import resident_mb
 from krx_quant.kinds import most_likely
 from krx_quant.market_calendar import Session
-from krx_quant.pricing import SELL_TAX, tick_size
 from krx_quant.special import HALT_STATUS, Kind, Window, touching
 from krx_quant.trader import (
     CAPITAL,
@@ -207,6 +206,7 @@ from krx_quant.trader.limits import (
     Notify,
     Simulated,
 )
+from krx_quant.trader.money import commission, open_net, round_trip, size
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import PREDICTOR_INACTIVE, Pick, Selection
 from krx_quant.trader.store import RESIDENT, WAITED, Entry, Exit, OpenTrade, Stall, TraderStore
@@ -227,8 +227,8 @@ HOLDING, OUTRANKED = "holding", "outranked"
 # The collector's quotes stalled (#407): nothing new is bought until they come again.
 STALLED = "quotes_stalled"
 # Why a buy decided did not fill.
-TARGET_REACHED, NO_SHARES, NO_QUOTE, RESTARTED = "target_reached", "no_shares", "no_quote", "restarted"
-BAD_STOP = "bad_stop"  # its stop not below the ask, or not a price (#471, ``size``)
+TARGET_REACHED, NO_QUOTE, RESTARTED = "target_reached", "no_quote", "restarted"
+# A buy below one share, or its stop not below the ask, takes none: ``money.NO_SHARES``, ``BAD_STOP``.
 # The risk rules hold new buys (#471, ``risk_held``): the day's buy orders, the losses in a row.
 BUY_LIMIT, COOLING_DOWN = "buy_limit", "cooldown"
 # A practice buy too soon after the day's last (#598, ``spaced``).
@@ -300,44 +300,6 @@ class Plan:
     target: float
     stop: float
     time_barrier: datetime
-
-
-@dataclass(frozen=True)
-class Costs:
-    buy_fee: float
-    sell_fee: float
-    tax: float
-
-    @property
-    def total(self) -> float:
-        return self.buy_fee + self.sell_fee + self.tax
-
-
-def costs(entry_price: float, exit_price: float, quantity: int, fee_rate: float) -> Costs:
-    """A round trip's costs, in won: the commission on the buy's and the sell's notional, and the
-    sell tax on the sell's."""
-    sold = exit_price * quantity
-    return Costs(entry_price * quantity * fee_rate, sold * fee_rate, sold * SELL_TAX)
-
-
-def at_risk(ask: float, stop: float, fee_rate: float) -> float:
-    """What a share bought at ``ask`` loses at its ``stop`` (#471, module doc "Size"), in won: the ask
-    less the stop, the commissions and the tax at those prices (the buy's at the ask, the sale's at the
-    stop), and one adverse tick (the stop's band's: the first bid at or below it sells)."""
-    return ask - stop + ask * fee_rate + stop * (fee_rate + SELL_TAX) + tick_size(stop)
-
-
-def shares(capital: float, ask: float, cash: float, fee_rate: float) -> int:
-    """The whole shares a buy at ``ask`` may take, its notional and commission within the capital and
-    the ``cash`` (#471)."""
-    return math.floor(round(min(capital, max(0.0, cash)) / (ask * (1 + fee_rate)), 9))
-
-
-def unrealized(trade: OpenTrade, bid: float, fee_rate: float) -> float:
-    """What ``trade`` would net sold at ``bid`` now (#396): the gross less the buy's commission and
-    the sale's commission and tax."""
-    paid = costs(trade.entry_price, bid, trade.quantity, fee_rate)
-    return (bid - trade.entry_price) * trade.quantity - trade.buy_fee - paid.sell_fee - paid.tax
 
 
 def plan(
@@ -502,27 +464,6 @@ def refused(decided_at: datetime, barriers: Barriers, quote: BestQuote, rules: R
     return None
 
 
-def size(
-    ask: float,
-    stop: float,
-    budget: float,
-    capital: float,
-    cash: float,
-    fee_rate: float,
-    quantity: int | None = None,
-) -> int | str:
-    """The shares a buy at ``ask`` takes (#471, module doc "Size"): the loss ``budget`` over a share's
-    loss at ``stop`` (``at_risk``), or a pick's fixed ``quantity`` (#427), within the capital and the
-    ``cash`` (``shares``), rounded down; or why none: ``bad_stop`` (the stop not below the ask, or not
-    a price), ``no_shares`` (below one share)."""
-    if not (math.isfinite(stop) and 0 < stop < ask):
-        return BAD_STOP
-    most = shares(capital, ask, cash, fee_rate)
-    wanted = quantity if quantity is not None else math.floor(round(budget / at_risk(ask, stop, fee_rate), 9))
-    taken = min(wanted, most)
-    return taken if taken >= 1 else NO_SHARES
-
-
 def risk_held(rules: Rules, at: datetime, buys: int, exits: Sequence[tuple[datetime, float]]) -> str | None:
     """Why the risk rules hold a book's new buy at ``at`` (#471, module doc "Risk rules"), from its buy
     orders of ``at``'s day (``buys``) and its trades exited that day (``exits``: each one's exit time and
@@ -668,11 +609,6 @@ def _pnl(realized: float, unrealized: float, trades: int | None = None) -> dict[
     """A P&L in the trader's state (#533): realized, open, their sum, and the trades exited if given."""
     found: dict[str, Any] = {"realized": realized, "unrealized": unrealized, "net": realized + unrealized}
     return found if trades is None else found | {"trades": trades}
-
-
-def net_of(entry_price: float, exit_price: float, quantity: int, fee_rate: float) -> float:
-    """A round trip's net P&L in won: the gross less its costs (``costs``), as a trade keeps it."""
-    return (exit_price - entry_price) * quantity - costs(entry_price, exit_price, quantity, fee_rate).total
 
 
 @dataclass(frozen=True)
@@ -1177,9 +1113,9 @@ class PaperTrader:
         return self._open is not None or self._waiting is not None
 
     def _unrealized(self, trade: OpenTrade, bid: float) -> float:
-        """What the open ``trade`` nets sold at ``bid`` now (``unrealized``); the mock book counts
+        """What the open ``trade`` nets sold at ``bid`` now (``money.open_net``); the mock book counts
         what of it is sold already at its fills (#405)."""
-        return unrealized(trade, bid, self.rules.fee_rate)
+        return open_net(trade, bid, self.rules.fee_rate)
 
     def _rank(self, cell: Cell) -> int:
         return self._picks[cell][0] if cell in self._picks else len(self._picks)
@@ -1358,7 +1294,7 @@ class PaperTrader:
             entry_at=at,
             entry_price=price,
             quantity=quantity,
-            buy_fee=price * quantity * self.rules.fee_rate,
+            buy_fee=commission(price, quantity, self.rules.fee_rate),
             quote_at=quote_at,
             selection_id=self._selection,
             role=pick.role,
@@ -1386,7 +1322,9 @@ class PaperTrader:
             self._exit(trade, sale.at, sale.price, sale.reason, sale.quote)
 
     def _exit(self, trade: OpenTrade, at: datetime, price: float, reason: str, quote: BestQuote) -> None:
-        paid = costs(trade.entry_price, price, trade.quantity, self.rules.fee_rate)
+        trip = round_trip(
+            trade.entry_price, trade.quantity, trade.buy_fee, price * trade.quantity, self.rules.fee_rate
+        )
         # The day the exit is counted in, rolled before the exit is kept: a day read again after it
         # would hold it already (an exit the clock had not reached the day of yet, #396).
         if self.holds.roll(at):
@@ -1395,11 +1333,11 @@ class PaperTrader:
             self.store.stall_effect(trade.id, self._returned.id, WAITED)
         # The sale's decision (#475): on the quote it is made on; a take-profit rests from the buy.
         sold = (None, None) if reason == TAKE_PROFIT else (at, mid_of(quote))
-        self.store.exit(trade, Exit(at, price, reason, paid.sell_fee, paid.tax, quote.received_at, *sold))
+        self.store.exit(trade, Exit(at, price, reason, trip.sell_fee, trip.tax, quote.received_at, *sold))
         self._open = None
         self._sell_after = None
         self._dirty = True
-        net = (price - trade.entry_price) * trade.quantity - trade.buy_fee - paid.sell_fee - paid.tax
+        net = trip.net  # as the store keeps it
         log.info(
             "%s sold %s at %s (%s, trade %s): net %.0f won",
             self._whose(),

@@ -14,7 +14,7 @@ narrow the capital, never widen it (#393).
 - ``KRX_TRADER_DAILY_LOSS_PERCENT``, ``KRX_TRADER_CUMULATIVE_LOSS_PERCENT`` (#396): the loss
   limits in percent of the capital (10 and 20 unless set; above 0 and at most those);
 - ``KRX_TRADER_RISK_PER_TRADE_PERCENT`` (#471): a trade's loss budget in percent of the capital it
-  trades on (0.5 unless set; above 0 and at most that), which sizes each buy (``paper.size``);
+  trades on (0.5 unless set; above 0 and at most that), which sizes each buy (``money.size``);
 - ``KRX_TRADER_LOSS_STREAK``, ``KRX_TRADER_COOLDOWN_MINUTES`` (#471): the net losses in a row (3
   unless set; from 1 to 3) that stop new buys for the cooldown (30 minutes unless set; at least 30);
 - ``KRX_TRADER_DAILY_BUY_ORDERS`` (#471): the buy orders a day, those refused counted (20 unless set;

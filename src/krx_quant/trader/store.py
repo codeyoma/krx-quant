@@ -123,11 +123,11 @@ from typing import TYPE_CHECKING, Any
 
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, Session
-from krx_quant.pricing import SELL_TAX
 from krx_quant.trader import KIS_MODES, MOCK, PAPER, policy, promotion, review
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.db import iso, reading
 from krx_quant.trader.gap import day_gap
+from krx_quant.trader.money import round_trip, settled
 from krx_quant.trader.selection import GONE, PREDICTOR_INACTIVE
 
 if TYPE_CHECKING:
@@ -948,12 +948,18 @@ class TraderStore:
                     trade.id, self._mode(trade.id), SELL, out.reason, out.price, trade.quantity, at
                 )
             self._fill(sold, at, out.price, trade.quantity, out.quote_at)
-            gross = (out.price - trade.entry_price) * trade.quantity
-            cost = trade.buy_fee + out.sell_fee + out.tax
+            trip = settled(
+                trade.entry_price,
+                trade.quantity,
+                trade.buy_fee,
+                out.price * trade.quantity,
+                out.sell_fee,
+                out.tax,
+            )
             self._db.execute(
                 "UPDATE trades SET exit_at = ?, exit_price = ?, exit_reason = ?, sell_fee = ?, tax = ?,"
                 " cost = ?, gross = ?, net = ? WHERE id = ?",
-                (at, out.price, out.reason, out.sell_fee, out.tax, cost, gross, gross - cost, trade.id),
+                (at, out.price, out.reason, out.sell_fee, out.tax, trip.cost, trip.gross, trip.net, trade.id),
             )
             if out.decided_at is not None:  # #475: the sale's decision, for its execution cost
                 self._db.execute(
@@ -1235,16 +1241,14 @@ class TraderStore:
         if quantity != trade.quantity:
             raise ValueError(f"trade {trade.id}: {quantity} of its {trade.quantity} shares sold")
         price = amount / quantity
-        sell_fee, tax = amount * fee_rate, amount * SELL_TAX
-        gross = amount - trade.entry_price * trade.quantity
-        cost = trade.buy_fee + sell_fee + tax
+        trip = round_trip(trade.entry_price, trade.quantity, trade.buy_fee, amount, fee_rate)
         with self._db:
             self._db.execute(
                 "UPDATE trades SET exit_at = ?, exit_price = ?, exit_reason = ?, sell_fee = ?, tax = ?,"
                 " cost = ?, gross = ?, net = ? WHERE id = ?",
-                (iso(at), price, reason, sell_fee, tax, cost, gross, gross - cost, trade.id),
+                (iso(at), price, reason, trip.sell_fee, trip.tax, trip.cost, trip.gross, trip.net, trade.id),
             )
-        return gross - cost
+        return trip.net
 
     def add_failure(
         self,

@@ -35,6 +35,7 @@ from krx_quant.recorder import ParquetRecorder
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader import CAPITAL, SYMBOL, replay
 from krx_quant.trader.cells import Cell, open_engine_db, special_windows
+from krx_quant.trader.money import net_of
 from krx_quant.trader.paper import (
     COOLING_DOWN,
     EXPIRED,
@@ -48,7 +49,6 @@ from krx_quant.trader.paper import (
     TARGET_REACHED,
     TIME,
     Rules,
-    net_of,
 )
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.replay import (
