@@ -42,7 +42,7 @@ from krx_quant.scheduled import (
 )
 from krx_quant.stats import Scored, t_quantile
 from tests.fake_github import REPO, TOKEN, fake_github
-from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at
+from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at, faking
 from tests.test_holdout import AFTER_DAYS, OTHER, SYMBOL, Bar, bp, holdout, night, sigma_answers, stored
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
@@ -316,19 +316,14 @@ def test_the_job_runs_on_the_night_447_s_does_and_posts_to_449() -> None:
 
 
 async def test_the_job_runs_the_real_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from krx_quant.scheduled import Facts
-
     monkeypatch.chdir(tmp_path)  # no .env
     monkeypatch.setenv("KRX_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
     state = JobState.load(tmp_path / STATE_FILE)
 
-    async def facts() -> Facts:
-        return Facts(holdout_days=DAYS)
-
     async with fake_github() as hub, aiohttp.ClientSession() as session:
         scheduler = Scheduler(
-            [CLIMATE_GATE],
+            faking([CLIMATE_GATE], {CLIMATE_GATE.facts: DAYS}),
             AT,
             CALENDAR,
             state,
@@ -336,7 +331,6 @@ async def test_the_job_runs_the_real_command(tmp_path: Path, monkeypatch: pytest
             Told(),
             FakeClock(at(FRIDAY, "23:00")),
             commit=COMMIT,
-            facts=facts,
         )
         await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
     [body] = hub.bodies(449)

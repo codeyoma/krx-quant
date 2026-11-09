@@ -533,7 +533,8 @@ class Until:
 
 @dataclass(frozen=True)
 class Progress:
-    """Where the backfill stands, as its scheduled job's condition reads it (``Facts.neyman_backfill``)."""
+    """Where the backfill stands, as its scheduled job's condition reads it
+    (``scheduled.research.read_backfill``)."""
 
     read: bool = False  # read tonight: without, the job waits
     judged: bool = False  # its verdict is in the report

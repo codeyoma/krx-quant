@@ -12,6 +12,7 @@ import asyncio
 import json
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -49,7 +50,7 @@ from krx_quant.object_store import LocalObjectStore
 from krx_quant.process_log import Ran
 from krx_quant.raw_days import RawDays
 from krx_quant.recorder import ParquetRecorder
-from krx_quant.scheduled import JOBS, NIGHT_BOOK_BYTES, NIGHT_BOOK_VERDICT, Facts, JobRecord, Night
+from krx_quant.scheduled import JOBS, NIGHT_BOOK_BYTES, NIGHT_BOOK_VERDICT, JobRecord, Night
 
 # 2026-11-06 is a Friday; the next two weeks trade on weekdays.
 CALENDAR = MarketCalendar(
@@ -429,9 +430,9 @@ def test_the_state_file_counts_the_complete_nights_for_the_job_s_condition(tmp_p
 
 def night(
     day: date, record: JobRecord | None = None, *, nights: int = 0, verdict: JobRecord | None = None
-) -> Night:
+) -> Night[Any]:
     records = {} if verdict is None else {NIGHT_BOOK_VERDICT.name: verdict}
-    return Night(day, CALENDAR.is_trading_day(day), "abc", record, records, Facts(night_book_nights=nights))
+    return Night(day, CALENDAR.is_trading_day(day), "abc", record, records, nights)
 
 
 def ran_on(day: date, outcome: str = "ok", commit: str = "abc") -> JobRecord:

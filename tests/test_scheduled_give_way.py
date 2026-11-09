@@ -17,6 +17,7 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -30,12 +31,24 @@ from krx_quant.scheduled import (
     INTERRUPTED,
     JOBS,
     STATE_FILE,
-    Facts,
     Job,
     JobRecord,
+    PrevalidationFacts,
     Ran,
+    read_prevalidation_facts,
 )
-from tests.scheduled_doubles import COMMIT, FRIDAY, MONDAY, SATURDAY, SUNDAY, Runs, at, saved, scheduling
+from tests.scheduled_doubles import (
+    COMMIT,
+    FRIDAY,
+    MONDAY,
+    SATURDAY,
+    SUNDAY,
+    Runs,
+    at,
+    faking,
+    saved,
+    scheduling,
+)
 from tests.waiting import until
 
 BAR_CLOSE = "simulate bar-close"
@@ -69,15 +82,22 @@ class Takes(Runs):
         return self.ran
 
 
-def waiting(*algorithms: str, simulating: Sequence[str] = ("breiman",), daily: Sequence[str] = ()) -> Facts:
+def waiting(
+    *algorithms: str, simulating: Sequence[str] = ("breiman",), daily: Sequence[str] = ()
+) -> PrevalidationFacts:
     """Ten recorded days; ``algorithms`` wait for their pre-validation, ``simulating`` (bar-close)
     and ``daily`` for their probation's simulation."""
-    return Facts(
+    return PrevalidationFacts(
         recorded_days=MIN_DAYS,
         waiting=algorithms,
         simulating=tuple(simulating),
         simulating_daily=tuple(daily),
     )
+
+
+def fed(jobs: Sequence[Job[Any]], facts: PrevalidationFacts) -> list[Job[Any]]:
+    """``jobs``, the pre-validations' and simulations' conditions asked with ``facts``."""
+    return faking(jobs, {read_prevalidation_facts: facts})
 
 
 def gave_way(job: str, ahead: str, day: date, last_start: str, limit: str, latest: str, nights: int) -> str:
@@ -129,7 +149,7 @@ async def test_a_pre_validation_that_would_miss_its_last_start_goes_first_and_th
     runs = Takes(clock, {"prevalidate kalman": timedelta(hours=1, minutes=50)})
     facts = waiting("kalman", "shannon")
     async with scheduling(
-        tmp_path, clock.now(), SIMULATIONS_AND_PREVALIDATIONS, runs=runs, facts=facts, clock=clock
+        tmp_path, clock.now(), fed(SIMULATIONS_AND_PREVALIDATIONS, facts), runs=runs, clock=clock
     ) as (_, _, told, state):
         clock.set(at(FRIDAY, "22:30"))
         await until(lambda: runs.names() == ["prevalidate kalman"])
@@ -150,7 +170,7 @@ async def test_a_simulation_that_cannot_start_after_it_runs_the_next_night(tmp_p
     clock = FakeClock(at(FRIDAY, "22:00"))
     runs = Takes(clock, {"prevalidate kalman": timedelta(hours=2, minutes=20)})
     async with scheduling(
-        tmp_path, clock.now(), SIMULATIONS_AND_PREVALIDATIONS, runs=runs, facts=waiting("kalman"), clock=clock
+        tmp_path, clock.now(), fed(SIMULATIONS_AND_PREVALIDATIONS, waiting("kalman")), runs=runs, clock=clock
     ) as (_, _, told, _):
         clock.set(at(FRIDAY, "22:30"))
         await until(lambda: runs.names() == ["prevalidate kalman"])
@@ -168,7 +188,7 @@ async def test_a_simulation_that_cannot_start_after_it_runs_the_next_night(tmp_p
     clock = FakeClock(at(SATURDAY, "06:00"))
     runs = Takes(clock, {})
     async with scheduling(
-        tmp_path, clock.now(), SIMULATIONS_AND_PREVALIDATIONS, runs=runs, facts=waiting("kalman"), clock=clock
+        tmp_path, clock.now(), fed(SIMULATIONS_AND_PREVALIDATIONS, waiting("kalman")), runs=runs, clock=clock
     ) as (_, _, told, state):
         assert state.gave_way == {"simulate-bar-close-298": [FRIDAY]}
         clock.set(at(SATURDAY, "22:30"))
@@ -196,9 +216,8 @@ async def test_a_breiman_has_4_hours_and_a_half_and_must_start_by_01_00(
     async with scheduling(
         tmp_path,
         clock.now(),
-        SIMULATIONS_AND_PREVALIDATIONS,
+        fed(SIMULATIONS_AND_PREVALIDATIONS, waiting("breiman")),
         runs=runs,
-        facts=waiting("breiman"),
         clock=clock,
     ) as (_, _, told, _):
         if breiman_first:
@@ -237,7 +256,7 @@ async def test_the_daily_simulation_stays_first_when_both_fit(
     runs = Takes(clock, {prevalidation: timedelta(hours=2)})
     facts = waiting(algorithm, simulating=(), daily=("cox",))
     async with scheduling(
-        tmp_path, clock.now(), SIMULATIONS_AND_PREVALIDATIONS, runs=runs, facts=facts, clock=clock
+        tmp_path, clock.now(), fed(SIMULATIONS_AND_PREVALIDATIONS, facts), runs=runs, clock=clock
     ) as (_, _, told, state):
         if not gives_way:
             await until(lambda: runs.names() == [DAILY, prevalidation])
@@ -260,7 +279,7 @@ async def test_both_simulations_give_way_and_run_after_it_in_the_list_s_order(tm
     runs = Takes(clock, {"prevalidate mandelbrot": timedelta(minutes=15)})
     facts = waiting("mandelbrot", simulating=("breiman",), daily=("cox",))
     async with scheduling(
-        tmp_path, clock.now(), SIMULATIONS_AND_PREVALIDATIONS, runs=runs, facts=facts, clock=clock
+        tmp_path, clock.now(), fed(SIMULATIONS_AND_PREVALIDATIONS, facts), runs=runs, clock=clock
     ) as (_, _, told, state):
         await until(lambda: runs.names() == ["prevalidate mandelbrot"])
         assert len(told.saying("자리를 내준")) == 2
@@ -285,7 +304,7 @@ async def test_a_simulation_that_gave_way_on_two_nights_runs_first_on_the_third(
         clock = FakeClock(at(day, "06:00"))
         runs = Takes(clock, took)
         async with scheduling(
-            tmp_path, clock.now(), SIMULATIONS_AND_PREVALIDATIONS, runs=runs, facts=facts, clock=clock
+            tmp_path, clock.now(), fed(SIMULATIONS_AND_PREVALIDATIONS, facts), runs=runs, clock=clock
         ) as (_, _, told, _):
             clock.set(at(day, "22:30"))
             await until(lambda: runs.names() == [prevalidation])
@@ -304,7 +323,7 @@ async def test_a_simulation_that_gave_way_on_two_nights_runs_first_on_the_third(
     clock = FakeClock(at(SUNDAY, "06:00"))
     runs = Takes(clock, took)
     async with scheduling(
-        tmp_path, clock.now(), SIMULATIONS_AND_PREVALIDATIONS, runs=runs, facts=facts, clock=clock
+        tmp_path, clock.now(), fed(SIMULATIONS_AND_PREVALIDATIONS, facts), runs=runs, clock=clock
     ) as (_, _, told, state):
         clock.set(at(SUNDAY, "22:30"))
         await until(lambda: runs.names() == [BAR_CLOSE])
@@ -331,9 +350,8 @@ async def test_the_nights_given_way_count_no_more_once_it_waits_no_more(tmp_path
     async with scheduling(
         tmp_path,
         clock.now(),
-        SIMULATIONS_AND_PREVALIDATIONS,
+        fed(SIMULATIONS_AND_PREVALIDATIONS, waiting(simulating=())),
         runs=runs,
-        facts=waiting(simulating=()),
         clock=clock,
     ) as (_, _, _, state):
         assert state.gave_way == {"simulate-bar-close-298": [date(2026, 10, 15)]}
@@ -345,7 +363,7 @@ async def test_the_nights_given_way_count_no_more_once_it_waits_no_more(tmp_path
 
 async def test_a_job_that_gives_way_to_none_keeps_the_list_s_order(tmp_path: Path) -> None:
     """A long job listed first that gives way to nothing runs first, as every job did before."""
-    long = Job(
+    long: Job[None] = Job(
         name="long",
         due=lambda night: night.record is None,
         command=("long",),
@@ -355,7 +373,7 @@ async def test_a_job_that_gives_way_to_none_keeps_the_list_s_order(tmp_path: Pat
     clock = FakeClock(at(FRIDAY, "22:00"))
     runs = Takes(clock, {})
     async with scheduling(
-        tmp_path, clock.now(), [long, *PREVALIDATIONS], runs=runs, facts=waiting("kalman"), clock=clock
+        tmp_path, clock.now(), fed([long, *PREVALIDATIONS], waiting("kalman")), runs=runs, clock=clock
     ) as (_, _, told, _):
         clock.set(at(FRIDAY, "22:30"))
         await until(lambda: runs.names() == ["long", "prevalidate kalman"])
@@ -364,7 +382,7 @@ async def test_a_job_that_gives_way_to_none_keeps_the_list_s_order(tmp_path: Pat
 
 async def test_a_job_a_restart_cut_tonight_is_not_given_way_to(tmp_path: Path) -> None:
     """The night does not run it again (a job that kills the engine would loop): nothing to wait for."""
-    later = Job(
+    later: Job[None] = Job(
         name="later",
         due=lambda night: True,
         command=("prevalidate", "later"),
@@ -376,7 +394,7 @@ async def test_a_job_a_restart_cut_tonight_is_not_given_way_to(tmp_path: Path) -
     clock = FakeClock(at(FRIDAY, "23:00"))
     runs = Takes(clock, {})
     async with scheduling(
-        tmp_path, clock.now(), [BAR_CLOSE_SIMULATION, later], runs=runs, facts=waiting(), clock=clock
+        tmp_path, clock.now(), fed([BAR_CLOSE_SIMULATION, later], waiting()), runs=runs, clock=clock
     ) as (_, _, told, _):
         await until(lambda: runs.ended == [BAR_CLOSE])
         assert not told.saying("자리를 내준")

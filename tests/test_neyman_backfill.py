@@ -61,7 +61,16 @@ from krx_quant.prevalidation import code_digest
 from krx_quant.pricing import Direction
 from krx_quant.process_log import Ran
 from krx_quant.sample_store import STORE_DIR, SampleStore, night_reads, read_day
-from krx_quant.scheduled import FAILED, INTERRUPTED, JOBS, NEYMAN_BACKFILL, OK, Facts, JobRecord, Night
+from krx_quant.scheduled import (
+    FAILED,
+    INTERRUPTED,
+    JOBS,
+    NEYMAN_BACKFILL,
+    OK,
+    BackfillFacts,
+    JobRecord,
+    Night,
+)
 from krx_quant.scheduled.research import SMT_DISCOVERY
 from krx_quant.training import is_recorded
 from tests.synthetic_bars import day_of_bars
@@ -413,8 +422,8 @@ def test_the_job_goes_on_by_day_until_its_verdict_last_in_the_list() -> None:
         record: JobRecord | None = None,
         commit: str = "abc",
         backfill: module.Progress = open_,
-    ) -> Night:
-        facts = Facts(neyman_variants=found, neyman_backfill=backfill)
+    ) -> Night[BackfillFacts]:
+        facts = BackfillFacts(found, backfill)
         return Night(sunday + timedelta(days=1), False, commit, record, {}, facts)
 
     discovered = neyman_variants.Progress(True, 56, False, 3)

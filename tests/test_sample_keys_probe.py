@@ -34,7 +34,7 @@ from krx_quant.object_store import LocalObjectStore
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.sample_keys_probe import STATE, _changes, key_files, probe_sample_keys, read_key
 from krx_quant.sample_store import STORE_DIR, DayKey, SampleStore, day_key
-from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night
+from krx_quant.scheduled import FAILED, JOBS, OK, JobRecord, Night
 from krx_quant.scheduled.probes import SAMPLE_KEYS, SAMPLE_KEYS_AGAIN, SAMPLE_KEYS_ISSUE
 from krx_quant.training import TrainingDay
 from tests.replay_events import at, trade
@@ -316,9 +316,9 @@ def test_without_a_stored_day_or_a_store_there_is_nothing_to_look_at(tmp_path: P
 
 def night(
     day: date, record: JobRecord | None = None, first: JobRecord | None = None, commit: str = "new"
-) -> Night:
+) -> Night[None]:
     records = {} if first is None else {SAMPLE_KEYS.name: first}
-    return Night(day, CALENDAR.is_trading_day(day), commit, record, records, Facts())
+    return Night(day, CALENDAR.is_trading_day(day), commit, record, records, None)
 
 
 def ran(day: date, outcome: str = OK, commit: str = "new") -> JobRecord:

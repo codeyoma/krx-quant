@@ -136,8 +136,8 @@ def _midnight(day: date) -> datetime:
 
 
 def days_in_window(db: Path) -> int:
-    """How many of the window's days are in (``Facts.holdout_days``): 0 without the DB, or when it
-    cannot be read (logged; the jobs' other conditions are read all the same)."""
+    """How many of the window's days are in (``scheduled.research.read_holdout_days``): 0 without the
+    DB, or when it cannot be read (logged; the jobs' other conditions are read all the same)."""
     try:
         with read_only(db) as conn:
             return 0 if conn is None else len(window_days(conn))

@@ -73,7 +73,7 @@ from krx_quant.neyman_variants import (
 )
 from krx_quant.prevalidation import code_digest
 from krx_quant.pricing import Direction, most_likely
-from krx_quant.scheduled import FAILED, JOBS, NEYMAN_VARIANTS, Facts, JobRecord, Night
+from krx_quant.scheduled import FAILED, JOBS, NEYMAN_VARIANTS, JobRecord, Night
 from krx_quant.stats import Scored
 from tests.prevalidation_doubles import AFTER, DAYS
 from tests.replay_doubles import record
@@ -565,7 +565,7 @@ def test_the_live_window_judges_d_alone_its_n_56_from_the_saved_s_d(
     ran = JobRecord(sunday, "ok", datetime(2026, 11, 8, 23, tzinfo=KST), "abc", 0, 600.0)
 
     def due(found: Progress) -> bool:
-        return NEYMAN_VARIANTS.due(Night(sunday, False, "abc", ran, {}, Facts(neyman_variants=found)))
+        return NEYMAN_VARIANTS.due(Night(sunday, False, "abc", ran, {}, found))
 
     assert not due(Progress(True, 56, False, 55)) and due(Progress(True, 56, False, 56))
     # A report with a plan keeps it; one whose discovery holds no s_d of D - A cannot set N.
@@ -613,8 +613,8 @@ def test_the_job_discovers_once_then_judges_the_window_once_it_can_be_full() -> 
     ran = JobRecord(sunday, "ok", started, "abc", 0, 600.0)
     failed = JobRecord(sunday, FAILED, started, "abc", None, 14400.0, timed_out=True)
 
-    def night(found: Progress, record: JobRecord | None = None, commit: str = "abc") -> Night:
-        return Night(sunday + timedelta(days=1), False, commit, record, {}, Facts(neyman_variants=found))
+    def night(found: Progress, record: JobRecord | None = None, commit: str = "abc") -> Night[Progress]:
+        return Night(sunday + timedelta(days=1), False, commit, record, {}, found)
 
     new = Progress(read=True)
     assert job.due(night(new)), "the discovery, trading or not"

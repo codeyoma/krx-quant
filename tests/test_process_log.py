@@ -301,7 +301,9 @@ async def test_a_scheduled_job_s_run_reaches_loki_as_process_job(
     calendar = MarketCalendar({NIGHT: True, NIGHT + timedelta(days=1): True})
     clock = FakeClock(datetime.combine(NIGHT, time(23, 0), KST))
     script = "import sys; print('found 3 days'); print('a warning', file=sys.stderr)"
-    job = Job("probe-x", lambda night: True, ("-c", script), timedelta(minutes=1), (IssueTarget(1),))
+    job: Job[None] = Job(
+        "probe-x", lambda night: True, ("-c", script), timedelta(minutes=1), (IssueTarget(1),)
+    )
     async with aiohttp.ClientSession() as session:
 
         async def told(text: str) -> bool:

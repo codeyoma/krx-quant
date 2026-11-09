@@ -333,7 +333,7 @@ def days_from(conn: sqlite3.Connection, since: date, limit: int, until: date | N
 
 def fixed_days(db: Path, since: date, limit: int) -> int:
     """How many of the first ``limit`` days with predictions from ``since`` are in
-    (``scheduled.Facts.signal_review_days``, #206): 0 without the DB, or when it cannot be read
+    (``scheduled.research.read_signal_review``, #206): 0 without the DB, or when it cannot be read
     (logged; the jobs' other conditions are read all the same)."""
     try:
         with read_only(db) as conn:

@@ -13,28 +13,37 @@ The measure of where making a recorded day's samples spends its time (``sample-p
 
 from __future__ import annotations
 
-from datetime import timedelta
+import asyncio
+from dataclasses import dataclass, field
+from datetime import date, timedelta
 
 from krx_quant.holdout import DAYS as HOLDOUT_DAYS
+from krx_quant.holdout import days_in_window
 from krx_quant.inverse_replay import AGENT_LINE
 from krx_quant.neyman_backfill import GOES_ON_LINE as NEYMAN_BACKFILL_GOES_ON
 from krx_quant.neyman_backfill import REPORT as NEYMAN_BACKFILL_REPORT
+from krx_quant.neyman_backfill import Progress as NeymanBackfill
+from krx_quant.neyman_backfill import progress as neyman_backfill_progress
 from krx_quant.neyman_variants import REPORT as NEYMAN_VARIANTS_REPORT
-from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS
+from krx_quant.neyman_variants import Progress as NeymanVariants
+from krx_quant.neyman_variants import progress as neyman_variants_progress
+from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS, nights_with_hit_rates
+from krx_quant.predictions import DB_NAME
 from krx_quant.process_log import Ran
 from krx_quant.scheduled.core import (
     FAILED,
     OK,
-    SIGNAL_REVIEW_FIXED_DAYS,
-    SIGNAL_REVIEW_FROM,
     Attachment,
     Job,
     Night,
+    Reads,
     Target,
-    _first_night,
+    again_on_new_code,
 )
+from krx_quant.signal_review import fixed_days
 from krx_quant.smt_experiment import AFTER as SMT_AFTER
 from krx_quant.smt_experiment import DAYS as SMT_DAYS
+from krx_quant.smt_experiment import days_in_holdout as smt_days_in_holdout
 
 # ②″ The signal-threshold review on a fixed window (#206): on 2026-11-03 the user moved the default
 # of ``KRX_SIGNAL_MIN_PROBABILITY`` from 0.6 to 0.70 (#483), provisionally: on section 5 of the
@@ -42,21 +51,40 @@ from krx_quant.smt_experiment import DAYS as SMT_DAYS
 # 58.1%. The default is held for ``SIGNAL_REVIEW_FIXED_DAYS`` (20) trading days and measured again on
 # them alone: the first days with predictions from ``SIGNAL_REVIEW_FROM`` (2026-11-04, the first day
 # the 06:00 deploy runs the new default), a fixed window (``signal-review --from``) that a later run
-# reads the same. Once, on the first trading night they are all in (``Facts.signal_review_days``,
-# counted in the engine DB read-only when the night's conditions are read: up to 20 small queries)
-# with an official algorithm: the night of 2026-12-01 if every trading day from 11-04 has
-# predictions (no market holiday in between). Its sections 4 and 5 compare the bands by trading day
+# reads the same. Once, on the first trading night they are all in (``SignalReviewFacts.days``, counted in
+# the engine DB read-only when the job is considered: up to 20 small queries) with an official
+# algorithm: the night of 2026-12-01 if every trading day from 11-04 has predictions (no market holiday
+# in between). Its sections 4 and 5 compare the bands by trading day
 # and section 6 prints the branch of the rule fixed here, before those days (``signal_review.verdict``,
-# the note, docs/operations.md). Before the pre-validations, as the first run. The window's two
-# constants are in ``core``, where ``read_facts`` counts its days.
+# the note, docs/operations.md). Before the pre-validations, as the first run.
 SIGNAL_REVIEW_ISSUE = 206
+SIGNAL_REVIEW_FROM = date(2026, 11, 4)
+SIGNAL_REVIEW_FIXED_DAYS = 20
 
 
-def _signal_review_window_in(night: Night) -> bool:
+@dataclass(frozen=True)
+class SignalReviewFacts:
+    """What the signal review's condition asks."""
+
+    # How many of the first ``SIGNAL_REVIEW_FIXED_DAYS`` days with predictions from ``SIGNAL_REVIEW_FROM``
+    # are in the engine DB (``signal_review.fixed_days``).
+    days: int = 0
+    official: int = 0  # the consensus members: active algorithms on the engine's target
+
+
+async def read_signal_review(reads: Reads) -> SignalReviewFacts:
+    sources = reads.sources
+    days = await asyncio.to_thread(
+        fixed_days, sources.settings.state_dir / DB_NAME, SIGNAL_REVIEW_FROM, SIGNAL_REVIEW_FIXED_DAYS
+    )
+    return SignalReviewFacts(days, len(sources.running.members()))
+
+
+def _signal_review_window_in(night: Night[SignalReviewFacts]) -> bool:
     """Once, on the first trading night the fixed window's days are all in, with an official algorithm."""
     return (
         night.trading_day
-        and night.facts.signal_review_days >= SIGNAL_REVIEW_FIXED_DAYS
+        and night.facts.days >= SIGNAL_REVIEW_FIXED_DAYS
         and night.facts.official > 0
         and not night.ran
     )
@@ -65,6 +93,7 @@ def _signal_review_window_in(night: Night) -> bool:
 SIGNAL_REVIEW_FIXED = Job(
     name="signal-review-206-1201",
     due=_signal_review_window_in,
+    facts=read_signal_review,
     command=(
         "signal-review",
         "--from",
@@ -101,7 +130,7 @@ SIGNAL_REVIEW_FIXED = Job(
 # rule would have chosen and whether the log loss promoted a model whose hit rate fell
 # (``nightly_hit_rates``); the swap rule stays the mean log loss. Once ``HIT_RATE_NIGHTS`` (10)
 # nights' promotion lists carry them (counted in the store when the night's conditions are read,
-# ``Facts.hit_rate_nights``: before the night's training ends, it may count that night the next), on
+# ``read_hit_rate_nights``: before the night's training ends, it may count that night the next), on
 # that night, trading or not, once: ``nightly-hit-rates`` sums them up by algorithm, and an agent
 # proposes on #437 whether to change the swap rule; the user decides. After a failure, again once a
 # deploy brings other code. It reads ten promotion lists from the store: seconds; the quarter hour is
@@ -110,20 +139,22 @@ SIGNAL_REVIEW_FIXED = Job(
 NIGHTLY_HIT_RATES_ISSUE = 437
 
 
-def _with_hit_rate_nights(night: Night) -> bool:
+async def read_hit_rate_nights(reads: Reads) -> int:
+    """How many of the latest nights' promotion lists carry the hit rates (``nights_with_hit_rates``, up
+    to ``HIT_RATE_NIGHTS``)."""
+    return await asyncio.to_thread(nights_with_hit_rates, reads.sources.settings)
+
+
+def _with_hit_rate_nights(night: Night[int]) -> bool:
     """Once, on the first night ``HIT_RATE_NIGHTS`` promotion lists carry the hit rates, trading or
     not; after a failed run, again on other code."""
-    if night.facts.hit_rate_nights < HIT_RATE_NIGHTS:
-        return False
-    record = night.record
-    return not night.ran or (
-        record is not None and record.outcome == FAILED and record.commit != night.commit
-    )
+    return night.facts >= HIT_RATE_NIGHTS and again_on_new_code(night)
 
 
 NIGHTLY_HIT_RATES = Job(
     name="nightly-hit-rates-437",
     due=_with_hit_rate_nights,
+    facts=read_hit_rate_nights,
     command=("nightly-hit-rates", "--nights", str(HIT_RATE_NIGHTS)),
     timeout=timedelta(minutes=15),
     targets=(
@@ -161,7 +192,7 @@ NIGHTLY_HIT_RATES = Job(
 INVERSE_REPLAY_ISSUE = 606
 
 
-def _every_trading_night(night: Night) -> bool:
+def _every_trading_night(night: Night[None]) -> bool:
     """Every trading day's night, once; a run a restart cut runs the next trading night."""
     if not night.trading_day:
         return False
@@ -204,8 +235,8 @@ INVERSE_REPLAY = Job(
 # turing's hypotheses judged on a fixed holdout (#447): four hypotheses picked from #431's report,
 # fixed in #447 before the days after its period, are judged on the first ``holdout.DAYS`` (10) days
 # after 2026-10-30 with turing's predictions on answer version 3 (``holdout.py``). Once, on the first
-# night the window is full (``Facts.holdout_days``, counted in the engine DB read-only when the
-# night's conditions are read: a few small queries), trading or not; after a failure, again once a
+# night the window is full (``read_holdout_days``, counted in the engine DB read-only when the job is
+# considered: a few small queries), trading or not; after a failure, again once a
 # deploy brings other code. It reads the window's scored predictions read-only beside the running
 # engine, a day at a time, as ``error-breakdown`` does (which read 15 days in 24 seconds on the
 # server); the hour is a bound. Before the simulations and pre-validations, which may take the rest
@@ -213,20 +244,22 @@ INVERSE_REPLAY = Job(
 HOLDOUT_ISSUE = 447
 
 
-def _holdout_full(night: Night) -> bool:
+async def read_holdout_days(reads: Reads) -> int:
+    """How many days of turing's holdout window are in the engine DB (``holdout.days_in_window``, up to
+    ``holdout.DAYS``); the climate gate's condition asks it too, read once a night for both."""
+    return await asyncio.to_thread(days_in_window, reads.sources.settings.state_dir / DB_NAME)
+
+
+def _holdout_full(night: Night[int]) -> bool:
     """Once, on the first night the holdout window is full, trading or not; after a failed run,
     again on other code."""
-    if night.facts.holdout_days < HOLDOUT_DAYS:
-        return False
-    record = night.record
-    return not night.ran or (
-        record is not None and record.outcome == FAILED and record.commit != night.commit
-    )
+    return night.facts >= HOLDOUT_DAYS and again_on_new_code(night)
 
 
 ERROR_HOLDOUT = Job(
     name="error-holdout-447",
     due=_holdout_full,
+    facts=read_holdout_days,
     command=("error-holdout",),
     timeout=timedelta(hours=1),
     targets=(
@@ -254,6 +287,7 @@ GATE_ISSUE = 449
 CLIMATE_GATE = Job(
     name="climate-gate-449",
     due=_holdout_full,
+    facts=read_holdout_days,
     command=("climate-gate",),
     timeout=timedelta(hours=1),
     targets=(
@@ -281,7 +315,7 @@ CLIMATE_GATE = Job(
 # (``neyman_variants.py``). Two stages, each run once: on the first night after the deploy that brings
 # it, trading or not, the discovery on neyman's pre-validation days fixes N, the window's days, from
 # the days' paired gains' spread; then on the first night N recorded days after 2026-11-02 are in that
-# have not been counted short (``Facts.neyman_variants``: read from its report and the day folders),
+# have not been counted short (``read_neyman_variants``: read from its report and the day folders),
 # the evaluation counts the window's days and, once it is full, judges it once (a window a short day
 # left unfilled waits for the next recorded day). After a failure, again on other code. A day fits ten
 # tree models on neyman's 20 days (about 1.7 s each on a Mac with 22,000 made-up samples, the server
@@ -297,14 +331,22 @@ CLIMATE_GATE = Job(
 NEYMAN_VARIANTS_ISSUE = 455
 
 
-def _neyman_variants_due(night: Night) -> bool:
+async def read_neyman_variants(reads: Reads) -> NeymanVariants:
+    """Where neyman's variants experiment stands (``neyman_variants.progress``): its window's N once
+    discovered, whether it was judged, and the recorded days after 2026-11-02 that can be in the
+    window. The backfill's condition asks it too."""
+    sources = reads.sources
+    return await asyncio.to_thread(neyman_variants_progress, sources.settings, sources.clock.now())
+
+
+def _neyman_variants_due(night: Night[NeymanVariants]) -> bool:
     """The discovery on the first night; then the evaluation on the first night its window can be full,
     until it is judged; after a failed run, again on other code. Not on a night its progress was not
     read."""
     record = night.record
     if record is not None and record.outcome == FAILED and record.commit == night.commit:
         return False
-    found = night.facts.neyman_variants
+    found = night.facts
     if not found.read:
         return False
     if found.n is None:
@@ -315,6 +357,7 @@ def _neyman_variants_due(night: Night) -> bool:
 NEYMAN_VARIANTS = Job(
     name="neyman-variants-283",
     due=_neyman_variants_due,
+    facts=read_neyman_variants,
     command=("neyman-variants",),
     timeout=timedelta(hours=4),
     targets=(
@@ -344,8 +387,8 @@ NEYMAN_VARIANTS = Job(
 # that brings it, trading or not: the finished recorded days up to ``SMT_AFTER`` (2026-11-04), each
 # day's trades replayed through the Market View as ``krx-quant smt --day`` does, and the days with
 # backfilled bars only (about a year, bars only: a few minutes) apart. The verdict, on the first night
-# the holdout's ``SMT_DAYS`` (10) eligible days after ``SMT_AFTER`` are in (``Facts.smt_holdout_days``,
-# counted from the day folders and the engine DB read-only when the night's conditions are read: a
+# the holdout's ``SMT_DAYS`` (10) eligible days after ``SMT_AFTER`` are in (``read_smt_holdout_days``,
+# counted from the day folders and the engine DB read-only when the job is considered: a
 # small query a day after the cutoff): the night of 2026-11-18 if every trading day from 11-05 is
 # eligible. A day's replay reads two stocks' and the futures' trades, about as long as ``smt --day``:
 # the discovery's two hours and the verdict's hour are bounds. Last, after the experiments on an
@@ -355,26 +398,23 @@ NEYMAN_VARIANTS = Job(
 SMT_ISSUE = 519
 
 
-def _smt_discovery_due(night: Night) -> bool:
-    """Once, on the first night it is asked on, trading or not; after a failed run, again on other
-    code."""
-    record = night.record
-    return _first_night(night) or (
-        record is not None and record.outcome == FAILED and record.commit != night.commit
-    )
+async def read_smt_holdout_days(reads: Reads) -> int:
+    """How many days of the SMT experiment's holdout are in (``smt_experiment.days_in_holdout``, up to
+    ``smt_experiment.DAYS``)."""
+    sources = reads.sources
+    now = sources.clock.now()
+    return await asyncio.to_thread(smt_days_in_holdout, sources.settings, sources.calendar, now)
 
 
-def _smt_holdout_full(night: Night) -> bool:
+def _smt_holdout_full(night: Night[int]) -> bool:
     """Once, on the first night the SMT holdout's days are all in, trading or not; after a failed run,
     again on other code."""
-    if night.facts.smt_holdout_days < SMT_DAYS:
-        return False
-    return _smt_discovery_due(night)
+    return night.facts >= SMT_DAYS and again_on_new_code(night)
 
 
 SMT_DISCOVERY = Job(
     name="smt-discovery-519",
-    due=_smt_discovery_due,
+    due=again_on_new_code,
     command=("smt-experiment",),
     timeout=timedelta(hours=2),
     targets=(
@@ -398,6 +438,7 @@ SMT_DISCOVERY = Job(
 SMT_HOLDOUT = Job(
     name="smt-holdout-519",
     due=_smt_holdout_full,
+    facts=read_smt_holdout_days,
     command=("smt-experiment", "--holdout"),
     timeout=timedelta(hours=1),
     targets=(
@@ -424,7 +465,7 @@ SMT_HOLDOUT = Job(
 # fitted on the 20 trading days before it (``neyman_backfill.py``), and moves the live window's saved
 # plan to D − A alone (0.5 points at 95%, N 56 from the saved s_d; the discovery is not run again).
 # Once, on the first night after the deploy that brings it with the discovery in its report
-# (``Facts.neyman_variants``), trading or not; after a failure (a run cut by its limit among them), again
+# (``read_neyman_variants``), trading or not; after a failure (a run cut by its limit among them), again
 # on other code, reading the days the first run listed. A day fits ten tree models on its 20 days
 # (about 51 s on the server: the discovery's 15 days took 11 minutes) and makes the one backfilled day
 # that enters its window (4–6 s; the sample store keeps only the nights' days); the list's count makes
@@ -444,12 +485,27 @@ SMT_HOLDOUT = Job(
 NEYMAN_BACKFILL_DAY = timedelta(minutes=30)
 
 
-def _neyman_backfill_due(night: Night) -> bool:
+@dataclass(frozen=True)
+class BackfillFacts:
+    """What the backfill's condition asks: where the variants experiment stands, and the backfill."""
+
+    variants: NeymanVariants = field(default_factory=NeymanVariants)
+    backfill: NeymanBackfill = field(default_factory=NeymanBackfill)  # its verdict in, from its report
+
+
+async def read_backfill(reads: Reads) -> BackfillFacts:
+    return BackfillFacts(
+        await reads(read_neyman_variants),
+        await asyncio.to_thread(neyman_backfill_progress, reads.sources.settings),
+    )
+
+
+def _neyman_backfill_due(night: Night[BackfillFacts]) -> bool:
     """On each night with the variants' discovery in its report and no verdict of its own yet,
     trading or not, while it goes on by day (#643): after a run that stopped before the last day, or
     one its time limit stopped (the days it walked are kept); after another failure, again on other
     code. Not on a night its progress was not read."""
-    found, backfill = night.facts.neyman_variants, night.facts.neyman_backfill
+    found, backfill = night.facts.variants, night.facts.backfill
     if not found.read or found.n is None or not backfill.read or backfill.judged:
         return False
     record = night.record
@@ -468,6 +524,7 @@ def _neyman_backfill_judged(ran: Ran) -> bool:
 NEYMAN_BACKFILL = Job(
     name="neyman-backfill-532",
     due=_neyman_backfill_due,
+    facts=read_backfill,
     command=("neyman-variants", "--backfill"),
     timeout=timedelta(hours=5),
     resumes=NEYMAN_BACKFILL_DAY,

@@ -423,8 +423,8 @@ def holdout_days(
 
 
 def days_in_holdout(settings: Settings, calendar: MarketCalendar, now: datetime) -> int:
-    """How many of the holdout's days are in (``Facts.smt_holdout_days``): 0 without the DB, or
-    when it cannot be read (logged; the jobs' other conditions are read all the same)."""
+    """How many of the holdout's days are in (``scheduled.research.read_smt_holdout_days``): 0 without
+    the DB, or when it cannot be read (logged; the jobs' other conditions are read all the same)."""
     try:
         with read_only(settings.state_dir / DB_NAME) as conn:
             return 0 if conn is None else len(holdout_days(settings.data_dir, conn, calendar, now))

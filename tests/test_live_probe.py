@@ -18,7 +18,7 @@ from krx_quant import kis_orders
 from krx_quant.fake_kis import FakeAccount, FakeKis, FakeOrder
 from krx_quant.kis_orders import Servers
 from krx_quant.live_probe import DIFFERENT, NO_KEYS, PASSED, REFUSED, UNREADABLE, probe_live_account
-from krx_quant.scheduled import JOBS, LIVE_PROBE, Facts, JobRecord, Night
+from krx_quant.scheduled import JOBS, LIVE_PROBE, JobRecord, Night
 from krx_quant.trader import live
 from krx_quant.trader.store import DB_NAME
 from tests.kis_doubles import LIVE_ACCOUNT, LIVE_KEY, LIVE_SECRET, live_settings
@@ -165,7 +165,7 @@ async def test_without_the_live_key_or_with_another_s_it_sends_nothing(
     assert not (tmp_path / DB_NAME).exists(), "nothing kept"
 
 
-def night(day: date, facts: Facts, record: JobRecord | None = None) -> Night:
+def night(day: date, facts: bool, record: JobRecord | None = None) -> Night[bool]:
     return Night(day, CALENDAR.is_trading_day(day), "abc", record, {}, facts)
 
 
@@ -175,7 +175,7 @@ def test_the_job_runs_every_trading_night_once_the_live_key_is_set_until_a_run_p
     assert LIVE_PROBE.timeout == timedelta(minutes=5) and LIVE_PROBE.session is None
     assert [t.issue for t in LIVE_PROBE.targets] == [417]
     assert "주문은 하나도 보내지 않는다" in LIVE_PROBE.targets[0].note
-    keyed, unkeyed = Facts(trader_live_kis=True), Facts()
+    keyed, unkeyed = True, False
     wednesday, saturday = date(2026, 10, 14), date(2026, 10, 17)
     started = datetime(2026, 10, 14, 22, 40)
     failed = JobRecord(wednesday, "failed", started, "abc", DIFFERENT, 3.0, False)
