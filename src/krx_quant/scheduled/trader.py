@@ -1,5 +1,6 @@
-"""The auto trader's jobs (#393, #500): its nightly report and re-fit, and the live account's read
-against KIS. ``JOBS`` (``krx_quant.scheduled``) lists them in the order they run.
+"""The auto trader's jobs (#393, #500): its nightly report and re-fit, the fill notice's columns 10
+and 17 (#648), and the live account's read against KIS. ``JOBS`` (``krx_quant.scheduled``) lists
+them in the order they run.
 
 The mock day's check against KIS, the passive entry's measurement and the cost map's audit ran,
 posted their results and left ``JOBS`` (#505), as a one-off job does once it has done its work.
@@ -14,6 +15,7 @@ from datetime import timedelta
 
 from krx_quant.process_log import Ran
 from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, Night, Target
+from krx_quant.trader.notice_columns import APART
 from krx_quant.trader.report import PRACTICE_HEADING, PRACTICE_TRADES, calls_agent
 
 # The trader's night (#399, #400, #402, #393 "정책과 자기 개선", "리포트와 에이전트"): every trading
@@ -99,13 +101,62 @@ TRADER_REPORT = Job(
 # column (``trader/notice_layout.py``). Its run of 2026-11-04 joined a buy, a sell and a cancel (exit 0)
 # and #531 named the 23 columns (``kis_orders.MOCK_FILL_NOTICE_COLUMNS``), so it left ``JOBS`` (#580,
 # #505); ``krx-quant fill-notice-layout`` stays for a run by hand. The recorder goes on recording in
-# mock mode: telling the fill quantity (column 10) from the order's (17) needs two weeks or more of
-# orders (the user's decision, 2026-11-05).
+# mock mode until the fill quantity (column 10) is told from the order's (17) (the user's decision,
+# 2026-11-05): the job below tells them.
 #
 # The order probe's session job ``probe-kis-orders-403`` (#403) left ``JOBS`` here (#484): its run of
 # 2026-10-30 did every step but the fill notice, which the job above measured instead, and left in, it
 # would order again on the same mock account once the trader is back in paper. ``krx-quant
 # probe-kis-orders`` stays for a run by hand.
+
+
+# The fill notice's columns 10 and 17 (#648): every mock order was of one share on 2026-11-04, so the
+# two held the same value; they differ only on an order of more than one share filled in part or in
+# several fills, which the trader's mock places only once a champion with cells trades by its loss
+# budget (the practice buys one share, ``selection.PRACTICE_SHARES``). So on the first trading night
+# with ``notice_columns.APART`` (20) orders of more than one share that something filled of on the
+# recorded days (``Facts.fill_notice_apart``, the ledger's count), ``fill-notice-columns`` measures
+# each column against them (read-only: the records, the ledger, each day's KIS inquiry with the
+# trader's key) and counts the orders whose notice was lost while the recorder was disconnected. It
+# runs once: a run that could not read (4), failed or was cut runs again the next trading night. The
+# user then decides whether the recorder stays. Its output holds counts, column numbers, dates and
+# times: no value, order number, account, HTS ID or price.
+FILL_NOTICE_COLUMNS_ISSUE = 648
+
+
+def _once_enough_orders_tell_the_columns_apart(night: Night) -> bool:
+    """On a trading night with ``APART`` telling orders recorded, until a run succeeded (exit 0); a
+    failed run, the next trading night."""
+    if not night.trading_day or night.facts.fill_notice_apart < APART:
+        return False
+    record = night.record
+    if record is None or record.outcome not in (OK, FAILED):
+        return True
+    return record.outcome != OK and record.day < night.day
+
+
+FILL_NOTICE_COLUMNS = Job(
+    name="fill-notice-columns-648",
+    due=_once_enough_orders_tell_the_columns_apart,
+    command=("fill-notice-columns",),
+    timeout=timedelta(minutes=10),
+    targets=(
+        Target(
+            FILL_NOTICE_COLUMNS_ISSUE,
+            note=(
+                "체결 통보 칸 10과 17 가르기(#648): mock trader의 체결 통보 기록기(#484)가 남긴 레코드를 "
+                "수량이 1주보다 많고 체결이 있는 주문(조건: 그런 주문 20건이 기록된 첫 거래일 밤)에 "
+                "묶어, 칸마다 "
+                "그 주문의 주문 수량과 같은 레코드 수와 체결 레코드의 합이 체결 수량과 같은 주문 수를 "
+                "센다. 판정은 예제대로(칸 10 체결 수량, 칸 17 주문 수량), 반대, 어느 쪽도 아님, 가려지지 "
+                "않음이다. 끊긴 동안 통보가 빠진 주문 수도 센다. 에이전트는 이 수로 사용자에게 기록기를 "
+                "지울지, 매시간 끊김 WARNING을 INFO로 낮출지 묻는다. 다시 돌리기(읽기만): "
+                "`docker compose run --rm engine fill-notice-columns`. 출력에는 값, 주문번호, 계좌번호, "
+                "HTS ID, 가격이 없다(개수, 칸 번호, 날짜, 시간만)."
+            ),
+        ),
+    ),
+)
 
 
 # The live account's answers (#408, CODING_STANDARDS "External data is probed before it is used"): the
