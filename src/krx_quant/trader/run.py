@@ -251,8 +251,6 @@ async def _run(
             "commit": settings.commit,
         },
     )
-    for name in trader.ignored:
-        log.warning("trader: %s is no longer read (#395): the cost map picks the cells", name)
     rules = Rules.of(trader, settings.fee_rate)
     switched = False
     try:
