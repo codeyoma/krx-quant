@@ -1,17 +1,17 @@
 """KIS's daily supply joined by day to the day candles, as the collector's keepers write them
-(#270): the structure check's turn of the month and Cox's flows (#264).
+(#270): Cox's flows (#264).
 
-The structure check's first run (#270, 2026-10-18) found 2,452 stored days of each symbol's
-foreign net buys, but only 395 of them, the same count for all three symbols, joined to a day
-candle with a figure: about the trading days since NXT opened (2025-03-04). KIS's integrated
-(``UN``) investor query answers 0 shares for the net buys on the days before, when there was no
-integrated market. The keeper asks those days of the KRX query (``J``, #297), the whole market
-then; whether ``J`` has figures that far back is measured on the server, so both cases are
-here (``KRX``): ``J`` with figures (each class its own made-up number), and ``J`` with zeros
-too. The fake KIS answers so, the keepers write the files (``CandleKeeper``, ``SupplyKeeper``:
-the dates as they store them), and the structure check and Cox read them: the days join by
-date, KIS's 0 before NXT is no figure (None), never a day of no net buying, KRX's figures
-before NXT are the flows of those days, and a real 0 after NXT (``REAL_ZERO``) stays 0.
+The structure check's first run (#270, 2026-10-18; its command was removed in #658) found 2,452
+stored days of each symbol's foreign net buys, but only 395 of them, the same count for all three
+symbols, joined to a day candle with a figure: about the trading days since NXT opened (2025-03-04).
+KIS's integrated (``UN``) investor query answers 0 shares for the net buys on the days before, when
+there was no integrated market. The keeper asks those days of the KRX query (``J``, #297), the whole
+market then; whether ``J`` has figures that far back is measured on the server, so both cases are
+here (``KRX``): ``J`` with figures (each class its own made-up number), and ``J`` with zeros too.
+The fake KIS answers so, the keepers write the files (``CandleKeeper``, ``SupplyKeeper``: the dates
+as they store them), and Cox reads them: the days join by date, KIS's 0 before NXT is no figure
+(None), never a day of no net buying, KRX's figures before NXT are the flows of those days, and a
+real 0 after NXT (``REAL_ZERO``) stays 0.
 
 Every number is made up.
 """
@@ -34,7 +34,6 @@ from krx_quant.macro import Observation
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import OPEN_TO_CLOSE, SIGMA_DAYS
 from krx_quant.ratelimit import RateLimiter
-from krx_quant.structure_check import structure_check
 from krx_quant.supply import INVESTORS, KIS, NET_MARKET, SupplyKeeper, krx_history_stored, read_supply
 from krx_quant.us_daily import US_DAILY, write_us_daily
 from tests.candle_doubles import candles_api, kis_candles
@@ -157,29 +156,6 @@ async def test_the_supply_days_join_the_candle_days_and_kis_s_zeros_are_no_figur
         net_buys(r["date"]) for r in after
     ]
     assert next(r for r in after if r["date"] == REAL_ZERO)["institution_net"] == 0, "a real 0 stays"
-
-
-@pytest.mark.parametrize("krx", KRX)
-async def test_the_turn_of_the_month_splits_every_day_with_a_foreign_figure(
-    kis: FakeKis, tmp_path: Path, krx: str
-) -> None:
-    data, state = await keep_files(kis, tmp_path, krx)
-
-    out = structure_check(data, state, CALENDAR, [SYMBOL], fee_rate=FEE)
-
-    section = out.split("\n\n")[4]
-    figures = DAYS if krx == "figures" else [d for d in DAYS if d >= NXT_OPEN]
-    assert (
-        f"{SYMBOL} 일봉 {DAYS[0]} – {LAST}, 외국인 순매수 {len(figures)}일({figures[0]} – {LAST})" in section
-    )
-    # Each day whose previous day has a foreign figure is in one of the two splits: all but the
-    # last day's (no day after it here).
-    split = 0
-    for line in section.splitlines()[2:]:
-        for part in line.split(" · ")[1:]:
-            if part.startswith(("외국인 +", "외국인 −")):
-                split += int(part.split()[2].removesuffix("일"))
-    assert split == len(figures) - 1
 
 
 @pytest.mark.parametrize("krx", KRX)

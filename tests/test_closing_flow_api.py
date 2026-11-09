@@ -35,7 +35,6 @@ from krx_quant.products import products_of
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.replay import replay_into
 from krx_quant.special import Kind, Window
-from krx_quant.structure_check import structure_check
 from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import check
 from tests.replay_events import book
@@ -346,22 +345,7 @@ def record_print(data: Path, symbol: str, day: date, price: int, qty: int) -> No
     recorder.close()
 
 
-def section_two(text: str, symbol: str) -> dict[str, str]:
-    """``structure-check``'s section 2 lines of ``symbol``, by period."""
-    block = text.split("2. 마감 단일가")[1].split("\n\n")[0]
-    found = {}
-    for line in block.splitlines():
-        if line.strip().startswith(f"{symbol} "):
-            name, rest = line.strip().removeprefix(f"{symbol} ").split(": ", 1)
-            found[name] = rest
-    return found
-
-
-def shown(share: float | None, n: int) -> str:
-    return "없음" if share is None else f"{100 * share:.1f}% (n={n})"
-
-
-async def test_the_days_measure_as_structure_check_and_add_the_demand(tmp_path: Path) -> None:
+async def test_the_days_measure_the_day_s_flow_and_add_the_demand(tmp_path: Path) -> None:
     data, state = tmp_path / "data", tmp_path / "state"
     for symbol in SYMBOLS:
         for i, (day, (o, pre, c)) in enumerate(DAYS.items()):
@@ -415,7 +399,7 @@ async def test_the_days_measure_as_structure_check_and_add_the_demand(tmp_path: 
         app, "/v1/symbols/005930/closing-flow/days?from=2026-07-01&to=2026-08-31", "closing_flow_days"
     )
 
-    # 009150 (no products): every day compares the day's flow, as structure-check does.
+    # 009150 (no products): every day compares the day's flow.
     rows = {r["date"]: r for r in control["days"]}
     assert sorted(rows) == [d.isoformat() for d in days[1:]], "the first day has no day before it"
     d = rows["2026-07-29"]
@@ -436,16 +420,8 @@ async def test_the_days_measure_as_structure_check_and_add_the_demand(tmp_path: 
     assert (first["denominator_days"], first["denominator"]) == (1, 80_600 * 1_000)
     assert rows["2026-08-04"]["agree"] is None, "the auction did not move"
     assert rows["2026-08-07"]["next_gap_bp"] is None, "no next day yet"
-    text = structure_check(data, state, CALENDAR, ("009150",), fee_rate=FEE)
-    lines = section_two(text, "009150")
     summary = {p["period"]: p for p in control["summary"]["periods"]}
-    assert set(summary) == set(lines) == {PERIODS[1][0], PERIODS[2][0]}
-    for name, line in lines.items():
-        cell = summary[name]["all"]
-        assert line.startswith(f"{cell['days']}일 · {cell['auction_bp_median']:.1f}bp")
-        assert f"그날 흐름과 {shown(cell['agree'], cell['agree_n'])}" in line
-        assert f"다음날 갭 반대 {shown(cell['next_gap_opposite'], cell['next_gap_n'])}" in line
-        assert f"다음날 종가 반대 {shown(cell['next_close_opposite'], cell['next_close_n'])}" in line
+    assert set(summary) == {PERIODS[1][0], PERIODS[2][0]}
 
     # 005930: the demand from the net assets and the bars' flow, the stored one on its day.
     rows = {r["date"]: r for r in samsung["days"]}

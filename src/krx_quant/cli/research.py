@@ -31,20 +31,6 @@ def _smt(day: date | None) -> int:
     return 0 if made is not None or live else 1
 
 
-def _climate_prior(days: int) -> int:
-    """The climate prior experiment for shannon (#429): its lines; exit 1 without a recorded day."""
-    from krx_quant.climate_prior import REPORT, climate_prior_experiment, lines
-
-    settings = Settings.from_env(require_kis=False)
-    try:
-        result = climate_prior_experiment(settings, days=days)
-    except FileNotFoundError as e:
-        print(e, file=sys.stderr)
-        return 1
-    print("\n".join(lines(result, settings.state_dir / REPORT)))
-    return 0
-
-
 def _moment(text: str) -> datetime:
     """A time with its offset (``--until``); one without is read as KST."""
     try:
@@ -73,34 +59,12 @@ def _neyman_variants(backfill: bool = False, until: datetime | None = None) -> i
     return 0
 
 
-def _diagnose(days: int) -> int:
-    from krx_quant.diagnose import diagnose
-    from krx_quant.market_calendar import calendar_store
-    from krx_quant.predictions import DB_NAME
-
-    settings = Settings.from_env(require_kis=False)
-    calendar = calendar_store(settings).calendar
-    print(
-        diagnose(settings.data_dir, settings.state_dir / DB_NAME, calendar, days, fee_rate=settings.fee_rate)
-    )
-    return 0
-
-
 def _signal_review(days: int, since: date | None) -> int:
     from krx_quant.predictions import DB_NAME
     from krx_quant.signal_review import signal_review
 
     settings = Settings.from_env(require_kis=False)
     print(signal_review(settings.state_dir / DB_NAME, settings, datetime.now(KST).date(), days, since))
-    return 0
-
-
-def _error_breakdown(days: int, algorithm: str) -> int:
-    from krx_quant.error_breakdown import error_breakdown
-    from krx_quant.predictions import DB_NAME
-
-    settings = Settings.from_env(require_kis=False)
-    print(error_breakdown(settings.state_dir / DB_NAME, settings, datetime.now(KST).date(), days, algorithm))
     return 0
 
 
@@ -149,68 +113,6 @@ def _nightly_hit_rates(nights: int) -> int:
     return 0 if found else 1
 
 
-def _daily_check(days: int) -> int:
-    from krx_quant.daily_check import daily_check
-    from krx_quant.market_calendar import calendar_store
-    from krx_quant.predictions import DB_NAME
-
-    settings = Settings.from_env(require_kis=False)
-    calendar = calendar_store(settings).calendar
-    print(
-        daily_check(
-            settings.data_dir,
-            settings.state_dir / DB_NAME,
-            calendar,
-            settings.symbols,
-            datetime.now(KST).date(),
-            days,
-        )
-    )
-    return 0
-
-
-def _structure_check(days: int | None) -> int:
-    from krx_quant.market_calendar import calendar_store
-    from krx_quant.structure_check import structure_check
-
-    settings = Settings.from_env(require_kis=False)
-    calendar = calendar_store(settings).calendar
-    print(
-        structure_check(
-            settings.data_dir,
-            settings.state_dir,
-            calendar,
-            settings.symbols,
-            fee_rate=settings.fee_rate,
-            days=days,
-        )
-    )
-    return 0
-
-
-def _prediction_days_arguments(parser: argparse.ArgumentParser) -> None:
-    """``climate-prior``'s: the pre-validation's days."""
-    from krx_quant.prevalidation import PREVALIDATION_DAYS
-
-    parser.add_argument(
-        "--days",
-        type=positive,
-        default=PREVALIDATION_DAYS,
-        help=f"recorded trading days to predict (default: {PREVALIDATION_DAYS})",
-    )
-
-
-def _diagnose_arguments(parser: argparse.ArgumentParser) -> None:
-    from krx_quant.diagnose import DEFAULT_DAYS
-
-    parser.add_argument(
-        "--days",
-        type=positive,
-        default=DEFAULT_DAYS,
-        help=f"the latest N trading days with data (default {DEFAULT_DAYS})",
-    )
-
-
 def _signal_review_arguments(parser: argparse.ArgumentParser) -> None:
     from krx_quant.signal_review import DEFAULT_DAYS
 
@@ -229,20 +131,6 @@ def _signal_review_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _error_breakdown_arguments(parser: argparse.ArgumentParser) -> None:
-    from krx_quant.error_breakdown import DEFAULT_ALGORITHM, DEFAULT_DAYS
-
-    parser.add_argument(
-        "--days",
-        type=positive,
-        default=DEFAULT_DAYS,
-        help=f"the latest N days with predictions (default {DEFAULT_DAYS}, the leaderboard's 20d)",
-    )
-    parser.add_argument(
-        "--algorithm", default=DEFAULT_ALGORITHM, help=f"the algorithm (default {DEFAULT_ALGORITHM})"
-    )
-
-
 def _nightly_hit_rates_arguments(parser: argparse.ArgumentParser) -> None:
     from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS
 
@@ -251,17 +139,6 @@ def _nightly_hit_rates_arguments(parser: argparse.ArgumentParser) -> None:
         type=positive,
         default=HIT_RATE_NIGHTS,
         help=f"the latest N nights whose promotion lists carry the hit rates (default {HIT_RATE_NIGHTS})",
-    )
-
-
-def _daily_check_arguments(parser: argparse.ArgumentParser) -> None:
-    from krx_quant.daily_check import DAYS
-
-    parser.add_argument(
-        "--days",
-        type=positive,
-        default=DAYS,
-        help=f"the latest N trading days (default {DAYS})",
     )
 
 
@@ -283,12 +160,6 @@ def add(sub: Commands) -> None:
     )
     smt_cmd.add_argument("--day", type=date.fromisoformat, help="the day, YYYY-MM-DD (default: today)")
     smt_cmd.set_defaults(run=lambda args: _smt(args.day))
-    sub.add_parser(
-        "climate-prior",
-        help="compare the climate baseline, shannon and shannon with each slot's class frequencies on"
-        " the pre-validation's folds (#429; reads the training samples, replays nothing)",
-        arguments=_prediction_days_arguments,
-    ).set_defaults(run=lambda args: _climate_prior(args.days))
     neyman_variants_cmd = sub.add_parser(
         "neyman-variants",
         help="neyman's variants (#455): the discovery that fixes the window's N, then the verdict on the"
@@ -310,21 +181,10 @@ def add(sub: Commands) -> None:
     )
     neyman_variants_cmd.set_defaults(run=lambda args: _neyman_variants(args.backfill, args.until))
     sub.add_parser(
-        "diagnose",
-        help="print the measurements the open decisions need; reads only, writes nothing",
-        arguments=_diagnose_arguments,
-    ).set_defaults(run=lambda args: _diagnose(args.days))
-    sub.add_parser(
         "signal-review",
         help="print what choosing the Telegram signal settings needs (#206); reads only, writes nothing",
         arguments=_signal_review_arguments,
     ).set_defaults(run=lambda args: _signal_review(args.days, args.since))
-    sub.add_parser(
-        "error-breakdown",
-        help="print where an algorithm errs (#431): confusion matrices and lift over the climate baseline"
-        " by symbol, 30-minute slot, spread and volatility; exploratory, reads only, writes nothing",
-        arguments=_error_breakdown_arguments,
-    ).set_defaults(run=lambda args: _error_breakdown(args.days, args.algorithm))
     sub.add_parser(
         "error-holdout",
         help="print turing's four pre-registered hypotheses of #431's report judged on the fixed holdout"
@@ -353,22 +213,6 @@ def add(sub: Commands) -> None:
         " rule would have chosen; reads the store only, no price",
         arguments=_nightly_hit_rates_arguments,
     ).set_defaults(run=lambda args: _nightly_hit_rates(args.nights))
-    sub.add_parser(
-        "daily-check",
-        help="print what the daily kinds did on the latest trading days (#264); reads only, writes nothing",
-        arguments=_daily_check_arguments,
-    ).set_defaults(run=lambda args: _daily_check(args.days))
-    structure_cmd = sub.add_parser(
-        "structure-check",
-        help="measure the research's market-structure claims on the stored bars and candles; reads only",
-    )
-    structure_cmd.add_argument(
-        "--days",
-        type=positive,
-        default=None,
-        help="the latest N trading days with one-minute bars (default: all)",
-    )
-    structure_cmd.set_defaults(run=lambda args: _structure_check(args.days))
     inverse_cmd = sub.add_parser(
         "inverse-replay",
         help="replay the explicit down calls through the inverse ETF's recorded KRX quotes (#606): one"
