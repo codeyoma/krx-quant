@@ -12,7 +12,7 @@ what the nightly re-fit fits a policy on (``refit.py``).
   (``displayed_at``: the trader reads every half second, the replay at the earliest). An algorithm's
   prediction by a model trained on another target than the one the cost map scores it on is read
   and never buys (``off_target``, as ``stats.on_target`` leaves it out). Nor does one of a day a pick
-  would have held its cell off (``predictor_inactive``, #603, ``inactive_days``): its predictor's
+  would have held its cell off (``predictor_inactive``, #603, ``buyable.inactive_days``): its predictor's
   lifecycle status at that day's pick (``PICK_AT``, as the engine's ``statuses`` kept it then) not
   active, or not active at the pick of an earlier trading day of the same review cycle (the trader's
   ``evaluation``, when one is given: the trader holds it off until the next review); such a cell ranks
@@ -125,19 +125,17 @@ from krx_quant.predictions import KIND_ANSWER_JOIN, TOUCH_JOIN
 from krx_quant.pricing import SELL_TAX
 from krx_quant.special import Window, touching
 from krx_quant.stats import Interval, day_mean
-from krx_quant.trader import PICK_AT, SYMBOL, review
+from krx_quant.trader import SYMBOL, review
+from krx_quant.trader.buyable import NO_REST, Rest, inactive_days, today
 from krx_quant.trader.cells import (
-    ACTIVE,
     DIRECTION_COLUMNS,
     DIRECTION_FROM,
     KIND_COLUMNS,
     Cell,
-    History,
     Signal,
     direction_signal,
     kind_signal,
     learned_at,
-    status_at,
     statuses,
     traded_kind,
 )
@@ -397,35 +395,6 @@ def _upper_first(path: str | None) -> bool:
 def known(windows: Sequence[Window], at: datetime) -> list[Window]:
     """The special windows known at ``at``: those the engine had learned by then (module doc)."""
     return [w for w in windows if learned_at(w) <= at]
-
-
-def inactive_days(
-    history: History,
-    days: Collection[date],
-    sessions: Callable[[date], Session | None],
-    evaluation: review.Evaluation | None = None,
-) -> frozenset[date]:
-    """The ``days`` a pick would have held a cell off new buys (#603, module doc), its predictor's
-    status changes ``history``: its status at the day's pick not active, or (with ``evaluation``, from
-    its first day) not active at the pick of a trading day of the same review cycle before it, counted
-    on ``sessions``. None for a predictor without a status."""
-    if not history:
-        return frozenset()
-
-    def held(day: date) -> bool:
-        status = status_at(history, datetime.combine(day, PICK_AT, KST))
-        return status is not None and status != ACTIVE
-
-    out = set()
-    for day in days:
-        if held(day):
-            out.add(day)
-        elif evaluation is not None and day >= evaluation.first_day:
-            first = review.cycle_of(evaluation, day, sessions).first
-            earlier = (first + timedelta(days=n) for n in range((day - first).days))
-            if any(sessions(d) is not None and held(d) for d in earlier):
-                out.add(day)
-    return frozenset(out)
 
 
 # The fills.
@@ -792,14 +761,18 @@ class Policy:
     ) -> None:
         """The day of ``reads`` (each cell's), on ``fills``, with the special ``windows`` of the day: the
         predictions in the order read, the clock at each rise's deadline (``settle``). A cell of
-        ``inactive`` (#603) is held off that day: its predictions skipped, and it ranks below none."""
+        ``inactive`` (#603) is held off that day: its predictions skipped, and it ranks below none. The
+        cells that may buy are the desk's answer (#646, ``buyable.today``)."""
         rules = self._rules
         self._fills, self._held = fills, None
         self._buys, self._exits = 0, []
         pending: dict[datetime, list[Rise]] = {}
         seen: dict[datetime, set[Cell]] = {}
         deadlines: list[datetime] = []
-        ranks = {c: r for c, r in self.ranks.items() if c not in inactive}
+        # The cells that may buy that day, as the desk asks (#646): a cell held off ranks below none.
+        found = today(self.ranked, Rest(inactive=frozenset(inactive)) if inactive else NO_REST)
+        ranks = {r.cell: self.ranks[r.cell] for r in found.buys}
+        held = set(found.held)
         events = sorted(
             ((r.at, r.signal.bar_close, self.ranks[c], r) for c in self.ranks for r in reads.get(c, ())),
             key=lambda e: (e[0], e[1], e[2]),
@@ -824,7 +797,7 @@ class Policy:
             ranked = self.ranked[rank]
             seen.setdefault(close, set()).add(ranked.cell)
             signal = read.signal
-            if ranked.cell in inactive:
+            if ranked.cell in held:
                 self._skip(signal, at, PREDICTOR_INACTIVE)
             elif not read.on_target:
                 self._skip(signal, at, OFF_TARGET)
@@ -988,8 +961,8 @@ class Replayer:
         self._sessions = sessions
         self._windows = sorted(windows, key=lambda w: w.start)
         self._cells = dict(cells)
-        # The days a pick would have held each cell off (#603, ``inactive_days``), from the statuses as
-        # the engine kept them.
+        # The days a pick would have held each cell off (#603, ``buyable.inactive_days``), from the
+        # statuses as the engine kept them.
         found = statuses(db, {c.predictor for c in self._cells})
         self.inactive = {
             c: inactive_days(found.get(c.predictor, ()), source.days, sessions, evaluation)

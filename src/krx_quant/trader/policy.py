@@ -83,7 +83,7 @@ import json
 import math
 import sqlite3
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -92,15 +92,7 @@ from krx_quant.feeds.base import KST
 from krx_quant.trader import PICK_AT, review
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.db import iso, reading
-from krx_quant.trader.selection import (
-    GONE,
-    NO_CHAMPION,
-    NO_COST_MAP,
-    NOT_IN_POLICY,
-    PREDICTOR_INACTIVE,
-    Pick,
-    Selection,
-)
+from krx_quant.trader.selection import Selection
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS policies (   -- each policy version (#399): what the trader trades on
@@ -237,73 +229,12 @@ def apply(
     gone: Collection[Cell] = (),
     inactive: Collection[Cell] = (),
 ) -> Selection:
-    """``selection`` (today's cost map) under ``policy`` (module doc): its cells, by their predictors'
-    names, in its order, each at its θ, whatever the cost map's verdict (#472), with the cost map's
-    figures where it names them; the cells the cost map passes that it does not have marked as not in
-    it. Each of its cells kept with whether it trades and why not (``Selection.cells``, #469):
-    ``GONE`` (in ``gone``: its predictor stopped predicting), ``PREDICTOR_INACTIVE`` (#603, in
-    ``inactive``: its predictor is not active; read, never bought, ``Selection.inactive``; so even
-    when the cost map could not be read, so that the pick keeps it for the cycle), ``NO_COST_MAP``.
-    Without a policy nothing trades (``NO_CHAMPION``, #469), and a cost map that could not be read
-    stays as it is."""
-    if policy is None:
-        if selection.reason == NO_COST_MAP:
-            return selection
-        unpicked = tuple(
-            {**seen, "picked": False, "why": NO_CHAMPION} if seen.get("picked") else seen
-            for seen in selection.considered
-        )
-        return replace(selection, picks=(), considered=unpicked, reason=NO_CHAMPION, named=())
-    # The cost map's figures of each cell it names: its passing picks are among them.
-    named = {p.cell: p for p in (*selection.picks, *selection.named)}
-    picks: list[Pick] = []
-    held: list[Cell] = []
-    whys: dict[Cell, str | None] = {}
-    cells = []
-    for cell in policy.cells:
-        why = None
-        if selection.reason != NO_COST_MAP and cell.cell in gone:
-            why = GONE
-        elif cell.cell in inactive:  # #603: before the cost map, so that the pick keeps it for the cycle
-            why = PREDICTOR_INACTIVE
-            held.append(cell.cell)
-        elif selection.reason == NO_COST_MAP:
-            why = NO_COST_MAP
-        else:
-            found = named.get(cell.cell) or Pick.unmapped(cell.kind, cell.role, cell.predictor)
-            picks.append(replace(found, threshold=cell.threshold))
-        whys[cell.cell] = why
-        cells.append(
-            {
-                "kind": cell.kind,
-                "role": cell.role,
-                "predictor": cell.predictor,
-                "threshold": cell.threshold,
-                "traded": why is None,
-                "why": why,
-            }
-        )
-    kept = {p.cell for p in picks}
-    considered = []
-    for seen in selection.considered:
-        named_cell = Cell(seen["kind"], seen.get("predictor") or "")
-        if named_cell in kept:  # #472: a champion's cell trades whatever its verdict
-            seen = {**seen, "picked": True}
-        elif seen.get("picked"):
-            why = whys.get(named_cell) or f"not in policy {policy.version}"
-            seen = {**seen, "picked": False, "why": why}
-        considered.append(seen)
-    reason = None if picks else selection.reason or NOT_IN_POLICY
-    return replace(
-        selection,
-        picks=tuple(picks),
-        considered=tuple(considered),
-        reason=reason,
-        policy=policy.version,
-        cells=tuple(cells),
-        named=(),
-        inactive=tuple(held),
-    )
+    """``selection`` (today's cost map) under ``policy`` (module doc), its cells of ``gone`` (#469: its
+    predictor stopped predicting) and of ``inactive`` (#603: its predictor is not active; read, never
+    bought) resting: ``buyable.under_policy``, which the desk and the replay ask (#646)."""
+    from krx_quant.trader.buyable import Rest, under_policy
+
+    return under_policy(policy, selection, Rest(frozenset(gone), frozenset(inactive)))
 
 
 def ensure_schema(db: sqlite3.Connection) -> None:
