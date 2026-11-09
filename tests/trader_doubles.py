@@ -41,7 +41,7 @@ from krx_quant.trader.book import Rules
 from krx_quant.trader.cells import Cell, EngineReader
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import ask
-from krx_quant.trader.paper import PaperTrader
+from krx_quant.trader.paper import Fills, PaperTrader
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.replay import Signals
 from krx_quant.trader.selection import Pick, Selection, kelly
@@ -327,6 +327,8 @@ class Day:
     # The desk finds a policy's predictor gone in the engine's database (#469): off unless a test sets
     # it, since most tests write the predictions of the cells they trade alone.
     gone: bool = False
+    # The champion's fills (#652, ``paper.Fills``): the paper fills unless a test gives its own.
+    fills: Fills | None = None
 
     def run(self, events: Sequence[Event]) -> list[dict[str, Any]]:
         """Each event in time order (the clock ticking at each), into a trader started at
@@ -348,7 +350,12 @@ class Day:
                 )
             else:
                 trader = PaperTrader(
-                    store, self.rules, CALENDAR.session, self.started_at, notify=self.notices.append
+                    store,
+                    self.rules,
+                    CALENDAR.session,
+                    self.started_at,
+                    notify=self.notices.append,
+                    fills=self.fills,
                 )
             picks = tuple(self.picks) if self.picks is not None else (pick(self.cell),)
             chosen = self.selection or Selection(picks)

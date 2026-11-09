@@ -1,7 +1,7 @@
 """The KIS account against the ledger (#406, #393 "KIS 주문"): what a mock start compares before
 the trader buys or sells anything, and which KIS order a buy or a sell whose answer was lost is.
 
-The mock book (``mock.MockTrader.start``) first reads its own orders on KIS, each on the day it was
+The mock book (``mock.KisFills.start``) first reads its own orders on KIS, each on the day it was
 placed (an order of a day gone by is over: a KRX limit order is a day order), and looks up each buy
 it sent whose answer it never had (``store.SENT``, ``candidates``), and the sell (#460). Then
 ``compare`` holds the account's balance and the day's order inquiry against what the ledger holds:

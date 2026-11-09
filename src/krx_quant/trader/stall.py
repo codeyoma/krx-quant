@@ -12,7 +12,7 @@ stood when the trader connected, does not make a stall at once.
 (``paper.PaperTrader.on_stall``): it buys nothing new (a rise read is skipped ``quotes_stalled``,
 a buy waiting for its quote given up so, the rises waiting skipped), and its open trade is kept as
 open through it (``trade_stalls``). The champion's book in mock mode reads
-KIS's best quotes over REST on the trader's key while it holds a position (``mock.MockTrader``), and
+KIS's best quotes over REST on the trader's key while it holds a position (``mock.KisFills``), and
 keeps checking its stop and time barrier on them; a paper book (paper mode's champion, the mock
 mode's paper shadow, every challenger) has no REST access and waits for the stream.
 

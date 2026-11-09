@@ -119,7 +119,7 @@ SYMBOL = "005930"
 # orders placed on KIS's mock server (``mock.py``), the challengers in paper beside it; live (#408),
 # the champion's orders placed on the live account the same way, once the live gate and the execution
 # checks pass (``live.py``; until then the trader runs as paper). The two that order on KIS
-# (``KIS_MODES``) share the KIS book (``mock.MockTrader``).
+# (``KIS_MODES``) share the KIS book (``mock.KisFills``).
 PAPER = "paper"
 MOCK = "mock"
 LIVE = "live"

@@ -30,8 +30,9 @@ from krx_quant.trader import LIVE, MOCK, SYMBOL, live
 from krx_quant.trader.book import STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.cells import EngineReader
 from krx_quant.trader.limits import ENTRIES_PAUSED, ORDER_FAILED, RUNNING, ask
-from krx_quant.trader.mock import OUTSIDE_HELD, RECONCILING, MockTrader
+from krx_quant.trader.mock import OUTSIDE_HELD, RECONCILING
 from krx_quant.trader.mock_check import PROBE_JOB, SAME, check_mock_trades
+from krx_quant.trader.paper import PaperTrader
 from krx_quant.trader.reconcile import Outside, candidates, compare
 from krx_quant.trader.store import CLEAN, DB_NAME, RESUME, Placed, TraderStore, read_trades
 from tests.api_schema import check
@@ -76,7 +77,7 @@ class Day(MockDay):
     """``MockDay`` with the server's resume (``Resume``) among its events."""
 
     async def _on(
-        self, event: Any, book: MockTrader, engine: PredictionStore, reader: EngineReader, store: TraderStore
+        self, event: Any, book: PaperTrader, engine: PredictionStore, reader: EngineReader, store: TraderStore
     ) -> None:
         if isinstance(event, Resume):
             assert not isinstance(ask(store, RESUME, MOCK, event.time), str)
@@ -598,7 +599,7 @@ class Acting(Day):
     """``Day`` with KIS's side acting among its events (``Do``)."""
 
     async def _on(
-        self, event: Any, book: MockTrader, engine: PredictionStore, reader: EngineReader, store: TraderStore
+        self, event: Any, book: PaperTrader, engine: PredictionStore, reader: EngineReader, store: TraderStore
     ) -> None:
         if isinstance(event, Do):
             event.act()

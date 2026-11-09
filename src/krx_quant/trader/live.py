@@ -2,7 +2,7 @@
 live account, and how large it may be.
 
 **Unlocked** (``readiness``). With ``KRX_TRADER_MODE=live`` the champion's book orders on the live
-account (``mock.MockTrader`` of mode ``live``, through ``kis_orders.trader_live_broker``) only when the
+account (``mock.KisFills`` of mode ``live``, through ``kis_orders.trader_live_broker``) only when the
 live gate and every execution check pass. Until then the trader places no real order: it runs as
 paper, with its challengers as ever (``run.py``), and says on Telegram what is missing at its start
 and once a day, at the day's pick (08:30). The trader judges it at its start and at each pick: when
