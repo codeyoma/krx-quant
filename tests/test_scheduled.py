@@ -206,6 +206,57 @@ async def test_a_job_that_would_end_after_05_30_waits_for_the_next_night(tmp_pat
         await until(lambda: runs.names() == ["short", "long"])
 
 
+class Given(Runs):
+    """Stand-in runs that keep each run's arguments and time limit."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        super().__init__(clock)
+        self.given: list[tuple[tuple[str, ...], timedelta]] = []
+
+    async def __call__(
+        self,
+        args: Sequence[str],
+        timeout: timedelta,
+        child: Child | None = None,
+    ) -> Ran:
+        self.given.append((tuple(args), timeout))
+        return await super().__call__(args, timeout, child)
+
+
+async def test_a_job_that_resumes_starts_when_a_day_fits_and_is_told_the_night_s_end(tmp_path: Path) -> None:
+    # #643: a five-hour job that goes on by day starts at 03:00, when its half-hour day still fits.
+    training = NightTraining()
+    training.started(at(FRIDAY, "21:30"), at(MONDAY, "21:30"))
+    long = replace(job("long", every_night, timeout=timedelta(hours=5)), resumes=timedelta(minutes=30))
+    whole = job("whole", every_night, timeout=timedelta(hours=5))
+    assert (long.needs, whole.needs) == (timedelta(minutes=30), timedelta(hours=5))
+    clock = FakeClock(at(FRIDAY, "22:30"))
+    runs = Given(clock)
+    async with scheduling(
+        tmp_path, at(FRIDAY, "22:30"), [whole, long], training=training, clock=clock, runs=runs
+    ) as (_, _, told, _):
+        clock.set(at(SATURDAY, "03:00"))  # the training ends late
+        training.finished()
+        await until(lambda: runs.ended == ["long"])
+        end = at(SATURDAY, "05:30")
+        assert runs.given == [(("long", "--flag", "--until", end.isoformat()), end - at(SATURDAY, "03:00"))]
+        assert told.saying("whole(2026-10-16 밤)") == [
+            "예약 작업 whole(2026-10-16 밤): 지금 시작하면 제한 시간(5시간)이 05:30을 넘어 "
+            "다음 밤으로 미룹니다."
+        ]
+        # Early in a night it runs to its own limit at most.
+        clock.set(at(SATURDAY, "22:30"))
+        await until(lambda: runs.ended == ["long", "whole", "long"])
+        assert runs.given[-1][1] == timedelta(hours=5)
+        # Past its last start (05:00), not even a day fits: the next night.
+        clock.set(at(MONDAY, "05:10"))
+        await until(lambda: bool(told.saying("long(2026-10-18 밤)")))
+        assert told.saying("long(2026-10-18 밤)") == [
+            "예약 작업 long(2026-10-18 밤): 지금 시작하면 하루치(30분)도 05:30을 넘어 다음 밤으로 미룹니다."
+        ]
+        assert runs.ended == ["long", "whole", "long"]
+
+
 async def test_a_training_not_over_by_a_job_s_last_start_postpones_it(tmp_path: Path) -> None:
     training = NightTraining()
     training.started(at(FRIDAY, "23:30"), at(MONDAY, "21:30"))  # a catch-up after a late restart

@@ -86,14 +86,14 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from aiohttp import web
 
-from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, Algorithm, KindAlgorithm, Model
+from krx_quant.algorithms import ALGORITHMS, Algorithm, KindAlgorithm, Model
 from krx_quant.api import create_app
+from krx_quant.assembly import Gates, Mode, build_engine
 from krx_quant.auctions import KEEP_DAYS, MINUTE_BAR, write_auctions
 from krx_quant.backfill import (
     BAR_SCHEMA,
     FUTURES_BAR_SCHEMA,
     FUTURES_BARS_TR,
-    PreviousDay,
     bars_key,
     stock_bars_path,
 )
@@ -111,9 +111,9 @@ from krx_quant.closing_flow import (
     write_days,
     write_demand,
 )
+from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200
 from krx_quant.daily import ANSWER_FROM, NO_EX_CODE, DailyAlgorithm, StoredDays
-from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import (
     BOOK,
@@ -140,7 +140,6 @@ from krx_quant.macro import (
     Observation,
     Reading,
     Source,
-    day_regime,
     macro_recorder,
 )
 from krx_quant.market_calendar import MarketCalendar
@@ -156,7 +155,7 @@ from krx_quant.prevalidation import Refusal, judging
 from krx_quant.products import PRODUCTS
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
-from krx_quant.replay import replay, replay_into
+from krx_quant.replay import replay_into
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
@@ -916,6 +915,24 @@ def _finished_periods(days: list[Row], period: str) -> list[Row]:
     return out
 
 
+def demo_settings(data_dir: Path) -> Settings:
+    """The demo's settings (#647): its made-up symbols and fee, the touch target, no leading series
+    besides the symbols and the two futures, the data under ``data_dir`` (its state in ``state/``),
+    and the server's defaults for the rest. The engine is built from them as the server's."""
+    return Settings(
+        kis_app_key="",
+        kis_app_secret="",
+        symbols=DEMO_SYMBOLS,
+        index_codes=(),
+        us_symbols=(),
+        etf_symbols=(),
+        fee_rate=_FEE,
+        data_dir=data_dir,
+        state_dir=data_dir / "state",
+        target_version=TARGET_VERSION,
+    )
+
+
 async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     """The Engine API on the demo morning, replayed into ``db`` (replaced), with the
     morning's macro read and the model history in ``<db stem>-data/`` (``macro/`` and
@@ -938,6 +955,8 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     store.mark_target(TARGET_VERSION, first)  # already on the touch target: no restart (#170)
     store.close()
     data_dir = db.with_name(f"{db.stem}-data")
+    settings = demo_settings(data_dir)
+    gates = Gates(_admitted, _refusal)
     write_demo_macro(data_dir)  # first: Markov reads the morning's regime
     shutil.rmtree(data_dir / "bars", ignore_errors=True)
     write_demo_candles(data_dir)
@@ -950,44 +969,33 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         # every algorithm stays active as on the morning.
         past = past_events(day)
         write_past_bars(data_dir, day, past)
-        engine = await replay(
-            past,
-            db=db,
-            calendar=_CALENDAR,
-            symbols=DEMO_SYMBOLS,
-            fee_rate=_FEE,
-            start=datetime.combine(day, _PAST_FROM, KST) - timedelta(minutes=1),
-            until=datetime.combine(day, time(15, 30), KST),
-            target_version=TARGET_VERSION,
-            admits=_admitted,  # the morning's waiting one never ran (#561)
-            previous=PreviousDay(data_dir, _CALENDAR),  # range_prev_day, slot returns (#181, #265)
+        clock = FakeClock(datetime.combine(day, _PAST_FROM, KST) - timedelta(minutes=1))
+        engine = build_engine(
+            settings,
+            Mode.REPLAY,  # no daily kinds those days
+            PredictionStore(db),
+            clock,
+            _CALENDAR,
+            models={},
+            gates=gates,  # the morning's waiting one never ran (#561)
         )  # no macro read those mornings: no regime
+        await replay_into(engine, clock, past, until=datetime.combine(day, time(15, 30), KST))
         engine.store.close()
     forget_smt(db, PAST_DAYS[0])  # the API makes the 7th again from its backfilled bars (#521)
     cox = write_demo_daily(db, data_dir)  # the daily kind's last 20 days (#264)
     write_demo_windows(db, data_dir)  # the five-session kind's last 20 windows (#310)
     events = demo_events()
-    engine = await replay(
-        events,
-        db=db,
-        calendar=_CALENDAR,
-        symbols=DEMO_SYMBOLS,
-        fee_rate=_FEE,
-        start=start,
-        until=_at(_END if pace is None else _PACED_FROM),
-        regimes=partial(day_regime, data_dir),
-        target_version=TARGET_VERSION,  # the touch target, as the server's default (#170)
-        previous=PreviousDay(data_dir, _CALENDAR),
+    clock = FakeClock(start)
+    engine = build_engine(
+        settings,
+        Mode.DEMO,  # with the morning's 08:50 daily predictions (#264)
+        PredictionStore(db),
+        clock,
+        _CALENDAR,
         models={cox.version.split("-")[0]: cox},
-        daily=StoredDays(data_dir),  # the morning's 08:50 predictions (#264)
-        daily_algorithms=DAILY_ALGORITHMS,
-        admits=_admitted,  # as the server's pre-validations (#310, #561)
-        refused=_refusal,
-        daily_features=LiveFeatures(
-            OPEN_TO_CLOSE, data_dir, data_dir / "state", _CALENDAR, DEMO_SYMBOLS, _FEE
-        ),
-        daily_feature_names=DAILY_FEATURES,
+        gates=gates,  # as the server's pre-validations (#310, #561)
     )
+    await replay_into(engine, clock, events, until=_at(_END if pace is None else _PACED_FROM))
     write_demo_briefing(data_dir)  # after the morning: Cox's 08:50 inputs stay as they were
     write_demo_flow(data_dir)  # into the events the briefing's writer began (#306)
     write_demo_closing_flow(data_dir)  # from the day candles (#305)

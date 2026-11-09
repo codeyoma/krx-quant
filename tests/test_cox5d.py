@@ -38,6 +38,7 @@ from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.prevalidation import code_digest, report_path
 from krx_quant.scheduled import OK, Facts, JobRecord, Night, daily_prevalidation_jobs, prevalidation_job_name
 from krx_quant.simulation import simulate_daily
+from krx_quant.touch import TARGET_VERSION
 from tests.daily_doubles import SYMBOLS, made_history
 
 FEE = 0.015 / 100
@@ -235,6 +236,7 @@ async def test_a_passed_algorithm_of_a_held_kind_waits_for_its_review_days(tmp_p
         daily_features=lambda a, sym, d, p, b: FeatureVector(dict.fromkeys(a.features), a.features),
         daily_feature_names={"us_sox"},
         admits=lambda a: True,
+        target_version=TARGET_VERSION,
     )
     assert engine.daily_algorithms == () and "stand" not in engine.store.statuses()
     engine.store.close()
@@ -319,6 +321,7 @@ def _engine(
         admits=admitted,
         refused=refused,
         notify=notify,
+        target_version=TARGET_VERSION,
     )
 
 
@@ -475,6 +478,7 @@ async def test_a_passed_algorithm_held_for_its_review_days_is_not_said_to_wait_a
             daily_feature_names={"us_sox"},
             admits=lambda a: True,  # its report passed
             notify=outbox,
+            target_version=TARGET_VERSION,
         ), clock
 
     for day in (monday, monday + timedelta(days=1)):  # the second: a restart the next morning

@@ -594,12 +594,16 @@ def walk_into(
     *,
     diagnose: bool = False,
     name: str = "neyman variants",
+    stop: Callable[[], bool] | None = None,
 ) -> list[date]:
     """``walk``'s days, each handed to ``add``; the days with fewer than ``min_scored`` bar closes
-    with a label left out (returned). Its memory a day (#383), logged as ``name``'s."""
+    with a label left out (returned). Its memory a day (#383), logged as ``name``'s. ``stop``, asked
+    before each day, ends the walk there when it says so (#643: the backfill's night is over)."""
     short: list[date] = []
     meter = Meter()
     for n, day in enumerate(days, 1):
+        if stop is not None and stop():
+            break
         usage = DayUsage(meter)
         with usage.phase("training"):
             samples = _labelled(trainer.samples_on(day))

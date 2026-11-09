@@ -37,7 +37,7 @@ async def predictions(engine: Any) -> dict[str, list[dict[str, Any]]]:
 
 
 async def test_bar_closes_inside_a_vi_are_not_predicted(tmp_path: Path) -> None:
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *VI], until=at("09:40:00"))
+    engine = await run(tmp_path / "engine.db", [*busy_morning(), *VI], until=at("09:40:00"), target_version=1)
 
     made = await predictions(engine)
     for close in ("09:31", "09:32"):
@@ -52,7 +52,7 @@ def special(made: dict[str, list[dict[str, Any]]], close: str) -> set[bool]:
 
 
 async def test_a_vi_touching_a_predictions_four_minutes_makes_it_special(tmp_path: Path) -> None:
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *VI], until=at("09:45:00"))
+    engine = await run(tmp_path / "engine.db", [*busy_morning(), *VI], until=at("09:45:00"), target_version=1)
 
     made = await predictions(engine)
     # 09:27–09:31 reaches into the VI; 09:26–09:30 ends before it; 09:33 starts after it.
@@ -67,7 +67,9 @@ async def test_a_vi_learned_late_still_makes_what_it_touched_special(tmp_path: P
     # were predicted and 09:27 was scored.
     late = [vi(at("09:34:05"), "09:30:20", "09:32:40")]
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *late], until=at("09:45:00"))
+    engine = await run(
+        tmp_path / "engine.db", [*busy_morning(), *late], until=at("09:45:00"), target_version=1
+    )
 
     made = await predictions(engine)
     assert made_by(made["09:31"]) == {"ok"}
@@ -77,8 +79,8 @@ async def test_a_vi_learned_late_still_makes_what_it_touched_special(tmp_path: P
 
 
 async def test_special_predictions_are_left_out_of_the_leaderboard_by_default(tmp_path: Path) -> None:
-    with_vi = await run(tmp_path / "vi.db", [*busy_morning(), *VI], until=at("09:45:00"))
-    without = await run(tmp_path / "plain.db", busy_morning(), until=at("09:45:00"))
+    with_vi = await run(tmp_path / "vi.db", [*busy_morning(), *VI], until=at("09:45:00"), target_version=1)
+    without = await run(tmp_path / "plain.db", busy_morning(), until=at("09:45:00"), target_version=1)
 
     async def flat_n(engine: Any, query: str = "") -> int:
         async with api(engine) as client:
@@ -104,7 +106,9 @@ async def test_a_kospi_drop_of_8_percent_held_a_minute_is_a_circuit_breaker(tmp_
         *held("10:20:00", "10:22:00", kospi, -15.4),
     ]
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *market], until=at("10:30:00"))
+    engine = await run(
+        tmp_path / "engine.db", [*busy_morning(), *market], until=at("10:30:00"), target_version=1
+    )
 
     made = await predictions(engine)
     for close in ("09:17", "09:20", "09:37"):  # the dip; 09:37–09:41 ends as the halt begins
@@ -124,7 +128,9 @@ async def test_kospi200_futures_5_percent_off_held_a_minute_is_a_sidecar_once_a_
         *held("09:40:00", "09:42:00", kospi200_futures, 5.6),
     ]
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *futures], until=at("09:55:00"))
+    engine = await run(
+        tmp_path / "engine.db", [*busy_morning(), *futures], until=at("09:55:00"), target_version=1
+    )
 
     made = await predictions(engine)
     for close in ("09:18", "09:21", "09:25"):
@@ -136,7 +142,7 @@ async def test_kospi200_futures_5_percent_off_held_a_minute_is_a_sidecar_once_a_
 async def test_a_vi_whose_release_is_not_seen_lasts_three_minutes(tmp_path: Path) -> None:
     on = [vi(at("09:30:24"), "09:30:20")]  # the release never comes through
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *on], until=at("09:40:00"))
+    engine = await run(tmp_path / "engine.db", [*busy_morning(), *on], until=at("09:40:00"), target_version=1)
 
     made = await predictions(engine)
     for close in ("09:31", "09:32", "09:33"):  # to 09:33:20
@@ -147,7 +153,9 @@ async def test_a_vi_whose_release_is_not_seen_lasts_three_minutes(tmp_path: Path
 async def test_a_vi_at_the_open_skips_the_first_bar_closes(tmp_path: Path) -> None:
     at_open = [vi(at("09:00:14"), "09:00:10"), vi(at("09:02:39"), "09:00:10", "09:02:35")]
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *at_open], until=at("09:10:00"))
+    engine = await run(
+        tmp_path / "engine.db", [*busy_morning(), *at_open], until=at("09:10:00"), target_version=1
+    )
 
     made = await predictions(engine)
     assert {p["status"] for p in made["09:01"] + made["09:02"]} == {"vi"}
@@ -159,7 +167,9 @@ async def test_a_futures_gap_from_before_the_open_is_a_sidecar_five_minutes_in(t
     # first 5 minutes of the stock market, so the minute held starts at 09:05: 09:06–09:11.
     gap = held("08:45:00", "09:30:00", kospi200_futures, 6.0)
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *gap], until=at("09:30:00"))
+    engine = await run(
+        tmp_path / "engine.db", [*busy_morning(), *gap], until=at("09:30:00"), target_version=1
+    )
 
     made = await predictions(engine)
     for close in ("09:02", "09:11"):
@@ -171,7 +181,9 @@ async def test_a_futures_gap_from_before_the_open_is_a_sidecar_five_minutes_in(t
 async def test_no_breaker_or_sidecar_in_the_last_40_minutes(tmp_path: Path) -> None:
     late = [*held("14:51:00", "14:58:00", kospi, -8.5), *held("14:51:00", "14:58:00", kospi200_futures, -5.5)]
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *late], until=at("15:10:00"))
+    engine = await run(
+        tmp_path / "engine.db", [*busy_morning(), *late], until=at("15:10:00"), target_version=1
+    )
 
     made = await predictions(engine)
     assert special(made, "14:55") == {False}
@@ -180,7 +192,9 @@ async def test_no_breaker_or_sidecar_in_the_last_40_minutes(tmp_path: Path) -> N
 async def test_the_status_shows_the_special_situations_known_today(tmp_path: Path) -> None:
     market = held("09:40:00", "09:42:00", kospi, -8.2)
 
-    engine = await run(tmp_path / "engine.db", [*busy_morning(), *VI, *market], until=at("09:50:00"))
+    engine = await run(
+        tmp_path / "engine.db", [*busy_morning(), *VI, *market], until=at("09:50:00"), target_version=1
+    )
 
     async with api(engine) as client:
         status = await get_json(client, "/v1/status")
