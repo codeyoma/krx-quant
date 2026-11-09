@@ -40,7 +40,7 @@ from krx_quant.lifecycle import REGISTERED, Status, target_changed
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.replay import replay_recorded
-from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night
+from krx_quant.scheduled import FAILED, JOBS, OK, JobRecord, Night, PrevalidationFacts
 from krx_quant.simulation import BAR_CLOSE_DAYS, Simulation, SimulationRun, report, simulate_bar_close
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm, spend
@@ -459,9 +459,14 @@ async def test_the_engine_s_stage_counts_the_simulated_days_and_the_next_review_
     engine.store.close()
 
 
-def night_of(day: date, record: JobRecord | None, **facts: Any) -> Night:
+def night_of(day: date, record: JobRecord | None, **facts: Any) -> Night[PrevalidationFacts]:
     return Night(
-        day, True, "abc", record, {} if record is None else {"simulate-bar-close-298": record}, Facts(**facts)
+        day,
+        True,
+        "abc",
+        record,
+        {} if record is None else {"simulate-bar-close-298": record},
+        PrevalidationFacts(**facts),
     )
 
 
@@ -534,7 +539,7 @@ def test_a_kind_s_algorithm_is_simulated_on_its_kind_s_answers_against_its_basel
 
 
 async def test_the_nightly_facts_tell_the_bar_close_probations_waiting(tmp_path: Path) -> None:
-    from krx_quant.scheduled import read_facts
+    from krx_quant.scheduled import Reads, Sources, read_prevalidation_facts
 
     days = RECORDED[:10]
     s = settings(tmp_path, days)
@@ -555,7 +560,7 @@ async def test_the_nightly_facts_tell_the_bar_close_probations_waiting(tmp_path:
         target_version=TARGET_VERSION,
     )
 
-    facts = await read_facts(s, MarketCalendar(), clock, engine)
+    facts = await Reads(Sources(s, MarketCalendar(), clock, engine))(read_prevalidation_facts)
 
     assert (facts.simulating, facts.simulating_daily, facts.recorded_days) == (("contrarian",), (), 10)
     engine.store.close()

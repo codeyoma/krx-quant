@@ -106,7 +106,7 @@ def telling(order: Order) -> bool:
 def apart_orders(state_dir: Path) -> int:
     """How many of the trader's mock orders, on the days the recorder kept records of, tell the two
     columns apart by the ledger alone (``telling``: more than one share, something filled), for the
-    job's condition (``scheduled.Facts.fill_notice_apart``). Read-only; 0 without either file or
+    job's condition (``scheduled.trader.read_fill_notice_apart``). Read-only; 0 without either file or
     with one that cannot be read."""
     notices, ledger = state_dir / DB_NAME, state_dir / TRADER_DB
     if not notices.exists() or not ledger.exists():

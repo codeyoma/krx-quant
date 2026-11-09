@@ -32,7 +32,7 @@ nights of a file share one row group at most.
 
 A night is measured afresh on each run: nothing is kept but the state file (``STATE``), which holds each
 night's figures and whose count of complete nights the measuring job's condition reads
-(``scheduled.Facts.night_book_nights``). The collector reads that count, so this module imports no probe
+(``scheduled.probes.read_night_book_nights``). The collector reads that count, so this module imports no probe
 (#552).
 
 **Who reads the book.** The verdict reads the syntax tree of every module of the installed package and
@@ -341,8 +341,8 @@ def save(state_dir: Path, nights: Sequence[NightBytes], now: datetime) -> None:
 
 
 def complete_nights(state_dir: Path) -> int:
-    """How many complete nights the last measure found (``scheduled.Facts.night_book_nights``): 0 without
-    a state file or with one that cannot be read, so that the measure runs and writes it again."""
+    """How many complete nights the last measure found (``scheduled.probes.read_night_book_nights``): 0
+    without a state file or with one that cannot be read, so that the measure runs and writes it again."""
     try:
         data = json.loads((state_dir / STATE).read_text())
         return sum(1 for n in data["nights"] if n["complete"] is True)

@@ -7,16 +7,175 @@ registries and lists them in the order they run.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Callable, Mapping, Sequence
-from datetime import timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
-from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS
+from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS, Algorithm, KindAlgorithm
+from krx_quant.config import Settings
 from krx_quant.daily import DailyAlgorithm, DailyKind
+from krx_quant.daily_features import pending_inputs
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
-from krx_quant.prevalidation import MIN_DAYS, REGISTERED_BEFORE, report_path
-from krx_quant.queue_screen import QUEUE
-from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, JobRecord, Night, Ran, Target
+from krx_quant.market_calendar import MarketCalendar, first_whole_day
+from krx_quant.predictions import Revision
+from krx_quant.prevalidation import (
+    MIN_DAYS,
+    REGISTERED_BEFORE,
+    LastReport,
+    last_report,
+    report_path,
+    revision_report,
+)
+from krx_quant.queue_screen import QUEUE, queue_order
+from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, JobRecord, Night, Ran, Reads, Target
+from krx_quant.training import finished_days, is_recorded
+
+log = logging.getLogger("krx_quant.scheduled")
+
+# What the pre-validations' and simulations' conditions ask (#651; before, fields of the one ``Facts``
+# every job was asked with): read once a night, when the first of them is considered, and again after
+# the queue screen (``Job.refreshes``, #599) and for the quiet night's turn.
+
+
+@dataclass(frozen=True)
+class Revising:
+    """A running bar-close algorithm's changed code, waiting for its pre-validation (#454)."""
+
+    boundary: datetime  # when the engine first ran it
+    since: date  # its first whole trading day: the days it is judged on start there
+    recorded_days: int  # the recorded days from ``since``, as ``prevalidate --revision`` counts them
+    report: LastReport | None  # its latest report if made for this revision; None without one
+
+
+@dataclass(frozen=True)
+class PrevalidationFacts:
+    """What the engine knows that a pre-validation's or a simulation's condition asks."""
+
+    recorded_days: int = 0  # recorded days, as ``prevalidate`` counts them (MIN_DAYS, #204)
+    waiting: tuple[str, ...] = ()  # the algorithms waiting for their pre-validation (#204)
+    # The latest pre-validation report of each registered algorithm that has one (#204).
+    reports: Mapping[str, LastReport] = field(default_factory=dict)
+    # The daily features whose data on this server is behind their version (#297,
+    # ``daily_features.pending_inputs``): a pre-validation reading them waits for it.
+    pending_inputs: tuple[str, ...] = ()
+    # The daily algorithms on a probation that waits for its simulation (#298,
+    # ``PredictionEngine.to_simulate``).
+    simulating_daily: tuple[str, ...] = ()
+    # The daily kinds whose answers of the latest days are not all in on this server
+    # (``DailyKind.pending``, #264: ``open_to_close``'s closing auction prices): their algorithms'
+    # simulation and scheduled walk-forward wait for them.
+    pending_answers: tuple[str, ...] = ()
+    # The bar-close kinds' algorithms on a probation that waits for its simulation (#298).
+    simulating: tuple[str, ...] = ()
+    # The running bar-close algorithms whose changed code waits for its pre-validation (#454,
+    # ``PredictionEngine.revising``), by name.
+    revising: Mapping[str, Revising] = field(default_factory=dict)
+    # The order of the bar-close pre-validations the latest queue screen set (#599, ``read_queue``):
+    # none without a screen of the last few nights.
+    queue: tuple[str, ...] = ()
+
+
+def recorded_days(data_dir: Path, symbols: Sequence[str], now: datetime) -> int:
+    """The recorded days ``prevalidate`` would replay, as it counts them."""
+    return sum(1 for d in finished_days(data_dir, symbols, now) if is_recorded(data_dir, d, symbols))
+
+
+def prevalidation_reports(
+    state_dir: Path, algorithms: Sequence[Algorithm | KindAlgorithm | DailyAlgorithm], target_version: int
+) -> dict[str, LastReport]:
+    """The latest pre-validation report of each of ``algorithms`` that has one, as it stands for
+    the code and target it runs now."""
+    reports = {a.name: last_report(state_dir, a, target_version) for a in algorithms}
+    return {name: report for name, report in reports.items() if report is not None}
+
+
+def revising_facts(
+    settings: Settings,
+    calendar: MarketCalendar,
+    now: datetime,
+    revising: Sequence[tuple[Algorithm | KindAlgorithm, Revision]],
+) -> dict[str, Revising]:
+    """Each of ``revising`` (``PredictionEngine.revising``) as the revision jobs ask (#454): its first
+    whole trading day, the recorded days from it and its report made for this revision."""
+    if not revising:
+        return {}
+    recorded = [
+        d
+        for d in finished_days(settings.data_dir, settings.symbols, now)
+        if is_recorded(settings.data_dir, d, settings.symbols)
+    ]
+    out = {}
+    for algorithm, revision in revising:
+        since = first_whole_day(calendar, revision.boundary)
+        found = revision_report(settings.state_dir, algorithm, revision.boundary, settings.target_version)
+        out[algorithm.name] = Revising(
+            revision.boundary,
+            since,
+            sum(1 for d in recorded if d >= since),
+            None if found is None else found[0],
+        )
+    return out
+
+
+def pending_answers(settings: Settings, calendar: MarketCalendar, now: datetime) -> list[str]:
+    """The daily kinds whose answers of the latest days are not all in
+    (``PrevalidationFacts.pending_answers``)."""
+    out = []
+    for kind in DAILY_KINDS:
+        why = (
+            None if kind.pending is None else kind.pending(settings.data_dir, calendar, settings.symbols, now)
+        )
+        if why is not None:
+            log.info("%s: %s", kind.name, why)
+            out.append(kind.name)
+    return out
+
+
+async def read_queue(reads: Reads) -> tuple[str, ...]:
+    """The order of the bar-close pre-validations the latest queue screen set (#599): the quiet night's
+    turn goes by it (``Job.order``)."""
+    sources = reads.sources
+    return await asyncio.to_thread(queue_order, sources.settings.state_dir, sources.clock.now())
+
+
+async def read_prevalidation_facts(reads: Reads) -> PrevalidationFacts:
+    """What the pre-validations' and simulations' conditions ask tonight: every recorded day's folder,
+    every registered algorithm's report and a few small queries of the engine's database."""
+    settings, calendar, clock = reads.sources.settings, reads.sources.calendar, reads.sources.clock
+    engine = reads.sources.running
+    recorded = await asyncio.to_thread(recorded_days, settings.data_dir, settings.symbols, clock.now())
+    everyone: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
+        *engine.registered,
+        *engine.kind_registered,
+        *engine.daily_registered,
+    ]
+    reports = await asyncio.to_thread(
+        prevalidation_reports, settings.state_dir, everyone, settings.target_version
+    )
+    daily = sorted({f for a in engine.daily_registered for f in a.features})
+    pending = await asyncio.to_thread(pending_inputs, daily, settings.state_dir, settings.symbols)
+    answers = await asyncio.to_thread(pending_answers, settings, calendar, clock.now())
+    simulating, simulating_daily = engine.to_simulate()  # the engine's database: on this thread
+    revising = engine.revising()  # likewise (#454)
+    return PrevalidationFacts(
+        recorded_days=recorded,
+        waiting=tuple(engine.waiting()),
+        reports=reports,
+        pending_inputs=tuple(pending),
+        simulating_daily=tuple(simulating_daily),
+        pending_answers=tuple(answers),
+        simulating=tuple(simulating),
+        revising=await asyncio.to_thread(revising_facts, settings, calendar, clock.now(), revising),
+        queue=await reads(read_queue),
+    )
+
+
+# A pre-validation's or a simulation's night.
+Turn = Night[PrevalidationFacts]
 
 # The daily kinds' issue (#264), open_to_close's: its pre-validation and simulation post there too.
 # The daily check (``daily-check-264``, ``probes``) named it until that job left ``JOBS`` (#505).
@@ -62,7 +221,7 @@ def prevalidation_order(names: Sequence[str]) -> tuple[str, ...]:
     return (*(n for n in PREVALIDATE_FIRST if n in new), *(n for n in new if n not in PREVALIDATE_FIRST))
 
 
-def prevalidation_turn(night: Night, algorithm: str) -> str | None:
+def prevalidation_turn(night: Turn, algorithm: str) -> str | None:
     """Whether ``algorithm`` would be pre-validated tonight: FRESH, AGAIN (its last run left
     no verdict, on older code: it waits for the FRESH ones), or None (not tonight)."""
     facts = night.facts
@@ -91,7 +250,7 @@ def prevalidation_turn(night: Night, algorithm: str) -> str | None:
     return AGAIN  # it crashed or ran out of time on older code
 
 
-def prevalidation_tonight(night: Night, order: Sequence[str]) -> str | None:
+def prevalidation_tonight(night: Turn, order: Sequence[str]) -> str | None:
     """The algorithm pre-validated tonight in its turn, of ``order``: none if one was tonight
     already (whatever came of it), a changed code's too (#454, ``revision_tonight``); else the first
     FRESH, else the first AGAIN."""
@@ -101,7 +260,7 @@ def prevalidation_tonight(night: Night, order: Sequence[str]) -> str | None:
     return next((n for n, t in turns if t == FRESH), None) or next((n for n, t in turns if t == AGAIN), None)
 
 
-def prevalidations_quiet(night: Night, order: Sequence[str]) -> tuple[str, ...]:
+def prevalidations_quiet(night: Turn, order: Sequence[str]) -> tuple[str, ...]:
     """The algorithms of ``order`` that may be pre-validated second on a quiet night (#546, ``Job.quiet``:
     every job of the night had its turn), in turn: none unless exactly one bar-close pre-validation
     ran tonight (a changed code's too) to its end (one a restart cut may have taken the engine down
@@ -119,28 +278,29 @@ def _in_turn(turns: Sequence[tuple[str, str | None]]) -> tuple[str, ...]:
 
 
 def screened_order(screened: Sequence[str], order: Sequence[str]) -> tuple[str, ...]:
-    """``order`` (the registries' turn) as the latest queue screen set it (#599, ``Facts.queue``, the
+    """``order`` (the registries' turn) as the latest queue screen set it (#599,
+    ``PrevalidationFacts.queue``, the
     Engine API's ``queue``): those of it ``screened`` orders, in its order, then the others in
     ``order``'s (none screened: the registries' turn)."""
     ordered = [n for n in dict.fromkeys(screened) if n in order]
     return (*ordered, *(n for n in order if n not in ordered))
 
 
-def _prevalidation_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
-    def due(night: Night) -> bool:
+def _prevalidation_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Turn], bool]:
+    def due(night: Turn) -> bool:
         return prevalidation_tonight(night, screened_order(night.facts.queue, order)) == algorithm
 
     return due
 
 
-def _prevalidation_quiet(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
-    def due(night: Night) -> bool:
+def _prevalidation_quiet(algorithm: str, order: tuple[str, ...]) -> Callable[[Turn], bool]:
+    def due(night: Turn) -> bool:
         return algorithm in prevalidations_quiet(night, screened_order(night.facts.queue, order))
 
     return due
 
 
-def _ran_tonight(night: Night, order: Sequence[str]) -> list[JobRecord]:
+def _ran_tonight(night: Turn, order: Sequence[str]) -> list[JobRecord]:
     """The bar-close pre-validations run tonight, whatever came of them: first ones (of ``order``)
     and changed code's (#454)."""
     first = [
@@ -156,14 +316,14 @@ def _ran_tonight(night: Night, order: Sequence[str]) -> list[JobRecord]:
     return first + revised
 
 
-def _second(night: Night, order: Sequence[str]) -> bool:
+def _second(night: Turn, order: Sequence[str]) -> bool:
     """Whether a quiet night may run a second bar-close pre-validation (#546): one ran tonight, to
     its end (ok or failed: not cut by a restart)."""
     ran = _ran_tonight(night, order)
     return len(ran) == PREVALIDATIONS_A_NIGHT - 1 and all(r.outcome in (OK, FAILED) for r in ran)
 
 
-def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
+def prevalidation_jobs(names: Sequence[str]) -> tuple[Job[PrevalidationFacts], ...]:
     """A pre-validation job for each algorithm of ``names`` (the registries) registered after
     pre-validation existed, in ``prevalidation_order``."""
     order = prevalidation_order(names)
@@ -172,12 +332,14 @@ def prevalidation_jobs(names: Sequence[str]) -> tuple[Job, ...]:
             name=prevalidation_job_name(name),
             due=_prevalidation_due(name, order),
             quiet=_prevalidation_quiet(name, order),
+            facts=read_prevalidation_facts,
             command=("prevalidate", name),
             timeout=PREVALIDATION_TIMEOUTS.get(name, PREVALIDATION_TIMEOUT),
             targets=(Target(PREVALIDATION_ISSUE, note=_prevalidation_note(name)),),
             attach=(Attachment(f"리포트 state/{_report_of(name)}", _report_of(name)),),
             report=_report_of(name),
             queued=name,
+            order=read_queue,
         )
         for name in order
     )
@@ -206,7 +368,7 @@ def revision_job_name(algorithm: str) -> str:
     return f"{REVISION_JOB}{algorithm}"
 
 
-def revision_turn(night: Night, algorithm: str) -> str | None:
+def revision_turn(night: Turn, algorithm: str) -> str | None:
     """Whether ``algorithm``'s changed code would be pre-validated tonight (#454): FRESH, AGAIN (its
     last run for this revision left no verdict, on older code: it waits for the FRESH ones), or None
     (not tonight: none waits, too few days after the change, or judged)."""
@@ -234,7 +396,7 @@ def revision_turn(night: Night, algorithm: str) -> str | None:
     return AGAIN
 
 
-def revision_tonight(night: Night, order: Sequence[str]) -> str | None:
+def revision_tonight(night: Turn, order: Sequence[str]) -> str | None:
     """The algorithm of ``order`` whose changed code is pre-validated tonight in its turn (#454):
     none if a bar-close pre-validation (a first one or a changed code's) ran tonight; else the first
     FRESH, else the first AGAIN."""
@@ -244,7 +406,7 @@ def revision_tonight(night: Night, order: Sequence[str]) -> str | None:
     return next((n for n, t in turns if t == FRESH), None) or next((n for n, t in turns if t == AGAIN), None)
 
 
-def revisions_quiet(night: Night, order: Sequence[str]) -> tuple[str, ...]:
+def revisions_quiet(night: Turn, order: Sequence[str]) -> tuple[str, ...]:
     """The algorithms of ``order`` whose changed code may be pre-validated second on a quiet night
     (#546), in turn, as ``prevalidations_quiet``; listed before the first ones, they come first."""
     if not _second(night, order):
@@ -252,21 +414,21 @@ def revisions_quiet(night: Night, order: Sequence[str]) -> tuple[str, ...]:
     return _in_turn([(name, revision_turn(night, name)) for name in order])
 
 
-def _revision_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
-    def due(night: Night) -> bool:
+def _revision_due(algorithm: str, order: tuple[str, ...]) -> Callable[[Turn], bool]:
+    def due(night: Turn) -> bool:
         return revision_tonight(night, order) == algorithm
 
     return due
 
 
-def _revision_quiet(algorithm: str, order: tuple[str, ...]) -> Callable[[Night], bool]:
-    def due(night: Night) -> bool:
+def _revision_quiet(algorithm: str, order: tuple[str, ...]) -> Callable[[Turn], bool]:
+    def due(night: Turn) -> bool:
         return algorithm in revisions_quiet(night, order)
 
     return due
 
 
-def revision_jobs(names: Sequence[str]) -> tuple[Job, ...]:
+def revision_jobs(names: Sequence[str]) -> tuple[Job[PrevalidationFacts], ...]:
     """A job pre-validating the changed code of each bar-close algorithm of ``names`` (the
     registries' order), those registered before pre-validation too (#454)."""
     order = tuple(names)
@@ -275,6 +437,7 @@ def revision_jobs(names: Sequence[str]) -> tuple[Job, ...]:
             name=revision_job_name(name),
             due=_revision_due(name, order),
             quiet=_revision_quiet(name, order),
+            facts=read_prevalidation_facts,
             command=("prevalidate", name, "--revision"),
             timeout=PREVALIDATION_TIMEOUTS.get(name, PREVALIDATION_TIMEOUT),
             targets=(Target(PREVALIDATION_ISSUE, note=_revision_note(name)),),
@@ -314,10 +477,10 @@ DAILY_KIND_ISSUES = {"open_to_close": DAILY_CHECK_ISSUE, "open_to_close_5d": 310
 
 def _daily_prevalidation_due(
     algorithm: str, features: Sequence[str] = (), kind: str | None = None
-) -> Callable[[Night], bool]:
+) -> Callable[[Turn], bool]:
     of_kind = daily_kind_named(kind) if kind is not None else None
 
-    def due(night: Night) -> bool:
+    def due(night: Turn) -> bool:
         facts = night.facts
         if algorithm not in facts.waiting:
             return False
@@ -345,7 +508,7 @@ def daily_prevalidation_jobs(
     names: Sequence[str],
     features: Mapping[str, Sequence[str]] | None = None,
     kinds: Mapping[str, str] | None = None,
-) -> tuple[Job, ...]:
+) -> tuple[Job[PrevalidationFacts], ...]:
     """A pre-validation job for each daily algorithm of ``names`` (#264), waiting for its
     ``features``' data and its kind's answers (``kinds``: algorithm -> kind), posting to #204 and
     its kind's issue (``DAILY_KIND_ISSUES``)."""
@@ -357,6 +520,7 @@ def daily_prevalidation_jobs(
             Job(
                 name=prevalidation_job_name(name),
                 due=_daily_prevalidation_due(name, (features or {}).get(name, ()), kind),
+                facts=read_prevalidation_facts,
                 command=("prevalidate", name),
                 timeout=DAILY_PREVALIDATION_TIMEOUT,
                 targets=(
@@ -397,7 +561,7 @@ _DAILY_PREVALIDATION_NOTES = {
 # a new pass), as a pre-validation that left no verdict does. Cox fits in seconds: 20 fits and ten
 # years of samples are minutes; the hour is a bound. Its result goes to #298 and #264. It waits for
 # the algorithms of a kind whose answers of the latest days are not all in on this server
-# (``Facts.pending_answers``, #264: ``open_to_close``'s closing auction prices).
+# (``PrevalidationFacts.pending_answers``, #264: ``open_to_close``'s closing auction prices).
 # It gives way to a bar-close pre-validation as the bar-close simulation does (below, #376). It never
 # holds back the daily pre-validations: they run before it (a pass enrolls that night), take about a
 # minute, are not one a night, and start by 04:30. Judged by its hour, it gives way only when it
@@ -407,17 +571,17 @@ SIMULATION_ISSUE = 298
 DAILY_SIMULATION_TIMEOUT = timedelta(hours=1)
 
 
-def _a_prevalidation(job: Job) -> bool:
+def _a_prevalidation(job: Job[Any]) -> bool:
     """A pre-validation's job: the simulations give way to it (#376)."""
     return job.command[:1] == ("prevalidate",)
 
 
 def _daily_simulation_due(
     algorithms: Sequence[DailyAlgorithm], kinds: Sequence[DailyKind] = DAILY_KINDS
-) -> Callable[[Night], bool]:
+) -> Callable[[Turn], bool]:
     held = {k.name for k in kinds if k.review_hold is not None}
 
-    def due(night: Night) -> bool:
+    def due(night: Turn) -> bool:
         # Not for an algorithm whose kind's latest answers are not all in on this server (#264):
         # the days replayed would not be the latest; nor for one whose kind's review days are not
         # fixed yet (#310, ``DailyKind.review_hold``): it is not enrolled.
@@ -447,6 +611,7 @@ def _daily_simulation_due(
 DAILY_SIMULATION = Job(
     name="simulate-daily-298",
     due=_daily_simulation_due(DAILY_ALGORITHMS),
+    facts=read_prevalidation_facts,
     command=("simulate", "daily"),
     timeout=DAILY_SIMULATION_TIMEOUT,
     gives_way_to=_a_prevalidation,
@@ -494,7 +659,7 @@ DAILY_SIMULATION = Job(
 SIMULATION_TIMEOUT = timedelta(hours=5)
 
 
-def _bar_close_simulation_due(night: Night) -> bool:
+def _bar_close_simulation_due(night: Turn) -> bool:
     facts = night.facts
     if facts.recorded_days < MIN_DAYS or not facts.simulating:
         return False
@@ -509,6 +674,7 @@ def _bar_close_simulation_due(night: Night) -> bool:
 BAR_CLOSE_SIMULATION = Job(
     name="simulate-bar-close-298",
     due=_bar_close_simulation_due,
+    facts=read_prevalidation_facts,
     command=("simulate", "bar-close"),
     timeout=SIMULATION_TIMEOUT,
     gives_way_to=_a_prevalidation,
@@ -566,8 +732,8 @@ def _report_of(algorithm: str) -> str:
 QUEUE_SCREEN_TIMEOUT = timedelta(hours=1, minutes=15)
 
 
-def _queue_screen_due(order: tuple[str, ...]) -> Callable[[Night], bool]:
-    def due(night: Night) -> bool:
+def _queue_screen_due(order: tuple[str, ...]) -> Callable[[Turn], bool]:
+    def due(night: Turn) -> bool:
         if night.facts.recorded_days < MIN_DAYS:
             return False
         record = night.record
@@ -597,6 +763,7 @@ QUEUE_SCREEN = Job(
     due=_queue_screen_due(
         prevalidation_order([*(a.name for a in ALGORITHMS), *(a.name for a in KIND_ALGORITHMS)])
     ),
+    facts=read_prevalidation_facts,
     command=("screen-queue",),
     timeout=QUEUE_SCREEN_TIMEOUT,
     targets=(Target(PREVALIDATION_ISSUE, note=_QUEUE_SCREEN_NOTE),),

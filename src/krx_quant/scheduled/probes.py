@@ -8,16 +8,19 @@ The sixteen probes and checks up to ``probe-member-frames-381`` ran once, posted
 left ``JOBS`` (#505), as a one-off job does once it has done its work, so that a lost state file
 cannot run them again. Most of their commands stay for a run by hand (``krx-quant probe-supply`` and
 the rest); those whose questions were settled went with their modules (#563). A new probe goes here,
-with its condition (``core._first_night`` and ``core._first_trading_night`` are the usual ones).
+with its condition (``core._first_night`` and ``core._first_trading_night`` are the usual ones, and
+``core.again_on_new_code`` the usual retry).
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
+from typing import Any
 
-from krx_quant.night_book import NIGHTS, VERDICT_DAY
+from krx_quant.night_book import NIGHTS, VERDICT_DAY, complete_nights
 from krx_quant.process_log import Ran
-from krx_quant.scheduled.core import FAILED, OK, Job, Night, Target
+from krx_quant.scheduled.core import FAILED, OK, Job, Night, Reads, Target, again_on_new_code
 from krx_quant.trader.report import calls_agent
 
 # What changes the key of a day the night stored (#565): a normal night makes the trading day before
@@ -34,20 +37,12 @@ from krx_quant.trader.report import calls_agent
 SAMPLE_KEYS_ISSUE = 565
 
 
-def _again_on_other_code(night: Night) -> bool:
-    """Not run yet; or failed, and the code is other now."""
-    record = night.record
-    return not night.ran or (
-        record is not None and record.outcome == FAILED and record.commit != night.commit
-    )
-
-
-def _first_sample_keys(night: Night) -> bool:
+def _first_sample_keys(night: Night[None]) -> bool:
     """On the first trading night (after a failure, again on other code)."""
-    return night.trading_day and _again_on_other_code(night)
+    return night.trading_day and again_on_new_code(night)
 
 
-def _second_sample_keys(night: Night) -> bool:
+def _second_sample_keys(night: Night[None]) -> bool:
     """On a trading night after the first run's, once it ran to its end (after a failure, again on
     other code)."""
     first = night.records.get(SAMPLE_KEYS.name)
@@ -56,7 +51,7 @@ def _second_sample_keys(night: Night) -> bool:
         and first is not None
         and first.outcome == OK
         and first.day < night.day
-        and _again_on_other_code(night)
+        and again_on_new_code(night)
     )
 
 
@@ -110,7 +105,7 @@ SAMPLE_KEYS_AGAIN = Job(
 RECORDING_QUALITY_ISSUE = 571
 
 
-def _each_trading_night(night: Night) -> bool:
+def _each_trading_night(night: Night[Any]) -> bool:
     """Every trading day's night, once; a run a restart cut runs the next trading night."""
     if not night.trading_day:
         return False
@@ -155,7 +150,7 @@ RECORDING_QUALITY = Job(
 # stop its subscription (in a PR of its own), anything else keeps it. The night trades and what was
 # recorded stay either way. The command reads the two days' partitions of each night (their received
 # times and the files' Parquet metadata, not the frames) and writes only its state file, whose count of
-# complete nights the measure's condition reads (``Facts.night_book_nights``).
+# complete nights the measure's condition reads (``read_night_book_nights``).
 #
 # The measure runs each trading night right after the recording's quality, so the night that ended the
 # morning before was merged at 21:00 (``archive.NIGHTLY_ARCHIVE``), until it has its seven complete
@@ -168,10 +163,16 @@ NIGHT_BOOK_ISSUE = 605
 _NIGHT_BOOK_VERDICT = "night-book-verdict-605"
 
 
-def _until_seven_complete_nights(night: Night) -> bool:
+async def read_night_book_nights(reads: Reads) -> int:
+    """How many complete nights the night futures' book's measure found (``night_book.complete_nights``,
+    read from its state file)."""
+    return await asyncio.to_thread(complete_nights, reads.sources.settings.state_dir)
+
+
+def _until_seven_complete_nights(night: Night[int]) -> bool:
     """Each trading night, once, until the measure has its complete nights or the verdict ran; a run a
     restart cut runs the next trading night."""
-    if night.facts.night_book_nights >= NIGHTS:
+    if night.facts >= NIGHTS:
         return False
     verdict = night.records.get(_NIGHT_BOOK_VERDICT)
     if verdict is not None and verdict.outcome == OK:
@@ -183,14 +184,15 @@ def _failed(ran: Ran) -> bool:
     return ran.exit_code != 0 or ran.timed_out
 
 
-def _on_the_verdict_day(night: Night) -> bool:
+def _on_the_verdict_day(night: Night[None]) -> bool:
     """Once, on the verdict's night or the first after it (after a failure, again on other code)."""
-    return night.day >= VERDICT_DAY and _again_on_other_code(night)
+    return night.day >= VERDICT_DAY and again_on_new_code(night)
 
 
 NIGHT_BOOK_BYTES = Job(
     name="night-book-bytes-605",
     due=_until_seven_complete_nights,
+    facts=read_night_book_nights,
     command=("night-book-bytes",),
     timeout=timedelta(minutes=15),
     label_if=_failed,
@@ -244,7 +246,7 @@ NIGHT_BOOK_VERDICT = Job(
 BLAS_THREADS_ISSUE = 589
 
 
-def _bar_close_times_due(night: Night) -> bool:
+def _bar_close_times_due(night: Night[None]) -> bool:
     """On trading nights until a run ends ok: the first, and after a failure the next (not the night it
     failed on)."""
     record = night.record

@@ -56,7 +56,6 @@ from krx_quant.scheduled import (
     JOBS,
     OK,
     STATE_FILE,
-    Facts,
     JobRecord,
     JobState,
     Night,
@@ -65,7 +64,7 @@ from krx_quant.scheduled import (
 from krx_quant.stats import Lift, Scored, t_quantile
 from tests.api_doubles import touch
 from tests.fake_github import REPO, TOKEN, fake_github
-from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at
+from tests.scheduled_doubles import AT, CALENDAR, COMMIT, FRIDAY, MONDAY, SATURDAY, Told, at, faking
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 SURE = {UP: Forecast(1, 0, 0, 0), FLAT: Forecast(0, 1, 0, 0), DOWN: Forecast(0, 0, 1, 0)}
@@ -399,8 +398,8 @@ def test_the_command_prints_it_and_writes_nothing(
 # The scheduled job
 
 
-def night(day: date, days: int, record: JobRecord | None = None, commit: str = COMMIT) -> Night:
-    return Night(day, CALENDAR.is_trading_day(day), commit, record, {}, Facts(holdout_days=days))
+def night(day: date, days: int, record: JobRecord | None = None, commit: str = COMMIT) -> Night[int]:
+    return Night(day, CALENDAR.is_trading_day(day), commit, record, {}, days)
 
 
 def test_the_job_runs_once_on_the_first_night_the_window_is_full_and_posts_to_447() -> None:
@@ -431,12 +430,9 @@ async def test_the_job_runs_the_real_command(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setenv("KRX_STATE_DIR", str(tmp_path / "state"))
     state = JobState.load(tmp_path / STATE_FILE)
 
-    async def facts() -> Facts:
-        return Facts(holdout_days=DAYS)
-
     async with fake_github() as hub, aiohttp.ClientSession() as session:
         scheduler = Scheduler(
-            [ERROR_HOLDOUT],
+            faking([ERROR_HOLDOUT], {ERROR_HOLDOUT.facts: DAYS}),
             AT,
             CALENDAR,
             state,
@@ -444,7 +440,6 @@ async def test_the_job_runs_the_real_command(tmp_path: Path, monkeypatch: pytest
             Told(),
             FakeClock(at(FRIDAY, "23:00")),
             commit=COMMIT,
-            facts=facts,
         )
         await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
     [body] = hub.bodies(447)
@@ -453,7 +448,8 @@ async def test_the_job_runs_the_real_command(tmp_path: Path, monkeypatch: pytest
 
 
 async def test_the_nightly_facts_count_the_window_s_days_in_the_engine_db(tmp_path: Path) -> None:
-    from krx_quant.scheduled import read_facts
+    from krx_quant.scheduled import Reads, Sources
+    from krx_quant.scheduled.research import read_holdout_days
     from tests.daily_doubles import CALENDAR as DAILY_CALENDAR
     from tests.daily_doubles import NIGHT, engine_on
     from tests.daily_doubles import settings as daily_settings
@@ -463,7 +459,7 @@ async def test_the_nightly_facts_count_the_window_s_days_in_the_engine_db(tmp_pa
     stored(s.state_dir / DB_NAME, [Bar(day, "09:01", UP, FLAT, UP) for day in AFTER_DAYS[:4]])
     e = engine_on(s, clock, [])
     try:
-        facts = await read_facts(s, DAILY_CALENDAR, clock, e)
+        days = await Reads(Sources(s, DAILY_CALENDAR, clock, e))(read_holdout_days)
     finally:
         e.store.close()
-    assert facts.holdout_days == 4
+    assert days == 4
