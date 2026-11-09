@@ -24,8 +24,6 @@ targets: the label says up, while a down call's target was reached too.
 
 from __future__ import annotations
 
-import sqlite3
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
@@ -36,14 +34,10 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from krx_quant.archive import guarded_files
-from krx_quant.baselines import baselines_for
-from krx_quant.consensus import NAMES
 from krx_quant.feeds import BOOK, TRADE
-from krx_quant.predictions import scored_rows
 from krx_quant.pricing import Direction
-from krx_quant.skill import skill, skill_text
-from krx_quant.stats import Prices, Scored, on_target, scored_by_algorithm, touch_profit
-from krx_quant.touch import TARGET_VERSION, WINDOW
+from krx_quant.stats import Prices, Scored, touch_profit
+from krx_quant.touch import WINDOW
 
 DELAYS = (0, 1, 5, 30)  # seconds after the bar close
 
@@ -177,65 +171,3 @@ class Tally:
             self.reached[delay].append(prices.upper_reached if up else prices.lower_reached)
             if (profit := touch_profit(r.predicted, prices, fee_rate)) is not None:
                 self.profits[delay].append(profit)
-
-
-def entry_delays(
-    conn: sqlite3.Connection, data_dir: Path, days: Sequence[date], fee_rate: float
-) -> list[str]:
-    """Each predictor's line (``diagnose`` section 10): its scored predictions on ``days`` as the
-    leaderboard reads them (special ones left out; an algorithm's by models of the touch target
-    only), their skill against the class rates (``skill.py``: kappa, by trading day too), and its
-    up and down calls' target reached and touch P&L after each delay. A day at a time, its
-    quotes let go after it, to stay within the server's memory."""
-    baselines = {b.name for b in baselines_for(TARGET_VERSION)} | set(NAMES)
-    tallies: dict[str, Tally] = {}
-    calls: dict[str, dict[date, list[tuple[Direction, Direction]]]] = {}
-    for day in days:
-        factory, conn.row_factory = conn.row_factory, sqlite3.Row  # as the store reads its rows
-        try:
-            rows = scored_rows(conn, [day], None, False)
-        finally:
-            conn.row_factory = factory  # the diagnosis's other sections read tuples
-        by_name = scored_by_algorithm(on_target(rows, baselines, TARGET_VERSION))
-        symbols = {r.symbol for records in by_name.values() for r in records}
-        quotes = {symbol: day_quotes(data_dir, day, symbol) for symbol in sorted(symbols)}
-        seen: dict[tuple[str, datetime, int], Prices | None] = {}
-        for name, records in by_name.items():
-            t = tallies.setdefault(name, Tally())
-            for r in records:
-                t.add(r, quotes[r.symbol], fee_rate, seen)
-            calls.setdefault(name, {})[day] = [(r.predicted, r.outcome) for r in records]
-    return [line for name in sorted(tallies) for line in _lines(name, tallies[name], calls[name])]
-
-
-def _lines(name: str, t: Tally, calls: Mapping[date, Sequence[tuple[Direction, Direction]]]) -> list[str]:
-    s = skill([c for day in calls.values() for c in day])
-    if s is None:
-        return []
-    lines = [
-        f"{name}: 채점 {s.n:,} · 정답률 {s.accuracy:.1%} · {skill_text(calls)} · 상승·하락 예측 {t.calls:,}"
-    ]
-    if not t.calls:
-        return lines
-
-    def counted(delay: int, values: Sequence[object]) -> str:
-        return f"{_delay(delay)} " + ("" if len(values) == t.calls else f"(n {len(values):,}) ")
-
-    reached = [
-        counted(d, t.reached[d])
-        + ("—" if not t.reached[d] else f"{sum(t.reached[d]) / len(t.reached[d]):.1%}")
-        for d in DELAYS
-    ]
-    profits = [
-        counted(d, t.profits[d])
-        + ("—" if not t.profits[d] else f"{sum(t.profits[d]) / len(t.profits[d]):+.2f}")
-        for d in DELAYS
-    ]
-    return lines + [
-        f"  목표 도달: {' · '.join(reached)}",
-        f"  닿음 손익(틱/번, 연구용): {' · '.join(profits)}",
-    ]
-
-
-def _delay(seconds: int) -> str:
-    return "봉 마감" if seconds == 0 else f"+{seconds}초"

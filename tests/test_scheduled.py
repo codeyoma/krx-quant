@@ -1207,16 +1207,16 @@ async def test_a_job_waits_for_what_the_engine_knows_then_runs_once(tmp_path: Pa
 async def test_the_collector_runs_the_night_s_jobs(
     kis: FakeKis, empty_server: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The list as a job made here, whose real command is cheap on an empty server: the diagnosis
-    # (its job ``diagnose-203-187`` left ``JOBS``, #505).
-    diagnosis = Job(
-        name="diagnose",
+    # The list as a job made here, whose real command is cheap on an empty server: the signal review
+    # (the diagnosis was until its command was removed, #658).
+    review = Job(
+        name="signal-review",
         due=never_ran,
-        command=("diagnose", "--days", "20"),
+        command=("signal-review", "--days", "20"),
         timeout=timedelta(hours=1),
         targets=TWO_ISSUES.targets,
     )
-    monkeypatch.setattr("krx_quant.scheduled.JOBS", (diagnosis,))
+    monkeypatch.setattr("krx_quant.scheduled.JOBS", (review,))
     async with fake_github() as hub:
         settings = replace(
             settings_for(kis, empty_server),
@@ -1230,7 +1230,7 @@ async def test_the_collector_runs_the_night_s_jobs(
 
         def posted() -> bool:
             """Both comments are up and saved (the labels come between a comment and its save)."""
-            record = JobState.load(empty_server / "state" / STATE_FILE).jobs.get("diagnose")
+            record = JobState.load(empty_server / "state" / STATE_FILE).jobs.get("signal-review")
             return record is not None and record.comments.keys() == {203, 187}
 
         try:
@@ -1238,7 +1238,7 @@ async def test_the_collector_runs_the_night_s_jobs(
         finally:
             stop.set()
             await asyncio.wait_for(task, 10)
-    record = JobState.load(empty_server / "state" / STATE_FILE).jobs["diagnose"]
+    record = JobState.load(empty_server / "state" / STATE_FILE).jobs["signal-review"]
     assert record.outcome == OK and record.day == FRIDAY and record.comments.keys() == {203, 187}
 
 

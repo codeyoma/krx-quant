@@ -66,15 +66,10 @@ LEAVES = frozenset(
         "session_memory_probe",
         "supply_probe",
         "toss_probe",
-        # Checks: a claim measured on the stored data.
-        "closing_flow_check",
-        "daily_check",
-        "structure_check",
+        # Checks (``*_check``), a claim measured on the stored data: none since #658 removed the last
+        # (``closing_flow_check``, ``daily_check``, ``structure_check``).
         # Experiments and research reports: a hypothesis judged, or a report an agent reads.
         "climate_gate",
-        "climate_prior",
-        "diagnose",
-        "error_breakdown",
         "holdout",
         "inverse_replay",
         "neyman_backfill",
@@ -146,14 +141,14 @@ def test_every_module_named_as_a_probe_a_check_or_an_experiment_is_listed() -> N
 def test_the_rule_sees_a_live_module_that_imports_a_leaf() -> None:
     # The same check finds an import of a leaf, at the top or in a function, in either form.
     found = {
-        "base_rates": ast.parse("from krx_quant.structure_check import PERIODS"),
+        "base_rates": ast.parse("from krx_quant.holdout import read_scored"),
         "collector": ast.parse("def f():\n    from krx_quant import gaps_probe"),
         "engine": ast.parse("import krx_quant.signal_review"),
         "cli.probes": ast.parse("from krx_quant.gaps_probe import probe_gaps"),
-        "holdout": ast.parse("from krx_quant.error_breakdown import read_scored"),
+        "holdout": ast.parse("from krx_quant.climate_gate import climate_gate"),
     }
     assert leaves_imported_by_live_modules(found) == [
-        "base_rates -> structure_check",
+        "base_rates -> holdout",
         "collector -> gaps_probe",
         "engine -> signal_review",
     ]

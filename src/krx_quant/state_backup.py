@@ -118,14 +118,15 @@ FOLDERS = ("prevalidations", "models")
 # every module naming a file under ``experiments/`` has its pattern here.
 EXPERIMENTS = "experiments"
 EXPERIMENT_REPORTS = {
-    "krx_quant.climate_prior": "climate-prior-429.json",
     "krx_quant.neyman_variants": "neyman-variants-283.json",
     "krx_quant.neyman_backfill": "neyman-backfill-532.json",
 }
 # The reports a backup holds though their experiment's code is gone: each stays on the server as the
-# record of its result. The label-order experiment's (#529), removed once its result was in (none of
-# the five a candidate, the night of 2026-11-08): nothing writes or reads it any more.
-KEPT_REPORTS = ("normal-order-529.json",)
+# record of its result, and nothing writes or reads it any more. The label-order experiment's (#529),
+# removed once its result was in (none of the five a candidate, the night of 2026-11-08); the climate
+# prior's (#429), whose command went with #505's other kept research commands (#658; its result made
+# shannon read the prior, #435).
+KEPT_REPORTS = ("normal-order-529.json", "climate-prior-429.json")
 # Refused though its pattern names it (#604): an experiment report with one of these words in its
 # name or in a key of its JSON, at any depth. A name or a key is split into words at anything but a
 # letter or a digit and where a lower case letter meets an upper case one, then lowered; each word is
