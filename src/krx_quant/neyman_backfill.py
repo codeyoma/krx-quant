@@ -65,7 +65,8 @@ day it ended is kept (``CHECKPOINT``: its fold, and each bar close's symbol, tim
 arms' calls and σ̂₄), so the next night's run goes on from the first day left. The kept days are read
 only with the same code (``code_key``: this module's, ``neyman_variants``', the algorithm modules they
 and neyman import, ``turing``'s shared tree settings among them, neyman's package's digest, the
-walk-forward's class and the code that makes samples, ``sample_store.code_digest``), the same list and
+walk-forward's class, the code that makes samples, ``sample_store.code_digest``, and what they mean,
+``sample_store.semantics``), the same list and
 the same input (``input_key``: the settings that make the samples, the days with data up to the last
 listed one, and each such day's sample key, ``sample_store.day_key``: the files it reads by their
 SHA-256 and the trading calendar around it); with any other, they are set aside and the run starts
@@ -144,7 +145,7 @@ from krx_quant.predictions import iso
 from krx_quant.prevalidation import _WalkForward, code_digest
 from krx_quant.pricing import Direction, most_likely
 from krx_quant.sample_store import code_digest as samples_code
-from krx_quant.sample_store import day_key, night_reads, read_files
+from krx_quant.sample_store import day_key, night_reads, read_files, semantics
 from krx_quant.stats import Interval, wilson
 from krx_quant.training import finished_days, is_recorded, previous_days_needed, training_day
 
@@ -350,7 +351,8 @@ def code_key() -> str:
     """A digest of the code that makes a day's calls: ``CODE``'s modules and the algorithm modules
     they and neyman import (``_algorithm_code``: a package whole), neyman's package by
     ``prevalidation.code_digest``, ``_WalkForward``'s class, and the code that makes a day's samples
-    (``sample_store.code_digest``). Kept days are read only with it."""
+    (``sample_store.code_digest``) and what they mean (``sample_store.semantics``). Kept days are read
+    only with it."""
     digest = hashlib.sha256()
     for name in [*CODE, *_algorithm_code()]:
         path = Path(_source(importlib.import_module(name)))
@@ -359,7 +361,11 @@ def code_key() -> str:
             digest.update(f"\0{name}\0{f.name}\0".encode() + f.read_bytes())
     digest.update(b"\0neyman\0" + code_digest(Neyman()).encode())
     digest.update(b"\0walk\0" + inspect.getsource(_WalkForward).encode())
+    # The sample code itself (stricter than the sample key, which holds only what the samples mean
+    # since #645), and what the samples mean (``sample_store.semantics``: its version, its golden
+    # digest and the runtime's versions), as every day's sample key holds it.
     digest.update(b"\0samples\0" + samples_code().encode())
+    digest.update(b"\0semantics\0" + json.dumps(semantics()).encode())
     return digest.hexdigest()[:16]
 
 

@@ -567,6 +567,9 @@ def test_the_keys_follow_the_code_the_settings_the_list_the_calendar_and_the_dat
     monkeypatch.setattr(module, "samples_code", lambda: "another")
     assert module.code_key() != code
     monkeypatch.undo()
+    monkeypatch.setattr(module, "semantics", lambda: [2, "golden", "runtime"])
+    assert module.code_key() != code, "what the samples mean (#645)"
+    monkeypatch.undo()
     # The input.
     s = settings_of(data, tmp_path)
     listed = Listed(WHEN, DAYS[0], DAYS[-TRAINING_DAYS], date(2026, 7, 13), 2, 200, [DAYS[3]], [DAYS[2]])
