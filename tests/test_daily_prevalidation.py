@@ -323,7 +323,7 @@ def test_the_night_trains_cox_last_and_puts_it_on_the_promotion_list(tmp_path: P
     )
     # Its five-session twin trains too, now that its kind runs (#310); held from probation, it
     # runs on none of its models yet.
-    assert list(night.promoted) == ["cox", "cox-5d"]
+    assert list(night.promoted) == ["baseline-climate", "cox", "cox-5d"]  # the climate every night
     [report] = [r for r in night.reports if r["algorithm"] == "cox"]
     assert (report["cadence"], report["day"]) == ("daily", night_day.isoformat())
     stored = json.loads((root / f"models/cox/{night.promoted['cox']}.json").read_text())

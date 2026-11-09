@@ -26,8 +26,7 @@ TOUCH_LABEL = (
 @dataclass(frozen=True)
 class Card:
     """A predictor's card. Card text describes the current target, the touch label (#170,
-    ``TOUCH_LABEL``): with ``KRX_TARGET_VERSION=1`` the predictors learn and forecast the
-    four-minute move instead, which the cards do not tell."""
+    ``TOUCH_LABEL``), the only one the predictors learn and forecast since #659."""
 
     scientist: str | None  # None: a baseline, named after no one
     character: str  # e.g. trend following

@@ -1058,7 +1058,6 @@ async def test_a_recorded_day_trains_on_the_barrier_answers_and_widths_the_engin
         ("barrier_width",),
         FEE,
         Leaders(),
-        target_version=TARGET_VERSION,
         kinds=(BARRIER,),
     )
 
@@ -1098,7 +1097,6 @@ def test_a_backfilled_day_trains_on_the_bar_rule_its_same_minutes_left_out(tmp_p
         ("barrier_width",),
         FEE,
         Leaders(),
-        target_version=TARGET_VERSION,
         kinds=(BARRIER,),
     )
 

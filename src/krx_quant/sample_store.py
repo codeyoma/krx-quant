@@ -29,8 +29,9 @@ The key (``day_key``) is a digest of everything the samples are made of:
 - what the samples mean (``semantics``, #645): ``SAMPLE_SEMANTICS``, a version raised by hand when
   a change to the code can change a sample on some day; ``GOLDEN``, the digest of the golden samples
   (``tests/golden/sample_store_days.json.gz``: what the fixed days of ``tests/test_sample_store.py``
-  make, with every feature and kind the night reads, a recorded day with the touch target and with
-  the four-minute move, and a backfilled one); and the Python, NumPy and PyArrow versions.
+  make, with every feature and kind the night reads, a recorded day and a backfilled one; between
+  them the recorded day with the four-minute move, which no code makes since #659 and the file keeps
+  so its digest stays); and the Python, NumPy and PyArrow versions.
 
 Until #645 the key held the digest of the code itself (``code_digest``), so any change to it but a
 comment made every day again on the next night, hours of it, though most changed no sample. The code
@@ -123,7 +124,7 @@ FORMAT = 1  # the file's layout; another is a miss
 # day's key (a change to either makes every day again), REVIEWED_CODE is not.
 SAMPLE_SEMANTICS = 1
 GOLDEN = "9ad340d6e42b4493126df0bcd9d9ec3b"
-REVIEWED_CODE = "27cd65b408826d27"
+REVIEWED_CODE = "193371a8ca4ebb0b"
 # How far before a day the key holds the calendar's sessions: the 20 trading days whose bars the slot
 # returns read (#265), with holidays, and their previous days, are well inside. Of the days after it
 # the samples ask only the trading days to the options expiry, which the key holds as they are.
@@ -609,7 +610,6 @@ def read_day(
             names,
             fee_rate,
             leaders,
-            target_version=target_version,
             kinds=kinds,
         )
 

@@ -42,7 +42,7 @@ from krx_quant.algorithms import (
     predicted,
     save_model,
 )
-from krx_quant.baselines import BASELINES, TOUCH_BASELINES
+from krx_quant.baselines import TOUCH_BASELINES
 from krx_quant.consensus import CARDS, NAMES
 from krx_quant.features import (
     BOOK_FEATURES,
@@ -123,19 +123,15 @@ def test_every_registered_feature_has_a_meaning() -> None:
     assert all(filled(m) for m in FEATURE_MEANINGS.values())
 
 
-def test_the_baselines_and_the_consensus_have_cards_too() -> None:
-    cards = [b.card for b in BASELINES] + [CARDS[name] for name in NAMES]
-
-    for card in cards:
+def test_the_consensus_has_cards_too() -> None:
+    for card in [CARDS[name] for name in NAMES]:
         assert card.character and card.logic and card.training and card.forecasting and card.failure
-        assert card.unique_features == ()
-    assert all(b.card.scientist is None for b in BASELINES), "named after no one"
-    assert all(CARDS[name].scientist for name in NAMES)
+        assert card.unique_features == () and card.scientist
 
 
-def test_the_touch_targets_baselines_have_cards_too() -> None:
-    # With the touch target (KRX_TARGET_VERSION=3, #169): the climate is new, persist and random
-    # say the new label.
+def test_the_baselines_have_cards_too() -> None:
+    # Of the touch target (KRX_TARGET_VERSION=3, #169, the only one since #659): the climate is
+    # new, persist and random say the new label; none is named after anyone.
     assert [b.name for b in TOUCH_BASELINES] == [
         "baseline-flat",
         "baseline-persist",

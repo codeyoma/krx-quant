@@ -42,6 +42,7 @@ from krx_quant.algorithms import Algorithm, KindAlgorithm
 from krx_quant.kind_registry import KINDS
 from krx_quant.kinds import Kind
 from krx_quant.prevalidation import _target, code_digest, inputs_of, revision_report
+from krx_quant.touch import TARGET_VERSION
 
 
 @dataclass(frozen=True)
@@ -98,7 +99,7 @@ class RevisionGate:
     def __init__(
         self,
         state_dir: Path,
-        target_version: int = 1,
+        target_version: int = TARGET_VERSION,
         kinds: Sequence[Kind] = KINDS,
         refactors: Sequence[Refactor] = SAME_REVISION,
     ) -> None:

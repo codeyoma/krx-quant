@@ -196,11 +196,9 @@ def test_the_rollback_command_names_what_runs_now(
     assert main(["rollback", "newton"]) == 0
     assert "newton now runs newton-20261009-0a0b0c" in capsys.readouterr().out
 
-    monkeypatch.setenv("KRX_TARGET_VERSION", "1")  # before the switch any model goes
-    assert main(["rollback", "newton"]) == 0
-    assert "newton now runs its defaults" in capsys.readouterr().out
+    # Before #659, with KRX_TARGET_VERSION=1, any model went back, the defaults too; not now.
     assert main(["rollback", "newton"]) == 1
-    assert "nothing to roll back" in capsys.readouterr().err
+    assert f"its defaults was not trained on target {TARGET_VERSION}" in capsys.readouterr().err
     assert main(["rollback", "einstein"]) == 1
 
 

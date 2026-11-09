@@ -330,7 +330,7 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
             **load_models(settings.state_dir, [*ALGORITHMS, *KIND_ALGORITHMS, *DAILY_ALGORITHMS]),
             **load_tables(settings.state_dir, KINDS),
         },
-        climate=load_climate(settings.state_dir) if settings.target_version >= 2 else None,
+        climate=load_climate(settings.state_dir),
     )
     store.add_run("start", engine.started_at, None, json.dumps(started(settings)))
     # Held while it runs: a rescore refuses to run beside it (#168). One running already

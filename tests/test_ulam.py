@@ -108,12 +108,10 @@ def test_the_same_features_give_the_same_forecast() -> None:
     assert Ulam().predict(f, model()) == Ulam().predict(f, model())
 
 
-def fit(make_day: object, target_version: int = 1) -> Model:
+def fit(make_day: object) -> Model:
     assert callable(make_day)
     bar_days = {("005930", d): make_day(d, seed=i) for i, d in enumerate(DAYS)}
-    training = samples(
-        bar_days, MarketCalendar(dict.fromkeys(DAYS, True)), Ulam.features, FEE, target_version=target_version
-    )
+    training = samples(bar_days, MarketCalendar(dict.fromkeys(DAYS, True)), Ulam.features, FEE)
     return Ulam().fit(training)
 
 
@@ -125,7 +123,7 @@ def test_a_day_that_keeps_going_up_is_fitted_with_its_drift() -> None:
 
 
 def test_training_on_the_touch_target_is_the_same_every_time() -> None:
-    first = fit(random_walk, target_version=3)
+    first = fit(random_walk)
 
     assert first.target_version == 3
-    assert fit(random_walk, target_version=3).version == first.version
+    assert fit(random_walk).version == first.version

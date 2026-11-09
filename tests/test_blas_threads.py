@@ -63,7 +63,6 @@ made = samples(
     MarketCalendar(dict.fromkeys(days, True)),
     names,
     0.00015,
-    target_version=3,
 )
 # Fitted here and kept in the folder argv[2] ("fit"), or read from it ("load"): the same models.
 learned = Path(sys.argv[2])

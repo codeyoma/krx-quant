@@ -16,7 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.algorithms import ALGORITHMS
 from krx_quant.api import create_app
-from krx_quant.baselines import BASELINES, TOUCH_BASELINES
+from krx_quant.baselines import TOUCH_BASELINES
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.engine import Event, PredictionEngine
 from krx_quant.feeds import (
@@ -41,14 +41,11 @@ from krx_quant.touch import TARGET_VERSION
 
 SYMBOL = "005930"
 # What predicts at a bar close; the consensus is recorded there too, empty (no_members)
-# while no algorithm is active.
-PREDICTING = {b.name for b in BASELINES} | {a.name for a in ALGORITHMS}
+# while no algorithm is active. The baselines are the touch target's (#170: baseline-climate too).
+PREDICTING = {b.name for b in TOUCH_BASELINES} | {a.name for a in ALGORITHMS}
 PREDICTORS = PREDICTING | set(CONSENSUS)
-# Live, an algorithm registered after pre-validation existed waits for its report (#24), and
-# the baselines are the touch target's, the server's default (#170: baseline-climate too).
-LIVE_PREDICTORS = (PREDICTORS | {b.name for b in TOUCH_BASELINES}) - {
-    a.name for a in ALGORITHMS if a.name not in REGISTERED_BEFORE
-}
+# Live, an algorithm registered after pre-validation existed waits for its report (#24).
+LIVE_PREDICTORS = PREDICTORS - {a.name for a in ALGORITHMS if a.name not in REGISTERED_BEFORE}
 DAY = date(2026, 10, 12)  # a Monday
 CALENDAR = MarketCalendar({DAY: True})
 FEE = 0.015 / 100

@@ -301,9 +301,9 @@ class Read:
 def target_of(cell: Cell, role: str, target_version: int) -> int | None:
     """The model target a cell's predictions count from, as the cost map's statistics keep them
     (``stats.on_target``): an algorithm's (``top``) the kind's answer version, the direction's the
-    touch target from 2 on; None: every one (a baseline's, a consensus's)."""
+    touch target; None: every one (a baseline's, a consensus's)."""
     kind = traded_kind(cell.kind)
-    if role != "top" or (kind.name == DIRECTION and target_version < 2):
+    if role != "top":
         return None
     return kind.answer_version if kind.name != DIRECTION else target_version
 

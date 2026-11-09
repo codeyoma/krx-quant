@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from krx_quant.algorithms import Model
 from krx_quant.baselines import Forecast
 from krx_quant.consensus import Timing
 from krx_quant.lifecycle import Status
@@ -27,7 +28,8 @@ from tests.algorithm_doubles import FixedAlgorithm
 from tests.api_schema import check
 from tests.lifecycle_doubles import RIGHT, put_days, stored, weekdays_before
 from tests.replay_doubles import busy_morning
-from tests.replay_events import DAY, SYMBOL, api, at, get_json, run
+from tests.replay_events import DAY, SYMBOL, api, at, get_json
+from tests.replay_events import run as replay_run
 from tests.test_lifecycle import MISSES_DOWNS, NEXT_DAY, WRONG, morning
 
 QUICK = FixedAlgorithm(
@@ -54,6 +56,16 @@ LOWER = FixedAlgorithm(
     "lower", features=("acceleration",), unique=("acceleration",), forecast=Forecast(0.2, 0.3, 0.5, -1.0)
 )
 TWO_DAYS = MarketCalendar({DAY: True, NEXT_DAY: True})
+
+
+async def run(db: Path, events: Any, until: Any, **options: Any) -> Any:
+    """The replay, the stand-ins running models of the touch target: only such a model's
+    algorithm is a member the weights are fitted for (#170)."""
+    on_target = {
+        a.name: Model(f"{a.name}-default", {}, target_version=TARGET_VERSION)
+        for a in options.get("algorithms", ())
+    }
+    return await replay_run(db, events, until, **{"models": on_target, **options})
 
 
 def put_statuses(db: Path, statuses: dict[str, Status]) -> None:
@@ -89,7 +101,6 @@ async def test_the_fast_consensus_takes_the_active_finished_soon_and_the_final_t
         algorithms=[QUICK, SLOW, NEW, *others],
         kind_algorithms=(),  # the stand-ins only: the kinds' real ones would hold the GIL they need (#327)
         consensus_timing=TIMING,
-        target_version=1,
     )
 
     made = await at_close(engine, "09:01")
@@ -129,7 +140,6 @@ async def test_a_consensus_counts_its_members_directions(tmp_path: Path) -> None
         algorithms=[QUICK, SLOW, NEW, steady, tied],
         kind_algorithms=(),  # the stand-ins only: the kinds' real ones would hold the GIL they need (#327)
         consensus_timing=TIMING,
-        target_version=1,
     )
 
     made = await at_close(engine, "09:01")
@@ -150,7 +160,7 @@ async def test_a_consensus_stored_before_the_votes_shows_none(tmp_path: Path) ->
     db = tmp_path / "engine.db"
     put_days(db, weekdays_before(DAY, 1), {"consensus-final": [Direction.UP]}, with_baselines=False)
 
-    engine = await run(db, [], until=at("08:00:00"), algorithms=[QUICK], target_version=1)
+    engine = await run(db, [], until=at("08:00:00"), algorithms=[QUICK])
 
     async with api(engine) as client:
         body = await get_json(client, f"/v1/symbols/{SYMBOL}/predictions?limit=10")
@@ -164,7 +174,6 @@ async def test_the_fast_consensus_card_tells_the_engine_s_own_cutoff(tmp_path: P
         busy_morning(),
         until=at("09:02:00"),
         consensus_timing=TIMING,
-        target_version=1,
     )
 
     async with api(engine) as client:
@@ -182,7 +191,6 @@ async def test_one_bar_close_s_predictions_every_one_of_them(tmp_path: Path) -> 
         until=at("09:06:00"),
         algorithms=[QUICK],
         consensus_timing=TIMING,
-        target_version=1,
     )
 
     async with api(engine) as client:
@@ -201,6 +209,7 @@ async def test_one_bar_close_s_predictions_every_one_of_them(tmp_path: Path) -> 
         "baseline-flat",
         "baseline-persist",
         "baseline-random",
+        "baseline-climate",
         "quick",
         "consensus-fast",
         "consensus-final",
@@ -211,7 +220,10 @@ async def test_one_bar_close_s_predictions_every_one_of_them(tmp_path: Path) -> 
 
 async def test_an_empty_consensus_has_no_votes(tmp_path: Path) -> None:
     engine = await run(
-        tmp_path / "engine.db", busy_morning(), until=at("09:02:00"), algorithms=[QUICK], target_version=1
+        tmp_path / "engine.db",
+        busy_morning(),
+        until=at("09:02:00"),
+        algorithms=[QUICK],
     )
 
     made = await at_close(engine, "09:01")
@@ -221,7 +233,10 @@ async def test_an_empty_consensus_has_no_votes(tmp_path: Path) -> None:
 
 async def test_with_no_active_algorithm_the_consensus_is_recorded_empty(tmp_path: Path) -> None:
     engine = await run(
-        tmp_path / "engine.db", busy_morning(), until=at("09:03:00"), algorithms=[QUICK], target_version=1
+        tmp_path / "engine.db",
+        busy_morning(),
+        until=at("09:03:00"),
+        algorithms=[QUICK],
     )
 
     made = await at_close(engine, "09:01")
@@ -240,7 +255,7 @@ async def weights_after_review(
     put_days(db, weekdays_before(DAY, days), calls)
     members = [a for a in (ALPHA, BETA, GAMMA) if a.name in calls]
 
-    engine = await run(db, [], until=at("15:45:00"), algorithms=members, target_version=1)
+    engine = await run(db, [], until=at("15:45:00"), algorithms=members)
 
     async with api(engine) as client:
         body = await get_json(client, "/v1/consensus")
@@ -280,7 +295,7 @@ async def test_an_algorithm_good_only_lately_gains_nothing(tmp_path: Path) -> No
     for day, gamma_calls in zip(history, gamma, strict=True):
         put_days(db, [day], {"alpha": MISSES_DOWNS, "gamma": gamma_calls})
 
-    engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA, GAMMA], target_version=1)
+    engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA, GAMMA])
 
     async with api(engine) as client:
         body = await get_json(client, "/v1/consensus")
@@ -291,9 +306,7 @@ async def test_the_consensus_uses_the_weights_refitted_after_the_close(tmp_path:
     db = tmp_path / "engine.db"
     put_statuses(db, {"upper": Status.ACTIVE, "lower": Status.ACTIVE})
     put_days(db, weekdays_before(DAY, 25), {"upper": RIGHT, "lower": MISSES_DOWNS})
-    await run(
-        db, [], until=at("15:45:00"), algorithms=[UPPER, LOWER], target_version=1
-    )  # DAY's review fits them
+    await run(db, [], until=at("15:45:00"), algorithms=[UPPER, LOWER])  # DAY's review fits them
 
     engine = await run(
         db,
@@ -301,7 +314,6 @@ async def test_the_consensus_uses_the_weights_refitted_after_the_close(tmp_path:
         until=at("09:02:00", NEXT_DAY),
         calendar=TWO_DAYS,
         algorithms=[UPPER, LOWER],
-        target_version=1,
     )
 
     async with api(engine) as client:
@@ -326,7 +338,7 @@ async def test_with_three_members_only_the_steady_one_takes_what_the_weak_one_lo
         beta = RIGHT if i >= len(history) - 4 else WRONG
         put_days(db, [day], {"alpha": RIGHT, "beta": beta, "gamma": WRONG})
 
-    engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA, BETA, GAMMA], target_version=1)
+    engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA, BETA, GAMMA])
 
     async with api(engine) as client:
         weights = (await get_json(client, "/v1/consensus"))["weights"][SYMBOL]["09:00"]
@@ -354,7 +366,6 @@ async def test_members_that_have_not_finished_or_failed_leave_the_consensus_with
         until=at("09:02:00"),
         algorithms=[SLOW, failing],
         consensus_timing=TIMING,
-        target_version=1,
     )
 
     made = await at_close(engine, "09:01")
@@ -374,7 +385,6 @@ async def test_the_final_consensus_does_not_wait_for_algorithms_outside_it(tmp_p
         algorithms=[QUICK, late],
         kind_algorithms=(),  # the stand-ins only: the kinds' real ones would hold the GIL they need (#327)
         consensus_timing=TIMING,
-        target_version=1,
     )
 
     with sqlite3.connect(db) as conn:
@@ -398,7 +408,7 @@ async def test_the_weights_are_fitted_only_on_models_of_the_touch_target(tmp_pat
     put_days(db, days[:20], {"alpha": WRONG, "beta": RIGHT}, model="old", target_version=1)
     put_days(db, days[20:], {"alpha": RIGHT, "beta": flat})
 
-    engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA, BETA], target_version=1)
+    engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA, BETA])
 
     async with api(engine) as client:
         weights = (await get_json(client, "/v1/consensus"))["weights"][SYMBOL]["09:00"]
@@ -408,7 +418,7 @@ async def test_the_weights_are_fitted_only_on_models_of_the_touch_target(tmp_pat
     put_statuses(counted, {"alpha": Status.ACTIVE, "beta": Status.ACTIVE})
     put_days(counted, days[:20], {"alpha": WRONG, "beta": RIGHT}, model="old")
     put_days(counted, days[20:], {"alpha": RIGHT, "beta": flat})
-    engine = await run(counted, [], until=at("15:45:00"), algorithms=[ALPHA, BETA], target_version=1)
+    engine = await run(counted, [], until=at("15:45:00"), algorithms=[ALPHA, BETA])
     async with api(engine) as client:
         weights = (await get_json(client, "/v1/consensus"))["weights"][SYMBOL]["09:00"]
     assert weights == pytest.approx({"alpha": 0.5, "beta": 0.5})
@@ -418,9 +428,7 @@ async def test_a_member_the_fit_did_not_know_gets_an_equal_share(tmp_path: Path)
     db = tmp_path / "engine.db"
     put_statuses(db, {"upper": Status.ACTIVE, "lower": Status.ACTIVE})
     put_days(db, weekdays_before(DAY, 25), {"upper": RIGHT, "lower": MISSES_DOWNS})
-    await run(
-        db, [], until=at("15:45:00"), algorithms=[UPPER, LOWER], target_version=1
-    )  # fits upper and lower
+    await run(db, [], until=at("15:45:00"), algorithms=[UPPER, LOWER])  # fits upper and lower
     third = FixedAlgorithm(
         "third", features=("vwap_z",), unique=("vwap_z",), forecast=Forecast(0.4, 0.4, 0.2, 0.0)
     )
@@ -432,7 +440,6 @@ async def test_a_member_the_fit_did_not_know_gets_an_equal_share(tmp_path: Path)
         until=at("09:02:00", NEXT_DAY),
         calendar=TWO_DAYS,
         algorithms=[UPPER, LOWER, third],
-        target_version=1,
     )
 
     async with api(engine) as client:
