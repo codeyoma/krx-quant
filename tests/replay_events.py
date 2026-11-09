@@ -37,6 +37,7 @@ from krx_quant.feeds import (
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.prevalidation import REGISTERED_BEFORE
 from krx_quant.replay import replay
+from krx_quant.touch import TARGET_VERSION
 
 SYMBOL = "005930"
 # What predicts at a bar close; the consensus is recorded there too, empty (no_members)
@@ -315,11 +316,19 @@ async def run(
     *,
     calendar: MarketCalendar = CALENDAR,
     symbols: tuple[str, ...] = (SYMBOL,),
+    target_version: int = TARGET_VERSION,  # the server's (#647)
     **options: Any,
 ) -> PredictionEngine:
     ordered = sorted(events, key=lambda e: e[1]["received_at"])
     return await replay(
-        ordered, db=db, calendar=calendar, symbols=symbols, fee_rate=FEE, until=until, **options
+        ordered,
+        db=db,
+        calendar=calendar,
+        symbols=symbols,
+        fee_rate=FEE,
+        until=until,
+        target_version=target_version,
+        **options,
     )
 
 

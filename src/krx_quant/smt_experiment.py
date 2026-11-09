@@ -83,7 +83,6 @@ from krx_quant.market_view import HORIZON
 from krx_quant.predictions import DB_NAME, iso, read_only
 from krx_quant.pricing import Direction
 from krx_quant.reference import BAR, Bar
-from krx_quant.signal_review import _points
 from krx_quant.smt import (
     BACKFILLED,
     BEARISH,
@@ -101,7 +100,7 @@ from krx_quant.smt import (
     day_events,
     reconstruct,
 )
-from krx_quant.stats import Scored
+from krx_quant.stats import Scored, points_text
 from krx_quant.touch import bar_touch
 from krx_quant.training import finished_days, is_recorded
 
@@ -675,7 +674,7 @@ def claim_line(m: Measured, judged: bool) -> str:
     if judged and j.verdict == TOO_FEW:
         return f"{head} · {TOO_FEW}"
     line = (
-        f"{head} · 규칙 {_ratio(j.accuracy)} · 엔진 {_ratio(j.baseline)} · 차이 {_points(j.lift.value)}"
+        f"{head} · 규칙 {_ratio(j.accuracy)} · 엔진 {_ratio(j.baseline)} · 차이 {points_text(j.lift.value)}"
         f" · 짝 구간 {_span(j.lift)} · 거래일 구간 {_span(j.by_day)}"
     )
     return f"{line} · {j.verdict}" if judged else line
@@ -685,5 +684,5 @@ def climate_line(m: Measured) -> str:
     j = m.against_climate()
     return (
         f"  {_claim(m.claim)}: 짝 {j.lift.n:,} · {j.days}일 · 규칙 {_ratio(j.accuracy)} · 기후 "
-        f"{_ratio(j.baseline)} · 차이 {_points(j.lift.value)} · 거래일 구간 {_span(j.by_day)}"
+        f"{_ratio(j.baseline)} · 차이 {points_text(j.lift.value)} · 거래일 구간 {_span(j.by_day)}"
     )

@@ -567,7 +567,16 @@ def gaps(
     """The time within each day's recording window (of the days a connection was asked for on) that
     no connection was subscribed, and the windows. A connection that has no end kept (the trader was
     stopped hard) counts to when it was last heard from."""
-    total = timedelta()
+    spans, windows = uncovered(connections, calendar)
+    return sum((b - a for a, b in spans), timedelta()), windows
+
+
+def uncovered(
+    connections: Sequence[StoredConnection], calendar: MarketCalendar
+) -> tuple[list[tuple[datetime, datetime]], list[tuple[datetime, datetime]]]:
+    """The spans within each day's recording window (of the days a connection was asked for on) that
+    no connection was subscribed, in order, and the windows (``gaps``)."""
+    spans: list[tuple[datetime, datetime]] = []
     windows = []
     for day in sorted({c.day for c in connections}):
         session = calendar.session(day)
@@ -583,13 +592,14 @@ def gaps(
             a, b = max(c.subscribed_at, start), min(until, end)
             if a < b:
                 covered.append((a, b))
-        seen, at = timedelta(), start
+        at = start
         for a, b in sorted(covered):
-            if b > at:
-                seen += b - max(a, at)
-                at = b
-        total += (end - start) - seen
-    return total, windows
+            if a > at:
+                spans.append((at, a))
+            at = max(at, b)
+        if at < end:
+            spans.append((at, end))
+    return spans, windows
 
 
 ODD = {
@@ -735,21 +745,34 @@ def known_of(settings: Settings) -> Known:
     return Known(accounts, (settings.trader_kis_hts_id or "").strip())
 
 
-async def fill_notice_layout(settings: Settings, now: datetime, *, servers: Servers = MOCK_SERVERS) -> int:
-    """``krx-quant fill-notice-layout``: the records measured and printed (``render``); its exit code
-    (``DONE``, ``PARTIAL``, ``UNREADABLE``)."""
+@dataclass(frozen=True)
+class Gathered:
+    """What a run read: the night, the records measured against their days' orders (``measure``),
+    those orders, and the calendar."""
+
+    night: date
+    layout: Layout
+    orders: Mapping[date, Sequence[Order]]
+    calendar: MarketCalendar
+
+
+async def gather(
+    settings: Settings, now: datetime, title: str, *, servers: Servers = MOCK_SERVERS
+) -> Gathered | str:
+    """The records, the ledger and each recorded day's KIS inquiry, read and measured; or, when the
+    records or the ledger cannot be read, the run's whole output saying so under ``title``."""
     calendar = calendar_store(settings).calendar
     night = report_day(calendar, now)
-    heading = f"{TITLE} · {night}({WEEKDAYS[night.weekday()]}) 밤"
+    heading = f"{title} · {night}({WEEKDAYS[night.weekday()]}) 밤"
     try:
         recorded = read_recorded(settings.state_dir)
     except sqlite3.Error as e:
-        print(f"{heading}\n결과: 기록(state/{DB_NAME})을 읽지 못했다: {e}")
-        return UNREADABLE
+        return f"{heading}\n결과: 기록(state/{DB_NAME})을 읽지 못했다: {e}"
     if recorded is None:
-        print(f"{heading}\n결과: 기록(state/{DB_NAME})이 없다. 다음 거래일 밤에 다시 돈다")
-        return UNREADABLE
-    days = recorded.days
+        return f"{heading}\n결과: 기록(state/{DB_NAME})이 없다. 다음 거래일 밤에 다시 돈다"
+    # A day a connection was asked for on but nothing came (never subscribed) is read too: its orders
+    # are the notices it lost.
+    days = tuple(sorted(set(recorded.days) | {c.day for c in recorded.connections}))
     ledgers: dict[date, dict[str, Ledgered]] = {}
     path = settings.state_dir / TRADER_DB
     try:
@@ -757,8 +780,7 @@ async def fill_notice_layout(settings: Settings, now: datetime, *, servers: Serv
             with _reading(path.resolve().as_uri() + "?mode=ro") as db:
                 ledgers = {d: ledger_of(db, d) for d in days}
     except sqlite3.Error as e:
-        print(f"{heading}\n결과: 장부(state/{TRADER_DB})를 읽지 못했다: {e}")
-        return UNREADABLE
+        return f"{heading}\n결과: 장부(state/{TRADER_DB})를 읽지 못했다: {e}"
     rows: dict[date, list[OrderRow]] = {}
     unread: list[date] = []
     why: str | None = None
@@ -785,5 +807,15 @@ async def fill_notice_layout(settings: Settings, now: datetime, *, servers: Serv
         kis_orders=sum(1 for v in rows.values() for r in v if not r.cancel),
         kis_cancels=sum(1 for v in rows.values() for r in v if r.cancel),
     )
-    print(render(layout, night))
-    return layout.code
+    return Gathered(night, layout, orders, calendar)
+
+
+async def fill_notice_layout(settings: Settings, now: datetime, *, servers: Servers = MOCK_SERVERS) -> int:
+    """``krx-quant fill-notice-layout``: the records measured and printed (``render``); its exit code
+    (``DONE``, ``PARTIAL``, ``UNREADABLE``)."""
+    gathered = await gather(settings, now, TITLE, servers=servers)
+    if isinstance(gathered, str):
+        print(gathered)
+        return UNREADABLE
+    print(render(gathered.layout, gathered.night))
+    return gathered.layout.code

@@ -1,5 +1,0 @@
-usage: krx-quant structure-check [-h] [--days DAYS]
-
-options:
-  -h, --help   show this help message and exit
-  --days DAYS  the latest N trading days with one-minute bars (default: all)

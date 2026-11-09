@@ -53,9 +53,22 @@ def morning(day: date) -> datetime:
     return datetime.combine(day, time(8), KST)
 
 
-async def review_day(db: Path, algorithms: list[FixedAlgorithm], **options: Any) -> Any:
+async def review_day(
+    db: Path,
+    algorithms: list[FixedAlgorithm],
+    target_version: int = 1,  # the four-minute move these reviews were written on (#647)
+    **options: Any,
+) -> Any:
     """Replay DAY past its 15:40 review, with no market events."""
-    return await run(db, [], until=at("15:45:00"), algorithms=algorithms, min_sample=20, **options)
+    return await run(
+        db,
+        [],
+        until=at("15:45:00"),
+        algorithms=algorithms,
+        min_sample=20,
+        target_version=target_version,
+        **options,
+    )
 
 
 async def listed(engine: Any) -> dict[str, Any]:
@@ -286,7 +299,7 @@ async def test_from_its_tenth_day_active_too_few_predictions_on_them_leave_it_ac
     put_simulation(db, "alpha", simulated, FLAT)
     put_days(db, history, {"alpha": FLAT})
 
-    engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA], min_sample=80)
+    engine = await run(db, [], until=at("15:45:00"), algorithms=[ALPHA], min_sample=80, target_version=1)
 
     assert (await listed(engine))["alpha"]["status"]["status"] == "active"
 
@@ -336,6 +349,7 @@ async def test_a_benched_algorithm_recovers_or_after_sixty_days_is_a_retirement_
             algorithms=[ALPHA, BETA],
             min_sample=20,
             notify=outbox,
+            target_version=1,
         )
     assert len(outbox.sent) == 2
 
@@ -387,7 +401,12 @@ async def test_the_stage_shows_the_days_counted_the_next_review_and_the_lift_it_
 
     # At 15:00, before the day's review: the nine days reviewed, and the tenth judged today.
     before = await run(
-        with_history(tmp_path / "before.db"), [], until=at("15:00:00"), algorithms=[ALPHA], min_sample=20
+        with_history(tmp_path / "before.db"),
+        [],
+        until=at("15:00:00"),
+        algorithms=[ALPHA],
+        min_sample=20,
+        target_version=1,
     )
     stage = (await listed(before))["alpha"]["stage"]
     weakest = stage.pop("weakest")
@@ -485,7 +504,15 @@ async def test_a_review_missed_while_the_engine_was_down_runs_when_it_starts(tmp
         )
 
     # Down from before DAY's close until 16:00.
-    engine = await run(db, [], start=at("16:00:00"), until=at("16:01:00"), algorithms=[ALPHA], min_sample=20)
+    engine = await run(
+        db,
+        [],
+        start=at("16:00:00"),
+        until=at("16:01:00"),
+        algorithms=[ALPHA],
+        min_sample=20,
+        target_version=1,
+    )
 
     alpha = (await listed(engine))["alpha"]
     assert last_change(alpha)[:2] == ("probation", "active")
@@ -562,8 +589,12 @@ async def test_the_switch_restarts_every_algorithm_not_retired_on_probation_once
     since = weekdays_before(DAY, 30)[0]
     old_engine_db(db, {"alpha": "active", "beta": "bench", "gamma": "retired", "delta": "clone"}, since)
 
-    deployed = await run(db, [], start=at("06:00:00"), until=at("06:01:00"), algorithms=[ALPHA, BETA, DELTA])
-    again = await run(db, [], start=at("06:30:00"), until=at("06:31:00"), algorithms=[ALPHA, BETA, DELTA])
+    deployed = await run(
+        db, [], start=at("06:00:00"), until=at("06:01:00"), algorithms=[ALPHA, BETA, DELTA], target_version=1
+    )
+    again = await run(
+        db, [], start=at("06:30:00"), until=at("06:31:00"), algorithms=[ALPHA, BETA, DELTA], target_version=1
+    )
 
     statuses = await listed(again)
     for name, before in (("alpha", "active"), ("beta", "bench"), ("delta", "clone")):
@@ -591,7 +622,14 @@ async def test_probation_counts_from_the_trading_day_the_swap_installed_a_model_
     old_engine_db(db, {"alpha": "active"}, weekdays_before(deploy, 20)[0])
     put_days(db, weekdays_before(deploy, 15), {"alpha": RIGHT}, model=OLD_MODEL, target_version=1)
     calendar = MarketCalendar(dict.fromkeys([deploy, DAY], True))
-    await run(db, [], start=at("06:00:00", deploy), until=at("06:01:00", deploy), calendar=calendar)
+    await run(
+        db,
+        [],
+        start=at("06:00:00", deploy),
+        until=at("06:01:00", deploy),
+        calendar=calendar,
+        target_version=1,
+    )
     put_days(db, days[:1], {"alpha": RIGHT}, model=OLD_MODEL, target_version=1)  # D0: the old model
     put_days(db, days[1:], {"alpha": RIGHT}, model=NEW_MODEL)  # from D1: the touch target's
 
@@ -621,6 +659,7 @@ async def test_an_algorithm_waits_until_the_swap_runs_a_model_of_the_target(tmp_
         algorithms=[ALPHA, BETA],
         kind_algorithms=(),
         models=old,
+        target_version=1,
     )
     waiting = await listed(deploy_day)
     assert {name: (a["stage"]["counted_from"], a["stage"]["days"]) for name, a in waiting.items()} == {
@@ -638,6 +677,7 @@ async def test_an_algorithm_waits_until_the_swap_runs_a_model_of_the_target(tmp_
         algorithms=[ALPHA, BETA],
         kind_algorithms=(),
         models=old,
+        target_version=1,
     )
     assert engine.switch_models(
         {"alpha": Model("alpha-new", {}, target_version=TARGET_VERSION)}
@@ -676,8 +716,12 @@ async def test_version_3_restarts_every_direction_algorithm_not_retired_once(tmp
     since = weekdays_before(DAY, 30)[0]
     version_2_engine_db(db, {"alpha": "active", "beta": "bench", "gamma": "retired", "delta": "clone"}, since)
 
-    deployed = await run(db, [], start=at("06:00:00"), until=at("06:01:00"), algorithms=[ALPHA, BETA, DELTA])
-    again = await run(db, [], start=at("06:30:00"), until=at("06:31:00"), algorithms=[ALPHA, BETA, DELTA])
+    deployed = await run(
+        db, [], start=at("06:00:00"), until=at("06:01:00"), algorithms=[ALPHA, BETA, DELTA], target_version=1
+    )
+    again = await run(
+        db, [], start=at("06:30:00"), until=at("06:31:00"), algorithms=[ALPHA, BETA, DELTA], target_version=1
+    )
 
     statuses = await listed(again)
     for name, before in (("alpha", "active"), ("beta", "bench"), ("delta", "clone")):
@@ -704,7 +748,14 @@ async def test_after_version_3_probation_counts_from_the_swap_of_a_model_of_it_n
     version_2_engine_db(db, {"alpha": "active"}, weekdays_before(deploy, 20)[0])
     put_days(db, weekdays_before(deploy, 15), {"alpha": RIGHT}, model="v2-model", target_version=2)
     calendar = MarketCalendar(dict.fromkeys([deploy, DAY], True))
-    await run(db, [], start=at("06:00:00", deploy), until=at("06:01:00", deploy), calendar=calendar)
+    await run(
+        db,
+        [],
+        start=at("06:00:00", deploy),
+        until=at("06:01:00", deploy),
+        calendar=calendar,
+        target_version=1,
+    )
     put_days(db, days[:1], {"alpha": RIGHT}, model="v2-model", target_version=2)  # D0: version 2's
     put_days(db, days[1:], {"alpha": RIGHT}, model=NEW_MODEL)  # from D1: version 3's
 

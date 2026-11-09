@@ -33,6 +33,9 @@ from krx_quant.archive import MERGED, PRUNED, RAW, RawMissing, pruned_mark
 from krx_quant.object_store import ObjectStore, file_digest
 
 DAYS = 2  # days whose copies are kept at once: a night is read from two days' partitions
+# The collector's raw partitions of WebSocket frames that are not a feed's data (``collector.py``):
+# KIS's control frames (PINGPONG, the replies to registrations) and the frames it could not parse.
+SYSTEM, UNPARSED = "_system", "_unparsed"
 
 
 class RawDays:

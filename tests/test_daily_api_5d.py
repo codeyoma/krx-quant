@@ -25,6 +25,7 @@ from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
+from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import check
 from tests.daily_doubles import SYMBOLS, made_history
 
@@ -52,6 +53,7 @@ def engine(tmp_path: Path, kinds: Sequence[DailyKind] = DAILY_KINDS) -> tuple[Pr
         kind_algorithms=(),
         daily=StoredDays(tmp_path / "data"),
         daily_kinds=kinds,
+        target_version=TARGET_VERSION,
     )
     return e, clock
 

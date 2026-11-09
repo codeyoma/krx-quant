@@ -32,6 +32,7 @@ FIRST = (
     "inverse-replay-606",
     "signal-review-206-1201",
     "probe-live-account-408",
+    "fill-notice-columns-648",
     "error-holdout-447",
     "climate-gate-449",
     "nightly-hit-rates-437",
@@ -91,7 +92,9 @@ RETIRED = {
 }
 # The commands removed with their modules once their questions were settled: the probes (#563, #644)
 # and the concluded experiments (#559, #529, #644). The user decided both on 2026-11-05, over #505's "the
-# commands stay". ``probe-candles`` ran by hand only (#111).
+# commands stay". ``probe-candles`` ran by hand only (#111). The research commands #505 kept for a run
+# by hand (#658): their issues all closed and none ran by hand in the 14 days before 2026-11-09; the
+# user decided on 2026-11-09.
 REMOVED = (
     "probe-candles",
     "probe-close",
@@ -107,8 +110,16 @@ REMOVED = (
     "probe-inverse-book",
     "probe-market-halt",
     "sample-profile",
+    "diagnose",
+    "daily-check",
+    "structure-check",
+    "error-breakdown",
+    "climate-prior",
+    "check-closing-flow",
+    "check-krx-net-assets",
 )
-# The concluded experiments' and probes' modules, removed with their commands (#559, #529, #644).
+# The concluded experiments', probes' and research commands' modules, removed with their commands
+# (#559, #529, #644, #658).
 REMOVED_MODULES = (
     "krx_quant.trader.passive",
     "krx_quant.cost_map_audit",
@@ -118,6 +129,12 @@ REMOVED_MODULES = (
     "krx_quant.inverse_book_probe",
     "krx_quant.market_halt_probe",
     "krx_quant.sample_profile",
+    "krx_quant.diagnose",
+    "krx_quant.daily_check",
+    "krx_quant.structure_check",
+    "krx_quant.error_breakdown",
+    "krx_quant.climate_prior",
+    "krx_quant.closing_flow_check",
 )
 
 
@@ -176,5 +193,5 @@ def test_the_removed_probes_are_no_command_and_no_job_runs_one() -> None:
 
 
 def test_the_concluded_experiments_modules_are_gone() -> None:
-    """#559, #529, #644: removed with their commands (``REMOVED``), nothing is left to import."""
+    """#559, #529, #644, #658: removed with their commands (``REMOVED``), nothing is left to import."""
     assert [m for m in REMOVED_MODULES if importlib.util.find_spec(m) is not None] == []
