@@ -770,7 +770,9 @@ async def gather(
         return f"{heading}\n결과: 기록(state/{DB_NAME})을 읽지 못했다: {e}"
     if recorded is None:
         return f"{heading}\n결과: 기록(state/{DB_NAME})이 없다. 다음 거래일 밤에 다시 돈다"
-    days = recorded.days
+    # A day a connection was asked for on but nothing came (never subscribed) is read too: its orders
+    # are the notices it lost.
+    days = tuple(sorted(set(recorded.days) | {c.day for c in recorded.connections}))
     ledgers: dict[date, dict[str, Ledgered]] = {}
     path = settings.state_dir / TRADER_DB
     try:

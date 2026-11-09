@@ -31,7 +31,12 @@ WebSocket ended``) matters to the decision only if such orders lost their notice
 
 **The output** holds counts, column numbers, dates and spans of time: no value, order number,
 account, HTS ID or price (it goes on the public issue #648). Its exit code: ``DONE`` (0) once
-measured, ``UNREADABLE`` (4) when the records, the ledger or a day's inquiry could not be read.
+measured; ``PARTIAL`` (3) when fewer than ``APART`` of the orders the ledger counts had a record of
+the mock server's width joined to them (the job's condition counts the ledger's alone), and the job
+runs again the next trading night; ``UNREADABLE`` (4) when the records, the ledger or a day's
+inquiry could not be read. The orders are read for every day the recorder kept a record or asked
+for a connection on (``notice_layout.gather``), so a day it never got subscribed counts its orders
+as missing their notice.
 """
 
 from __future__ import annotations
@@ -71,7 +76,7 @@ from krx_quant.trader.store import DB_NAME as TRADER_DB
 log = logging.getLogger(__name__)
 
 TITLE = "체결 통보 칸 10과 17 가르기 (#648)"
-DONE = 0
+DONE, PARTIAL = 0, 3
 # The orders telling the two columns apart the job waits for: 20 make one order that goes against a
 # reading 5% of them, and each brings two records or more (its acceptance and its fills), so a
 # column that matches all 20 is no chance. A champion trading by its loss budget (several shares an
@@ -275,7 +280,7 @@ def render(gathered: Gathered) -> str:
     rec = layout.recorded
     told = told_orders(layout)
     n = counts_of(told)
-    days = rec.days
+    days = sorted(gathered.orders)
     lines = [f"{TITLE} · {night}({WEEKDAYS[night.weekday()]}) 밤", ""]
     lines.append(f"1. 기록(state/{DB_NAME}) · 주문(state/{TRADER_DB}, mock · KIS 주문 체결 조회)")
     lines.append(f"  - 거래일 {len(days)}일" + (f": {_span_of(days)}" if days else ""))
@@ -358,4 +363,6 @@ async def fill_notice_columns(settings: Settings, now: datetime, *, servers: Ser
         print(gathered)
         return UNREADABLE
     print(render(gathered))
-    return UNREADABLE if gathered.layout.unread else DONE
+    if gathered.layout.unread:
+        return UNREADABLE
+    return PARTIAL if verdict(told_orders(gathered.layout)) == TOO_FEW else DONE

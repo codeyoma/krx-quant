@@ -15,7 +15,7 @@ from datetime import timedelta
 
 from krx_quant.process_log import Ran
 from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, Night, Target
-from krx_quant.trader.notice_columns import APART
+from krx_quant.trader.notice_columns import APART, PARTIAL
 from krx_quant.trader.report import PRACTICE_HEADING, PRACTICE_TRADES, calls_agent
 
 # The trader's night (#399, #400, #402, #393 "정책과 자기 개선", "리포트와 에이전트"): every trading
@@ -118,7 +118,9 @@ TRADER_REPORT = Job(
 # recorded days (``Facts.fill_notice_apart``, the ledger's count), ``fill-notice-columns`` measures
 # each column against them (read-only: the records, the ledger, each day's KIS inquiry with the
 # trader's key) and counts the orders whose notice was lost while the recorder was disconnected. It
-# runs once: a run that could not read (4), failed or was cut runs again the next trading night. The
+# runs once: a run with fewer than 20 of those orders joined to a notice record (3: the condition
+# counts the ledger's), one that could not read (4), failed or was cut runs again the next trading
+# night, and 3 posts without a label. The
 # user then decides whether the recorder stays. Its output holds counts, column numbers, dates and
 # times: no value, order number, account, HTS ID or price.
 FILL_NOTICE_COLUMNS_ISSUE = 648
@@ -135,11 +137,17 @@ def _once_enough_orders_tell_the_columns_apart(night: Night) -> bool:
     return record.outcome != OK and record.day < night.day
 
 
+def fill_notice_columns_calls(ran: Ran) -> bool:
+    """Whether a run calls an agent: but too few orders joined to a notice (3), each one does."""
+    return ran.exit_code != PARTIAL or ran.timed_out
+
+
 FILL_NOTICE_COLUMNS = Job(
     name="fill-notice-columns-648",
     due=_once_enough_orders_tell_the_columns_apart,
     command=("fill-notice-columns",),
     timeout=timedelta(minutes=10),
+    label_if=fill_notice_columns_calls,
     targets=(
         Target(
             FILL_NOTICE_COLUMNS_ISSUE,
@@ -150,7 +158,9 @@ FILL_NOTICE_COLUMNS = Job(
                 "그 주문의 주문 수량과 같은 레코드 수와 체결 레코드의 합이 체결 수량과 같은 주문 수를 "
                 "센다. 판정은 예제대로(칸 10 체결 수량, 칸 17 주문 수량), 반대, 어느 쪽도 아님, 가려지지 "
                 "않음이다. 끊긴 동안 통보가 빠진 주문 수도 센다. 에이전트는 이 수로 사용자에게 기록기를 "
-                "지울지, 매시간 끊김 WARNING을 INFO로 낮출지 묻는다. 다시 돌리기(읽기만): "
+                "지울지, 매시간 끊김 WARNING을 INFO로 낮출지 묻는다. 종료 코드 3은 통보 레코드가 묶인 그런 "
+                "주문이 20건에 못 미쳤다는 뜻이고, 라벨 없이 올리고 다음 거래일 밤에 다시 돈다. "
+                "다시 돌리기(읽기만): "
                 "`docker compose run --rm engine fill-notice-columns`. 출력에는 값, 주문번호, 계좌번호, "
                 "HTS ID, 가격이 없다(개수, 칸 번호, 날짜, 시간만)."
             ),

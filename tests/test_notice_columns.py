@@ -9,7 +9,9 @@ Every value is made up.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Sequence
+from contextlib import closing
 from datetime import date
 from pathlib import Path
 
@@ -17,15 +19,17 @@ import pytest
 
 from krx_quant.fake_kis import FakeAccount, FakeKis
 from krx_quant.kis_orders import MOCK_FILL_NOTICE_COLUMNS, SIDE_BUY, SIDE_SELL, Servers
+from krx_quant.process_log import Ran
 from krx_quant.scheduled import FILL_NOTICE_COLUMNS, JOBS, OK, Facts, JobRecord, Night
 from krx_quant.trader import notice_columns
-from krx_quant.trader.fill_notices import TR_ID, Recorded, StoredConnection, StoredRecord
+from krx_quant.trader.fill_notices import DB_NAME, TR_ID, Recorded, StoredConnection, StoredRecord
 from krx_quant.trader.notice_columns import (
     APART,
     DONE,
     EXAMPLE,
     NEITHER,
     NOT_APART,
+    PARTIAL,
     REVERSED,
     TOO_FEW,
     apart_orders,
@@ -251,6 +255,12 @@ def test_the_job_waits_for_enough_orders_and_runs_once() -> None:
     failed = JobRecord(thursday, "failed", at("22:30:00"), "c0ffee", 4, 30.0)
     assert not due(night(Facts(fill_notice_apart=APART), failed, thursday))
     assert due(night(Facts(fill_notice_apart=APART), failed, date(2026, 11, 20)))
+    # Too few orders joined to a notice (3): again the next trading night, posted without a label.
+    too_few = JobRecord(thursday, "failed", at("22:30:00"), "c0ffee", PARTIAL, 30.0)
+    assert due(night(Facts(fill_notice_apart=APART), too_few, date(2026, 11, 20)))
+    label = FILL_NOTICE_COLUMNS.label_if
+    assert label is not None
+    assert not label(Ran(PARTIAL, "", "")) and label(Ran(DONE, "", "")) and label(Ran(4, "", ""))
 
 
 # The run, on what the recorder kept while the mock book traded
@@ -277,9 +287,8 @@ async def test_a_partly_filled_take_profit_tells_the_columns_and_no_value_is_sho
     assert apart_orders(tmp_path) == 3
     monkeypatch.setattr(notice_columns, "APART", 3)
 
-    code = await fill_notice_columns(
-        night_settings(fake, tmp_path), NIGHT, servers=Servers(fake.rest_url, fake.ws_url)
-    )
+    settings, servers = night_settings(fake, tmp_path), Servers(fake.rest_url, fake.ws_url)
+    code = await fill_notice_columns(settings, NIGHT, servers=servers)
     text = capsys.readouterr().out
 
     assert code == DONE, text
@@ -296,6 +305,21 @@ async def test_a_partly_filled_take_profit_tells_the_columns_and_no_value_is_sho
     for o in account.orders:
         if o.price:  # a cancel's is 0
             assert str(o.price) not in text and f"{o.price:,}" not in text
+
+    # The ledger counts the orders, but fewer are joined to a notice than the job waits for: 3, and
+    # the job runs again.
+    monkeypatch.setattr(notice_columns, "APART", 4)
+    assert await fill_notice_columns(settings, NIGHT, servers=servers) == PARTIAL
+    assert "판정: 가르기에 모자란다" in capsys.readouterr().out
+
+    # A day the recorder asked for connections on but kept no record of: its orders are read, and
+    # each counts as missing its notice.
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db, db:
+        db.execute("DELETE FROM records")
+    assert await fill_notice_columns(settings, NIGHT, servers=servers) == PARTIAL
+    text = capsys.readouterr().out
+    assert "  - 거래일 1일: 2026-10-14\n" in text
+    assert "그날들의 주문 4건(취소 포함) 중 묶인 레코드가 없는 것 4건" in text
 
 
 def test_without_the_files_no_order_is_counted(tmp_path: Path) -> None:
