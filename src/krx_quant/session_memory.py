@@ -11,8 +11,9 @@ session's first events; ``held`` counts what the view keeps, for the line the en
 (``garbage.Garbage.rest``).
 
 This lives apart from ``market_view.py`` and reaches into the view's logs from outside, because
-that module, ``kinds.py`` and ``reference.py`` are in the key of every day's stored samples whole
-(``sample_store._WHOLE``): a change to their code has the night make every day again, hours of it.
+when it was written that module, ``kinds.py`` and ``reference.py`` were in the key of every day's
+stored samples whole: a change to their code had the night make every day again, hours of it. Since
+#645 the key holds what the samples mean, not the code, and moving this into the view is #654.
 Nothing here changes what a sample or a prediction is made of (``tests/test_session_memory.py``:
 two days through an engine that lets go and one that does not read and store the same). A change
 to how those logs keep their entries is a change here too.

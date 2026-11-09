@@ -472,9 +472,9 @@ async def test_a_restored_copy_is_the_file_recorded(tmp_path: Path) -> None:
 # --- one guard for listing a partition's files ------------------------------------------------------
 
 # The callers of ``archive.partition_files`` besides the guard (``guarded_files``) and the prune, which
-# lists under the archive's own lock: each reads a layer the archive never prunes, and its code is in the
-# sample store's key (``sample_store._WHOLE``, ``_PARTS``), so routing it through the guard would make
-# every stored training day again on the next night.
+# lists under the archive's own lock: each reads a layer the archive never prunes, and its code is the
+# sample store's to review (``sample_store._WHOLE``, ``_PARTS``): until #645 it was in the key, and
+# routing it through the guard would have made every stored training day again on the next night.
 UNGUARDED = {
     ("replay", "recorded_partitions"): "events",
     ("macro", "_read_partition"): "macro",
