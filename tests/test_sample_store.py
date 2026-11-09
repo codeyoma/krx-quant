@@ -14,6 +14,7 @@ import gzip
 import importlib
 import inspect
 import json
+import math
 import shutil
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -36,14 +37,23 @@ from krx_quant.barriers import barrier_width_rule
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, USD, days_to_expiry
 from krx_quant.engine import Event
-from krx_quant.features import FEATURES, LEAD_FEATURES, LEADER_FEATURES, Leaders, Snapshot
+from krx_quant.features import (
+    FEATURES,
+    LEAD_FEATURES,
+    LEADER_FEATURES,
+    FeatureVector,
+    Leaders,
+    Snapshot,
+    TouchTerms,
+)
 from krx_quant.feeds import FOREIGN_ESTIMATE, NXT_TRADE, USD_FUTURES
 from krx_quant.kind_registry import KINDS, kind_named
-from krx_quant.kinds import DIRECTION_KIND, Kind
+from krx_quant.kinds import DIRECTION_KIND, Answer, Kind
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.nightly import train_night
 from krx_quant.object_store import LocalObjectStore
 from krx_quant.prevalidation import _WalkForward, prevalidate
+from krx_quant.pricing import Direction
 from krx_quant.reference import Bar
 from krx_quant.sample_store import (
     CALENDAR_REACH,
@@ -402,10 +412,12 @@ def rewrite_close(path: Path) -> None:
         "a previous day's bars changed",
         "a previous day's bars appearing",
         "a recorded part appearing",
-        "the code",
+        "the samples' meaning",
+        "the golden samples",
+        "a NumPy version",
     ],
 )
-def test_the_files_and_the_code_the_samples_are_made_of_change_their_key(
+def test_the_files_and_what_the_samples_mean_change_their_key(
     store_root: Path, change: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     before = bars_key(DAYS[-2], "FHKST03010230", "005930")
@@ -422,9 +434,27 @@ def test_the_files_and_the_code_the_samples_are_made_of_change_their_key(
     elif change == "a recorded part appearing":
         partition = store_root / "events" / f"date={NIGHT}" / "feed=H0UNCNT0" / "symbol=005930"
         shutil.copy(partition / "data.parquet", partition / "part-99999999.parquet")
+    elif change == "the samples' meaning":
+        monkeypatch.setattr(sample_store, "SAMPLE_SEMANTICS", sample_store.SAMPLE_SEMANTICS + 1)
+    elif change == "the golden samples":
+        monkeypatch.setattr(sample_store, "GOLDEN", "another")
     else:
-        monkeypatch.setattr(sample_store, "code_digest", lambda: "another")
+        monkeypatch.setattr("numpy.__version__", "0.0.0")
     assert key_of(store_root) != original
+
+
+def test_a_change_to_the_code_alone_leaves_the_key(
+    market: Path, store_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The code's digest is not in the key (#645): a refactor of a feature (the same values by other
+    code) leaves the key and the day's samples as they were."""
+    original, samples = key_of(store_root), made(market, NIGHT)
+    velocity = features_module.FEATURES["velocity"]
+    monkeypatch.setitem(features_module.FEATURES, "velocity", lambda s: velocity(s))
+    monkeypatch.setattr(sample_store, "code_digest", lambda: "another")
+
+    assert key_of(store_root) == original
+    assert fingerprint(made(market, NIGHT)) == fingerprint(samples)
 
 
 @pytest.mark.parametrize(
@@ -464,6 +494,206 @@ def test_a_docstring_or_a_comment_leaves_the_code_digest() -> None:
         'def f(x):\n    """Doubles."""\n    return 2 * x\n'
     )
     assert sample_store._normalized(code) != sample_store._normalized("def f(x):\n    return 3 * x\n")
+
+
+# --- what the samples mean: the golden days and the review gate (#645) -----------------------
+
+
+@pytest.fixture(scope="module")
+def golden(market: Path) -> list[tuple[TrainingDay, tuple[str, ...]]]:
+    """The fixed days ``sample_store.GOLDEN`` is the digest of, with every feature and kind the
+    night reads: a recorded day (every feed, a VI) with the touch target and with the four-minute
+    move, and a backfilled day."""
+    names = NIGHT_READS.names
+    return [
+        (made(market, NIGHT), names),
+        (made(market, NIGHT, target_version=1), names),
+        (made(market, DAYS[2]), names),
+    ]
+
+
+# Making the three days takes some seconds more than the 30 s default on a loaded runner.
+@pytest.mark.timeout(120)
+def test_the_fixed_days_make_the_golden_samples(golden: list[tuple[TrainingDay, tuple[str, ...]]]) -> None:
+    """What stands in the key for the code (#645): the same days make the same samples, bit for bit.
+    On Linux, as the server and CI make them: a Mac's C maths library gives a few logarithms and
+    exponentials another last bit (``kospi200f_moves``, ``reversion_speed``, ``session_sigma``), so
+    its digest is another (Linux on arm64 and on x86-64 agree)."""
+    if sys.platform != "linux":
+        pytest.skip(
+            "GOLDEN is Linux's samples (the server's, CI's); this platform's maths differ in the last bit"
+        )
+    found = sample_store.golden_digest(golden)
+    assert found == sample_store.GOLDEN, (
+        f"the fixed days' samples changed (golden digest {found}): the stored days no longer match "
+        "what the code makes. Set sample_store.GOLDEN to it (every day is made again on the next "
+        "night) and say in the PR why the samples changed; if only a dependency's version did, the key "
+        "already changes with it."
+    )
+    assert all(found.samples and found.answers for found, _ in golden)
+    assert golden[0][0].left_out["vi"] > 0 and golden[2][0].reference == "close"
+
+
+def _first_float(found: TrainingDay) -> tuple[int, str]:
+    for i, s in enumerate(found.samples):
+        for n, v in s.features.as_dict().items():
+            if isinstance(v, float) and math.isfinite(v) and v != 0:
+                return i, n
+    raise AssertionError("no float feature")
+
+
+def _first_series(found: TrainingDay) -> tuple[int, str]:
+    for i, s in enumerate(found.samples):
+        for n, v in s.features.as_dict().items():
+            if isinstance(v, tuple) and v and isinstance(v[0], float):
+                return i, n
+    raise AssertionError("no series feature")
+
+
+def _feature(found: TrainingDay, at: tuple[int, str], value: Any) -> TrainingDay:
+    i, name = at
+    s = found.samples[i]
+    vector = FeatureVector({**s.features.as_dict(), name: value}, list(s.features), s.features.touch)
+    samples = [*found.samples[:i], dataclasses.replace(s, features=vector), *found.samples[i + 1 :]]
+    return dataclasses.replace(found, samples=samples)
+
+
+def _nudged(found: TrainingDay, at: tuple[int, str], change: Callable[[Any], Any]) -> TrainingDay:
+    return _feature(found, at, change(found.samples[at[0]].features.as_dict()[at[1]]))
+
+
+def _sample(found: TrainingDay, i: int, **change: Any) -> TrainingDay:
+    samples = list(found.samples)
+    samples[i] = dataclasses.replace(samples[i], **change)
+    return dataclasses.replace(found, samples=samples)
+
+
+def _answer(found: TrainingDay, change: Callable[[Answer], Answer | None]) -> TrainingDay:
+    answers = dict(found.answers)
+    at = next(k for k, a in answers.items() if a is not None and a.label is not None and a.path)
+    answers[at] = change(answers[at])  # type: ignore[arg-type]
+    return dataclasses.replace(found, answers=answers)
+
+
+def _swap_answers(found: TrainingDay) -> TrainingDay:
+    items = list(found.answers.items())
+    i = next(i for i in range(len(items) - 1) if items[i][1] != items[i + 1][1])
+    items[i], items[i + 1] = items[i + 1], items[i]
+    return dataclasses.replace(found, answers=dict(items))
+
+
+def _swap_samples(found: TrainingDay) -> TrainingDay:
+    samples = list(found.samples)
+    samples[0], samples[1] = samples[1], samples[0]
+    return dataclasses.replace(found, samples=samples)
+
+
+def _ulp(value: float) -> float:
+    return math.nextafter(value, math.inf)
+
+
+def _other_label(answer: Answer, labels: Sequence[str]) -> Answer:
+    return dataclasses.replace(answer, label=next(c for c in labels if c != answer.label))
+
+
+def _path_value(answer: Answer) -> Answer:
+    key, value = next(
+        (k, v) for k, v in answer.path.items() if isinstance(v, (int, float)) and not isinstance(v, bool)
+    )
+    return dataclasses.replace(answer, path={**answer.path, key: value + 1})
+
+
+def _touch(found: TrainingDay) -> TrainingDay:
+    i = next(i for i, s in enumerate(found.samples) if s.features.touch is not None)
+    s = found.samples[i]
+    assert s.features.touch is not None
+    touch = TouchTerms(_ulp(s.features.touch.half_spread))
+    return _sample(found, i, features=FeatureVector(s.features, list(s.features), touch))
+
+
+def _outcome(found: TrainingDay) -> TrainingDay:
+    i = next(i for i, s in enumerate(found.samples) if s.outcome is not None)
+    other = next(d for d in Direction if d != found.samples[i].outcome)
+    return _sample(found, i, outcome=other)
+
+
+def _change_ticks(found: TrainingDay) -> TrainingDay:
+    i = next(i for i, s in enumerate(found.samples) if s.change_ticks is not None)
+    return _sample(found, i, change_ticks=_ulp(float(found.samples[i].change_ticks or 0.0)))
+
+
+def _labels() -> list[str]:
+    return sorted({c for k in NIGHT_READS.kinds for c in k.classes})
+
+
+# Each a change of one thing a day's samples hold (``golden_digest``); the day it is made to and the
+# features' order (None: as made).
+MUTATIONS: dict[str, tuple[int, Callable[[TrainingDay], TrainingDay], bool]] = {
+    "a feature value by one ulp": (0, lambda f: _nudged(f, _first_float(f), lambda v: _ulp(v)), False),
+    "a feature value lost": (0, lambda f: _feature(f, _first_float(f), None), False),
+    "a series value by one ulp": (
+        0,
+        lambda f: _nudged(f, _first_series(f), lambda v: (_ulp(v[0]), *v[1:])),
+        False,
+    ),
+    "the features' order": (0, lambda f: f, True),
+    "two samples' order": (0, _swap_samples, False),
+    "a sample fewer": (0, lambda f: dataclasses.replace(f, samples=f.samples[1:]), False),
+    "a sample's label": (0, _outcome, False),
+    "a backfilled sample's label": (2, _outcome, False),
+    "a four-minute sample's label": (1, _outcome, False),
+    "a sample's move": (0, _change_ticks, False),
+    "a sample's bar close": (
+        0,
+        lambda f: _sample(f, 0, bar_close=f.samples[0].bar_close + timedelta(microseconds=1)),
+        False,
+    ),
+    "a sample's symbol": (0, lambda f: _sample(f, 0, symbol="000660"), False),
+    "a sample's reference": (0, lambda f: _sample(f, 0, reference="close"), False),
+    "the touch terms by one ulp": (0, _touch, False),
+    "a kind's answer": (0, lambda f: _answer(f, lambda a: _other_label(a, _labels())), False),
+    "a kind's answer unscorable": (
+        0,
+        lambda f: _answer(f, lambda a: dataclasses.replace(a, label=None, unscorable="why")),
+        False,
+    ),
+    "a kind's answer's path": (0, lambda f: _answer(f, _path_value), False),
+    "a kind's answer missing": (0, lambda f: _answer(f, lambda a: None), False),
+    "two answers' order": (0, _swap_answers, False),
+    "a bar close left out": (
+        0,
+        lambda f: dataclasses.replace(f, left_out={**f.left_out, "vi": f.left_out["vi"] + 1}),
+        False,
+    ),
+    "the day's reference": (2, lambda f: dataclasses.replace(f, reference="mid"), False),
+}
+
+
+@pytest.mark.parametrize("mutation", list(MUTATIONS))
+def test_any_change_to_the_samples_fails_the_golden_test(
+    golden: list[tuple[TrainingDay, tuple[str, ...]]], mutation: str
+) -> None:
+    """The golden digest is strong enough: one feature value off by an ulp, a label, a kind's answer,
+    any order changed, and it is another."""
+    day, mutate, reorder = MUTATIONS[mutation]
+    found, names = golden[day]
+    changed = list(golden)
+    changed[day] = (mutate(found), tuple(reversed(names)) if reorder else names)
+
+    assert sample_store.golden_digest(changed) != sample_store.golden_digest(golden)
+
+
+def test_the_code_that_makes_samples_is_as_last_reviewed() -> None:
+    """The review gate (#645): the golden days cannot take every branch (a special situation they do
+    not hold, a feed's rare message), so a change to the code that makes samples stops here until its
+    author says what it does to them."""
+    found = sample_store.code_digest()
+    assert found == sample_store.REVIEWED_CODE, (
+        f"the code that makes samples changed (code digest {found}). If the change cannot change a "
+        "sample on any day (a refactor, a rename, a log line), set sample_store.REVIEWED_CODE to it and "
+        "say why in the PR. If it can, or that is not certain, also raise sample_store.SAMPLE_SEMANTICS "
+        "(every day is made again on the next night)."
+    )
 
 
 # --- what the key holds: the guards ----------------------------------------------------------

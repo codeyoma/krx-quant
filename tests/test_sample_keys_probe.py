@@ -237,7 +237,7 @@ def test_the_next_run_names_what_changed_in_a_key_since_the_last(server: Server)
     (line,) = [line for line in changes.splitlines() if merged in line]
     was = dict(kept["days"]["2026-11-06"]["parts"]["inputs"])[merged]
     assert line == f"      {merged} · {was[:12]} → {dict(new.parts['inputs'])[merged][:12]}"
-    kept_parts = "calendar, code, day, fee_rate, format, kinds, leaders, names, symbols, target_version"
+    kept_parts = "calendar, day, fee_rate, format, kinds, leaders, names, semantics, symbols, target_version"
     assert f"    그대로인 부분: {kept_parts}" in changes
     assert "  키가 그대로인 날 1개" in changes and "  새 날 1개: 2026-11-09" in changes
     assert "  없어진 날 0개" in changes
