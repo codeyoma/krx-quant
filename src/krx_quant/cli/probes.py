@@ -1,7 +1,6 @@
 """The probes' commands (#578): what an outside source's data means (KIS, Toss, the KRX Open API,
 the recordings), measured before the engine uses it (CODING_STANDARDS.md "External data is probed
-before it is used"), and the checks of what the closing flow kept. The trader's probes are the
-trader's (``cli.trader``)."""
+before it is used"). The trader's probes are the trader's (``cli.trader``)."""
 
 from __future__ import annotations
 
@@ -46,20 +45,6 @@ def _probe_gaps() -> int:
     from krx_quant.gaps_probe import probe_gaps
 
     print(probe_gaps(Settings.from_env(require_kis=False), datetime.now(KST)))
-    return 0
-
-
-async def _check_closing_flow() -> int:
-    from krx_quant.closing_flow_check import check_closing_flow
-
-    print(await check_closing_flow(Settings.from_env(), datetime.now(KST)))
-    return 0
-
-
-def _check_krx_net_assets() -> int:
-    from krx_quant.closing_flow_check import check_krx_net_assets
-
-    print(check_krx_net_assets(Settings.from_env(require_kis=False), datetime.now(KST)))
     return 0
 
 
@@ -124,18 +109,6 @@ def add(sub: Commands) -> None:
         help="summarize every recorded day's gaps and the closing auction window's frames, trades and"
         " bars (#344), read-only; prints no market value",
     ).set_defaults(run=lambda args: _probe_gaps())
-    sub.add_parser(
-        "check-closing-flow",
-        help="summarize what the closing flow kept (#305): the net assets by day and when they came,"
-        " the 15:20 rows, the days, and the integrated and KRX one-minute bars' closing auction values"
-        " against the recorded prints (asks KIS for the KRX bars); writes nothing, no market value",
-    ).set_defaults(run=lambda args: asyncio.run(_check_closing_flow()))
-    sub.add_parser(
-        "check-krx-net-assets",
-        help="summarize the ETF net assets kept from the KRX Open API (#305): the days, when they came,"
-        " which day's listed units the net asset total matches, KRX against KIS; reads the state file"
-        " only, prints no value",
-    ).set_defaults(run=lambda args: _check_krx_net_assets())
     sample_keys_cmd = sub.add_parser(
         "probe-sample-keys",
         help="what changed the key of the days the sample store holds since the night stored them (#565):"

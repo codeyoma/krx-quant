@@ -434,31 +434,6 @@ def day_regime(data_dir: Path, day: date, before: datetime) -> str | None:
     return regime
 
 
-@dataclass(frozen=True)
-class Decided:
-    """A day's regime as last decided before a moment, and which indicators that read had."""
-
-    reasons: list[str]
-    valued: set[str]  # the indicators with a value in the same read
-
-
-def decided_before(data_dir: Path, day: date, before: datetime) -> Decided | None:
-    """``day``'s regime as last decided before ``before`` (the open, as ``day_regime``), and
-    the indicators valued in that read; None if none was decided by then."""
-    root = data_dir / MACRO / f"date={day}"
-    decided = [r for r in _rows(root / "feed=regime" / "symbol=market") if r["recorded_at"] < before]
-    if not decided:
-        return None
-    regime = decided[-1]
-    valued = {
-        indicator.name
-        for indicator in INDICATORS
-        for r in _rows(root / "feed=readings" / f"symbol={indicator.name}")
-        if r["recorded_at"] == regime["recorded_at"] and r["value"] is not None
-    }
-    return Decided(json.loads(regime["reasons"]), valued)
-
-
 def reading_before(data_dir: Path, day: date, indicator: str, before: datetime) -> dict[str, Any] | None:
     """``indicator``'s reading in ``day``'s last read recorded before ``before`` (the open,
     as ``day_regime`` takes the regime), or None. A ``krx-quant macro`` run after the open
