@@ -70,7 +70,7 @@ from pathlib import Path
 from typing import Any
 
 from krx_quant.algorithms import ALGORITHMS, KIND_ALGORITHMS
-from krx_quant.baselines import Forecast, baselines_for
+from krx_quant.baselines import TOUCH_BASELINES, Forecast
 from krx_quant.config import Settings
 from krx_quant.consensus import FINAL, NAMES, NO_WEIGHTS, Weights, pool
 from krx_quant.feeds.base import KST, kst_day
@@ -202,7 +202,7 @@ def signal_review(
     )
     sections: list[tuple[str, list[str]]] = [("1. 신호 설정과 엔진이 남긴 신호", _settings(settings, data))]
     if data is not None and data.days:
-        baselines = frozenset(b.name for b in baselines_for(settings.target_version))
+        baselines = frozenset(b.name for b in TOUCH_BASELINES)
         algorithms, base = split(data.scored, baselines)
         for name, standing in data.standings.items():  # registered, not scored yet: unranked
             if name not in _KINDS and standing.status is not Status.RETIRED:
@@ -374,12 +374,10 @@ def _runs(conn: sqlite3.Connection, days: Sequence[date]) -> list[tuple[str, dat
 def _scored(conn: sqlite3.Connection, days: Sequence[date], target_version: int) -> dict[str, list[Scored]]:
     """Each predictor's scored predictions on ``days`` as the leaderboard reads them (special
     ones left out; an algorithm's by models of the engine's target only), a day at a time."""
-    baselines = {b.name for b in baselines_for(target_version)} | set(NAMES)
+    baselines = {b.name for b in TOUCH_BASELINES} | set(NAMES)
     out: dict[str, list[Scored]] = {}
     for day in days:
-        rows = scored_rows(conn, [day], None, False)
-        if target_version >= 2:
-            rows = on_target(rows, baselines, target_version)
+        rows = on_target(scored_rows(conn, [day], None, False), baselines, target_version)
         for name, records in scored_by_algorithm(rows).items():
             out.setdefault(name, []).extend(records)
     return out
@@ -431,7 +429,7 @@ def _members(
     ):
         out.setdefault((r["symbol"], r["bar_close"]), {})[r["algorithm"]] = _Member(
             Forecast(r["p_up"], r["p_flat"], r["p_down"], r["expected_ticks"]),
-            target_version < 2 or r["target_version"] == target_version,
+            r["target_version"] == target_version,
             r["mid_close"],
             bool(r["special"]),
         )

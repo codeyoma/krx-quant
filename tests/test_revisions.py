@@ -235,7 +235,6 @@ async def test_a_gate_that_fails_never_stops_the_engine_nor_changes_a_status(tmp
         algorithms=[ALPHA, BETA],
         kind_algorithms=(),
         revisions=Broken(),
-        target_version=1,
     )
 
     assert {name: history(db, name) for name in ("alpha", "beta")} == before
@@ -279,7 +278,6 @@ async def test_the_probation_counts_the_revision_s_whole_days_only(tmp_path: Pat
         kind_algorithms=(),
         models=ON_TARGET,
         revisions=Gate({"alpha": "a2"}),
-        target_version=1,
     )
 
     alpha = (await listed(engine))["alpha"]
@@ -317,7 +315,6 @@ async def test_the_probation_makes_it_active_only_once_its_pre_validation_passed
         kind_algorithms=(),
         min_sample=20,
         revisions=Gate({"alpha": "a2"}),
-        target_version=1,
     )
     await run(
         db=passed,
@@ -327,7 +324,6 @@ async def test_the_probation_makes_it_active_only_once_its_pre_validation_passed
         kind_algorithms=(),
         min_sample=20,
         revisions=Gate({"alpha": "a2"}, {("alpha", deploy): Verdict(True, "")}),
-        target_version=1,
     )
 
     assert last_change_of(waiting, "alpha") == ("active", "probation", CODE_CHANGED)
@@ -360,7 +356,6 @@ async def test_a_review_day_passed_while_it_waited_makes_it_active_once_its_pre_
             kind_algorithms=(),
             min_sample=20,
             revisions=Gate({"alpha": "a2"}),
-            target_version=1,
         )
     assert last_change_of(db, "alpha") == ("active", "probation", CODE_CHANGED)
     with stored(db) as store:
@@ -418,7 +413,6 @@ async def test_a_pass_alone_makes_nothing_active(tmp_path: Path) -> None:
         algorithms=[ALPHA],
         kind_algorithms=(),
         revisions=Gate({"alpha": "a2"}, {("alpha", deploy): Verdict(True, "")}),
-        target_version=1,
     )
 
     assert last_change_of(db, "alpha") == ("active", "probation", CODE_CHANGED)
@@ -454,7 +448,6 @@ async def test_a_refusal_retires_it_as_soon_as_the_engine_reads_it_told_once(tmp
         kind_algorithms=(),
         revisions=refused,
         notify=notify,
-        target_version=1,
     )
     next_day = DAY + timedelta(days=1)
     await run(
@@ -467,7 +460,6 @@ async def test_a_refusal_retires_it_as_soon_as_the_engine_reads_it_told_once(tmp
         kind_algorithms=(),
         revisions=refused,
         notify=notify,
-        target_version=1,
     )
 
     previous, status, reason = last_change_of(db, "alpha")
@@ -496,7 +488,6 @@ async def test_a_new_algorithm_s_first_revision_is_the_code_it_passed_with(tmp_p
         algorithms=[ALPHA],
         kind_algorithms=(),
         revisions=Gate(),
-        target_version=1,
     )
     with stored(db) as store:
         [first] = store.revision_history("alpha")
@@ -555,7 +546,6 @@ async def test_turing_follows_the_rule_too_its_exemption_ends_with_its_first_rev
         algorithms=algorithms,
         kind_algorithms=(),
         revisions=gate,
-        target_version=TARGET_VERSION,
     )
 
     assert last_change_of(db, "turing") == ("active", "probation", CODE_CHANGED)

@@ -8,8 +8,8 @@ Each predicts one class with certainty. The random one draws from a generator se
 the symbol and bar close, so the same input always gives the same prediction. Each has a
 card like an algorithm's (``cards.Card``), named after no scientist.
 
-With the touch target (``KRX_TARGET_VERSION=3``, #169, the default since #170; 2 before #187,
-``baselines_for``) the last four minutes' direction is the touch label of the window that
+With the touch target (``KRX_TARGET_VERSION=3``, #169, the default since #170 and the only one
+since #659; 2 before #187) the last four minutes' direction is the touch label of the window that
 just ended (none when it could not be scored: the baseline does not predict, status
 ``no_previous``), the random class is drawn in the proportions of the day's touch labels,
 and a fourth baseline calls each symbol and 30-minute slot's most frequent label over the
@@ -26,7 +26,7 @@ from datetime import datetime
 from typing import Protocol
 
 from krx_quant.cards import Card
-from krx_quant.pricing import Direction, classify
+from krx_quant.pricing import Direction
 
 # The status of a baseline's prediction it did not make (#169): the last four minutes' touch
 # label could not be scored (no quotes followed through them, a restart, the first minutes).
@@ -108,39 +108,6 @@ class AlwaysFlat:
 
     def predict(self, inputs: Inputs) -> Forecast:
         return Forecast.certain(Direction.FLAT)
-
-
-class Persistence:
-    """The move of the last four minutes, classified like an outcome, continues."""
-
-    name = "baseline-persist"
-    version = "v1"
-    card = Card(
-        scientist=None,
-        character="기준 예측: 직전 4분 방향",
-        logic=(
-            "직전 4분(t − 4분 → t)의 중간가 변화를 채점과 같은 규칙(보합 범위 k틱)으로 상승·보합·하락으로 "
-            "나누고, 그 방향이 다음 4분에도 이어진다고 본다. 중간가를 모르면 보합이다."
-        ),
-        unique_features=(),
-        training=_NOT_LEARNED,
-        forecasting="그 방향에 확률 1, 나머지 둘에 0을 준다. 기대수익은 직전 4분 변화의 틱 수다.",
-        failure=(
-            "방향이 자주 바뀌는 장과 되돌림(직전 4분의 움직임이 되밀릴 때)에서 틀린다. 추세가 이어지거나 "
-            "조용한 장에서는 맞기 쉽다."
-        ),
-    )
-
-    def predict(self, inputs: Inputs) -> Forecast:
-        if (
-            inputs.mid is None
-            or inputs.mid_before is None
-            or inputs.flat_ticks is None
-            or inputs.tick is None
-        ):
-            return Forecast.certain(Direction.FLAT)
-        change = inputs.mid - inputs.mid_before
-        return Forecast.certain(classify(change, inputs.flat_ticks, inputs.tick), change / inputs.tick)
 
 
 class ClassRatioRandom:
@@ -286,12 +253,10 @@ class Climate:
         return Forecast.certain(inputs.climate or Direction.FLAT)
 
 
-BASELINES: tuple[Baseline, ...] = (AlwaysFlat(), Persistence(), ClassRatioRandom())
-BASELINE_NAMES = frozenset(b.name for b in BASELINES)
-# With the touch target (target version 3, 2 before #187; #169).
+# The baselines, of the touch target (target version 3, 2 before #187; #169). Until #659 the
+# four-minute move (target version 1) had its own (``BASELINES``: always flat, the last four minutes'
+# mid-point move as ``Persistence`` v1, the day's scored classes as ``ClassRatioRandom`` v1, no
+# climate); their stored predictions carry the same names, with version ``v1``.
 TOUCH_BASELINES: tuple[Baseline, ...] = (TouchFlat(), TouchPersistence(), TouchRatioRandom(), Climate())
-
-
-def baselines_for(target_version: int) -> tuple[Baseline, ...]:
-    """The baselines of ``target_version`` (``KRX_TARGET_VERSION``)."""
-    return TOUCH_BASELINES if target_version >= 2 else BASELINES
+# The three baselines every target had, by name: what the statuses' reviews compare with by default.
+BASELINE_NAMES = frozenset(b.name for b in TOUCH_BASELINES if not isinstance(b, Climate))

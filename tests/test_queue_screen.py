@@ -366,21 +366,6 @@ def test_a_barrier_candidate_s_folds_learn_and_score_its_kind_s_answers(tmp_path
     assert result.calls == answered and answered != directions, "its answers, not the touch labels"
 
 
-def test_on_the_four_minute_move_a_direction_candidate_s_score_is_unknown(tmp_path: Path) -> None:
-    """``KRX_TARGET_VERSION=1``: its persistence reads mid-points the samples lack; given none it would
-    be a second always flat, so the screen leaves the score unknown rather than wrong."""
-    s = replace(quiet_settings(tmp_path), target_version=1)
-
-    result = screen(s, "alpha", algorithms=[ALPHA], kind_algorithms=[], kinds=[], now=AFTER)
-
-    assert (result.score, result.calls, result.lifts) == (None, 0, {})
-    assert result.why == queue_screen.TOUCH_ONLY
-    assert Screened.from_dict(result.as_dict()) == result
-
-
-# The order
-
-
 def test_a_score_s_seat_and_an_arrival_s_seat_by_turns_the_bound_first() -> None:
     first_come = ["a", "b", "c", "d", "e"]
     scores = {"a": 0.01, "b": None, "c": 0.05, "d": -0.02, "e": 0.05}

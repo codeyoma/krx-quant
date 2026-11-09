@@ -261,11 +261,12 @@ async def test_a_report_counts_only_for_the_code_that_passed(tmp_path: Path) -> 
         admits=gate,
     )
     assert engine.waiting() == ["contrarian"]
-    path.write_text(json.dumps({"passed": True, "code": "0123456789abcdef"}))  # passed, then the code changed
+    on_target = {"passed": True, "target_version": TARGET_VERSION}
+    path.write_text(json.dumps({**on_target, "code": "0123456789abcdef"}))  # passed, then the code changed
     assert isinstance(engine.clock, FakeClock)
     await replay_into(engine, engine.clock, [], until=at("09:07:00"))
     assert engine.waiting() == ["contrarian"]
-    path.write_text(json.dumps({"passed": True, "code": code_digest(candidate)}))
+    path.write_text(json.dumps({**on_target, "code": code_digest(candidate)}))
     await replay_into(engine, engine.clock, [], until=at("09:08:00"))
     assert engine.waiting() == []
 
@@ -282,7 +283,7 @@ async def test_a_wait_is_told_once_for_the_code_and_target_it_waits_on_across_re
     gate = admits(tmp_path / "state")  # no report: it waits
     days = [date(2026, 9, 28) + timedelta(days=i) for i in range(5)]  # Monday to Friday
 
-    async def start(day: date, target_version: int = 1, down: bool = False) -> list[str]:
+    async def start(day: date, down: bool = False) -> list[str]:
         """An engine started at 07:20 of ``day``: what its review at 15:40 tells of the wait."""
         outbox = Outbox()
         outbox.down = down
@@ -295,7 +296,6 @@ async def test_a_wait_is_told_once_for_the_code_and_target_it_waits_on_across_re
             algorithms=[ALPHA, candidate],
             kind_algorithms=(),
             admits=lambda a: a.name == "alpha" or gate(a),
-            target_version=target_version,
             notify=outbox,
         )
         assert engine.waiting() == ["contrarian"]
@@ -316,14 +316,12 @@ async def test_a_wait_is_told_once_for_the_code_and_target_it_waits_on_across_re
     monkeypatch.setattr(prevalidation, "code_digest", lambda a: "0123456789abcdef")  # a new deploy
     assert await start(days[2] + timedelta(days=7)) == [told], "new code: told again"
     assert await start(days[3] + timedelta(days=7)) == []
-    assert await start(days[4] + timedelta(days=7), target_version=TARGET_VERSION) == [told], "a new target"
 
     store = PredictionStore(tmp_path / "live.db")
     keys = [json.loads(r.detail) for r in store.runs(engine_module.WAITING_RUN, at("00:00:00", days[0]))]
     store.close()
     assert [(k["code"], k["target_version"]) for k in keys] == [
-        (code_digest(candidate), 1),
-        ("0123456789abcdef", 1),
+        (code_digest(candidate), TARGET_VERSION),
         ("0123456789abcdef", TARGET_VERSION),
     ]
 
@@ -345,7 +343,9 @@ async def test_the_engine_logs_each_admission_once(tmp_path: Path, caplog: pytes
         admits=lambda a: a.name == "alpha" or gate(a),
     )
     assert engine.waiting() == ["contrarian"]
-    path.write_text(json.dumps({"passed": True, "code": code_digest(candidate)}))
+    path.write_text(
+        json.dumps({"passed": True, "code": code_digest(candidate), "target_version": TARGET_VERSION})
+    )
     assert isinstance(engine.clock, FakeClock)
     await replay_into(engine, engine.clock, [], until=at("09:09:00"))
     assert engine.waiting() == []
@@ -373,13 +373,11 @@ def test_a_report_counts_only_for_the_target_it_was_scored_on(tmp_path: Path) ->
     path.parent.mkdir(parents=True)
     passed = {"passed": True, "code": code_digest(candidate)}
     path.write_text(json.dumps(passed))  # before #169: the four-minute move
-    assert admits(tmp_path / "state")(candidate)
-    assert not admits(tmp_path / "state", target_version=TARGET_VERSION)(candidate), (
-        "not judged on the touch target"
-    )
+    assert not admits(tmp_path / "state")(candidate), "not judged on the touch target"
+    path.write_text(json.dumps({**passed, "target_version": 2}))  # #170 to #187: crossed quotes dropped
+    assert not admits(tmp_path / "state")(candidate), "not judged on its version 3"
     path.write_text(json.dumps({**passed, "target_version": TARGET_VERSION}))
-    assert admits(tmp_path / "state", target_version=TARGET_VERSION)(candidate)
-    assert not admits(tmp_path / "state")(candidate)
+    assert admits(tmp_path / "state")(candidate)
 
 
 def test_the_scheduled_job_reads_the_latest_report_as_the_engine_does(tmp_path: Path) -> None:
@@ -402,8 +400,9 @@ def test_the_scheduled_job_reads_the_latest_report_as_the_engine_does(tmp_path: 
         "target_version": TARGET_VERSION,
     }
     path.write_text(json.dumps(refused))
-    judged = last_report(state, candidate, target_version=TARGET_VERSION)
+    judged = last_report(state, candidate)
     assert judged == LastReport(made_at=made, current=True, passed=False, days=10) and judged.judged
+    path.write_text(json.dumps({**refused, "target_version": 2}))
     on_another_target = last_report(state, candidate)
     assert on_another_target is not None and not on_another_target.current and not on_another_target.judged
     path.write_text(json.dumps({**refused, "code": "0123456789abcdef"}))
@@ -412,7 +411,8 @@ def test_the_scheduled_job_reads_the_latest_report_as_the_engine_does(tmp_path: 
     path.write_text(json.dumps({**refused, "days": ten[:5]}))
     look = last_report(state, candidate, target_version=TARGET_VERSION)
     assert look is not None and look.current and not look.judged
-    path.write_text(json.dumps({"passed": True, "code": code_digest(candidate)}))  # before #204
+    before_204 = {"passed": True, "code": code_digest(candidate), "target_version": TARGET_VERSION}
+    path.write_text(json.dumps(before_204))
     assert last_report(state, candidate) == LastReport(made_at=None, current=True, passed=True, days=0)
 
 
@@ -442,7 +442,8 @@ def test_a_refusal_is_of_a_report_that_judged_the_code_and_target_it_runs(tmp_pa
     refusal = refused_by(candidate)
     assert refusal is not None
     assert refusal.why == "correlation: highest with alpha: r = 0.950; stats: weakest lift -0.0100"
-    assert refusals(state)(candidate) is None, "on another target: a new run is due"
+    path.write_text(json.dumps({**refused, "target_version": 2}))
+    assert refused_by(candidate) is None, "on another target: a new run is due"
     path.write_text(json.dumps({**refused, "code": "0123456789abcdef"}))
     assert refused_by(candidate) is None, "of other code"
     path.write_text(json.dumps({**refused, "days": ten[:5]}))

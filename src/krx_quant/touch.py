@@ -32,13 +32,14 @@ without reading the window again.
 
 Every prediction is scored on it (#170): the statistics, the statuses, the consensus weights
 and the screen's ✓/✗, through the Engine API. Training learns it with
-``KRX_TARGET_VERSION=3``, the default (#169, #170, #187): a recorded day labelled by these
+``KRX_TARGET_VERSION=3``, the only one since #659 (#169, #170, #187): a recorded day labelled by these
 windows, replaying its quotes, as the engine labels it; a day with one-minute bars only by
 the bar rule (``bar_touch``).
 
 The target versions (``TARGET_VERSION``, the ``touches`` rows' and the models'
-``target_version``): 1, the four-minute mid-point move (no touch label; ``KRX_TARGET_VERSION=1``
-still learns it); 2, this touch label with crossed quotes dropped (#160 to #187: its rows
+``target_version``): 1, the four-minute mid-point move (no touch label; learned with
+``KRX_TARGET_VERSION=1`` until #659: its models and predictions stay in the DB, no code learns it
+any more); 2, this touch label with crossed quotes dropped (#160 to #187: its rows
 stay in the DB, no code makes them any more); 3, this touch label with crossed quotes
 counted (#187), the one made now.
 """

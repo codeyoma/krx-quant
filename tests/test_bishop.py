@@ -83,9 +83,7 @@ def test_without_a_net_it_is_one_normal_distribution_about_0() -> None:
 
 def test_a_trained_model_is_the_same_every_time_and_predicts_a_distribution() -> None:
     bar_days = {("005930", d): random_walk(d, seed=i) for i, d in enumerate(DAYS)}
-    training = samples(
-        bar_days, MarketCalendar(dict.fromkeys(DAYS, True)), Bishop.features, FEE, target_version=3
-    )
+    training = samples(bar_days, MarketCalendar(dict.fromkeys(DAYS, True)), Bishop.features, FEE)
 
     model = Bishop().fit(training)
 

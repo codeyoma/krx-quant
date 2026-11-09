@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from krx_quant.barriers import BARRIER
-from krx_quant.baselines import Forecast, baselines_for
+from krx_quant.baselines import TOUCH_BASELINES, Forecast
 from krx_quant.climate import CLIMATE
 from krx_quant.config import Settings
 from krx_quant.consensus import NAMES
@@ -217,7 +217,7 @@ def test_the_whole_period_agrees_with_the_leaderboard(db: Path) -> None:
         assert conn is not None
         conn.row_factory = sqlite3.Row
         rows = scored_rows(conn, [D1, D2], None, False)
-    names = {b.name for b in baselines_for(TARGET_VERSION)}
+    names = {b.name for b in TOUCH_BASELINES}
     algorithms, baselines = split(
         scored_by_algorithm(on_target(rows, names | set(NAMES), TARGET_VERSION)), names
     )

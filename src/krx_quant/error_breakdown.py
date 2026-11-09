@@ -52,7 +52,7 @@ from pathlib import Path
 from krx_quant.api import TERCILES, by_volatility
 from krx_quant.barriers import ANSWER_VERSION as BARRIER_VERSION
 from krx_quant.barriers import NAME as BARRIER
-from krx_quant.baselines import baselines_for
+from krx_quant.baselines import TOUCH_BASELINES
 from krx_quant.climate import CLIMATE
 from krx_quant.config import Settings
 from krx_quant.consensus import NAMES, slot
@@ -146,13 +146,12 @@ def read_scored(
     reads them (special ones left out; an algorithm's by models of ``target_version`` only: the
     engine's here, the pre-registered one in the holdout, ``holdout.py``), a day at a time, as
     ``signal_review`` reads them."""
-    baselines = {b.name for b in baselines_for(target_version)} | set(NAMES)
+    baselines = {b.name for b in TOUCH_BASELINES} | set(NAMES)
     wanted = {algorithm, CLIMATE}
     out: dict[str, list[Scored]] = {}
     for day in days:
         rows = [r for r in scored_rows(conn, [day], None, False) if r["algorithm"] in wanted]
-        if target_version >= 2:
-            rows = on_target(rows, baselines, target_version)
+        rows = on_target(rows, baselines, target_version)
         for name, records in scored_by_algorithm(rows).items():
             out.setdefault(name, []).extend(records)
     return out

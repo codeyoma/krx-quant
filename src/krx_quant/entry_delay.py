@@ -36,7 +36,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from krx_quant.archive import guarded_files
-from krx_quant.baselines import baselines_for
+from krx_quant.baselines import TOUCH_BASELINES
 from krx_quant.consensus import NAMES
 from krx_quant.feeds import BOOK, TRADE
 from krx_quant.predictions import scored_rows
@@ -187,7 +187,7 @@ def entry_delays(
     only), their skill against the class rates (``skill.py``: kappa, by trading day too), and its
     up and down calls' target reached and touch P&L after each delay. A day at a time, its
     quotes let go after it, to stay within the server's memory."""
-    baselines = {b.name for b in baselines_for(TARGET_VERSION)} | set(NAMES)
+    baselines = {b.name for b in TOUCH_BASELINES} | set(NAMES)
     tallies: dict[str, Tally] = {}
     calls: dict[str, dict[date, list[tuple[Direction, Direction]]]] = {}
     for day in days:

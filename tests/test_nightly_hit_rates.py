@@ -181,7 +181,10 @@ class Constant:
         self._trained = trained
 
     def default_model(self) -> Model:
-        return Model(f"{self.name}-default", {"up": 1 / 3, "flat": 1 / 3, "down": 1 / 3})
+        # Of the touch target, so the night compares with it (#170).
+        return Model(
+            f"{self.name}-default", {"up": 1 / 3, "flat": 1 / 3, "down": 1 / 3}, target_version=TARGET_VERSION
+        )
 
     def fit(self, samples: Sequence[Sample]) -> Model:
         scored = [s for s in samples if s.outcome is not None]
@@ -199,8 +202,8 @@ CALLS_FLAT = {"up": 0.49, "flat": 0.50, "down": 0.01}
 
 
 def runs(root: Path, name: str, params: dict[str, float]) -> Model:
-    """The server runs ``params`` for ``name``: the night's champion."""
-    model = Model(f"{name}-20260917-aaaaaa", params)
+    """The server runs ``params`` for ``name``, of the touch target: the night's champion (#170)."""
+    model = Model(f"{name}-20260917-aaaaaa", params, target_version=TARGET_VERSION)
     (root / "models" / name).mkdir(parents=True)
     (root / "models" / name / f"{model.version}.json").write_text(model.to_json())
     (root / "live.json").write_text(json.dumps({name: model.version}))
@@ -233,7 +236,7 @@ def test_a_challenger_of_a_lower_log_loss_and_a_lower_hit_rate_is_promoted_and_f
     assert loss < theirs, "the log loss prefers the challenger"
     assert (report["promoted"], report["forced"]) == (True, False), "promoted: the rule is unchanged"
     assert report["reason"] == f"{loss:.4f} < {theirs:.4f} ({champion.version})"
-    assert result.promoted == {"learner": report["challenger"]["version"]}
+    assert result.promoted["learner"] == report["challenger"]["version"]
     found = report["hit_rate"]
     happened = shares(tmp_path)
     assert found["samples"] == report["validation"]["paired"]["samples"]
@@ -259,7 +262,7 @@ def test_a_challenger_of_a_higher_hit_rate_and_a_higher_log_loss_is_kept(root: P
     report = read(root, f"reports/{NIGHT}/learner.json")
     assert report["challenger"]["loss"] > report["champion"]["loss"]
     assert (report["promoted"], report["forced"]) == (False, False), "kept: the rule is unchanged"
-    assert result.promoted == {}
+    assert "learner" not in result.promoted
     found = report["hit_rate"]
     assert found["difference"] > 0
     assert (found["log_loss_rule"], found["hit_rate_rule"], found["mismatch"]) == (KEEP, PROMOTE, False)
@@ -271,8 +274,8 @@ def test_the_verdict_is_the_log_loss_s_whatever_the_hit_rates(root: Path, tmp_pa
     """Input: stand-ins the two rules agree and part on. Output: each is promoted exactly when its
     log loss is lower; the hit-rate rule is reported beside it."""
     algorithms: list[Algorithm] = [
-        FrequencyAlgorithm("learner", "velocity"),
-        FrequencyAlgorithm("backwards", "volatility", inverted=True),
+        FrequencyAlgorithm("learner", "velocity", target=TARGET_VERSION),
+        FrequencyAlgorithm("backwards", "volatility", inverted=True, target=TARGET_VERSION),
         Constant("flat", CALLS_FLAT),
         Constant("up", CALLS_UP),
     ]
@@ -292,7 +295,7 @@ def test_the_verdict_is_the_log_loss_s_whatever_the_hit_rates(root: Path, tmp_pa
         "flat": (PROMOTE, KEEP),  # ln 2 against the defaults' ln 3, calling flat as their tie does
         "up": (PROMOTE, PROMOTE),
     }
-    assert sorted(result.promoted) == ["flat", "learner", "up"]
+    assert sorted(result.promoted) == ["baseline-climate", "flat", "learner", "up"]  # the climate always
 
 
 def test_a_kind_s_report_compares_its_classes(tmp_path: Path) -> None:

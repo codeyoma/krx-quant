@@ -73,7 +73,6 @@ async def test_a_recorded_day_trains_a_kind_on_the_answers_the_engine_scores(tmp
         ("velocity",),
         FEE,
         Leaders(),
-        target_version=TARGET_VERSION,
         kinds=(TEST_KIND,),
     )
 

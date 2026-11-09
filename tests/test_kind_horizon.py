@@ -18,7 +18,6 @@ import pytest
 from krx_quant.features import Leaders
 from krx_quant.kinds import DIRECTION_KIND, KindRegistrationError, QuoteLog, register_kinds
 from krx_quant.rescore import answer_day
-from krx_quant.touch import TARGET_VERSION
 from krx_quant.training import bar_answers, training_day
 from tests.api_schema import check
 from tests.kind_doubles import DRIFT, TEST_KIND
@@ -185,7 +184,6 @@ async def test_a_recorded_day_trains_a_longer_kind_on_the_answers_the_engine_sco
         ("velocity",),
         FEE,
         Leaders(),
-        target_version=TARGET_VERSION,
         kinds=(LONG,),
     )
 

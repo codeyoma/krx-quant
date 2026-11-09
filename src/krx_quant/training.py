@@ -6,12 +6,11 @@ classified with the same flat band as live scoring. A day is read one of two way
 
 - Recorded: every symbol's integrated trades were recorded. The day's events go through
   the engine's own Market View. The bars, leaders and reference price (the mid-point) are
-  what the engine saw. The outcome is the mid-point four minutes later, as live scoring
-  decides it (basis A). Every lead group is there, indices and US daytime trades too. The
+  what the engine saw. Every lead group is there, indices and US daytime trades too. The
   bar closes the engine does not predict (a VI) and those live statistics leave out (a
   special situation touches them) are left out.
 - Backfilled only: the backfill has bars, not quotes. The reference price is the last
-  close, and the outcome the close four minutes later. A close jumps between the bid and
+  close. A close jumps between the bid and
   the ask and back (bid-ask bounce); live scoring on mid-points never sees that. The lead
   groups are the other symbols, the futures' continuous series and the ETFs. Indices and
   US daytime trades have no backfill, so their moves are unknown. The leaders' bars are read
@@ -20,12 +19,13 @@ classified with the same flat band as live scoring. A day is read one of two way
 
 A recorded day is read the first way even when it has backfilled bars too.
 
-With the touch target (``KRX_TARGET_VERSION=3``, 2 before #187; #169) the outcome is its label instead:
-on a recorded day the engine's own touch window (``touch.py``) over the replayed quotes,
+The outcome is the touch target's label (``KRX_TARGET_VERSION=3``, 2 before #187; #169): on a
+recorded day the engine's own touch window (``touch.py``) over the replayed quotes,
 exactly as the engine labels it; on a backfilled day the one-minute bar rule
 (``touch.bar_touch``). The move (``change_ticks``) stays the four-minute one. The features
 carry the touch target's terms (``FeatureVector.touch``): half the spread at the bar close
-on a recorded day, a one-tick spread's on a backfilled one.
+on a recorded day, a one-tick spread's on a backfilled one. Until #659 the four-minute move
+(target version 1) could be the outcome instead: the mid-point (or close) four minutes later.
 
 A day read for the kinds besides the direction (#179, ``kinds.py``) also holds each kind's
 answers of its bar closes (``TrainingDay.answers``), what the kind's algorithms learn
@@ -176,12 +176,11 @@ def training_day(
     fee_rate: float,
     leaders: Leaders,
     *,
-    target_version: int = 1,
     kinds: Sequence[Kind] = (),
 ) -> TrainingDay | None:
     """``day``'s samples: from its recorded events if every symbol's trades were recorded,
     else from its backfilled bars if every symbol has them; None otherwise. A day never
-    trains on some symbols only. Their outcomes are of ``target_version`` (#169); with the
+    trains on some symbols only. Their outcomes are the touch target's labels (#169); with the
     ``kinds`` besides the direction (#179), each one's answers of its bar closes too.
     """
     session = calendar.session(day)
@@ -200,7 +199,6 @@ def training_day(
             fee_rate,
             leaders,
             regime=regime,
-            target_version=target_version,
             kinds=kinds,
             previous=previous,
         )
@@ -217,7 +215,6 @@ def training_day(
         leader_days=leader_days,
         leaders=leaders,
         regimes={day: regime},
-        target_version=target_version,
         previous=previous,
     )
     return TrainingDay("close", made, bar_answers(bar_days, calendar, fee_rate, kinds, previous=previous))
@@ -295,12 +292,11 @@ def samples(
     leader_days: BarDays | None = None,
     leaders: Leaders | None = None,
     regimes: Mapping[date, str | None] | None = None,
-    target_version: int = 1,
     previous: PreviousDays | None = None,
 ) -> list[Sample]:
     """A sample per bar close in each day's prediction window, in time order, from backfilled
-    bars: the reference price is the last close, the outcome the close four minutes later;
-    with the touch target (``target_version`` 3, #169, #187), the one-minute bar rule's label.
+    bars: the reference price is the last close, the outcome the touch target's label by the
+    one-minute bar rule (#169, #187); the move, the close four minutes later.
 
     ``leader_days`` holds the leading series' bars by (series, day); the other symbols of
     ``bar_days`` lead too. ``regimes`` holds each day's macro regime (none: unknown).
@@ -312,7 +308,7 @@ def samples(
     stocks = _by_day(bar_days)
     series = _by_day(leader_days or {})
     leading = needs_leaders(names)  # leaders are sliced only for the features that read them
-    touch = TouchTerms() if target_version >= 2 else None  # no quotes: a one-tick spread
+    touch = TouchTerms()  # no quotes: a one-tick spread
     names_held = declared(names)  # every sample's, one object (#355)
     out: list[Sample] = []
     for (symbol, day), bars in sorted(bar_days.items(), key=lambda item: (item[0][1], item[0][0])):
@@ -350,12 +346,11 @@ def samples(
             values = store.compute(snapshot, names)
             later = closes.get(t + HORIZON - BAR)  # the close of the bar ending at t + 4 minutes
             sample = _sample(snapshot, values, names_held, later, touch)
-            if touch is not None:
-                # The label needs the bar that ended at t itself: an older close is not t's.
-                closing = done[-1] if done and done[-1].start + BAR == t else None
-                after = bars[bisect.bisect_left(starts, t) : bisect.bisect_left(starts, t + HORIZON)]
-                outcome = bar_touch(closing, after, fee_rate) if closing is not None else None
-                sample = replace(sample, outcome=outcome)
+            # The label needs the bar that ended at t itself: an older close is not t's.
+            closing = done[-1] if done and done[-1].start + BAR == t else None
+            after = bars[bisect.bisect_left(starts, t) : bisect.bisect_left(starts, t + HORIZON)]
+            outcome = bar_touch(closing, after, fee_rate) if closing is not None else None
+            sample = replace(sample, outcome=outcome)
             out.append(sample)
             t += BAR
     return out
@@ -372,7 +367,6 @@ def recorded_samples(
     store: FeatureStore | None = None,
     *,
     regime: str | None = None,
-    target_version: int = 1,
 ) -> list[Sample]:
     """A sample per bar close of ``day``'s prediction window and symbol, in time order, from
     the day's events (in receipt order) through the engine's Market View (``recorded_day``).
@@ -387,7 +381,6 @@ def recorded_samples(
         leaders,
         store,
         regime=regime,
-        target_version=target_version,
     )
     return made
 
@@ -403,7 +396,6 @@ def recorded_day(
     store: FeatureStore | None = None,
     *,
     regime: str | None = None,
-    target_version: int = 1,
     kinds: Sequence[Kind] = (),
     previous: PreviousDays | None = None,
 ) -> tuple[list[Sample], Answers, dict[str, int]]:
@@ -413,10 +405,9 @@ def recorded_day(
     symbols) were left out, by why (#184: ``IN_VI``, ``SPECIAL``).
 
     At each bar close the features are computed before any event received at or after it,
-    as the engine does. The outcome is the mid-point four minutes later against the one at
-    the bar close, as live scoring decides it on basis A; with the touch target
-    (``target_version`` 3, #169, #187), the label of the bar close's touch window, as the engine
-    records it. A symbol in a VI at a bar close has no sample there (the engine does not
+    as the engine does. The outcome is the label of the bar close's touch window (#169, #187), as
+    the engine records it; the move, the mid-point four minutes later against the one at the bar
+    close. A symbol in a VI at a bar close has no sample there (the engine does not
     predict it), and neither has a bar close whose four minutes a VI, circuit breaker or
     sidecar touches (live statistics leave it out). ``previous`` gives each symbol's previous
     trading day's ranges and bars (#181, #183), as the engine's does.
@@ -425,15 +416,13 @@ def recorded_day(
     if session is None:
         return [], {}, {}
     store = store or FeatureStore()
-    to_touch = target_version >= 2
-    # With the touch target or the kinds, the view follows the windows as the engine's does.
-    windows_fee = fee_rate if to_touch or kinds else None
+    # The view follows the windows as the engine's does.
     view = MarketView(
         calendar,
         symbols,
         leaders,
         datetime.combine(day, time(), KST),
-        windows_fee,
+        fee_rate,
         kinds=kinds,
         previous=previous,
     )
@@ -443,8 +432,8 @@ def recorded_day(
     # target to look the mid-point up at, or both.
     minutes = deque(first + i * BAR for i in range((last + HORIZON - first) // BAR + 1))
     # Each bar close's snapshot, features, whether a window known then touched it, and the
-    # touch target's terms there (target versions 2 and up).
-    seen: list[tuple[Snapshot, dict[str, Value], bool, TouchTerms | None]] = []
+    # touch target's terms there.
+    seen: list[tuple[Snapshot, dict[str, Value], bool, TouchTerms]] = []
     mids: dict[tuple[str, datetime], float | None] = {}
     labels: dict[tuple[str, datetime], Direction | None] = {}  # by bar close, once its window ended
     answers: Answers = {}  # the kinds' (#179), likewise
@@ -464,13 +453,13 @@ def recorded_day(
                         continue
                     snapshot = view.snapshot(frozen, symbol, fee_rate, regime)
                     marked = touching(known, symbol, minute, minute + HORIZON)
-                    terms = TouchTerms.at(view.quote_at(symbol, minute), snapshot.tick) if to_touch else None
+                    terms = TouchTerms.at(view.quote_at(symbol, minute), snapshot.tick)
                     seen.append((_bare(snapshot), store.compute(snapshot, names), marked, terms))
             if minute >= first + HORIZON:
                 for symbol in symbols:
                     mids[(symbol, minute)] = view.mid(symbol, minute)
-                    if to_touch:  # the window from four minutes back has just ended
-                        labels[(symbol, minute - HORIZON)] = view.touch(symbol, minute - HORIZON).direction
+                    # The window from four minutes back has just ended.
+                    labels[(symbol, minute - HORIZON)] = view.touch(symbol, minute - HORIZON).direction
                     for kind in kinds:
                         # The window from the kind's horizon back has just ended (#263): one that
                         # ends by the closing auction, as every minute here does.
@@ -505,8 +494,7 @@ def recorded_day(
             continue
         later = mids.get((snapshot.symbol, snapshot.bar_close + HORIZON))
         sample = _sample(snapshot, values, names_held, later, terms)
-        if to_touch:
-            sample = replace(sample, outcome=labels.get((snapshot.symbol, t)))
+        sample = replace(sample, outcome=labels.get((snapshot.symbol, t)))
         out.append(sample)
     return out, answers, left_out
 
@@ -578,10 +566,11 @@ def _sample(
     values: Mapping[str, Value],
     names: frozenset[str],
     later: float | None,
-    touch: TouchTerms | None = None,
+    touch: TouchTerms,
 ) -> Sample:
-    """A sample of ``snapshot``, with the price four minutes later classified against its own;
-    its features carry the touch target's terms ``touch`` (target versions 2 and up)."""
+    """A sample of ``snapshot``, with the price four minutes later classified against its own (the
+    caller replaces that outcome by the touch label); its features carry the touch target's terms
+    ``touch``."""
     change = None
     outcome = None
     if later is not None and snapshot.price and snapshot.tick and snapshot.flat_ticks:
@@ -692,7 +681,6 @@ def fit_algorithm(
             features,
             settings.fee_rate,
             leaders,
-            target_version=settings.target_version,
             kinds=() if kind is None else (kind,),
         )
         if found is not None:

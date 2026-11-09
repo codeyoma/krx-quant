@@ -1344,7 +1344,7 @@ async def _leaderboard_days(request: web.Request) -> web.Response:
     rules, min_sample, recent = engine.review_rules, engine.min_sample, RECENT_DAYS
     if kind is DIRECTION_KIND:
         baselines, consensus = engine.baseline_names, list(NAMES)
-        target = engine.target_version if engine.target_version >= 2 else None  # as the leaderboard (#170)
+        target = engine.target_version  # as the leaderboard (#170)
         read: Callable[[Sequence[date]], list[dict[str, Any]]] = partial(
             engine.store.reviewed, include_special=False
         )
@@ -1569,10 +1569,9 @@ async def _stats(
         # Reading and computing both run in the worker: a long history must not hold up
         # the event loop that records and predicts.
         rows, excluded = engine.store.scored_and_excluded(query.days, query.symbol, query.special)
-        if engine.target_version >= 2:
-            # As the statuses go by (#170): an algorithm's predictions by models trained on the
-            # touch target only, not an older model's scored on a label it did not learn.
-            rows = on_target(rows, engine.baseline_names | set(NAMES), engine.target_version)
+        # As the statuses go by (#170): an algorithm's predictions by models trained on the
+        # touch target only, not an older model's scored on a label it did not learn.
+        rows = on_target(rows, engine.baseline_names | set(NAMES), engine.target_version)
         algorithms, baselines = split(scored_by_algorithm(rows), engine.baseline_names)
         for a in engine.algorithms:
             algorithms.setdefault(a.name, [])

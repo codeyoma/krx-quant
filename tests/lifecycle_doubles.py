@@ -24,6 +24,7 @@ BASELINE_CALLS = {
     "baseline-flat": [Direction.FLAT] * len(OUTCOMES),
     "baseline-persist": [Direction.UP] * len(OUTCOMES),
     "baseline-random": [Direction.DOWN] * len(OUTCOMES),
+    "baseline-climate": [Direction.DOWN] * len(OUTCOMES),  # the touch target's fourth (#169)
 }
 RIGHT = OUTCOMES  # every call right
 
