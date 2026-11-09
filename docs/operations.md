@@ -1933,7 +1933,7 @@ mock으로 시작한 날부터 비용 지도에서 시장가 왕복으로 통과
 
        > **바뀜** (2026-11-09, #655): 키에 코드가 들지 않는다(아래 "날마다의 표본은 표본 저장소에 둔다"의 "표본의 뜻(#645)"). 이제 `market_view.py`로 옮겨도 다시 만들지 않는다(검토 관문만 바꾼다). 옮기는 일은 따로다(#654).
 
-       > **바뀜** (2026-11-10, #NNN): 이 코드가 `session_memory.py`에서 Market View의 기록을 밖에서 다뤘다 → `market_view.py`의 `MarketView.held`, `MarketView.let_go`로 옮겼고(기록마다 자기 것을 놓는 `forget`), `session_memory.py`는 없다. 놓는 것과 그 줄(`memory handed back …`), 쉬는 때는 그대로다. 표본도 그대로라 검토 관문의 `REVIEWED_CODE`만 바꿨다. 이유: #654.
+       > **바뀜** (2026-11-10, #670): 이 코드가 `session_memory.py`에서 Market View의 기록을 밖에서 다뤘다 → `market_view.py`의 `MarketView.held`, `MarketView.let_go`로 옮겼고(기록마다 자기 것을 놓는 `forget`), `session_memory.py`는 없다. 놓는 것과 그 줄(`memory handed back …`), 쉬는 때는 그대로다. 표본도 그대로라 검토 관문의 `REVIEWED_CODE`만 바꿨다. 이유: #654.
   2. 얼린 것을 녹여 전체를 한 번 훑는다(위 `garbage collection: let go of …` 줄). 기록을 먼저 놓아서 훑을 객체가 적다(재생에서 0.03초. 놓지 않으면 0.22–0.69초).
   3. 풀린 메모리를 시스템에 돌려준다(`footprint.hand_back`: Arrow 메모리 풀의 `release_unused`, glibc의 `malloc_trim`. 사전 검증의 #383과 같은 방법).
   4. 남은 것을 다시 얼린다. 저녁의 일(하루 점검이 읽는 예측 행, Engine API)이 일으키는 전체 수집이 그것을 훑지 않는다. 다음 쉼이나 수집기가 멈출 때 녹인다.
