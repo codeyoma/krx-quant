@@ -93,7 +93,14 @@ def night(
 def engine(tmp_path: Path) -> PredictionEngine:
     calendar = MarketCalendar(dict.fromkeys(DAYS, True))
     clock = FakeClock(at(DAYS[1], "07:00"))
-    return PredictionEngine(PredictionStore(tmp_path / "engine.db"), calendar, ("005930",), 0.00015, clock)
+    return PredictionEngine(
+        PredictionStore(tmp_path / "engine.db"),
+        calendar,
+        ("005930",),
+        0.00015,
+        clock,
+        target_version=TARGET_VERSION,
+    )
 
 
 async def morning(store: ObjectStore, shelf: Shelf, engine: PredictionEngine, day: date) -> Pruned:

@@ -34,6 +34,7 @@ from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import PredictionStore
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.replay import replay_into
+from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import check
 from tests.daily_doubles import SYMBOLS, made_history
 from tests.replay_events import trade as made_trade
@@ -176,6 +177,7 @@ async def briefed(tmp_path: Path, now: str = "08:51") -> tuple[dict[str, Any], P
         daily_algorithms=(Cox(),),
         daily_features=LiveFeatures(OPEN_TO_CLOSE, data, state, CALENDAR, SYMBOLS, FEE),
         daily_feature_names=DAILY_FEATURES,
+        target_version=TARGET_VERSION,
     )
     await replay_into(engine, clock, sorted(morning, key=lambda e: e[1]["received_at"]), until=at(now))
     app = create_app(engine, data_dir=data, state_dir=state)
@@ -296,6 +298,7 @@ async def test_before_the_day_s_predictions_the_briefing_shows_the_last_day_s(tm
         kinds=(DIRECTION_KIND,),
         kind_algorithms=(),
         daily=StoredDays(data),
+        target_version=TARGET_VERSION,
     )
     await replay_into(engine, clock, [], until=at("08:51", FRIDAY))
     clock.set(at("08:00"))  # Monday, before its predictions
@@ -323,6 +326,7 @@ async def test_without_data_the_briefing_is_nulls(tmp_path: Path) -> None:
         algorithms=(),
         kinds=(DIRECTION_KIND,),
         kind_algorithms=(),
+        target_version=TARGET_VERSION,
     )
     async with TestClient(TestServer(create_app(engine))) as client:
         body = await (await client.get("/v1/briefing")).json()

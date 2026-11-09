@@ -32,6 +32,7 @@ from krx_quant.macro import Observation
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME, PredictionStore
 from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, write_supply
+from krx_quant.touch import TARGET_VERSION
 from krx_quant.us_daily import write_us_daily
 
 SYMBOLS = ("005930", "000660", "009150")
@@ -190,4 +191,5 @@ def engine_on(s: Settings, clock: FakeClock, algorithms: Sequence[Any]) -> Predi
         daily_algorithms=algorithms,
         daily_features=no_features,
         daily_feature_names={"us_sox"},
+        target_version=TARGET_VERSION,
     )

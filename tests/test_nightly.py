@@ -558,6 +558,7 @@ async def test_a_promoted_model_runs_from_the_morning_and_defends_the_next_night
         FEE,
         FakeClock(FINISHED),
         algorithms=[learner],
+        target_version=TARGET_VERSION,
     )
     shelf = Shelf(tmp_path / "state")
 
@@ -584,6 +585,7 @@ async def test_the_night_s_reports_and_what_the_model_trained_on_come_out_of_the
         FakeClock(datetime.combine(morning, time(7), KST)),
         algorithms=[learner, backwards],
         kind_algorithms=(),
+        target_version=TARGET_VERSION,
     )
     async with api(engine) as client:
         before = await get_json(client, "/v1/algorithms")
