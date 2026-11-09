@@ -149,7 +149,7 @@ from krx_quant.scheduled.research import (
     SMT_DISCOVERY,
     SMT_HOLDOUT,
 )
-from krx_quant.scheduled.trader import LIVE_PROBE, TRADER_REPORT, trader_report_calls
+from krx_quant.scheduled.trader import FILL_NOTICE_COLUMNS, LIVE_PROBE, TRADER_REPORT, trader_report_calls
 from krx_quant.scheduled.upkeep import RESTORE_DRILL
 from krx_quant.swap import NightTraining
 
@@ -163,6 +163,7 @@ __all__ = [
     "DAILY_SIMULATION",
     "ERROR_HOLDOUT",
     "FAILED",
+    "FILL_NOTICE_COLUMNS",
     "FRESH",
     "GIVE_WAY_NIGHTS",
     "INTERRUPTED",
@@ -293,6 +294,7 @@ JOBS: tuple[Job, ...] = (
     INVERSE_REPLAY,
     SIGNAL_REVIEW_FIXED,
     LIVE_PROBE,
+    FILL_NOTICE_COLUMNS,
     ERROR_HOLDOUT,
     CLIMATE_GATE,
     NIGHTLY_HIT_RATES,

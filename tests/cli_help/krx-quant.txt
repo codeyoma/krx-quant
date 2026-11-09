@@ -1,9 +1,9 @@
 usage: krx-quant [-h]
-                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
     replay              replay a recorded day through the engine into its own
                         database (no KIS needed)
@@ -55,6 +55,13 @@ positional arguments:
                         order inquiry (KRX_TRADER_KIS_*, read-only): each
                         column's shape, lengths, values' count and matches; no
                         value, order number, account or price
+    fill-notice-columns
+                        tell the mock fill notice's column 10 (CNTG_QTY) from
+                        17 (ODER_QTY) on the recorded orders of more than one
+                        share that something filled of, joined as fill-notice-
+                        layout joins them (#648), and count the orders whose
+                        notice was lost while the recorder was disconnected:
+                        counts alone; no value, order number, account or price
     probe-live-account  read the trader's live account with
                         KRX_TRADER_LIVE_KIS_* by inquiry calls alone (#408):
                         the price, the balance, the orderable cash and the
