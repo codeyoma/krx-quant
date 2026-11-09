@@ -46,15 +46,15 @@ capital plus the replay's own net so far); the risk rules (``risk_held``, #471: 
 the losses in a row and their cooldown, on the replay's own trades of the day); the exits
 (``exit_on``, ``clock_exit``: the take-profit at the target once a best bid reaches it, the stop at
 the first best bid at or below it, the time exit at the best bid of the last quote received in the
-``Rules.quote_wait`` before the time barrier, else of the first one after it); the costs (``net_of``:
+``Rules.quote_wait`` before the time barrier, else of the first one after it); the costs (``money.net_of``:
 the commission on both fills' notionals, the sell tax on the sale's). The quotes on which an exit
 rule does nothing are passed by a search of the arrays for the first one it can act on, and
 ``exit_on`` judges that one. The loss limits hold a replay as they hold a challenger's book
 (``limits.Simulated``, #471: from the replay's first day): a trade's exit realized at or below one
 stops it (the daily one for the rest of the day), and so does the open position at a best bid it
-holds through, the quote it is bought on included (``paper.unrealized``, as the paper book marks it
-on each quote, found by a search of the arrays too), sold at that bid. No pause holds it, and nothing
-stalls: a gap leaves its signals out instead (below).
+holds through, the quote it is bought on included (``money.round_trip`` over the arrays, as the paper
+book marks it on each quote, found by a search of the arrays too), sold at that bid. No pause holds it,
+and nothing stalls: a gap leaves its signals out instead (below).
 
 **Two outputs.**
 
@@ -122,7 +122,6 @@ from krx_quant.kinds import DIRECTION
 from krx_quant.macro import read_partition
 from krx_quant.market_calendar import Session
 from krx_quant.predictions import KIND_ANSWER_JOIN, TOUCH_JOIN
-from krx_quant.pricing import SELL_TAX
 from krx_quant.special import Window, touching
 from krx_quant.stats import Interval, day_mean
 from krx_quant.trader import SYMBOL, review
@@ -140,6 +139,7 @@ from krx_quant.trader.cells import (
     traded_kind,
 )
 from krx_quant.trader.limits import RUNNING, SALE, Simulated
+from krx_quant.trader.money import commission, net_of, round_trip, size
 from krx_quant.trader.paper import (
     HOLDING,
     NO_QUOTE,
@@ -153,12 +153,10 @@ from krx_quant.trader.paper import (
     clock_exit,
     exit_on,
     halt_spans,
-    net_of,
     plan,
     refused,
     risk_held,
     settle,
-    size,
 )
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import PREDICTOR_INACTIVE
@@ -886,19 +884,18 @@ class Policy:
     def _limited(self, filled: Fill, quantity: int) -> Sale | None:
         """The sale a loss limit makes of ``quantity`` shares bought as ``filled`` (#471, module doc):
         at the best bid of the first quote it holds through at which the day's or the cumulative P&L,
-        with the position's open one there (``paper.unrealized``, the same sums), is at or below its
-        limit (``limits.Simulated``, which keeps it reached); None if none is. The buy's own quote
-        first: ``PaperTrader._take`` marks a position on the quote that fills it, its spread and costs
-        open at once, before any exit rule acts."""
+        with the position's open one there (``money.round_trip``, as the paper book's ``money.open_net``),
+        is at or below its limit (``limits.Simulated``, which keeps it reached); None if none is. The
+        buy's own quote first: ``PaperTrader._take`` marks a position on the quote that fills it, its
+        spread and costs open at once, before any exit rule acts."""
         day = self._fills.day if self._fills is not None else None
         start, end = filled.bought, filled.until
         if day is None or start >= end or filled.entry is None:
             return None
         holds, limits, fee_rate = self.holds, self._rules.limits, self._rules.fee_rate
         bids = day.quotes.bids[start:end]
-        sold = bids * quantity
-        buy_fee = filled.entry * quantity * fee_rate
-        held = (bids - filled.entry) * quantity - buy_fee - sold * fee_rate - sold * SELL_TAX
+        fee = commission(filled.entry, quantity, fee_rate)
+        held = round_trip(filled.entry, quantity, fee, bids * quantity, fee_rate).net  # each quote's at once
         hit = np.flatnonzero(
             (holds.realized_day + held <= -limits.daily)
             | (holds.realized_cumulative + held <= -limits.cumulative)

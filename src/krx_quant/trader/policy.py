@@ -38,7 +38,7 @@ runs from the next trading day, the cycle's first.
 
 **How the trader applies the champion** (``apply``), at each pick (its start and 08:30, #395):
 the champion decides what trades. The trader trades the champion's cells, in the champion's order,
-each at its θ, sized by the loss budget (``paper.size``), whatever the cost map's verdict on them
+each at its θ, sized by the loss budget (``money.size``), whatever the cost map's verdict on them
 (#472: the nightly fit entered each on the lower bound of its replayed one-share net), with the cost
 map's figures where it names the cell (``Selection.named``) and none where it does not
 (``selection.Pick.unmapped``). A cell the champion does not have is not traded, whatever its verdict

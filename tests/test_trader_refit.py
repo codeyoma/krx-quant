@@ -57,6 +57,7 @@ from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader import CAPITAL, SYMBOL
 from krx_quant.trader import policy as policies
 from krx_quant.trader.cells import Cell, open_engine_db
+from krx_quant.trader.money import net_of
 from krx_quant.trader.paper import (
     BEFORE_ENTRY,
     NOT_UP,
@@ -66,7 +67,6 @@ from krx_quant.trader.paper import (
     TAKE_PROFIT,
     TARGET_REACHED,
     Rules,
-    net_of,
 )
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.refit import (

@@ -31,7 +31,7 @@ none of its trades either: they are all practice.
 
 **Loss.** A P&L is the net realized one (the trades exited, after their costs) plus the open
 position's at the best bid (neither a practice trade's, #533): what selling it at that bid would
-net, after the buy's commission and the sale's commission and tax (``paper.unrealized``). The
+net, after the buy's commission and the sale's commission and tax (``money.open_net``). The
 day's counts from 00:00 KST of that day; the cumulative one from the mode's first start, or from its
 last re-arm. A limit is reached when the P&L is at or below its negative: the open position's on
 every quote, the realized one at every exit.

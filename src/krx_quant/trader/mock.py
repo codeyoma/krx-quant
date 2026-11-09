@@ -184,7 +184,7 @@ from krx_quant.kis_orders import (
     same_number,
 )
 from krx_quant.market_calendar import Phase, Session
-from krx_quant.pricing import SELL_TAX, tick_size
+from krx_quant.pricing import tick_size
 from krx_quant.trader import LIVE, MOCK, SYMBOL
 from krx_quant.trader.cells import Signal
 from krx_quant.trader.limits import ORDER_FAILED, SALE, Notify
@@ -193,7 +193,8 @@ from krx_quant.trader.mock_check import DIFFERENT as CHECK_DIFFERENT
 from krx_quant.trader.mock_check import NO_ORDERS as CHECK_NO_ORDERS
 from krx_quant.trader.mock_check import SAME as CHECK_SAME
 from krx_quant.trader.mock_check import Check, failures, ledger_orders, probe_window
-from krx_quant.trader.paper import NO_SHARES, TAKE_PROFIT, TIME, PaperTrader, Rules, _Waiting, mid_of
+from krx_quant.trader.money import NO_SHARES, commission, open_net
+from krx_quant.trader.paper import TAKE_PROFIT, TIME, PaperTrader, Rules, _Waiting, mid_of
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.reconcile import LOST_AFTER, Finding, Outside, Window, candidates, compare
 from krx_quant.trader.store import (
@@ -471,10 +472,7 @@ class MockTrader(PaperTrader):
         """What ``trade`` nets once the shares not sold yet are sold at ``bid``: what its sells' fills
         brought (a take-profit filled in part, a sale under way) and the rest at ``bid``, less the
         buy's commission and the sales' commission and tax."""
-        sold, amount = self.store.sells(trade.id)
-        proceeds = amount + bid * (trade.quantity - sold)
-        paid = trade.buy_fee + proceeds * (self.rules.fee_rate + SELL_TAX)
-        return proceeds - trade.entry_price * trade.quantity - paid
+        return open_net(trade, bid, self.rules.fee_rate, *self.store.sells(trade.id))
 
     # The orders in flight.
 
@@ -1149,7 +1147,7 @@ class MockTrader(PaperTrader):
                     entry_at=at,
                     entry_price=average,
                     quantity=filled,
-                    buy_fee=amount * self.rules.fee_rate,
+                    buy_fee=commission(average, filled, self.rules.fee_rate),
                 )
                 status = OPEN if left else None
                 self._open = self.store.open_position(live.decision, entry, live.placed, status)
@@ -1157,7 +1155,7 @@ class MockTrader(PaperTrader):
                 log.info("trader: the buy at %s filled %s on KIS, read later", live.placed.price, filled)
             else:
                 trade = self._open
-                fee = amount * self.rules.fee_rate
+                fee = commission(average, filled, self.rules.fee_rate)
                 new = filled - live.filled
                 fill = (at, (amount - live.amount) / new, new)
                 self.store.grow_position(trade.id, filled, average, fee, fill)

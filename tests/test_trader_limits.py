@@ -24,7 +24,8 @@ import pytest
 
 from krx_quant.trader import policy as policies
 from krx_quant.trader.limits import CONTROL_SECONDS, ENTRIES_PAUSED, PAUSED, RUNNING, Guard, Limits
-from krx_quant.trader.paper import Rules, shares
+from krx_quant.trader.money import shares
+from krx_quant.trader.paper import Rules
 from krx_quant.trader.store import CUMULATIVE_LIMIT, DAILY_LIMIT, DB_NAME, REARM, Control, TraderStore
 from tests.test_trader_marks import trade
 from tests.trader_doubles import (
