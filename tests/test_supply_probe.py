@@ -20,7 +20,6 @@ import pytest
 
 from krx_quant import cli, supply_probe
 from krx_quant.fake_kis import FakeKis, RestAnswer
-from krx_quant.kis import KisError
 from krx_quant.probe_fields import flag
 from krx_quant.supply_probe import (
     CREDIT,
@@ -30,7 +29,6 @@ from krx_quant.supply_probe import (
     LOAN,
     PRICE,
     SHORT_SALE,
-    kis_error,
     parse,
     probe_supply,
     status,
@@ -373,16 +371,6 @@ def test_an_answer_of_another_shape_is_reported_by_its_keys() -> None:
     listed = {"rt_cd": "0", "output": [{"frgn_hldn_qty": "46692016"}]}  # an object wrapped in a list
     assert status(PRICE, parse(PRICE, listed, "")) == "OK, one object (output)"
     assert status(PRICE, parse(PRICE, {"rt_cd": "0"}, "")) == "OK, but not an object (body keys: rt_cd)"
-
-
-def test_a_refusal_is_reported_by_its_code_and_message_only() -> None:
-    error = KisError(
-        "FHPST04830000 {'FID_INPUT_ISCD': '005930'}: HTTP 500 "
-        "{'rt_cd': '1', 'msg_cd': 'EGW00201', 'msg1': '초당 거래건수를 초과하였습니다.', "
-        "'output': [{'x': '7314159'}]}"
-    )
-    assert kis_error(error) == "error HTTP 500 EGW00201 초당 거래건수를 초과하였습니다."
-    assert kis_error(KisError("something else")) == "error (no code)"
 
 
 def test_the_command_exits_1_only_when_nothing_answered(

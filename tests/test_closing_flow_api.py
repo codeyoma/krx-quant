@@ -21,6 +21,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from krx_quant.api import create_app
 from krx_quant.auctions import MINUTE_BAR, write_auctions
 from krx_quant.backfill import BAR_SCHEMA, stock_bars_path
+from krx_quant.base_rates import PERIODS
 from krx_quant.clock import FakeClock
 from krx_quant.closing_flow import keep_days, keep_demand, read_demand, store_closing_demand, write_demand
 from krx_quant.engine import PredictionEngine
@@ -34,7 +35,7 @@ from krx_quant.products import products_of
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.replay import replay_into
 from krx_quant.special import Kind, Window
-from krx_quant.structure_check import PERIODS, structure_check
+from krx_quant.structure_check import structure_check
 from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import check
 from tests.replay_events import book

@@ -42,7 +42,6 @@ values.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -50,16 +49,14 @@ from datetime import date
 from pathlib import Path
 
 from krx_quant.api import TERCILES, by_volatility
-from krx_quant.barriers import ANSWER_VERSION as BARRIER_VERSION
-from krx_quant.barriers import NAME as BARRIER
-from krx_quant.baselines import TOUCH_BASELINES
 from krx_quant.climate import CLIMATE
 from krx_quant.config import Settings
-from krx_quant.consensus import NAMES, slot
+from krx_quant.consensus import slot
 from krx_quant.feeds.base import kst_day
-from krx_quant.predictions import days_with_predictions, iso, read_only, scored_rows
+from krx_quant.holdout import Key, read_scored, read_sigmas
+from krx_quant.predictions import days_with_predictions, iso, read_only
 from krx_quant.pricing import Direction
-from krx_quant.signal_review import CALLED, _points, _ratio, _within
+from krx_quant.signal_review import CALLED
 from krx_quant.stats import (
     Entry,
     Interval,
@@ -67,8 +64,8 @@ from krx_quant.stats import (
     Scored,
     enough,
     entry,
-    on_target,
-    scored_by_algorithm,
+    interval_text,
+    points_text,
     wilson,
 )
 from krx_quant.touch import TARGET_VERSION
@@ -83,8 +80,6 @@ SPREADS = (ONE_TICK, WIDER, LOCKED, NO_QUOTES)
 # without a σ̂₄.
 VOLATILITY = dict(zip(TERCILES, ("낮음", "중간", "높음"), strict=True))
 NO_SIGMA = "σ̂₄ 없음"
-
-Key = tuple[str, str]  # (symbol, bar close as stored)
 
 
 @dataclass(frozen=True)
@@ -137,47 +132,6 @@ def read(conn: sqlite3.Connection, settings: Settings, until: date, days: int, a
         return Period([], [], [], {})
     scored = read_scored(conn, chosen, settings.target_version, algorithm)
     return Period(chosen, scored.get(algorithm, []), scored.get(CLIMATE, []), read_sigmas(conn, chosen))
-
-
-def read_scored(
-    conn: sqlite3.Connection, days: Sequence[date], target_version: int, algorithm: str
-) -> dict[str, list[Scored]]:
-    """``algorithm``'s and the climate baseline's scored predictions on ``days`` as the leaderboard
-    reads them (special ones left out; an algorithm's by models of ``target_version`` only: the
-    engine's here, the pre-registered one in the holdout, ``holdout.py``), a day at a time, as
-    ``signal_review`` reads them."""
-    baselines = {b.name for b in TOUCH_BASELINES} | set(NAMES)
-    wanted = {algorithm, CLIMATE}
-    out: dict[str, list[Scored]] = {}
-    for day in days:
-        rows = [r for r in scored_rows(conn, [day], None, False) if r["algorithm"] in wanted]
-        rows = on_target(rows, baselines, target_version)
-        for name, records in scored_by_algorithm(rows).items():
-            out.setdefault(name, []).extend(records)
-    return out
-
-
-def read_sigmas(conn: sqlite3.Connection, days: Sequence[date]) -> dict[Key, float]:
-    """σ̂₄ at each bar close of ``days`` the barrier answered with one, in basis points of its
-    mid-point (σ̂₄ ticks × the tick ÷ the mid-point): in basis points, not ticks, as
-    ``PredictionStore.barrier_widths``, because a tick changes size at band edges."""
-    on, params = _within(days, "bar_close")
-    out: dict[Key, float] = {}
-    for symbol, bar_close, path in conn.execute(
-        f"SELECT symbol, bar_close, path FROM kind_answers WHERE kind = ? AND answer_version = ? AND {on}",
-        [BARRIER, BARRIER_VERSION, *params],
-    ):
-        try:
-            found = json.loads(path or "{}")
-        except ValueError:
-            continue
-        if not isinstance(found, dict):
-            continue
-        sigma, tick, anchor = found.get("sigma"), found.get("tick"), found.get("anchor")
-        if sigma is None or not tick or not anchor or anchor < 0:
-            continue
-        out[(symbol, bar_close)] = float(sigma) * float(tick) * 1e4 / float(anchor)
-    return out
 
 
 # The cells
@@ -293,14 +247,14 @@ def cell_lines(c: Cell) -> list[str]:
         return [f"{head} · 표본 부족"]
     by_day = c.by_day
     lines = [
-        f"{head} · 정답률 {_ratio(s.accuracy)} · 기후 정답률(짝) {_ratio(c.climate)} · "
-        f"lift {_points(c.lift.value)} (짝 하한 {_points(c.lift.low)} · "
-        f"거래일 하한 {_points(None if by_day is None else by_day.low)})"
+        f"{head} · 정답률 {interval_text(s.accuracy)} · 기후 정답률(짝) {interval_text(c.climate)} · "
+        f"lift {points_text(c.lift.value)} (짝 하한 {points_text(c.lift.low)} · "
+        f"거래일 하한 {points_text(None if by_day is None else by_day.low)})"
     ]
     for called in Direction:
         row = c.confusion[called]
         happened = " · ".join(f"{CALLED[d]} {row[d]:,}" for d in Direction)
-        precision = _ratio(c.precision(called))
+        precision = interval_text(c.precision(called))
         lines.append(f"  {CALLED[called]} 예측 {sum(row.values()):,}: 정답 {happened} · 정밀도 {precision}")
     totals = {d: sum(c.confusion[called][d] for called in Direction) for d in Direction}
     lines.append(

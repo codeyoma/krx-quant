@@ -51,6 +51,7 @@ from krx_quant.smt_experiment import days_in_holdout as smt_days_in_holdout
 from krx_quant.state_backup import last_backup
 from krx_quant.swap import NightTraining
 from krx_quant.trader.mock_check import trader_in_mock
+from krx_quant.trader.notice_columns import apart_orders
 from krx_quant.training import finished_days, is_recorded
 
 # The package's logger: the lines name ``krx_quant.scheduled``, as before the split (#500).
@@ -314,6 +315,10 @@ class Facts:
     # The order of the bar-close pre-validations the latest queue screen set (#599,
     # ``queue_screen.queue_order``): none without a screen of the last few nights.
     queue: tuple[str, ...] = ()
+    # How many of the mock trader's orders of more than one share that something filled of are on
+    # the days the fill notice recorder kept (#648, ``notice_columns.apart_orders``): telling the
+    # notice's columns 10 and 17 apart waits for ``notice_columns.APART`` of them.
+    fill_notice_apart: int = 0
 
 
 @dataclass(frozen=True)
@@ -1144,6 +1149,7 @@ async def read_facts(
         state_backup=await asyncio.to_thread(last_backup, settings.state_dir),
         night_book_nights=await asyncio.to_thread(night_book_nights, settings.state_dir),
         queue=await asyncio.to_thread(queue_order, settings.state_dir, clock.now()),
+        fill_notice_apart=await asyncio.to_thread(apart_orders, settings.state_dir),
     )
 
 

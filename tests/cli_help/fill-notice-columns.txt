@@ -1,0 +1,4 @@
+usage: krx-quant fill-notice-columns [-h]
+
+options:
+  -h, --help  show this help message and exit

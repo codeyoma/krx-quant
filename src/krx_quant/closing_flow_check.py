@@ -44,6 +44,7 @@ import aiohttp
 from krx_quant.auctions import PRINT_WITHIN, bars_page, print_bar, recorded_prints
 from krx_quant.auth import tokens_and_client
 from krx_quant.backfill import MINUTE_BARS_TR, read_bars
+from krx_quant.base_rates import day_prices
 from krx_quant.closing_flow import read_days, read_demand, recorded_auction_value
 from krx_quant.config import Settings
 from krx_quant.feeds import KRX_TRADE
@@ -52,9 +53,8 @@ from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.krx_net_assets import FLAG, against_kis, next_trading_day
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.net_assets import KIS, KRX, read_net_assets
+from krx_quant.probe_calls import REQUEST_TIMEOUT, kis_error
 from krx_quant.products import Product, products_of
-from krx_quant.structure_check import day_prices
-from krx_quant.supply_probe import REQUEST_TIMEOUT, kis_error
 
 TITLE = "KRX 마감 흐름 확인 (#305)"
 SAME_WITHIN = 0.01  # two auction values within 1% of the recorded one are the same

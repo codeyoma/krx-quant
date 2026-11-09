@@ -26,7 +26,6 @@ whole probe ends well inside the job's time limit.
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -38,13 +37,12 @@ import aiohttp
 from krx_quant.auth import tokens_and_client
 from krx_quant.config import Settings
 from krx_quant.kis import KisError, RestClient, rest_session
-from krx_quant.probe_calls import CALL_ERRORS, Calls
+from krx_quant.probe_calls import CALL_ERRORS, REQUEST_TIMEOUT, Calls, kis_error
 from krx_quant.probe_fields import MISSING, day_of, describe, flags, order_of, present, same
 from krx_quant.toss_probe import probe_toss
 
 PACE = 0.5  # seconds between calls
 KIS_BUDGET = timedelta(minutes=15)  # the KIS part asks nothing more after this
-REQUEST_TIMEOUT = 15.0  # seconds a call may take (KIS and Toss)
 WINDOW = timedelta(days=365)  # a ranged query asks this far back from its last day
 YEAR = timedelta(days=365)  # "a year back"
 MAX_PAGES = 25  # a history pages back at most this many calls, then bisects
@@ -260,22 +258,6 @@ def parse(source: Source, body: dict[str, Any], more: str) -> Answer:
             head = body[head_key] if head_key else {}
             return Answer(key=key, rows=rows, head=head, head_key=head_key, more=more)
     return Answer(more=more, body_keys=tuple(sorted(body)))
-
-
-_HTTP = re.compile(r"HTTP (\d+)")
-_CODE = re.compile(r"'(?:msg_cd|error_code)': '([^']*)'")
-_MESSAGE = re.compile(r"'(?:msg1|error_description)': ['\"]([^'\"]*)")
-
-
-def kis_error(error: KisError) -> str:
-    """KIS's refusal, by its status, code and message only (the rest of the body is left out)."""
-    text = str(error)
-    parts = [
-        f"HTTP {m.group(1)}" if (m := _HTTP.search(text)) else "",
-        m.group(1) if (m := _CODE.search(text)) else "",
-        m.group(1).strip() if (m := _MESSAGE.search(text)) else "",
-    ]
-    return "error " + (" ".join(p for p in parts if p) or "(no code)")
 
 
 def status(source: Source, answer: Answer, end: date | None = None) -> str:

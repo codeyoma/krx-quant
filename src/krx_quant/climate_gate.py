@@ -53,8 +53,7 @@ from krx_quant.holdout import (
     read_holdout,
 )
 from krx_quant.predictions import read_only
-from krx_quant.signal_review import _points
-from krx_quant.stats import Scored
+from krx_quant.stats import Scored, points_text
 from krx_quant.touch import TARGET_VERSION
 
 # Fixed in #449 before the window's results: none of these is tuned.
@@ -184,5 +183,7 @@ def lift_line(name: str, j: Judged, judged: bool) -> str:
     head = f"{name}: 짝 {j.lift.n:,} · {j.days}일"
     if j.verdict == TOO_FEW:
         return f"{head} · {TOO_FEW}"
-    line = f"{head} · lift {_points(j.lift.value)} · 짝 구간 {_span(j.lift)} · 거래일 구간 {_span(j.by_day)}"
+    line = (
+        f"{head} · lift {points_text(j.lift.value)} · 짝 구간 {_span(j.lift)} · 거래일 구간 {_span(j.by_day)}"
+    )
     return f"{line} · {j.verdict}" if judged else line

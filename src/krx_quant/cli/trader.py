@@ -103,6 +103,14 @@ async def _fill_notice_layout() -> int:
     return await fill_notice_layout(Settings.from_env(require_kis=False), datetime.now(KST))
 
 
+async def _fill_notice_columns() -> int:
+    """Whether the mock fill notice tells column 10 from 17, on the recorded orders of more than one
+    share, and the notices lost while the recorder was disconnected (#648), read-only."""
+    from krx_quant.trader.notice_columns import fill_notice_columns
+
+    return await fill_notice_columns(Settings.from_env(require_kis=False), datetime.now(KST))
+
+
 async def _probe_live_account() -> int:
     """The live account read by inquiry calls alone (#408): the trader's live key, no order."""
     from krx_quant.live_probe import probe_live_account
@@ -185,6 +193,13 @@ def add(sub: Commands) -> None:
         " read-only): each column's shape, lengths, values' count and matches; no value, order number,"
         " account or price",
     ).set_defaults(run=lambda args: asyncio.run(_fill_notice_layout()))
+    sub.add_parser(
+        "fill-notice-columns",
+        help="tell the mock fill notice's column 10 (CNTG_QTY) from 17 (ODER_QTY) on the recorded orders of"
+        " more than one share that something filled of, joined as fill-notice-layout joins them (#648),"
+        " and count the orders whose notice was lost while the recorder was disconnected: counts alone;"
+        " no value, order number, account or price",
+    ).set_defaults(run=lambda args: asyncio.run(_fill_notice_columns()))
     sub.add_parser(
         "probe-live-account",
         help="read the trader's live account with KRX_TRADER_LIVE_KIS_* by inquiry calls alone (#408): the"
