@@ -26,9 +26,21 @@ The key (``day_key``) is a digest of everything the samples are made of:
   to the day (the 20 trading days before it and theirs), the trading days to the options expiry
   after it (``days_to_expiry``, the only thing they ask of later days), and the first day it
   knows when that is within reach;
-- the code that makes samples (``code_digest``): whole modules where the module is about it, else
-  its functions and classes, without docstrings and comments, with the constants they read; and
-  the Python, NumPy and PyArrow versions.
+- what the samples mean (``semantics``, #645): ``SAMPLE_SEMANTICS``, a version raised by hand when
+  a change to the code can change a sample on some day; ``GOLDEN``, the digest of the samples made
+  from the fixed days of ``tests/test_sample_store.py`` (every feature and kind the night reads, a
+  recorded day with the touch target and with the four-minute move, and a backfilled one); and the
+  Python, NumPy and PyArrow versions.
+
+Until #645 the key held the digest of the code itself (``code_digest``), so any change to it but a
+comment made every day again on the next night, hours of it, though most changed no sample. The code
+is not in the key now, and two tests stand in for it: the golden one makes the fixed days and fails
+when their samples' digest is not ``GOLDEN`` (any feature value, label, kind answer, touch term or
+their order: ``tests/test_sample_store.py`` changes each and sees it fail), and the review gate fails
+when ``code_digest()`` is not ``REVIEWED_CODE``. A change that moves the golden digest changes
+``GOLDEN`` and so the key by itself; one the fixed days cannot show (a branch they never take) is the
+author's to judge when the gate stops it: ``REVIEWED_CODE`` alone when it changes no sample on any
+day, with ``SAMPLE_SEMANTICS`` raised when it can, or when that is not certain.
 
 A day is read from the store only when the stored key is the one asked for, whole. A file cut
 short (it is written aside and renamed, so only a disk's crash leaves one), unreadable or of
@@ -104,14 +116,24 @@ log = logging.getLogger(__name__)
 
 STORE_DIR = "training-samples"  # under the state directory
 FORMAT = 1  # the file's layout; another is a miss
+# What the samples mean (#645, module doc). Raise SAMPLE_SEMANTICS when a change can change a sample
+# on any day, whatever the golden test says; GOLDEN is ``golden_digest`` of the test's fixed days as
+# Linux makes them (the server's and CI's; the same on arm64 and x86-64, while a Mac's C maths library
+# differs in the last bit of a few logarithms, so the test checks it on Linux alone); REVIEWED_CODE is
+# ``code_digest()`` as last reviewed. GOLDEN and SAMPLE_SEMANTICS are
+# in every day's key (a change to either makes every day again), REVIEWED_CODE is not.
+SAMPLE_SEMANTICS = 1
+GOLDEN = "9ad340d6e42b4493126df0bcd9d9ec3b"
+REVIEWED_CODE = "27cd65b408826d27"
 # How far before a day the key holds the calendar's sessions: the 20 trading days whose bars the slot
 # returns read (#265), with holidays, and their previous days, are well inside. Of the days after it
 # the samples ask only the trading days to the options expiry, which the key holds as they are.
 CALENDAR_REACH = timedelta(days=50)
 
-# The code a day's samples are made with: ``training.training_day`` and what it calls. Whole modules
-# where the module is about making samples; elsewhere the functions and classes it runs, and the
-# names of data it reads. ``tests/test_sample_store.py`` traces ``training_day`` on recorded and
+# The code a day's samples are made with: ``training.training_day`` and what it calls, and the store's
+# own encoding of them. Whole modules where the module is about making samples; elsewhere the
+# functions and classes it runs, and the names of data it reads. Its digest is not in the key (#645):
+# the review gate reads it. ``tests/test_sample_store.py`` traces ``training_day`` on recorded and
 # backfilled days with every feature and kind, and fails on a function it runs outside these (and on
 # one this code names, read from its source), on a file it reads outside ``read_files``, and on a
 # day it asks of the calendar outside the key's.
@@ -130,6 +152,7 @@ _PARTS: dict[str, tuple[str, ...]] = {
     "pricing": ("classify", "cost_ticks", "flat_ticks", "tick_size", "Direction"),
     "ranges": ("range_answer", "bar_range", "range_class", "_at"),
     "replay": ("recorded_events", "recorded_partitions", "_keys", "_partition_rows"),
+    "sample_store": ("encode", "decode", "content", "_value", "FORMAT"),
 }
 # Imported by the whole modules for what does not make samples: the registries (the kinds a day is
 # read with are in its key themselves, the algorithms only by their features).
@@ -191,7 +214,7 @@ def day_key(
             "expiry": days_to_expiry(day, calendar),
             "first_known": first.isoformat() if first is not None and first >= day - CALENDAR_REACH else None,
         },
-        "code": code_digest(),
+        "semantics": semantics(),
     }
     return DayKey(day, parts)
 
@@ -253,10 +276,28 @@ def _kind_part(kind: Kind) -> list[Any]:
     ]
 
 
+def semantics() -> list[Any]:
+    """What the samples mean, as every day's key holds it (module doc): ``SAMPLE_SEMANTICS``,
+    ``GOLDEN`` and the Python, NumPy and PyArrow versions."""
+    runtime = f"{sys.version_info[:3]} numpy {numpy.__version__} pyarrow {pyarrow.__version__}"
+    return [SAMPLE_SEMANTICS, GOLDEN, runtime]
+
+
+def golden_digest(days: Iterable[tuple[TrainingDay, Sequence[str]]]) -> str:
+    """The digest of ``days`` (each with the features stored, in that order) as the store keeps
+    them (``content``): every sample's fields, feature values and touch terms, every answer, the bar
+    closes left out, in their order."""
+    h = hashlib.sha256()
+    for found, names in days:
+        h.update(json.dumps(content(found, names), separators=(",", ":")).encode())
+        h.update(b"\0")
+    return h.hexdigest()[:32]
+
+
 @functools.cache
 def code_digest() -> str:
     """A digest of the code that makes samples (``_WHOLE``, ``_PARTS``), without docstrings and
-    comments, with the constants it reads; and of the Python, NumPy and PyArrow versions."""
+    comments, with the constants it reads: the review gate's (``REVIEWED_CODE``), not the key's."""
     h = hashlib.sha256()
     for name in _WHOLE:
         module = importlib.import_module(f"krx_quant.{name}")
@@ -267,8 +308,6 @@ def code_digest() -> str:
         module = importlib.import_module(f"krx_quant.{name}")
         for object_name in objects:
             h.update(f"\0{name}.{object_name}\0{_object_digest(module, object_name, objects)}".encode())
-    runtime = f"{sys.version_info[:3]} numpy {numpy.__version__} pyarrow {pyarrow.__version__}"
-    h.update(f"\0runtime\0{runtime}".encode())
     return h.hexdigest()[:16]
 
 
@@ -394,9 +433,12 @@ def _stable(value: Any, depth: int = 0) -> str:
 
 def encode(key: DayKey, found: TrainingDay, names: Sequence[str]) -> dict[str, Any]:
     """``found`` (its samples with the features ``names``, in that order) as the file holds it."""
+    return {"format": FORMAT, "key": key.parts, **content(found, names)}
+
+
+def content(found: TrainingDay, names: Sequence[str]) -> dict[str, Any]:
+    """What the file holds of ``found`` beside its format and key (``encode``)."""
     return {
-        "format": FORMAT,
-        "key": key.parts,
         "reference": found.reference,
         "names": list(names),
         "samples": [

@@ -173,8 +173,9 @@ BOOK = Feed("H0UNASP0", tuple(BOOK_COLUMNS), BOOK_SCHEMA, _normalize_book)
 # for 005930's inverse ETF (#606): ETFs do not trade on NXT. Column order per KIS's example
 # (examples_llm/domestic_stock/asking_price_krx, read 2026-11-06): the integrated book's first 59
 # fields, then MID_PRC, MIDP_TOTAL_RSQN, MIDP_CLS_CODE and MARKET_CLS_CODE, which the example added on
-# 2026-09-28 for KRX's after-market. The probe of 2026-11-06 (``probe-inverse-book``, #606's comment)
-# found that layout in every frame: 37,469 records of 63 fields, one a frame, the time HHMMSS in all.
+# 2026-09-28 for KRX's after-market. The probe of 2026-11-06 (``probe-inverse-book``, #606's comment,
+# gone since #644) found that layout in every frame: 37,469 records of 63 fields, one a frame, the time
+# HHMMSS in all.
 KRX_BOOK_COLUMNS = (
     *BOOK_COLUMNS[: BOOK_COLUMNS.index("STCK_DEAL_CLS_CODE") + 1],
     "MID_PRC",
