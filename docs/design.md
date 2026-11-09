@@ -1519,7 +1519,7 @@ SMT(ICT의 Smart Money Technique)는 함께 움직이는 두 종목 중 한쪽�
 - trader가 시작하기 전에 받은 호가는 서 있던 호가로만 쓰고 체결을 일으키지 않는다. 다시 시작한 trader는 열린 매매를 이어서 위 규칙대로 판다. 사려고 기다리던 결정은 버린다(`restarted`). 같은 예측을 같은 때 읽고 같은 호가를 받으면 같은 매매가 나온다(`tests/test_trader_paper.py`).
 - 규칙은 하나다(#470, #652): 진입(`plan`, `admit`), 순위(`settle`), 지금 사지 않는 까닭(`not_now`: 상태, 호가 멈춤, 들고 있는 것과 기다리는 매수(`held_off`: 같은 봉 마감의 위 순위면 `outranked`, 아니면 `holding`, KIS 장부는 `reconciling`도), 위험 규칙 `risk_held`(#471), 연습 간격 `spaced`), 매수(`refused`), 청산(`exit_on`, `clock_exit`, 목표가·손절가 판정 `takes_profit`·`stopped`)은 장부 모듈 `book.py`의, 비용과 크기(`round_trip`, `net_of`, `size`)는 `money.py`의, 손실 한도에 닿았는지(`reaches`)는 `limits.py`의 함수다. paper 장부, KIS 장부(`mock.py`), 밤 정책 맞추기의 녹화 재생(`replay.py`, 아래 "밤 정책 맞추기")이 같은 함수를 부르고, 재생은 녹화 배열에 같은 판정을 배열로 건다(`takes_profit`, `stopped`, `reaches`, `round_trip`은 값 하나와 배열을 함께 받는다). 재생은 도전 정책의 장부가 흉내 내는 손실 한도(`limits.Simulated`, #471)도 같은 것을 쓴다. 재생이 일부러 다른 것은 그대로다: 멈춤 대신 녹화의 빈 구간이 신호를 빼고, 정책 재생에는 연습 간격이 없다.
 
-  > **바뀜** (2026-11-09, #NNN): 진입·순위·위험 규칙·청산의 함수와 까닭 상수는 `paper.py`에 있었고, "지금 사지 않는 까닭"은 `PaperTrader._not_now`·`_held_off`와 `replay.Policy._busy`가 따로 짰다(KIS 장부는 `_busy`·`_held_off`를 덮어썼다). 재생의 목표가·손절가 배열 검색과 손실 한도 배열 검색도 paper의 판정을 다시 썼다 → `book.py`가 규칙을 갖고 `not_now` 하나를 모두 부른다. 이유: 규칙 하나를 바꾸면 한 곳만 고치게(#652). 결정, 체결, 순손익은 그대로다.
+  > **바뀜** (2026-11-09, #664): 진입·순위·위험 규칙·청산의 함수와 까닭 상수는 `paper.py`에 있었고, "지금 사지 않는 까닭"은 `PaperTrader._not_now`·`_held_off`와 `replay.Policy._busy`가 따로 짰다(KIS 장부는 `_busy`·`_held_off`를 덮어썼다). 재생의 목표가·손절가 배열 검색과 손실 한도 배열 검색도 paper의 판정을 다시 썼다 → `book.py`가 규칙을 갖고 `not_now` 하나를 모두 부른다. 이유: 규칙 하나를 바꾸면 한 곳만 고치게(#652). 결정, 체결, 순손익은 그대로다.
 
 **대기 매수: 측정 중 (#432, PR #434, `trader/passive.py`).** trader는 매도 1호가에 산다(위 "모의 체결". mock과 live도 매도 1호가의 지정가). 그래서 칸을 비용 지도의 시장가 왕복으로 판정하고, 지금은 모든 칸이 `fail`이다. 매수 1호가에 걸어 두는 대기 매수는 1틱이 싸다. 하지만 체결되지 않을 수 있고, 가격이 불리하게 움직일 때 잘 체결된다(역선택). 1틱이 싸다는 것만으로 이득이라고 볼 수 없어서, 바꾸기 전에 녹화로 잰다. trader의 주문 방식은 그대로다. 바꿀지는 그 숫자를 보고 사용자가 정하고, 대기 진입을 넣는 것은 별도 티켓이다.
 
@@ -1575,7 +1575,7 @@ SMT(ICT의 Smart Money Technique)는 함께 움직이는 두 종목 중 한쪽�
 
 > **바뀜** (2026-11-09, #656): "오늘 살 수 있는 칸"이 `selection.choose`, `policy.apply`, `desk`의 `_rested`·`_practising`·`_frozen`, `replay.inactive_days`에 흩어져 있었고 desk와 재생이 각자 적용했다 → `buyable.py` 한 곳이 답하고 둘 다 거기에 묻는다. `policy.apply`, `desk.under_champion`, `desk.practice_state`, `replay.inactive_days`는 같은 이름으로 남아 `buyable`의 것을 부른다. 이유: #603(#611)은 쉬는 예측기 하나를 위해 trader 모듈 11개를 고쳤다(#646). 동작은 바뀌지 않는다.
 
-> **삭제됨** (2026-11-09, #NNN): `policy.apply`, `desk.under_champion`, `desk.practice_state`, 그리고 `replay.inactive_days`라는 이름. 이유: #656이 옮기며 남긴 같은 이름의 통로였고, 부르는 곳을 모두 `buyable`로 옮겼다(#652). 대신: `buyable.under_policy`, `buyable.under_champion`, `buyable.practice_state`, `buyable.inactive_days`.
+> **삭제됨** (2026-11-09, #664): `policy.apply`, `desk.under_champion`, `desk.practice_state`, 그리고 `replay.inactive_days`라는 이름. 이유: #656이 옮기며 남긴 같은 이름의 통로였고, 부르는 곳을 모두 `buyable`로 옮겼다(#652). 대신: `buyable.under_policy`, `buyable.under_champion`, `buyable.practice_state`, `buyable.inactive_days`.
 
 **밤 정책 맞추기 (#399, `trader/refit.py`).** 예약 작업 `trader-report`(거래일 밤마다, 밤 학습 뒤, `krx-quant refit-policy --report`, [operations.md](operations.md) 3장 "예약 작업 (#215)")가 새 정책 버전을 맞추고, 그날의 리포트를 그 출력 위에 붙인다(아래 "밤 리포트").
 
