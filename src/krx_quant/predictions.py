@@ -729,6 +729,20 @@ def days_with_predictions(db: sqlite3.Connection, until: date, limit: int) -> li
     return days
 
 
+def within_days(days: Sequence[date], column: str) -> tuple[str, list[str]]:
+    """A condition on ``column`` (a time as stored) being on one of ``days`` (at least one), and its
+    parameters: the range lets SQLite use its index, the list leaves out the days in between."""
+    marks = ", ".join("?" * len(days))
+    return (
+        f"{column} >= ? AND {column} < ? AND substr({column}, 1, 10) IN ({marks})",
+        [
+            iso(datetime.combine(min(days), time(), KST)),
+            iso(datetime.combine(max(days) + timedelta(days=1), time(), KST)),
+            *(d.isoformat() for d in days),
+        ],
+    )
+
+
 def iso(at: datetime) -> str:
     return at.astimezone(KST).isoformat()
 

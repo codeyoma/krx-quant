@@ -49,10 +49,9 @@ from krx_quant.feeds.base import KST
 from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.net_assets import DAILY, DAILY_DATE, ETFETN, PRICE, Query, object_at, one_object, row_list
-from krx_quant.probe_calls import CALL_ERRORS, Calls
+from krx_quant.probe_calls import CALL_ERRORS, REQUEST_TIMEOUT, Calls, kis_error
 from krx_quant.probe_fields import MISSING, day_of, describe, flags, order_of, present, same
 from krx_quant.products import PRODUCTS, Product, Structure
-from krx_quant.supply_probe import REQUEST_TIMEOUT, kis_error
 
 Out = Callable[[str], None]
 

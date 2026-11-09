@@ -550,7 +550,10 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 지난날마다의 15:20 수요와 그 뒤의 종가 단일가·다음날이다. `from`부터 `to`까지(KST, 둘 다 포함, 기본은 오늘까지 1년, 많아야 4,000일)의 날이 오래된 날부터 오고, 그 날들로 계산한 요약이 붙는다. 날짜가 아니거나 `from`이 `to`보다 늦거나 범위가 넘치면 400, 모르는 종목은 404다.
 
 - **계산.** 수집기가 시작할 때와 매일 20:30 이력 작업(1분봉 백필, 단일가 가격) 뒤에, 그리고 KRX Open API의 순자산이 들어온 뒤에 계산해 `state/closing_flow/days.json`에 둔다(한 번에 하나씩). 읽을 때는 그것을 준다(`computed_at`, 계산 전이면 `null`). 그래서 그날의 줄은 그날 20:30 뒤에, 다음날 칸은 다음날 20:30 뒤에 채워진다. 이 배포 전의 모양으로 남은 파일(`version`이 2가 아니다)은 읽지 않는다: 배포 뒤 첫 계산까지 `computed_at`이 `null`이다.
-- **날.** 백필 1분봉(`bars`)이 있는 날 가운데 전 거래일에도 1분봉이 있는 날이다. 정의는 구조 실측(#270, `structure-check` 2절)과 같고, 같은 함수를 부른다(`structure_check.auction_days`, `day_prices`, `period_of`, `same_share`, `opposite_share`). 그래서 같은 데이터에서 요약의 숫자가 `structure-check`의 숫자와 같다.
+- **날.** 백필 1분봉(`bars`)이 있는 날 가운데 전 거래일에도 1분봉이 있는 날이다. 정의는 구조 실측(#270, `structure-check` 2절)과 같고, 같은 함수를 부른다(`base_rates.auction_days`, `day_prices`, `period_of`, `same_share`, `opposite_share`). 그래서 같은 데이터에서 요약의 숫자가 `structure-check`의 숫자와 같다.
+
+  > **바뀜** (2026-11-09, #663): 이 함수들은 `structure_check.py`에 있었다 → `base_rates.py`에 있다. 정의와 숫자는 그대로다. 이유: 실전 모듈이 검사 모듈을 가져오지 않게 하려고(#650).
+
   - `auction_bp`: 종가 단일가 움직임 = 종가 ÷ 15:20 직전가 − 1(bp). `auction_ticks`: 같은 움직임의 틱 수. `flow_bp`: 그날 15:20까지의 흐름 = 15:20 직전가 ÷ 전 거래일 종가 − 1. `next_gap_bp`: 다음날 시가 ÷ 종가 − 1. `next_close_bp`: 다음날 종가 ÷ 종가 − 1(다음날이 아직 없으면 `null`). 가격은 1분봉(통합)의 것이다.
   - `demand`, `spot_futures`, `futures`: 그날의 15:20 수요. `demand_source`가 `live`면 그날 저장한 15:20 행이고, `bars`면 저장한 행이 없는 날을 그날 쓸 순자산과 1분봉의 `flow_bp`(r 대신)로 계산한 값이다. KRX Open API의 순자산이 상장일(2026-05-27)부터 있으므로 그다음 거래일(2026-05-28)부터 수요가 있다. 순자산이 없는 날(상장 전, `KRX_OPENAPI_KEY`가 없는 서버의 2026-10-21 전)과 009150은 `null`이다.
 
@@ -1126,7 +1129,9 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
   - `verdict`: 비용마다 `pass`(맞힘률의 신뢰구간 하한 > p*), `fail`(아니면), `few`(신호 수가 순위표의 최소 표본 `min_sample`보다 적다). 맞힘률 자체가 아니라 하한으로 판정해 우연히 넘은 줄을 넘음으로 보지 않는다. p*가 없으면 `null`이다.
 - 통계는 순위표처럼 작업 스레드에서 계산하고 예측 저장소가 바뀔 때까지 둔다(종류마다 따로).
 
-**기간 기준율 `regimes`.** 4분 도달 정답의 기간별 기준율이다(`base_rates.py`). `structure-check`의 3절(#270)과 같은 기간(`structure_check.PERIODS`: 상장 전 ~05-26, 상장 뒤 05-27~07-30, 규제 뒤 07-31~09-13, 애프터마켓 뒤 09-14~), 같은 정답(1분봉 규칙 `touch.bar_touch`, 엔진이 예측하는 모든 봉 마감), 같은 함수(`structure_check.label_shares`)다.
+**기간 기준율 `regimes`.** 4분 도달 정답의 기간별 기준율이다(`base_rates.py`). `structure-check`의 3절(#270)과 같은 기간(`base_rates.PERIODS`: 상장 전 ~05-26, 상장 뒤 05-27~07-30, 규제 뒤 07-31~09-13, 애프터마켓 뒤 09-14~), 같은 정답(1분봉 규칙 `touch.bar_touch`, 엔진이 예측하는 모든 봉 마감), 같은 함수(`base_rates.label_shares`)다.
+
+> **바뀜** (2026-11-09, #663): 기간과 함수는 `structure_check.py`에 있었다 → `base_rates.py`에 있다. 기간과 숫자는 그대로다. 이유: 실전 모듈이 검사 모듈을 가져오지 않게 하려고(#650).
 
 - `computed_at`, `first_day`, `last_day`: 계산한 때와 읽은 1분봉의 첫날·마지막 날.
 - `rows[]`: 종목·기간마다 `days`(1분봉 날 수), `windows`(창 수), `up`·`flat`·`down`(클래스 비율. 늘 보합의 맞힘률은 `flat`이다), `k`(중앙값, 둘이면 아래 것), `persist`(직전 창 정답이 맞은 비율, 직전 창이 있는 창 `persist_windows` 가운데. 없으면 `null`). 창이 없는 기간은 빠진다. `symbol`을 고르면 그 종목 줄만 온다.

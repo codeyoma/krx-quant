@@ -155,7 +155,6 @@ from krx_quant.algorithms.turing import ROUNDS
 from krx_quant.api import TERCILES, tercile, volatility_cuts
 from krx_quant.baselines import Forecast
 from krx_quant.climate import direction
-from krx_quant.climate_prior import ArmStats, arm_stats
 from krx_quant.config import Settings
 from krx_quant.consensus import slot
 from krx_quant.features import BARRIER_SIGMA, BARRIER_WIDTH, DEFAULT_HALF_SPREAD, FeatureVector, Leaders
@@ -169,9 +168,11 @@ from krx_quant.prevalidation import _WalkForward
 from krx_quant.pricing import Direction, most_likely
 from krx_quant.sample_store import night_reads
 from krx_quant.stats import (
+    ArmStats,
     Lift,
     Paired,
     Scored,
+    arm_stats,
     day_lift,
     gains_by_day,
     lift,
