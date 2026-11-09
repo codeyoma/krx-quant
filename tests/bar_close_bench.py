@@ -33,7 +33,7 @@ it, on to the day's review at 15:40, which reads ``--history`` earlier days of p
 a copy of the day's, made in the store just before). It says the process's resident memory and what
 its allocators hold before the session, at its last bar closes, after its last answers, before and
 after the review; what the Market View holds at the last bar closes, by attribute, in entries
-(``session_memory.held``) and bytes; how long the review kept the event loop without a turn; and the
+(``MarketView.held``) and bytes; how long the review kept the event loop without a turn; and the
 lines the engine's garbage collection said (``garbage.py``).
 ``--hold`` runs the engine as before #623, which let nothing go and handed nothing back.
 """
@@ -68,7 +68,7 @@ from pathlib import Path
 from typing import Any
 
 import krx_quant.engine as engine_module
-from krx_quant import demo, footprint, session_memory
+from krx_quant import demo, footprint
 from krx_quant.algorithms import (
     ALGORITHMS,
     KIND_ALGORITHMS,
@@ -641,7 +641,7 @@ async def replay_day(state: Path, rate: float, history: int, hold: bool) -> dict
     started = timer.perf_counter()
     await to(15, 19)  # the last bar close (15:16) predicted; its answers are due at 15:20
     marks["at the last bar closes"] = memory()
-    held = {"entries": session_memory.held(engine._market), "mb": view_mb(engine)}
+    held = {"entries": engine._market.held(), "mb": view_mb(engine)}
     await to(15, 30)
     marks["after the last answers"] = memory()
     copy_to_earlier_days(db, DAY, history)
@@ -668,7 +668,7 @@ async def replay_day(state: Path, rate: float, history: int, hold: bool) -> dict
         "store_mb": round(db.stat().st_size / 2**20, 1),
         "memory": marks,
         "held_at_the_last_bar_closes": held,
-        "kept_after_the_review": session_memory.held(engine._market),
+        "kept_after_the_review": engine._market.held(),
         "review": review,
         "said": said.lines,
     }

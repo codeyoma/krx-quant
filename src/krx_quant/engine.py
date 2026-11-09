@@ -81,7 +81,7 @@ what is alive, so that Python's full collections no longer walk the session's qu
 (``garbage``, ``garbage.py``). Once its next work is over ``IDLE`` away after a bar close (the
 session's last answers), and after each daily review, the live engine rests (#623,
 ``Garbage.rest``): the Market View lets go of what the session kept and the next one does not read
-(``session_memory.let_go``), the frozen are released, the memory freed goes back to the system, and
+(``MarketView.let_go``), the frozen are released, the memory freed goes back to the system, and
 one INFO line says what went and what the process holds.
 
 The prediction window is continuous trading, from the first bar close after the open
@@ -147,7 +147,6 @@ from datetime import date, datetime, time, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from krx_quant import session_memory
 from krx_quant.algorithms import (
     ALGORITHMS,
     KIND_ALGORITHMS,
@@ -1092,21 +1091,19 @@ class PredictionEngine:
         if self.garbage is not None:  # out of the session, its memory handed back (#621, #623)
             ahead = self.next_due()
             if reviewed or ahead is None or ahead - self.clock.now() > IDLE:
-                rested = self.garbage.rest(
-                    self._let_go, partial(session_memory.held, self._market), reviewed=reviewed
-                )
+                rested = self.garbage.rest(self._let_go, self._market.held, reviewed=reviewed)
                 if rested is not None:  # for the night's report, which cannot read Loki
                     self.store.add_run(REST_RUN, self.clock.now(), None, json.dumps(rested))
 
     def _let_go(self) -> Mapping[str, int]:
         """Drop from the Market View what the next session's bar closes do not read (#623,
-        ``session_memory.let_go``), and say how many of each went: nothing while that session opens
+        ``MarketView.let_go``), and say how many of each went: nothing while that session opens
         within ``IDLE`` (the pre-market's events are few), or none is in sight."""
         ahead = next_bar_close(self.calendar, self._last_tick)
         session = None if ahead is None else self.calendar.session(ahead.astimezone(KST).date())
         if session is None or session.open - self.clock.now() <= IDLE:
             return {}
-        return session_memory.let_go(self._market, session.open, {k.horizon for k in self.kinds})
+        return self._market.let_go(session.open, {k.horizon for k in self.kinds})
 
     def _step(self, name: str) -> contextlib.AbstractContextManager[None]:
         """Time a synchronous step of the bar close on the event loop, when it is watched (#538)."""

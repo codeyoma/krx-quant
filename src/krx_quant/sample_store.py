@@ -124,7 +124,7 @@ FORMAT = 1  # the file's layout; another is a miss
 # day's key (a change to either makes every day again), REVIEWED_CODE is not.
 SAMPLE_SEMANTICS = 1
 GOLDEN = "9ad340d6e42b4493126df0bcd9d9ec3b"
-REVIEWED_CODE = "193371a8ca4ebb0b"
+REVIEWED_CODE = "d1afb25cad107e86"
 # How far before a day the key holds the calendar's sessions: the 20 trading days whose bars the slot
 # returns read (#265), with holidays, and their previous days, are well inside. Of the days after it
 # the samples ask only the trading days to the options expiry, which the key holds as they are.
