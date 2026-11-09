@@ -32,7 +32,7 @@ import bisect
 import math
 import statistics
 from array import array
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from typing import Any, NamedTuple
@@ -92,6 +92,19 @@ _QUOTING = (TRADE.tr_id, KRX_TRADE.tr_id, BOOK.tr_id, BOOK_SNAPSHOT.tr_id)
 VENUES = ("KRX", "NXT")
 # The feeds with the symbols' flows (Turing's and Shannon's).
 FLOW_FEEDS = (PROGRAM.tr_id, MEMBER.tr_id, MEMBER_REST.tr_id, FOREIGN_ESTIMATE.tr_id)
+# What the view lets go of once a session is over (#623, ``MarketView.let_go``), as ``held``,
+# ``let_go`` and the engine's rest (``garbage.Garbage.rest``) name them: each symbol's book updates,
+# the kinds' logged quotes and trades, the day's trades by aggressor, the running totals of the
+# trades' sides and venues, the day's flows (program trading, foreign member firms, investor
+# estimates).
+BOOK_UPDATES, KIND_QUOTES, TRADES, TRADE_SIDES, FLOWS = (
+    "book updates",
+    "kind quotes",
+    "trades",
+    "trade sides",
+    "flows",
+)
+LET_GO = (BOOK_UPDATES, KIND_QUOTES, TRADES, TRADE_SIDES, FLOWS)
 
 
 def prediction_window(session: Session, horizon: timedelta = HORIZON) -> tuple[datetime, datetime]:
@@ -151,6 +164,14 @@ class _Flow:
         early = opened is not None and self._at[0] <= opened + timedelta(minutes=FLOW_MINUTES)
         return 0.0 if early else None
 
+    def forget(self, before: datetime) -> int:
+        """Drop the values of a day earlier than ``before``'s, as that day's first value will
+        (``before``, ``base``). How many that dropped."""
+        if self._day is None or self._day >= kst_day(before):
+            return 0
+        dropped, self._at, self._values = len(self._at), [], []
+        return dropped
+
 
 class _Estimates:
     """A symbol's investor estimates of the day: each poll gives every time slot so far.
@@ -176,6 +197,14 @@ class _Estimates:
         foreign = next((r[2] for r in reversed(known) if r[2] is not None), None)
         institution = next((r[3] for r in reversed(known) if r[3] is not None), None)
         return foreign, institution
+
+    def forget(self, before: datetime) -> int:
+        """Drop the rows of a day earlier than ``before``'s, as that day's first row will
+        (``before``). How many that dropped."""
+        if self._day is None or self._day >= kst_day(before):
+            return 0
+        dropped, self._rows = len(self._rows), []
+        return dropped
 
 
 # An option trade older than this says nothing about where the money is at a bar close.
@@ -285,6 +314,15 @@ class _Running:
         before = self._totals[lo - 1] if lo > 0 else self._dropped
         return tuple(a - b for a, b in zip(self._totals[hi - 1], before, strict=True))
 
+    def forget(self, before: datetime) -> int:
+        """Drop what was received before ``before``, as ``add`` does what is ``keep`` old: a window
+        that starts at ``before`` or later sums the same. How many that dropped."""
+        cut = bisect.bisect_left(self._at, before)
+        if cut:
+            self._dropped = self._totals[cut - 1]
+            del self._at[:cut], self._totals[:cut]
+        return cut
+
 
 class _Quote(NamedTuple):
     """The best quotes and their sizes."""
@@ -386,6 +424,16 @@ class _Book:
         imbalance, size, updates = self._flow.between(start, end)
         return imbalance, size / updates if updates else None
 
+    def forget(self, before: datetime) -> int:
+        """Drop the updates received before ``before``, all but the last (the next update's order
+        flow is measured from it, ``add``): nothing asked about ``before`` + ``MAX_QUOTE_AGE`` or
+        later reads them. How many that dropped."""
+        cut = min(bisect.bisect_left(self._at, before), len(self._at) - 1)
+        if cut > 0:
+            del self._at[:cut], self._micro[:cut], self._depth[:cut], self._top[:cut]
+        self._flow.forget(before)
+        return max(cut, 0)
+
 
 class _Arrivals:
     """A symbol's buy- and sell-initiated trades of the day by receipt time, compact (17 bytes
@@ -404,6 +452,15 @@ class _Arrivals:
         self._at = array("d")  # seconds since the epoch
         self._buy = array("b")  # 1 bought (buy-initiated), 0 sold
         self._total = array("d")  # running total of the sizes
+
+    def forget(self, before: datetime) -> int:
+        """Drop the trades of a day earlier than ``before``'s, as that day's first trade will:
+        nothing asked about ``before``'s day reads them (``before``). How many that dropped."""
+        if self._day is None or self._day >= kst_day(before):
+            return 0
+        dropped = len(self._at)
+        self._reset()
+        return dropped
 
     def add(self, at: datetime, side: str, size: float) -> None:
         day = kst_day(at)
@@ -856,6 +913,70 @@ class MarketView:
         auction (#263): a kind of that horizon predicts and answers that bar close."""
         session = self.calendar.session(bar_close.astimezone(KST).date())
         return session is not None and bar_close + horizon <= session.closing_auction
+
+    def held(self) -> dict[str, int]:
+        """How much the view keeps, by what it is (#623): the entries ``let_go`` drops
+        (``LET_GO``), then the reference prices' quotes, the day's bars and the touch windows,
+        which it leaves. For the line the engine's rest says (``garbage.Garbage.rest``)."""
+        return {
+            BOOK_UPDATES: sum(len(b._at) for b in self._books.values()),
+            KIND_QUOTES: sum(len(q._quotes) + len(q._rests) + len(q._trades) for q in self._logs.values()),
+            TRADES: sum(len(a._at) for a in self._arrivals.values()),
+            TRADE_SIDES: sum(len(r._at) for r in (*self._sides.values(), *self._venues.values())),
+            FLOWS: sum(len(f._at) for f in (*self._program.values(), *self._foreign_members.values()))
+            + sum(len(e._rows) for e in self._estimates.values()),
+            "reference quotes": sum(len(q.times) for q in self._reference._quotes.values()),
+            "bars": sum(
+                len(b) for builder in (self._bars, self._leader_bars) for b in builder._bars.values()
+            ),
+            "touch windows": sum(len(w) for w in self._windows.values()),
+        }
+
+    def let_go(self, opened: datetime, horizons: Collection[timedelta]) -> dict[str, int]:
+        """Drop what no bar close of a session that opens at ``opened`` or later reads (#623): the
+        book updates (each symbol's last stays), the trades' sides and venues and the kinds' quotes
+        received before ``opened``, and the trades and flows of the days before its day. How many
+        of each went (``LET_GO``'s names); nothing, and none dropped, while a window followed is
+        still to be answered at one of ``horizons`` (the kinds'; the touch windows' four minutes
+        always): its kinds read the quotes logged.
+
+        A bar close's snapshot reads the book updates, the trades and the day's flows received from
+        its session's open on (``order_flow``, ``microprices``, ``arrivals``, ``flows``), and a
+        window's answer the quotes logged from its bar close on. Each log forgets what is older only
+        as it is added to, so what a session ends with stayed until the next one's first events,
+        through the evening and the night, when the nightly training needs the server's memory.
+        This drops exactly what each log would drop at the next session's first events.
+
+        The reference prices' quotes stay (a late look back reads the last minutes: the 15:20
+        closing demand), as do the bars and the touch windows (the day's chart, a late score)."""
+        if self._unanswered({WINDOW, *horizons}):
+            return {}
+        kind_quotes = self.held()[KIND_QUOTES]
+        for log in self._logs.values():
+            log.forget(opened)
+        flows = [*self._program.values(), *self._foreign_members.values()]
+        return {
+            BOOK_UPDATES: sum(b.forget(opened) for b in self._books.values()),
+            KIND_QUOTES: kind_quotes - self.held()[KIND_QUOTES],
+            TRADES: sum(a.forget(opened) for a in self._arrivals.values()),
+            TRADE_SIDES: sum(r.forget(opened) for r in (*self._sides.values(), *self._venues.values())),
+            FLOWS: sum(f.forget(opened) for f in flows)
+            + sum(e.forget(opened) for e in self._estimates.values()),
+        }
+
+    def _unanswered(self, horizons: Collection[timedelta]) -> bool:
+        """Whether a window the view follows is still to be handed out (``ended_windows``) at a
+        length it is answered at: every touch window, and a longer kind's that ends by the closing
+        auction."""
+        closes = {close for windows in self._windows.values() for close in windows}
+        for horizon in horizons:
+            through = self._ended_through.get(horizon)
+            for close in closes:
+                if (through is None or close > through) and (
+                    horizon == WINDOW or self.within_session(close, horizon)
+                ):
+                    return True
+        return False
 
     def _open_windows(self, close: datetime) -> None:
         """Start following each symbol's touch window from the bar close ``close``, once."""

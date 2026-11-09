@@ -29,7 +29,7 @@ That release gave no memory back: the session's quote logs were still referred t
 through the evening and the night, when the nightly training needs the server's memory (#623).
 ``Garbage.rest`` is what the engine does instead, twice a trading day: once its next work is over
 ``IDLE`` away after a bar close (after the session's last answers) and after each daily review. It
-lets go of what the session kept (the engine's ``let_go``: ``session_memory.py``), releases, hands
+lets go of what the session kept (the engine's ``let_go``: ``MarketView.let_go``), releases, hands
 the freed memory back to the system (``footprint.hand_back``: Arrow's pool, glibc's
 ``malloc_trim``) and freezes again what stays, so that the passes the evening's work sets off (the
 review's rows, the Engine API's) do not walk it either. One INFO line says what went and what the

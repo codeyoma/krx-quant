@@ -28,10 +28,9 @@ from krx_quant.features import FEATURES, Leaders
 from krx_quant.garbage import REST_RUN, Garbage
 from krx_quant.kind_registry import KINDS
 from krx_quant.market_calendar import MarketCalendar
-from krx_quant.market_view import MarketView, _Book, _Running
+from krx_quant.market_view import LET_GO, MarketView, _Book, _Running
 from krx_quant.predictions import PredictionStore
 from krx_quant.replay import replay_into
-from krx_quant.session_memory import LET_GO, _forget_book, _forget_running, held, let_go
 from krx_quant.touch import TARGET_VERSION
 from tests.algorithm_doubles import FixedAlgorithm
 from tests.replay_doubles import stored
@@ -192,21 +191,21 @@ def test_nothing_is_let_go_while_a_window_is_still_to_be_answered() -> None:
     ):
         view.on_event(feed, row)
     assert view.ended_windows(at("09:09:00")), "the four-minute windows from 09:01 to 09:05 are over"
-    before = held(view)
+    before = view.held()
     opened = at("09:00:00", NEXT_DAY)
     horizons = {k.horizon for k in KINDS}
 
-    assert let_go(view, opened, horizons) == {}
-    assert held(view) == before
+    assert view.let_go(opened, horizons) == {}
+    assert view.held() == before
 
     for horizon in horizons:
         view.ended_windows(at("15:20:00"), horizon)
-    gone = let_go(view, opened, horizons)
+    gone = view.let_go(opened, horizons)
 
     assert gone["book updates"] == before["book updates"] - 1
     assert gone["kind quotes"] == before["kind quotes"] > 0
     assert gone["trades"] == before["trades"] > 0
-    after = held(view)
+    after = view.held()
     assert (after["book updates"], after["kind quotes"], after["trades"]) == (1, 0, 0)
     assert after["bars"] == before["bars"] and after["touch windows"] == before["touch windows"]
 
@@ -228,7 +227,7 @@ def test_a_log_that_forgot_answers_the_same_from_there_on() -> None:
     since = at("09:10:00")
     earlier = sum(1 for _, row in updates if row["received_at"] < since)
 
-    assert _forget_book(cut, since) == earlier and _forget_running(cut_totals, since) == earlier
+    assert cut.forget(since) == earlier and cut_totals.forget(since) == earlier
     assert len(cut._at) == len(whole._at) - earlier and len(cut_totals._at) == len(totals._at) - earlier
 
     minutes = [since + timedelta(minutes=m) for m in range(1, 11)]
@@ -249,5 +248,5 @@ def test_a_log_that_forgot_answers_the_same_from_there_on() -> None:
     everything = _Book()
     for _, row in updates:
         everything.add(row["received_at"], row)
-    assert _forget_book(everything, at("15:40:00")) == len(updates) - 1, "the last update stays"
-    assert _forget_book(_Book(), since) == 0
+    assert everything.forget(at("15:40:00")) == len(updates) - 1, "the last update stays"
+    assert _Book().forget(since) == 0
