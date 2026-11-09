@@ -17,7 +17,7 @@ from krx_quant.config import Settings
 from krx_quant.feeds.base import KST
 from krx_quant.garbage import REST_RUN
 from krx_quant.predictions import DB_NAME, PredictionStore
-from krx_quant.scheduled import FAILED, INTERRUPTED, OK, SESSION_MEMORY, Facts, JobRecord, Night
+from krx_quant.scheduled import FAILED, INTERRUPTED, OK, SESSION_MEMORY, JobRecord, Night
 from krx_quant.session_memory_probe import session_memory
 
 DAY = date(2026, 11, 9)  # a Monday
@@ -108,8 +108,8 @@ def test_a_day_without_a_rest_exits_1_and_the_job_stays_due(tmp_path: Path) -> N
         1,
     )
 
-    def night(day: date, trading: bool, record: JobRecord | None) -> Night:
-        return Night(day, trading, "c1", record, {}, Facts())
+    def night(day: date, trading: bool, record: JobRecord | None) -> Night[None]:
+        return Night(day, trading, "c1", record, {}, None)
 
     started = at("22:40:00")
     tuesday = DAY + timedelta(days=1)

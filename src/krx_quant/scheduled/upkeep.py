@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+import asyncio
+from datetime import date, timedelta
 
 from krx_quant.process_log import Ran
-from krx_quant.scheduled.core import FAILED, OK, Job, Night, Target
+from krx_quant.scheduled.core import FAILED, OK, Job, Night, Reads, Target
+from krx_quant.state_backup import last_backup
 
 # The restore drill (#576, ``state_backup.drill``): the collector backs the server's state up each
 # night at 05:35 (``state_backup.BACKUP_AT``: the engine and trader databases, the pre-validations,
@@ -18,7 +20,7 @@ from krx_quant.scheduled.core import FAILED, OK, Job, Night, Target
 # counts against those counted at the backup (beside the live database's now), each experiment report
 # read as JSON and none refused at the backup (#604), and that the backup is no older than two days.
 # Counts, sizes, times and ok or fail only. On the first night of a month (trading or not) once this
-# server has made a backup (``Facts.state_backup``: a new server's first night has none yet), and
+# server has made a backup (``read_last_backup``: a new server's first night has none yet), and
 # seven nights after a drill that failed, until one passes. Short: before the pre-validations, which
 # the night is for. A drill that fails calls an agent (``label_if``); one that passes is a record and
 # changes no label, and no label is taken off: a question an agent left for the user stays. A few
@@ -27,10 +29,15 @@ RESTORE_DRILL_ISSUE = 577
 AGAIN_AFTER_FAILURE = timedelta(days=7)
 
 
-def _a_month_since_the_last_drill(night: Night) -> bool:
+async def read_last_backup(reads: Reads) -> date | None:
+    """The day of the last backup of the server's state this server made (``state_backup.MARK``)."""
+    return await asyncio.to_thread(last_backup, reads.sources.settings.state_dir)
+
+
+def _a_month_since_the_last_drill(night: Night[date | None]) -> bool:
     """Once the server has made a backup: on the first night of each month, and seven nights after
     a drill that failed; a run a restart cut runs the next night."""
-    if night.facts.state_backup is None:
+    if night.facts is None:
         return False
     record = night.record
     if record is None or record.outcome not in (OK, FAILED):
@@ -48,6 +55,7 @@ def restore_drill_calls(ran: Ran) -> bool:
 RESTORE_DRILL = Job(
     name="restore-drill-577",
     due=_a_month_since_the_last_drill,
+    facts=read_last_backup,
     command=("restore-drill",),
     timeout=timedelta(minutes=30),
     label_if=restore_drill_calls,

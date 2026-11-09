@@ -5,8 +5,8 @@ The jobs are listed here (``JOBS``), so what runs on the server, and when, is re
 a PR; the pre-validations (#204) are built from the algorithm registries, one for each
 algorithm registered after pre-validation existed, and one for each bar-close algorithm's changed
 code (#454). Each has a name (its key in the state file), a condition asked every night
-(``Night``: the day, whether it trades, this job's last run, every job's, and what the engine
-knows, ``Facts``), the command (``krx-quant``
+(``Night``: the day, whether it trades, this job's last run, every job's, and what its own reader of
+what the engine and the server know read, ``Job.facts``, #651), the command (``krx-quant``
 arguments), a time limit, the issues its result goes to (each with the part of the output
 it gets), the files it writes that go with the result (``Attachment``) and the labels it
 sets.
@@ -24,8 +24,8 @@ probations run after a pre-validation that would otherwise miss its last start t
 A session job (``Job.session``, #403) runs instead on a trading day, from its time in the
 continuous session, and ends by ``SESSION_UNTIL``: work only the market's hours can do (an
 order on KIS's mock server fills only then). It waits for no training, and its condition is
-asked with cheap ``Facts`` of its own (``session_facts``), not the night's, which read every
-recorded day beside the live engine.
+asked with its own facts read then, which must be cheap beside the live engine (as
+``trader.read_mock_session``'s), not the pre-validations', which read every recorded day.
 
 The state (``state/scheduled.json``) keeps each job's last run: its night, outcome (``ok``,
 ``failed``, ``interrupted``; ``running`` while it runs), exit code, duration, commit and
@@ -49,22 +49,31 @@ told apart by the report the run wrote.
 > post's went to Telegram → they are logged (``told``); the readiness line counts them. 이유: a line a
 > job was most of a night's Telegram, and each result is on its issue (#614).
 
-The package (#500): ``core`` holds what a job is, the facts its condition asks (``Facts``, read by
-``read_facts``), the state file and the scheduler. The jobs are in a module by family: ``probes``
+The package (#500): ``core`` holds what a job is, how its facts are read (``Reads``, from
+``Sources``), the state file and the scheduler, and knows no job (#651). The jobs are in a module by
+family: ``probes``
 (what an outside source's data means), ``research`` (reviews and experiments), ``trader`` (the auto
 trader's), ``upkeep`` (the server's: the state backup's restore drill, #576) and ``prevalidations``
 (the pre-validations and simulated probations, built from the registries). ``JOBS``, here, gathers
 them in the order they run. A new job goes in its family's module and on its line in ``JOBS``
-(``tests/test_scheduled_layout.py`` pins the order); a condition
-that needs more of what the engine knows adds it to ``Facts`` and ``read_facts``, in ``core``. The
-names other modules import from ``krx_quant.scheduled`` are exported here (``__all__``).
+(``tests/test_scheduled_layout.py`` pins the order). A condition that needs what the engine or the
+server knows gets it from the job's own reader (``Job.facts``), in the job's module beside it: a
+reader the scheduler reads once a night, when the first job that asks it is considered, however many
+jobs ask it (the pre-validations share ``read_prevalidation_facts``). Removing a job removes its
+reader with it. The names other modules import from ``krx_quant.scheduled`` are exported here
+(``__all__``).
+
+> **바뀜** (2026-11-10, #PRNUM): every job's condition was asked with one ``Facts``, a field per
+> experiment, which ``core.read_facts`` read whole each night → each job reads its own facts
+> (``Job.facts``), read only when it is considered. 이유: the core knew every experiment, and adding
+> or removing one changed the core, its family's module and the tests together.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from functools import partial
+from typing import Any
 
 import aiohttp
 
@@ -84,28 +93,24 @@ from krx_quant.scheduled.core import (
     REFUSED,
     RUNNING,
     SESSION_UNTIL,
-    SIGNAL_REVIEW_FIXED_DAYS,
-    SIGNAL_REVIEW_FROM,
     STATE_FILE,
     Attachment,
-    Facts,
     Job,
     JobRecord,
     JobState,
     Night,
     Ran,
-    Revising,
+    Reader,
+    Reads,
     Scheduler,
+    Sources,
     Target,
     Unposted,
+    again_on_new_code,
     first_night,
     in_queue,
-    prevalidation_reports,
-    read_facts,
-    revising_facts,
     run_command,
     sections,
-    session_facts,
     session_window,
     window,
 )
@@ -116,13 +121,19 @@ from krx_quant.scheduled.prevalidations import (
     FRESH,
     PREVALIDATION_ISSUE,
     QUEUE_SCREEN,
+    PrevalidationFacts,
+    Revising,
     _daily_simulation_due,
     daily_prevalidation_jobs,
     prevalidation_job_name,
     prevalidation_jobs,
     prevalidation_order,
+    prevalidation_reports,
     prevalidation_tonight,
     prevalidation_turn,
+    read_prevalidation_facts,
+    read_queue,
+    revising_facts,
     revision_job_name,
     revision_jobs,
     revision_turn,
@@ -146,10 +157,21 @@ from krx_quant.scheduled.research import (
     NEYMAN_VARIANTS,
     NIGHTLY_HIT_RATES,
     SIGNAL_REVIEW_FIXED,
+    SIGNAL_REVIEW_FIXED_DAYS,
+    SIGNAL_REVIEW_FROM,
     SMT_DISCOVERY,
     SMT_HOLDOUT,
+    BackfillFacts,
+    SignalReviewFacts,
 )
-from krx_quant.scheduled.trader import FILL_NOTICE_COLUMNS, LIVE_PROBE, TRADER_REPORT, trader_report_calls
+from krx_quant.scheduled.trader import (
+    FILL_NOTICE_COLUMNS,
+    LIVE_PROBE,
+    TRADER_REPORT,
+    MockSessionFacts,
+    read_mock_session,
+    trader_report_calls,
+)
 from krx_quant.scheduled.upkeep import RESTORE_DRILL
 from krx_quant.swap import NightTraining
 
@@ -193,17 +215,24 @@ __all__ = [
     "STATE_FILE",
     "TRADER_REPORT",
     "Attachment",
-    "Facts",
+    "BackfillFacts",
     "Job",
     "JobRecord",
     "JobState",
+    "MockSessionFacts",
     "Night",
+    "PrevalidationFacts",
     "Ran",
+    "Reader",
+    "Reads",
     "Revising",
     "Scheduler",
+    "SignalReviewFacts",
+    "Sources",
     "Target",
     "Unposted",
     "_daily_simulation_due",
+    "again_on_new_code",
     "daily_prevalidation_jobs",
     "first_night",
     "in_queue",
@@ -214,7 +243,9 @@ __all__ = [
     "prevalidation_reports",
     "prevalidation_tonight",
     "prevalidation_turn",
-    "read_facts",
+    "read_mock_session",
+    "read_prevalidation_facts",
+    "read_queue",
     "recording_quality_calls",
     "revising_facts",
     "revision_job_name",
@@ -223,7 +254,6 @@ __all__ = [
     "run_command",
     "screened_order",
     "sections",
-    "session_facts",
     "session_window",
     "trader_report_calls",
     "window",
@@ -247,7 +277,7 @@ async def keep_jobs(
     clock: SessionClock,
     training: NightTraining,
     engine: PredictionEngine,
-    jobs: Sequence[Job] | None = None,
+    jobs: Sequence[Job[Any]] | None = None,
     ran: Callable[[str, JobRecord], None] | None = None,
 ) -> None:
     """The collector's scheduled jobs (``KRX_JOBS_AT``), until cancelled; each run's end told to
@@ -268,8 +298,7 @@ async def keep_jobs(
         commit=settings.commit,
         secrets=secrets_of(settings),
         training=training,
-        facts=partial(read_facts, settings, calendar, clock, engine),
-        session_facts=partial(session_facts, settings),
+        sources=Sources(settings, calendar, clock, engine),
         ran=ran,
     )
     await scheduler.run()
@@ -282,7 +311,7 @@ async def keep_jobs(
 # it could not post yet still goes up (the scheduler posts what the state holds, listed or not).
 
 
-JOBS: tuple[Job, ...] = (
+JOBS: tuple[Job[Any], ...] = (
     SAMPLE_KEYS,
     SAMPLE_KEYS_AGAIN,
     TRADER_REPORT,

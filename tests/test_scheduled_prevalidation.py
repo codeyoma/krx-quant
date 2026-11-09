@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 import pytest
@@ -44,11 +45,11 @@ from krx_quant.scheduled import (
     PREVALIDATION_ISSUE,
     REFUSED,
     STATE_FILE,
-    Facts,
     Job,
     JobRecord,
     JobState,
     Night,
+    PrevalidationFacts,
     Ran,
     Revising,
     Scheduler,
@@ -58,10 +59,11 @@ from krx_quant.scheduled import (
     prevalidation_reports,
     prevalidation_tonight,
     prevalidation_turn,
+    read_prevalidation_facts,
     revision_job_name,
     revision_turn,
 )
-from krx_quant.scheduled.prevalidations import prevalidations_quiet, revisions_quiet
+from krx_quant.scheduled.prevalidations import Turn, prevalidations_quiet, revisions_quiet
 from krx_quant.touch import TARGET_VERSION
 from tests.fake_github import REPO, TOKEN, fake_github
 from tests.scheduled_doubles import (
@@ -75,6 +77,7 @@ from tests.scheduled_doubles import (
     Runs,
     Told,
     at,
+    faking,
     saved,
     scheduling,
     settle,
@@ -121,13 +124,13 @@ def night(
     reports: dict[str, LastReport] | None = None,
     runs: dict[str, JobRecord] | None = None,
     commit: str = COMMIT,
-) -> Night:
-    facts = Facts(recorded_days=recorded, waiting=tuple(waiting), official=0, reports=reports or {})
+) -> Turn:
+    facts = PrevalidationFacts(recorded_days=recorded, waiting=tuple(waiting), reports=reports or {})
     records = {prevalidation_job_name(name): record for name, record in (runs or {}).items()}
     return Night(day, CALENDAR.is_trading_day(day), commit, None, records, facts)
 
 
-def tonight(n: Night) -> str | None:
+def tonight(n: Turn) -> str | None:
     """The algorithm pre-validated tonight, as the jobs' conditions see it: one at most."""
     due = [j.command[1] for j in PREVALIDATIONS if j.due(n)]
     assert len(due) <= 1, due
@@ -255,7 +258,7 @@ def test_a_run_that_left_no_verdict_waits_for_a_deploy_then_for_the_others() -> 
     assert tonight(night(SATURDAY, runs=crashed, reports=judged)) is None  # the same code: nothing
 
 
-def quiet(n: Night) -> tuple[str, ...]:
+def quiet(n: Turn) -> tuple[str, ...]:
     """The algorithms that may be pre-validated second on a quiet night, as the jobs' conditions on
     one see them (#546), in turn."""
     due = tuple(j.command[1] for j in PREVALIDATIONS if j.quiet is not None and j.quiet(n))
@@ -348,9 +351,9 @@ async def test_in_turn_one_a_night_two_on_a_quiet_one_each_refusal_on_204_with_i
     clock = FakeClock(at(FRIDAY, "22:00"))
     runs = Prevalidates(clock, tmp_path)  # the state file's directory is the state directory
 
-    def facts() -> Facts:  # read each night, as the collector does
-        return Facts(
-            MIN_DAYS, ORDER, 0, prevalidation_reports(tmp_path, list(EVERYONE.values()), TARGET_VERSION)
+    def facts() -> PrevalidationFacts:  # read each night, as the collector does
+        return PrevalidationFacts(
+            MIN_DAYS, ORDER, prevalidation_reports(tmp_path, list(EVERYONE.values()), TARGET_VERSION)
         )
 
     def told(lines: int) -> Callable[[], bool]:
@@ -360,7 +363,12 @@ async def test_in_turn_one_a_night_two_on_a_quiet_one_each_refusal_on_204_with_i
     async with fake_github() as hub:
         hub.labels = {204: {"ready-for-human"}}
         async with scheduling(
-            tmp_path, at(FRIDAY, "22:00"), PREVALIDATIONS, runs=runs, github=hub, facts=facts, clock=clock
+            tmp_path,
+            at(FRIDAY, "22:00"),
+            faking(PREVALIDATIONS, {read_prevalidation_facts: facts}),
+            runs=runs,
+            github=hub,
+            clock=clock,
         ) as (_, _, lines_told, state):
             for count, day in zip((2, 4, 5), (FRIDAY, SATURDAY, SUNDAY), strict=True):
                 clock.set(at(day, "22:30"))
@@ -421,7 +429,7 @@ async def test_a_quiet_night_s_second_pre_validation_follows_every_other_job_if_
     """Input: mandelbrot's run in its turn taking ``took`` from 22:30, a job listed after it, and
     breiman and kalman waiting too. Output (#546): once that job ran, the first of the waiting in turn
     whose time limit still ends by 05:30 runs; two at most."""
-    later = Job(
+    later: Job[None] = Job(
         name="later",
         due=lambda n: n.record is None or n.record.day != n.day,  # once a night
         command=("later",),
@@ -431,9 +439,13 @@ async def test_a_quiet_night_s_second_pre_validation_follows_every_other_job_if_
     caplog.set_level("INFO", logger="krx_quant.scheduled")
     clock = FakeClock(at(FRIDAY, "22:00"))
     runs = Takes(clock, {"prevalidate mandelbrot": took})
-    facts = Facts(MIN_DAYS, ("mandelbrot", "breiman", "kalman"))
+    facts = PrevalidationFacts(MIN_DAYS, ("mandelbrot", "breiman", "kalman"))
     async with scheduling(
-        tmp_path, clock.now(), [*PREVALIDATIONS, later], runs=runs, facts=facts, clock=clock
+        tmp_path,
+        clock.now(),
+        faking([*PREVALIDATIONS, later], {read_prevalidation_facts: facts}),
+        runs=runs,
+        clock=clock,
     ) as (_, _, _, _):
         clock.set(at(FRIDAY, "22:30"))
         await until(lambda: runs.names() == ["prevalidate mandelbrot"])
@@ -475,10 +487,9 @@ async def ended(state_dir: Path, ran: Ran, report: str | None = None) -> tuple[s
         async with scheduling(
             state_dir,
             at(FRIDAY, "22:00"),
-            [MANDELBROT],
+            faking([MANDELBROT], {read_prevalidation_facts: PrevalidationFacts(MIN_DAYS, ORDER)}),
             runs=runs,
             github=hub,
-            facts=Facts(MIN_DAYS, ORDER),
             clock=clock,
         ) as (_, _, told, state):
             clock.set(at(FRIDAY, "22:30"))
@@ -592,13 +603,12 @@ async def test_the_job_runs_the_real_command(empty_server: Path) -> None:
     state = JobState.load(empty_server / "state" / STATE_FILE)
     [mandelbrot] = [j for j in PREVALIDATIONS if j.name == "prevalidate-mandelbrot"]
 
-    async def facts() -> Facts:  # as if ten days were recorded: the command finds none
-        return Facts(MIN_DAYS, ORDER)
+    facts = PrevalidationFacts(MIN_DAYS, ORDER)  # as if ten days were recorded: the command finds none
 
-    async def run_night(day: date, jobs: Sequence[Job]) -> None:
+    async def run_night(day: date, jobs: Sequence[Job[Any]]) -> None:
         async with aiohttp.ClientSession() as session:
             scheduler = Scheduler(
-                jobs,
+                faking(jobs, {read_prevalidation_facts: facts}),
                 AT,
                 CALENDAR,
                 state,
@@ -606,7 +616,6 @@ async def test_the_job_runs_the_real_command(empty_server: Path) -> None:
                 Told(),
                 FakeClock(at(day, "23:00")),
                 commit=COMMIT,
-                facts=facts,
             )
             await asyncio.wait_for(scheduler.run_night(day), 25)
 
@@ -645,13 +654,13 @@ def revision_night(
     waiting: Sequence[str] = ORDER,
     runs: dict[str, JobRecord] | None = None,
     commit: str = COMMIT,
-) -> Night:
+) -> Turn:
     """A night with ``changed`` revisions, ``waiting`` algorithms and ``runs`` by job name."""
-    facts = Facts(recorded_days=30, waiting=tuple(waiting), revising=changed)
+    facts = PrevalidationFacts(recorded_days=30, waiting=tuple(waiting), revising=changed)
     return Night(day, CALENDAR.is_trading_day(day), commit, None, dict(runs or {}), facts)
 
 
-def revised_tonight(n: Night) -> str | None:
+def revised_tonight(n: Turn) -> str | None:
     """The changed code pre-validated tonight, as the jobs' conditions see it: one at most, and
     then no first pre-validation."""
     due = [j.command[1] for j in REVISIONS if j.due(n)]

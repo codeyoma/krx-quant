@@ -34,7 +34,7 @@ from krx_quant.notify import Alerts
 from krx_quant.object_store import LocalObjectStore, ObjectStore, S3ObjectStore, file_digest
 from krx_quant.process_log import Ran
 from krx_quant.rescore import EngineLock
-from krx_quant.scheduled import FAILED, INTERRUPTED, OK, Facts, JobRecord, Night
+from krx_quant.scheduled import FAILED, INTERRUPTED, OK, JobRecord, Night
 from krx_quant.scheduled.upkeep import RESTORE_DRILL, restore_drill_calls
 from krx_quant.state_backup import (
     KEY,
@@ -781,8 +781,10 @@ def test_the_next_backup_is_the_next_05_35(now: datetime, then: datetime) -> Non
     assert next_backup(now) == then
 
 
-def night(day: date, record: JobRecord | None, backed_up: date | None = date(2026, 11, 7)) -> Night:
-    return Night(day, True, "c", record, {}, Facts(state_backup=backed_up))
+def night(
+    day: date, record: JobRecord | None, backed_up: date | None = date(2026, 11, 7)
+) -> Night[date | None]:
+    return Night(day, True, "c", record, {}, backed_up)
 
 
 def ran(day: date, outcome: str) -> JobRecord:

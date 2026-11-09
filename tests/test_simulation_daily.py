@@ -35,7 +35,7 @@ from krx_quant.lifecycle import REGISTERED, Status
 from krx_quant.open_to_close import CLIMATE, FLAT_NAME, OPEN_TO_CLOSE, PERSIST
 from krx_quant.predictions import DB_NAME, NewKindPrediction, PredictionStore
 from krx_quant.prevalidation import code_digest, report_path
-from krx_quant.scheduled import FAILED, JOBS, OK, Facts, JobRecord, Night, prevalidation_job_name
+from krx_quant.scheduled import FAILED, JOBS, OK, JobRecord, Night, PrevalidationFacts, prevalidation_job_name
 from krx_quant.simulation import DAILY_DAYS, SimulationRun, report, simulate_daily
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
@@ -318,8 +318,10 @@ async def test_the_live_leaderboard_never_reads_the_simulated_days(tmp_path: Pat
     assert "cox" not in names, "no live prediction of cox: the simulation's are not the leaderboard's"
 
 
-def night_of(day: date, record: JobRecord | None, records: Mapping[str, JobRecord], **facts: Any) -> Night:
-    return Night(day, True, "abc", record, dict(records), Facts(**facts))
+def night_of(
+    day: date, record: JobRecord | None, records: Mapping[str, JobRecord], **facts: Any
+) -> Night[PrevalidationFacts]:
+    return Night(day, True, "abc", record, dict(records), PrevalidationFacts(**facts))
 
 
 def test_the_scheduled_job_runs_after_a_daily_pass_or_while_a_probation_waits() -> None:
@@ -362,7 +364,7 @@ def known_calendar(s: Settings) -> None:
 def test_a_probation_waits_while_its_kinds_closes_are_not_all_kept(tmp_path: Path) -> None:
     """#264: the latest days replayed must be the latest. While an after-market day's closing
     auction price is not kept, that day has no answer, so Cox waits, still unsimulated, and is
-    simulated once it is kept; the scheduled job waits meanwhile (``Facts.pending_answers``)."""
+    simulated once it is kept; the scheduled job waits meanwhile (``PrevalidationFacts.pending_answers``)."""
     s = settings(tmp_path, signal=4.0)
     known_calendar(s)
     passed_report(s)
@@ -510,7 +512,7 @@ async def test_the_nightly_facts_read_the_engine_s_database_on_its_thread(tmp_pa
     """#298 review: the scheduler reads the facts in the collector's event loop; a read of the
     engine's database in a worker thread would raise (its connection belongs to the loop's thread),
     and every fact would be lost for the night. A daily probation waiting is among them."""
-    from krx_quant.scheduled import read_facts
+    from krx_quant.scheduled import Reads, Sources, read_prevalidation_facts
 
     s = settings(tmp_path, signal=0.0, seed=5)
     against = AgainstTheNight()
@@ -518,7 +520,7 @@ async def test_the_nightly_facts_read_the_engine_s_database_on_its_thread(tmp_pa
     clock = FakeClock(NIGHT)
     e = engine_on(s, clock, [against])
 
-    facts = await read_facts(s, CALENDAR, clock, e)
+    facts = await Reads(Sources(s, CALENDAR, clock, e))(read_prevalidation_facts)
 
     assert facts.simulating_daily == (against.name,)
     e.store.close()
