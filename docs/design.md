@@ -1564,9 +1564,9 @@ SMT(ICT의 Smart Money Technique)는 함께 움직이는 두 종목 중 한쪽�
 
 지키는 것: 연습은 mock에서만 한다. 챔피언은 고르기 때 읽기만 하고 검토 날 밤에만 바뀐다(`promotion.py`). 하드 손실 한도는 장부의 것(`limits.py`)이고 이 모듈은 읽지도 바꾸지도 않는다. 재생이 일부러 다르게 하는 것은 그대로 둔다: 녹화의 갭이 호가 멈춤을 대신하고(재생은 멈추지 않는다), 정책 재생에는 연습 매수 간격(`paper.spaced`)을 두지 않는다. 둘 다 "어느 칸이 사도 되는가"의 문제가 아니다.
 
-같은 입력에서 고른 칸은 이 모듈 전과 같다: 기존 trader 테스트를 바꾸지 않고 통과하고, 그 테스트들이 장부마다 받은 고르기(칸, θ, 수량, 연습 여부, 쉬는 칸, 까닭, `GET /v1/trader`의 `practice`)와 재생의 결과를 바꾸기 전과 후로 기록해 견주면 같다(PR #NNN). 표 테스트(`tests/test_trader_buyable.py`): active가 아닌 예측자, 없어진 예측자, 주기의 쉼, 연습으로 내려감과 연습이 쉬는 때, 칸 없음(`no_champion`, `no_cost_map`, `no_policy`, `not_in_policy`), 도전 정책, mock이 아닌 모드의 연습 거절.
+같은 입력에서 고른 칸은 이 모듈 전과 같다: 기존 trader 테스트를 바꾸지 않고 통과하고, 그 테스트들이 장부마다 받은 고르기(칸, θ, 수량, 연습 여부, 쉬는 칸, 까닭, `GET /v1/trader`의 `practice`)와 재생의 결과를 바꾸기 전과 후로 기록해 견주면 같다(PR #656). 표 테스트(`tests/test_trader_buyable.py`): active가 아닌 예측자, 없어진 예측자, 주기의 쉼, 연습으로 내려감과 연습이 쉬는 때, 칸 없음(`no_champion`, `no_cost_map`, `no_policy`, `not_in_policy`), 도전 정책, mock이 아닌 모드의 연습 거절.
 
-> **바뀜** (2026-11-09, #NNN): "오늘 살 수 있는 칸"이 `selection.choose`, `policy.apply`, `desk`의 `_rested`·`_practising`·`_frozen`, `replay.inactive_days`에 흩어져 있었고 desk와 재생이 각자 적용했다 → `buyable.py` 한 곳이 답하고 둘 다 거기에 묻는다. `policy.apply`, `desk.under_champion`, `desk.practice_state`, `replay.inactive_days`는 같은 이름으로 남아 `buyable`의 것을 부른다. 이유: #603(#611)은 쉬는 예측기 하나를 위해 trader 모듈 11개를 고쳤다(#646). 동작은 바뀌지 않는다.
+> **바뀜** (2026-11-09, #656): "오늘 살 수 있는 칸"이 `selection.choose`, `policy.apply`, `desk`의 `_rested`·`_practising`·`_frozen`, `replay.inactive_days`에 흩어져 있었고 desk와 재생이 각자 적용했다 → `buyable.py` 한 곳이 답하고 둘 다 거기에 묻는다. `policy.apply`, `desk.under_champion`, `desk.practice_state`, `replay.inactive_days`는 같은 이름으로 남아 `buyable`의 것을 부른다. 이유: #603(#611)은 쉬는 예측기 하나를 위해 trader 모듈 11개를 고쳤다(#646). 동작은 바뀌지 않는다.
 
 **밤 정책 맞추기 (#399, `trader/refit.py`).** 예약 작업 `trader-report`(거래일 밤마다, 밤 학습 뒤, `krx-quant refit-policy --report`, [operations.md](operations.md) 3장 "예약 작업 (#215)")가 새 정책 버전을 맞추고, 그날의 리포트를 그 출력 위에 붙인다(아래 "밤 리포트").
 
