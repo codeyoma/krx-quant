@@ -82,7 +82,7 @@ Endpoints (all under ``/v1``):
   running, and the last pauses, resumes and re-arms asked for; the champion, the live gate's
   progress and the policies running with their paper records (#400, ``trader/promotion.py``), and
   the challengers' cohort formed last with its verdict (#473, ``trader/cohort.py``); the loss
-  budget and the risk rules' state (#475, ``paper.risk_state``);
+  budget and the risk rules' state (#475, ``book.risk_state``);
 - ``GET /trader/days?from=D&to=D``: its ledger of each trading day (#396; default the year to
   today, at most 4,000 days), oldest first;
 - ``POST /trader/pause`` (``{"sell_now": false|true}``, ``Content-Type: application/json``): the

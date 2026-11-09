@@ -95,8 +95,8 @@ from krx_quant.market_calendar import Session
 from krx_quant.pricing import tick_size
 from krx_quant.trader import LIVE, MOCK, promotion
 from krx_quant.trader import policy as policies
+from krx_quant.trader.book import TAKE_PROFIT
 from krx_quant.trader.db import iso
-from krx_quant.trader.paper import TAKE_PROFIT
 from krx_quant.trader.store import (
     BREACH,
     DIFFERENT,

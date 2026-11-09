@@ -24,9 +24,9 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
 from krx_quant.trader import MOCK, SYMBOL
+from krx_quant.trader.book import Rules
 from krx_quant.trader.cells import EngineReader
 from krx_quant.trader.mock import MockTrader, Timing
-from krx_quant.trader.paper import Rules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Selection
 from krx_quant.trader.store import (

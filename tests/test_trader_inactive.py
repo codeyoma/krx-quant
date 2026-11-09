@@ -33,10 +33,11 @@ from krx_quant.predictions import PredictionStore
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader import MOCK, PAPER, SYMBOL, practice, report, review
 from krx_quant.trader import policy as policies
+from krx_quant.trader.book import TAKE_PROFIT, Rules
+from krx_quant.trader.buyable import Rest, under_policy
 from krx_quant.trader.cells import ACTIVE, Cell, inactive, open_engine_db, special_windows
 from krx_quant.trader.decisions import CHALLENGER, CHAMPION, SHADOW, read_decisions
 from krx_quant.trader.desk import Desk
-from krx_quant.trader.paper import TAKE_PROFIT, Rules
 from krx_quant.trader.replay import Ranked, Replayer, Source
 from krx_quant.trader.selection import (
     GONE,
@@ -49,7 +50,7 @@ from krx_quant.trader.selection import (
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trader
 from tests.api_schema import check
 from tests.kis_doubles import Fill, kis_mock, rows, settings_of
-from tests.test_trader_replay import as_paper, models, of_paper
+from tests.test_trader_replay import legs, models, paper_legs
 from tests.test_trader_shadow import BOUGHT, TAKEN, TEN, MockDesk, Repicked
 from tests.trader_doubles import (
     BARRIER,
@@ -322,14 +323,15 @@ def test_a_pick_without_a_cost_map_keeps_a_cell_held_off_and_a_gone_one_stays_go
         "test",
         (policy_cell(BARRIER), policy_cell(ITO), policy_cell(PERSIST, role="baseline")),
     )
-    unread = policies.apply(kept, Selection((), reason=NO_COST_MAP), gone={ITO}, inactive={BARRIER, ITO})
+    rest = Rest(frozenset({ITO}), frozenset({BARRIER, ITO}))
+    unread = under_policy(kept, Selection((), reason=NO_COST_MAP), rest)
     assert [(c["predictor"], c["why"]) for c in unread.cells] == [
         ("breiman", PREDICTOR_INACTIVE),
         ("ito", PREDICTOR_INACTIVE),
         (PERSIST.predictor, NO_COST_MAP),
     ]
     assert unread.inactive == (BARRIER, ITO) and unread.picks == ()
-    read = policies.apply(kept, Selection((pick(BARRIER),)), gone={ITO}, inactive={BARRIER, ITO})
+    read = under_policy(kept, Selection((pick(BARRIER),)), rest)
     assert [(c["predictor"], c["why"]) for c in read.cells] == [
         ("breiman", PREDICTOR_INACTIVE),
         ("ito", GONE),
@@ -470,7 +472,9 @@ def test_the_replay_holds_a_cell_off_on_the_days_a_pick_would_have(tmp_path: Pat
 
     trades, counts, replayer = replay_of(tmp_path, evaluation)
 
-    assert of_paper(list(reversed(paper))) == as_paper(trades)
+    bought = [(BARRIER, at("10:00:02.5"), 70_100, 9, at("10:02:00"), 70_250, TAKE_PROFIT)]
+    assert legs(trades) == bought, "the replay's fills"
+    assert paper_legs(list(reversed(paper))) == bought, "the paper book's fills"
     assert [t.bar_close.date() for t in trades] == [date(2026, 10, 14)]
     assert replayer.inactive[BARRIER] == frozenset(DAYS[1:])
     assert counts["read"] == 3 and counts[PREDICTOR_INACTIVE] == 2

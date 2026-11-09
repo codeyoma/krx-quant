@@ -29,13 +29,13 @@ from krx_quant.kis_orders import Servers, trader_broker
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
 from krx_quant.trader import MOCK, PAPER, SYMBOL, promotion, report
+from krx_quant.trader.book import TAKE_PROFIT, Rules
 from krx_quant.trader.cells import EngineReader
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.limits import ORDER_FAILED
 from krx_quant.trader.marks import read_marks
 from krx_quant.trader.mock import Timing
-from krx_quant.trader.paper import TAKE_PROFIT, Rules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Selection
 from krx_quant.trader.store import DB_NAME, TraderStore, read_days, read_trader, read_trades

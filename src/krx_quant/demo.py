@@ -162,10 +162,10 @@ from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader import CAPITAL, PAPER, THRESHOLD, cohort, review
 from krx_quant.trader import SYMBOL as TRADER_SYMBOL
 from krx_quant.trader import policy as policies
+from krx_quant.trader.book import Rules as TraderRules
 from krx_quant.trader.limits import Guard
 from krx_quant.trader.money import commission, open_net, round_trip, settled, shares
 from krx_quant.trader.paper import PaperTrader
-from krx_quant.trader.paper import Rules as TraderRules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.store import API, CLI, PAUSE, RESUME, TraderStore
 from krx_quant.trader.store import DB_NAME as TRADER_DB

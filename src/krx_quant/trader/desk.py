@@ -3,8 +3,8 @@ same cells' predictions and the same quotes, in one process.
 
 - **Picks** (``select``, at the trader's start and every day at 08:30; #646: each book's cells asked
   of ``buyable.py``, as the replay asks them): the champion read from the store, applied to the cost
-  map's cells (``under_champion``, ``policy.apply``: #472, its cells whatever their verdict; none
-  before the first champion, #469), for the
+  map's cells (``buyable.under_champion``, ``buyable.under_policy``: #472, its cells whatever their
+  verdict; none before the first champion, #469), for the
   champion's book (``paper.PaperTrader``: the trades the trader makes, which its loss limits and
   pauses hold; in mock mode ``mock.MockTrader``, #405, its orders on KIS's mock server); and each
   challenger that runs that day (``policy.running_versions``: the members of the cohort of that
@@ -26,10 +26,10 @@ same cells' predictions and the same quotes, in one process.
   to the champion's alone.
 - **A market halt** (#625, ``special.py``: the engine's ``market_halt`` window, from the halted trade
   to a minute of fresh quotes and trades after the reopening): no book buys (its window touches every
-  rise's, ``paper.plan``'s ``special``), and the paper books fill nothing on the quotes received in it
+  rise's, ``book.plan``'s ``special``), and the paper books fill nothing on the quotes received in it
   (the reopening auction's book is not one they could trade on): they take no quote then, as through
   a stall, make no time exit by the clock, and an exit waits for the first quote after it
-  (``paper.halt_spans``, which the re-fit's replay goes by too). The KIS book (mock, live) takes them as
+  (``book.halt_spans``, which the re-fit's replay goes by too). The KIS book (mock, live) takes them as
   ever: its real orders and fills, its stop and time rules, its loss limits are its own. The stall's
   notice is not sent for a halt the engine knows (``QuoteWatch.on_special``): the engine sends the
   halt's.
@@ -69,7 +69,7 @@ same cells' predictions and the same quotes, in one process.
   no policy and no record counts them (``store.PRACTICE_TRADE``); the KIS checks, the risk rules and
   the cash do (#427). No loss limit counts them since #533 (``limits.py`` "The practice"). Its buys
   are spaced, 15 minutes between two practice buy orders' bar closes unless set (#598,
-  ``paper.spaced``), so that they reach the afternoon and the time exits by 15:15.
+  ``book.spaced``), so that they reach the afternoon and the time exits by 15:15.
 
   > **바뀜** (2026-11-05, #557): the practice had a paper shadow of its own (``practice_shadow``, on
   > the practice cell's picks), which the live mode's gap paired the practice trades with → none; a
@@ -125,11 +125,11 @@ from krx_quant.kis_orders import Broker
 from krx_quant.market_calendar import Session
 from krx_quant.special import Window
 from krx_quant.trader import KIS_MODES, LIVE, MOCK, PAPER, buyable, live, policy, review
-from krx_quant.trader.buyable import practice_state, under_champion
+from krx_quant.trader.book import Rules
 from krx_quant.trader.cells import Cell, Signal
 from krx_quant.trader.limits import RUNNING, Notify
 from krx_quant.trader.mock import MockTrader, Timing
-from krx_quant.trader.paper import PaperTrader, Rules
+from krx_quant.trader.paper import PaperTrader
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.selection import Selection
 from krx_quant.trader.stall import STALL_AFTER, QuoteWatch
@@ -139,10 +139,6 @@ log = logging.getLogger(__name__)
 
 # The champion's statuses that leave its day a common one (#473): running, or held by its own rules.
 RUN_OR_LIMIT = (RUNNING, DAILY_LIMIT, CUMULATIVE_LIMIT)
-
-
-# The champion's pick and its practice (#646: ``buyable.py`` answers both), kept under their names here.
-__all__ = ["Desk", "practice_state", "under_champion"]
 
 
 class Desk:
@@ -233,7 +229,7 @@ class Desk:
                 account=self._paper_account,
                 since=self.simulated_since(),
             )
-        self.champion.practice_state = practice_state(practice)
+        self.champion.practice_state = buyable.practice_state(practice)
         self.challengers: dict[int, PaperTrader] = {}
         self._running: set[int] = set()  # the challengers picked, not retired
         self._recorded: dict[tuple[int, date], bool] = {}  # each record kept today, and if stopped
@@ -377,7 +373,7 @@ class Desk:
 
     def on_quote(self, quote: BestQuote) -> None:
         ended = self.watch.on_quote(quote)  # the quotes back (#407): each book told before it takes it
-        for book in self.books:  # a paper book takes no quote of a market halt (#625, ``paper.halt_spans``)
+        for book in self.books:  # a paper book takes no quote of a market halt (#625, ``book.halt_spans``)
             if ended is not None:
                 book.on_recover(ended, quote.received_at)
             book.on_quote(quote)

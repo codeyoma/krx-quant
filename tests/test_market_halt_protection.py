@@ -26,8 +26,8 @@ from krx_quant.feeds import KST
 from krx_quant.special import REOPENED, Kind, Window
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.trader import CAPITAL
+from krx_quant.trader.book import TIME, Rules
 from krx_quant.trader.cells import Kept, special_windows
-from krx_quant.trader.paper import TIME, Rules
 from krx_quant.trader.quotes import BestQuote
 from krx_quant.trader.replay import known
 from tests.api_schema import check
@@ -38,7 +38,7 @@ from tests.replay_events import SYMBOL, api, at, get_json, run
 from tests.test_calendar_health import health_checks
 from tests.test_market_halt import halt_morning, market
 from tests.test_resilience import with_telegram
-from tests.test_trader_replay import as_paper, models, of_paper, record_gap, replayed
+from tests.test_trader_replay import legs, models, paper_legs, record_gap, replayed
 from tests.test_trader_stall import BACK_SAID, BOUGHT, STALL_SAID, TEN, flowing, paper_day, said, stalls
 from tests.trader_doubles import (
     BARRIER,
@@ -275,11 +275,12 @@ def test_a_stall_in_a_halt_the_engine_knows_tells_telegram_nothing(tmp_path: Pat
     assert day.notices == []
 
 
-# --- The paper book and the re-fit's replay through a halt: the same fills (``paper.halt_spans``).
+# --- The paper book and the re-fit's replay through a halt: the same fills (``book.halt_spans``).
 
 
 def paper_and_replay(state: Path, events: list[Any], gaps: Sequence[tuple[str, str]] = ()) -> tuple[Any, Any]:
-    """The paper trader's trades on ``events`` and the replay's on the database it read, the same quotes
+    """The paper book's fills on ``events`` and the replay's (each adapter's, its nets checked:
+    ``test_trader_replay.legs``) on the database it read, the same quotes
     and the recorded ``gaps`` of the book (the halt's silence)."""
     models(state)
     paper = Day(state, picks=[pick(BARRIER)], rules=Rules(fee_rate=FEE, capital=CAPITAL)).run(events)
@@ -287,7 +288,7 @@ def paper_and_replay(state: Path, events: list[Any], gaps: Sequence[tuple[str, s
     for start, end in gaps:
         record_gap(state / "data", tat(start), tat(end))
     _, trades, _ = replayed(state, [pick(BARRIER)])
-    return of_paper(list(reversed(paper))), as_paper(trades)
+    return paper_legs(list(reversed(paper))), legs(trades)
 
 
 def test_the_replay_holds_a_trade_through_a_halt_as_the_paper_book(tmp_path: Path) -> None:
@@ -305,9 +306,9 @@ def test_the_replay_holds_a_trade_through_a_halt_as_the_paper_book(tmp_path: Pat
 
     paper, replay_ = paper_and_replay(tmp_path, events, gaps=[("10:01:30", "10:03:00")])
 
-    assert paper == replay_
-    [(_, _, _, _, exit_at, exit_price, reason, _)] = replay_
-    assert (exit_at, exit_price, reason) == (tat("10:05:00"), 69_900, TIME)
+    held = [(BARRIER, tat("10:00:02.5"), 70_100, 9, tat("10:05:00"), 69_900, TIME)]
+    assert replay_ == held, "the replay's fills"
+    assert paper == held, "the paper book's fills"
 
 
 def test_no_time_exit_by_the_clock_in_a_halt(tmp_path: Path) -> None:
@@ -332,9 +333,9 @@ def test_no_time_exit_by_the_clock_in_a_halt(tmp_path: Path) -> None:
 
     paper, replay_ = paper_and_replay(tmp_path / "both", [*before, quote("10:06:00", 69_900, 70_000)])
 
-    assert paper == replay_
-    [(_, _, _, _, exit_at, exit_price, reason, _)] = paper
-    assert (exit_at, exit_price, reason) == (tat("10:04:00"), 70_000, TIME)
+    sold = [(BARRIER, tat("10:00:02.5"), 70_100, 9, tat("10:04:00"), 70_000, TIME)]
+    assert replay_ == sold, "the replay's fills"
+    assert paper == sold, "the paper book's fills"
 
 
 def test_a_stall_whose_silence_began_just_before_the_halt_is_the_halts(tmp_path: Path) -> None:

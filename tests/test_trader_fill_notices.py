@@ -28,9 +28,9 @@ from krx_quant.kis_orders import FILL_NOTICE_COLUMNS, Servers, same_number
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
 from krx_quant.trader import MOCK, PAPER, SYMBOL
+from krx_quant.trader.book import TAKE_PROFIT
 from krx_quant.trader.fill_notices import DB_NAME as NOTICES_DB
 from krx_quant.trader.fill_notices import TR_ID, Pace, read_recorded
-from krx_quant.trader.paper import TAKE_PROFIT
 from krx_quant.trader.quotes import QuoteFeed
 from krx_quant.trader.run import run_trader
 from krx_quant.trader.settings import TraderSettings

@@ -21,14 +21,8 @@ import pytest
 
 from krx_quant.lifecycle import Status
 from krx_quant.special import Kind as SpecialKind
+from krx_quant.trader.book import BLOCKED, HOLDING, NOT_UP, OUTRANKED, SPECIAL
 from krx_quant.trader.cells import Cell
-from krx_quant.trader.paper import (
-    BLOCKED,
-    HOLDING,
-    NOT_UP,
-    OUTRANKED,
-    SPECIAL,
-)
 from krx_quant.trader.selection import NO_PASS, CostMapError, choose, kelly, read_cost_map
 from krx_quant.trader.store import DB_NAME, TraderStore, read_trades
 from tests.api_doubles import activate, barrier_board, standing

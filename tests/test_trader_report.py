@@ -26,7 +26,7 @@ from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
 from krx_quant.trader import MOCK, PAPER, SYMBOL, review
 from krx_quant.trader import policy as policies
-from krx_quant.trader.paper import STOP_LOSS, TAKE_PROFIT, TIME
+from krx_quant.trader.book import STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.report import (
     AGENT,
     PRACTICE_TRADES,
