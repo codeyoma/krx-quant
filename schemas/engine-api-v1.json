@@ -3194,7 +3194,7 @@
       "description": "A position from its entry to its exit (#394): the cell (kind, predictor) and what the cost map picked it on (#395: the predictor's role, p*, the hit rate's lower bound, the Kelly f* and the share of the capital bought; null for a trade entered before), the prediction and its rise's probability, the barriers, the fills, the costs and the P&L in won; exit and the sell's costs null while open. policy: the policy version it was made under (#399), null before the first champion; champion (#400): whether it is the champion's, not a challenger's paper trade. An exit is by the triple barrier (take_profit, stop_loss, time), or a sale at once (#396): a pause selling now (pause), a loss limit reached (daily_limit, cumulative_limit). #475: execution, each leg's adverse ticks and delays (trader_execution).",
       "type": "object",
       "required": ["id", "mode", "symbol", "kind", "predictor", "role", "prediction_id", "bar_close", "probability",
-                   "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "champion", "shadow", "practice", "anchor", "tick", "width_ticks",
+                   "threshold", "p_star", "precision_low", "kelly", "fraction", "policy", "champion", "shadow", "practice", "verdict", "anchor", "tick", "width_ticks",
                    "target", "stop", "time_barrier", "decided_at", "entry", "exit", "buy_fee", "sell_fee", "tax",
                    "cost", "gross", "net", "orders", "stalls", "execution"],
       "additionalProperties": false,
@@ -3202,9 +3202,9 @@
         "id": {"type": "integer"},
         "mode": {"enum": ["paper", "mock", "live"]},
         "symbol": {"type": "string"},
-        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m", "barrier_60m"]},
         "predictor": {"type": "string"},
-        "role": {"enum": ["consensus", "top", "baseline", null]},
+        "role": {"enum": ["consensus", "top", "baseline", "verdict", null]},
         "prediction_id": {"type": "integer"},
         "bar_close": {"$ref": "#/$defs/time"},
         "probability": {"type": "number", "minimum": 0, "maximum": 1},
@@ -3217,6 +3217,37 @@
         "champion": {"type": "boolean", "description": "#400: the champion's trade (the trader's, which the limits hold and the chart marks); false: a challenger's paper trade, or the shadow's."},
         "shadow": {"type": "boolean", "description": "#405: the champion policy's paper shadow's trade in mock mode (champion false): its paper record, never the trader's."},
         "practice": {"type": "boolean", "description": "#427: the mock book's practice trade (KRX_TRADER_MOCK_PRACTICE: on a day no champion cell traded, one share of the practice cell at the θ kept for the review cycle, #474; at KRX_TRADER_THRESHOLD before it; champion true, the trader's own, which the limits hold), or the practice shadow's (shadow true). Of no policy (policy null, fraction null): no record, promotion or live gate counts it; the mock execution checks do."},
+        "verdict": {
+          "description": "#677: the verdict that opened a verdict trade (the mock book's on the engine's verdict, KRX_TRADER_MOCK_VERDICT: of no policy, sized by the loss budget, which the loss limits count), null for every other trade. version: its rules' (VERDICT_VERSION, GET /v1/verdict's version); bar_close, verdict (buy), strength, margin, horizon and deadline as GET /v1/verdict gave them; probabilities, families, members, expected_net (won a share) and expected_net_ticks: its horizon's pool then.",
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["version", "bar_close", "verdict", "strength", "margin", "horizon", "deadline", "probabilities",
+                           "families", "members", "expected_net", "expected_net_ticks"],
+              "additionalProperties": false,
+              "properties": {
+                "version": {"type": "integer", "minimum": 1},
+                "bar_close": {"$ref": "#/$defs/time"},
+                "verdict": {"enum": ["buy"]},
+                "strength": {"enum": ["none", "weak", "moderate", "strong"]},
+                "margin": {"type": ["number", "null"]},
+                "horizon": {
+                  "type": "object",
+                  "required": ["kind", "minutes"],
+                  "additionalProperties": false,
+                  "properties": {"kind": {"type": "string"}, "minutes": {"type": "integer", "minimum": 1}}
+                },
+                "deadline": {"$ref": "#/$defs/time"},
+                "probabilities": {"type": ["object", "null"]},
+                "families": {"type": ["integer", "null"], "minimum": 0},
+                "members": {"type": ["integer", "null"], "minimum": 0},
+                "expected_net": {"type": ["number", "null"]},
+                "expected_net_ticks": {"type": ["number", "null"]}
+              }
+            }
+          ]
+        },
         "anchor": {"type": "number", "exclusiveMinimum": 0},
         "tick": {"type": "number", "exclusiveMinimum": 0},
         "width_ticks": {"type": "integer", "minimum": 1},
@@ -3244,7 +3275,7 @@
               "properties": {
                 "at": {"$ref": "#/$defs/time"},
                 "price": {"type": "number", "exclusiveMinimum": 0},
-                "reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit"]}
+                "reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", "verdict_sell"]}
               }
             }
           ]
@@ -3266,7 +3297,7 @@
               "id": {"type": "integer"},
               "side": {"enum": ["buy", "sell"]},
               "purpose": {"enum": ["entry", "take_profit", "stop_loss", "time", "pause", "daily_limit",
-                                   "cumulative_limit"]},
+                                   "cumulative_limit", "verdict_sell"]},
               "price": {"type": "number", "exclusiveMinimum": 0},
               "quantity": {"type": "integer", "minimum": 1},
               "placed_at": {"$ref": "#/$defs/time"},
@@ -3335,7 +3366,7 @@
               "required": ["reason", "reference", "ticks", "placed", "filled"],
               "additionalProperties": false,
               "properties": {
-                "reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit"]},
+                "reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", "verdict_sell"]},
                 "reference": {"enum": ["mid", "target"]},
                 "ticks": {"type": ["number", "null"]},
                 "placed": {"type": ["number", "null"]},
@@ -3357,7 +3388,7 @@
         "updated_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
         "alive": {"type": "boolean"},
         "mode": {"enum": ["paper", "mock", "live", null]},
-        "status": {"enum": ["running", "entries_paused", "paused", "order_failed", "daily_limit", "cumulative_limit", null]},
+        "status": {"enum": ["running", "entries_paused", "paused", "order_failed", "daily_limit", "cumulative_limit", "verdict_sell", null]},
         "started_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
         "capital": {"type": ["integer", "null"], "minimum": 1},
         "cash": {"type": ["number", "null"]},
@@ -3371,7 +3402,7 @@
               "additionalProperties": false,
               "properties": {
                 "trade_id": {"type": "integer"},
-                "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+                "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m", "barrier_60m"]},
                 "predictor": {"type": "string"},
                 "quantity": {"type": "integer", "minimum": 1},
                 "entry_price": {"type": "number", "exclusiveMinimum": 0},
@@ -3861,8 +3892,8 @@
             "used": {"type": "number", "minimum": 0}
           }
         },
-        "status": {"enum": ["running", "entries_paused", "paused", "order_failed", "daily_limit", "cumulative_limit"]},
-        "halt": {"enum": ["daily_limit", "cumulative_limit", null]},
+        "status": {"enum": ["running", "entries_paused", "paused", "order_failed", "daily_limit", "cumulative_limit", "verdict_sell"]},
+        "halt": {"enum": ["daily_limit", "cumulative_limit", "verdict_sell", null]},
         "updated_at": {"$ref": "#/$defs/time"},
         "gap": {
           "description": "#405: on a mock day, the champion's KIS mock trades entered that day against its paper shadow's (trades and the net of those exited, the difference mock − shadow, and each prediction's pair: the fill price differences in ticks, mock − shadow, the quantities, the exit reasons, the net difference; a side null when that book did not trade it), the practice's left out (#548: it has no shadow); null on another mode's day, or a mock day with neither.",
@@ -3914,7 +3945,7 @@
       "additionalProperties": false,
       "properties": {
         "quantity": {"type": "integer", "minimum": 1},
-        "exit_reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", null]},
+        "exit_reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", "verdict_sell", null]},
         "net": {"type": ["number", "null"]}
       }
     },
@@ -3942,9 +3973,9 @@
         "quantity": {"type": "integer", "minimum": 1},
         "mode": {"enum": ["paper", "mock", "live"]},
         "policy": {"type": ["integer", "null"], "minimum": 1},
-        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m", "barrier_60m"]},
         "predictor": {"type": "string"},
-        "exit_reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", null]},
+        "exit_reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", "verdict_sell", null]},
         "net": {"type": ["number", "null"]},
         "practice": {"type": "boolean", "description": "#427: the mock book's practice trade (the trader's own, of no policy)."}
       }
@@ -3956,7 +3987,7 @@
       "additionalProperties": false,
       "properties": {
         "day": {"$ref": "#/$defs/day"},
-        "book": {"enum": ["champion", "practice", "shadow", "challenger", null]},
+        "book": {"enum": ["champion", "practice", "verdict", "shadow", "challenger", null]},
         "books": {"type": "array", "items": {"$ref": "#/$defs/trader_decision_book"}}
       }
     },
@@ -3966,7 +3997,7 @@
       "required": ["book", "mode", "policy", "totals", "decisions", "more"],
       "additionalProperties": false,
       "properties": {
-        "book": {"enum": ["champion", "practice", "shadow", "challenger"]},
+        "book": {"enum": ["champion", "practice", "verdict", "shadow", "challenger"]},
         "mode": {"enum": ["paper", "mock", "live"]},
         "policy": {"type": ["integer", "null"], "minimum": 1},
         "totals": {"$ref": "#/$defs/trader_decision_totals"},
@@ -3997,7 +4028,7 @@
         "id": {"type": "integer"},
         "decided_at": {"$ref": "#/$defs/time"},
         "symbol": {"type": "string"},
-        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m"]},
+        "kind": {"enum": ["direction", "barrier", "barrier_15m", "barrier_30m", "barrier_60m"]},
         "predictor": {"type": "string"},
         "prediction_id": {"type": "integer"},
         "bar_close": {"$ref": "#/$defs/time"},

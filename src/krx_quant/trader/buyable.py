@@ -24,9 +24,12 @@ less those resting for the cycle.
   and the champion (none yet counts as read) but found no champion cell to trade, the practice cell
   kept for the cycle, one share at its θ; none while none is kept (``practice.NOT_FROZEN``), nor once
   its predictor was found gone or not active in the cycle.
+- **The verdict** (#677, ``verdicted``, ``verdicts.py``): in mock mode alone, on the same picks as the
+  practice (a cost map and a champion read, no champion cell to trade), the verdict policy's horizons,
+  ranked first, before the practice cell if one is practised; sized by the loss budget.
 
-**What it does not change.** The practice is for the mock mode alone (``champion`` refuses it in any
-other); the champion is read at the picks only and changes on a review night alone
+**What it does not change.** The practice and the verdict are for the mock mode alone (``champion``
+refuses them in any other); the champion is read at the picks only and changes on a review night alone
 (``promotion.py``); the hard loss limits are the books' own (``limits.py``) and nothing here reads
 them.
 
@@ -404,14 +407,28 @@ def frozen_now(
         return None
 
 
+# The verdict policy (#677).
+
+
+def verdicted(under: Selection, chosen: Selection, *, enabled: bool) -> Selection:
+    """``chosen`` (the champion's pick, or the practice cell), with the verdict ``enabled`` and no
+    champion cell to trade on a cost map and a champion read (none yet included): the verdict policy's
+    horizons before its picks (#677, module doc)."""
+    from krx_quant.trader import verdicts
+
+    if not enabled or under.picks or under.reason not in (NO_PASS, NOT_IN_POLICY, NO_CHAMPION):
+        return chosen
+    return replace(chosen, picks=(*verdicts.picks(), *chosen.picks), inactive=())
+
+
 # The desk's questions.
 
 
 @dataclass(frozen=True)
 class Champion:
     """The champion's pick (``champion``): under its policy (``under``: its paper shadow's), what its
-    book trades (``chosen``: ``under``, or the practice cell, #427), and ``GET /v1/trader``'s
-    ``practice``."""
+    book trades (``chosen``: ``under``, or the practice cell, #427, and the verdict's horizons, #677),
+    and ``GET /v1/trader``'s ``practice``."""
 
     under: Selection
     chosen: Selection
@@ -427,19 +444,23 @@ def champion(
     engine: Path | None,
     mode: str,
     practice: bool = False,
+    verdict: bool = False,
 ) -> Champion:
     """The cost map's cells (``selection``) at ``at`` under the champion kept in ``store``, less those
     resting in ``cycle`` (``rest_of``), and with ``practice`` the practice cell on a pick no champion
-    cell trades (``practised``): in mock mode alone (#427; ValueError in another ``mode``)."""
+    cell trades (``practised``), with ``verdict`` the verdict policy's horizons before it
+    (``verdicted``): in mock mode alone (#427, #677; ValueError in another ``mode``)."""
     if practice and mode != MOCK:  # #427: the settings refuse it before (``settings.py``)
         raise ValueError(f"the mock practice is for the mock mode alone, not {mode}")
+    if verdict and mode != MOCK:  # #677: likewise
+        raise ValueError(f"the verdict policy is for the mock mode alone, not {mode}")
 
     def rest_for(kept: Policy) -> Rest:
         return rest_of(kept, cycle, at, store=store, engine=engine)
 
     under = under_champion(store, selection, rest_for)
     chosen, state = practised(under, cycle, at, store=store, engine=engine, enabled=practice)
-    return Champion(under, chosen, state)
+    return Champion(under, verdicted(under, chosen, enabled=verdict), state)
 
 
 def challenger(

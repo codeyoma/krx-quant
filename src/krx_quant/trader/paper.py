@@ -181,6 +181,7 @@ from krx_quant.special import Window, touching
 from krx_quant.trader import (
     PAPER,
     SYMBOL,
+    VERDICT,
 )
 from krx_quant.trader.book import (
     BUY,
@@ -191,6 +192,7 @@ from krx_quant.trader.book import (
     SPECIAL,
     STALLED,
     TAKE_PROFIT,
+    VERDICT_SELL,
     Busy,
     Plan,
     Rise,
@@ -205,6 +207,7 @@ from krx_quant.trader.book import (
     midnight,
     not_now,
     plan,
+    plan_verdict,
     refused,
     risk_held,
     risk_state,
@@ -232,6 +235,11 @@ if TYPE_CHECKING:
     pass
 
 log = logging.getLogger(__name__)
+
+
+def _figure(value: float | None, spec: str) -> str:
+    """A verdict's figure for a log line; ``-`` without one."""
+    return "-" if value is None else format(value, spec)
 
 
 def _pnl(realized: float, unrealized: float, trades: int | None = None) -> dict[str, Any]:
@@ -424,6 +432,9 @@ class PaperTrader:
             )
         # A sale the status asks for sells at the first quote received after this (#396).
         self.sell_after: datetime | None = None
+        # A verdict's SELL (#677): the verdict trade it exits (its id) sells at the first quote received
+        # after this.
+        self._verdict_sale: tuple[int, datetime] | None = None
         self._written: tuple[datetime, dict[str, Any]] | None = None  # the state last written
         # The risk rules' state last read from the store, and when (#475, ``_risk_state``).
         self._risk_read: tuple[datetime, dict[str, Any]] | None = None
@@ -556,6 +567,8 @@ class PaperTrader:
             log.info("trader: challenger %s in paper: %s", self.challenger, selection.describe())
         elif self.shadow:
             log.info("%s in paper: %s", self._whose(), selection.describe())
+        elif selection.on_verdict:
+            log.info("trader: trading on the verdict, no champion cell trades: %s", selection.describe())
         elif selection.practising:
             log.info("trader: practising, no champion cell trades: %s", selection.describe())
         elif selection.picks:
@@ -625,7 +638,10 @@ class PaperTrader:
     def on_signal(self, signal: Signal, at: datetime) -> None:
         """A prediction of a cell, read at ``at``; one already decided on (a restart) is passed over."""
         cell = Cell(signal.kind, signal.predictor)
-        self._read.setdefault(signal.bar_close, set()).add(cell)
+        read = self._read.setdefault(signal.bar_close, set())
+        read.add(cell)
+        if signal.call is not None:  # the verdict of the bar close (#677): every horizon of it read
+            read.update(c for c in self._picks if c.predictor == VERDICT)
         if self.store.decided(self.mode, self._policy, signal.kind, signal.predictor, signal.prediction_id):
             return
         if cell in self._inactive and cell not in self._picks:
@@ -635,9 +651,33 @@ class PaperTrader:
         else:
             session = self.sessions(kst_day(signal.bar_close))
             _, picked = self._picks[cell]
-            planned = plan(signal, self.rules, session, at, self._special, picked.threshold)
+            if picked.verdict:
+                self._verdict_exit(signal, at)
+                planned = plan_verdict(signal, self.rules, session, at, self._special)
+            else:
+                planned = plan(signal, self.rules, session, at, self._special, picked.threshold)
             admit(self._pending, signal, planned, at, self._skip, self._not_now)
         self._settle(at)
+
+    def _verdict_exit(self, signal: Signal, at: datetime) -> None:
+        """A verdict's SELL read fresh at ``at`` while the book holds a trade the verdict bought before
+        it (#677, ``verdicts.py``): that trade sells at the next quote (``verdict_sell``)."""
+        trade, call = self.position, signal.call
+        if trade is None or call is None or not call.exits or trade.predictor != VERDICT:
+            return
+        if signal.bar_close <= trade.bar_close or at - signal.displayed_at > self.rules.fresh:
+            return
+        if self._verdict_sale is not None and self._verdict_sale[0] == trade.id:
+            return
+        self._verdict_sale = (trade.id, at)
+        self.dirty = True
+        log.info(
+            "%s the verdict of %s says sell (v%s): trade %s sells at the next quote",
+            self._whose(),
+            signal.bar_close.strftime("%H:%M"),
+            call.version,
+            trade.id,
+        )
 
     def on_quote(self, quote: BestQuote) -> None:
         """A quote from the stream (in mock mode during a stall, KIS's REST one, #407). One not newer
@@ -672,6 +712,10 @@ class PaperTrader:
         status = self.status
         if status in SALE and quote.received_at > (self.sell_after or self.started_at):
             self._exit(trade, quote.received_at, quote.bid, SALE[status], quote)
+            return
+        sale = self._verdict_sale
+        if sale is not None and sale[0] == trade.id and quote.received_at > sale[1]:
+            self._exit(trade, quote.received_at, quote.bid, VERDICT_SELL, quote)
             return
         reached = self.holds.mark(self._unrealized(trade, quote.bid), quote.received_at, trade.practice)
         if reached is not None:
@@ -895,7 +939,11 @@ class PaperTrader:
         """Why the practice's spacing holds ``signal``'s buy (#598, ``spaced``): of a practice pick alone,
         from the bar close of the book's last practice buy order of ``at``'s day, as the store has it."""
         picked = self._picks.get(Cell(signal.kind, signal.predictor))
-        if picked is None or not picked[1].practice or self.rules.practice_spacing <= timedelta(0):
+        if picked is None or self.rules.practice_spacing <= timedelta(0):
+            return None
+        if picked[1].verdict:  # the verdict's buys spaced as the practice's, from its own (#677)
+            return spaced(self.rules, signal.bar_close, self.store.last_verdict_buy(self.mode, midnight(at)))
+        if not picked[1].practice:
             return None
         return spaced(self.rules, signal.bar_close, self.store.last_practice_buy(self.mode, midnight(at)))
 
@@ -944,6 +992,17 @@ class PaperTrader:
             if pick.quantity is not None
             else f"a loss budget of {self.rules.budget(self._capital()):.0f} won",
         )
+        if signal.call is not None:  # the verdict that buys (#677): its version and what it expects
+            opened = signal.call.opened()
+            log.info(
+                "%s the verdict v%s of %s buys: %s, margin %s, expected net %s ticks a share",
+                self._whose(),
+                signal.call.version,
+                signal.bar_close.strftime("%H:%M"),
+                opened["strength"],
+                _figure(opened["margin"], "+.3f"),
+                _figure(opened["expected_net_ticks"], "+.2f"),
+            )
         self._waiting = _Waiting(decision, signal, pick, planned, at, mid_of(self.last))
 
     def _skip(self, signal: Signal, at: datetime, reason: str) -> None:
@@ -1045,13 +1104,16 @@ class PaperTrader:
             p_star=pick.p_star,
             low=pick.low,
             kelly=pick.kelly,  # f*, a diagnosis alone (#471): no trade is sized by it
-            # A practice trade is of no policy (#427): no record, promotion or gate counts it.
-            policy_id=None if pick.practice else self._policy,
+            # A practice trade is of no policy (#427), nor a verdict trade (#677): no record, promotion
+            # or gate counts it.
+            policy_id=None if pick.practice or pick.verdict else self._policy,
             champion=self.challenger is None and not self.shadow,
             shadow=self.shadow,
             practice=pick.practice,
             model_version=signal.model_version,
             decided_mid=waiting.mid,
+            verdict_version=None if signal.call is None else signal.call.version,
+            verdict=None if signal.call is None else signal.call.opened(),
         )
 
     def give_up(self, waiting: _Waiting, reason: str) -> None:

@@ -93,6 +93,10 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   stops new entries for the day. Beside it the champion policy's paper shadow keeps its paper
   record (``desk.Desk.shadow``): every record is paper's in every mode, and ``gap.py`` shows the
   KIS trades against the shadow's. ``mock_check.py`` compares a mock day's orders with KIS's.
+- **Verdict** (``verdicts.py``, #677): with ``KRX_TRADER_MOCK_VERDICT`` on (the default in mock mode,
+  mock alone), on a day no champion cell trades the mock book trades the engine's verdict (#676) too,
+  ranked before the practice cell: a BUY bought by the loss budget at the verdict's target, stop and
+  deadline (up to 60 minutes), sold there or on a later SELL; each trade keeps the verdict's version.
 - **Quotes stalled** (``stall.py``, #407): more than five seconds without a quote in continuous
   trading is a stall, kept, and sent to Telegram with the quotes' return, once each, when its
   silence is thirty seconds long (#624): no book buys anything new meanwhile; the mock champion
@@ -127,7 +131,8 @@ MODES = (PAPER, MOCK, LIVE)
 KIS_MODES = (MOCK, LIVE)
 
 # The kinds a cell may be of (#393): the four-minute direction, and the barrier at 4, 15 and 30
-# minutes. The 60-minute barrier and the daily kinds are not traded.
+# minutes. The 60-minute barrier and the daily kinds are not traded by a cell; the verdict policy
+# (#677, ``verdicts.py``) trades every barrier horizon of the verdict, the 60 minutes too.
 TRADED_KINDS = ("direction", "barrier", "barrier_15m", "barrier_30m")
 # A cell's predictor, as the cost map names it (#307, #395): the final consensus (the direction's
 # only), the kind's first-ranked active algorithm besides the consensus (#594), its strongest baseline.
@@ -163,6 +168,10 @@ DAILY_BUY_ORDERS = 20
 # one minute in four or five, as on those days, each buy waits a few minutes more for the next rise,
 # about 19 minutes a buy, and the 20 spread over the whole session.
 PRACTICE_SPACING = timedelta(minutes=15)
+
+# The verdict policy (#677, ``verdicts.py``): the predictor of its cells (one a barrier horizon of the
+# engine's verdict, #676) and the role of its picks; its trades' ``predictor``.
+VERDICT = "verdict"
 
 # The cost map the cells are picked from (#395): 005930's, its last 20 days with predictions, the
 # special situations left out (the trader buys in none). Picked at each start, and every day at

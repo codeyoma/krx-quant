@@ -247,6 +247,7 @@ async def _run(
             "daily_buy_orders": trader.daily_buy_orders,
             "mock_practice": trader.mock_practice,  # #427
             "practice_spacing_minutes": trader.practice_spacing_minutes,  # #598
+            "mock_verdict": trader.mock_verdict,  # #677
             "cost_map": {"engine": trader.engine_url, "symbol": SYMBOL, "period": COST_MAP_PERIOD},
             "commit": settings.commit,
         },
@@ -270,6 +271,7 @@ async def _run(
                     clock=clock,
                     timing=timing,
                     practice=trader.mock_practice and mode == MOCK,  # #427: the settings allow mock alone
+                    verdict=trader.mock_verdict and mode == MOCK,  # #677: likewise
                     engine=settings.state_dir / ENGINE_DB,  # where a policy's predictor is found gone (#469)
                 )
                 watch = LiveWatch(trader.mode, mode, book, sessions, alerts.notice, broker=broker)
