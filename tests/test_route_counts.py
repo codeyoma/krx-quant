@@ -1,6 +1,7 @@
 """The Engine API's requests counted by route (#588): the route patterns, the statuses, the p95, the
 WebSocket connections, one line at each 00:00 KST and one when the API stops, and nothing in the
-line that a request carried (its address, query or path values)."""
+line that a request carried (its address, query or path values). A request slower than
+``SLOW_SECONDS`` is a WARNING line of its own (#680)."""
 
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.fake_kis import FakeKis
 from krx_quant.feeds.base import KST
-from krx_quant.route_counts import RouteCounts, install, keep_daily
+from krx_quant.route_counts import SLOW_SECONDS, RouteCounts, install, keep_daily
 from tests.collector_doubles import settings_for
 from tests.replay_events import at
 from tests.server_doubles import free_port, poll
@@ -206,6 +207,60 @@ async def test_taking_the_line_counts_again_from_zero() -> None:
 
 def lines(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.name == "krx_quant.route_counts"]
+
+
+def slow(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [m for m in lines(caplog) if m.startswith("Engine API request slow: ")]
+
+
+async def test_a_request_slower_than_five_seconds_is_a_warning_with_its_route_and_seconds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ticks, clock = Ticks(), FakeClock(STARTED)
+    over = (SLOW_SECONDS + 1.2) * 1000
+    with caplog.at_level(logging.INFO, logger="krx_quant.route_counts"):
+        async with serving(ticks, clock) as (client, counts):
+            for path in (
+                f"/v1/symbols/005930/latest?ms={over}",
+                f"/v1/symbols/999999/latest?ms={over}",
+                f"/v1/status?ms={SLOW_SECONDS * 1000}",  # not longer than the limit
+                "/v1/status?ms=3",
+            ):
+                async with client.get(path) as response:
+                    await response.read()
+            ws = await client.ws_connect("/v1/stream")
+            ticks.add(3600)
+            await ws.close()
+            await until(lambda: "GET /v1/stream 1 " in counts.line(STARTED))
+
+    assert slow(caplog) == [
+        "Engine API request slow: GET /v1/symbols/{symbol}/latest 200 in 6.2s",
+        "Engine API request slow: GET /v1/symbols/{symbol}/latest 404 in 6.2s",
+    ], "the route's pattern, not the symbol asked; a WebSocket connection is not timed so"
+    warned = [r for r in caplog.records if r.getMessage().startswith("Engine API request slow: ")]
+    assert {r.levelno for r in warned} == {logging.WARNING}
+
+
+async def test_a_slow_request_cancelled_before_its_answer_is_a_warning_too(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    ticks, clock = Ticks(), FakeClock(STARTED)
+
+    async def bars(request: web.Request) -> web.Response:
+        ticks.add(7)
+        raise asyncio.CancelledError  # as when the engine stops while it runs
+
+    app = web.Application()
+    app.router.add_get("/v1/symbols/{symbol}/bars", bars)
+    install(app, clock, elapsed=ticks)
+    with caplog.at_level(logging.INFO, logger="krx_quant.route_counts"):
+        async with TestClient(TestServer(app)) as client:
+            with pytest.raises(aiohttp.ClientError):
+                async with client.get("/v1/symbols/005930/bars") as response:
+                    await response.read()
+            await until(lambda: bool(slow(caplog)))
+
+    assert slow(caplog) == ["Engine API request slow: GET /v1/symbols/{symbol}/bars cancelled after 7.0s"]
 
 
 class Asked(FakeClock):
