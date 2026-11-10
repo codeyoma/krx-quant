@@ -2392,10 +2392,11 @@ class PredictionStore:
         ).fetchone()
         return int(row[0]), row[1], int(answers[0]), answers[1]
 
-    def to_simulate(self, names: Sequence[str]) -> list[str]:
+    def to_simulate(self, names: Sequence[str], *, bar_close: bool = False) -> list[str]:
         """Of ``names``, in order, the algorithms on a probation that waits for its simulation
         (#298): begun for a reason that is simulated (``lifecycle.starts_simulation``: a new
-        algorithm's, a new target's), no simulation kept for it yet. Not one whose code changed and
+        algorithm's, a new target's; of ``bar_close`` kinds' algorithms, a new target's only, #681),
+        no simulation kept for it yet. Not one whose code changed and
         whose pre-validation has not passed that revision (#454, ``Revision.held``: not judged yet,
         or refused and unretired since): it is judged on the days after the change only, a replay of
         the latest days could hold those it was chosen on, and a simulation's review is applied
@@ -2407,7 +2408,7 @@ class PredictionStore:
             for n in names
             if (s := standings.get(n)) is not None
             and s.status is Status.PROBATION
-            and starts_simulation(s.reason)
+            and starts_simulation(s.reason, bar_close=bar_close)
             and (n, s.since) not in done
             and not ((r := revisions.get(n)) is not None and r.held)
         ]

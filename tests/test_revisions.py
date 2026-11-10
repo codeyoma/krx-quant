@@ -139,6 +139,30 @@ async def test_the_first_start_records_each_code_as_it_runs_and_changes_no_statu
     assert first.revising() == []
 
 
+async def test_one_its_pre_validation_enrolled_while_the_engine_ran_has_its_code_recorded_when_run(
+    tmp_path: Path,
+) -> None:
+    """Input: alpha active; beta waiting for its pre-validation when the engine starts, then made
+    active by it at night, in the engine's database (#681: its walk-forward replay passed). Output: at
+    the next admission (the next bar close) the engine runs beta and records its code as its first
+    revision, its status as the pre-validation left it."""
+    db = tmp_path / "engine.db"
+    put_statuses(db, {"alpha": ("active", "set by the test")}, EARLIER)
+    engine = await start(db, at("06:00:00"), Gate(), [ALPHA, BETA], admits=lambda a: a.name == "alpha")
+    assert [a.name for a in engine.algorithms] == ["alpha"]
+    with stored(db) as store:
+        store.add_status("beta", at("06:10:00"), None, Status.ACTIVE, "walk-forward replay (set by the test)")
+    assert (await listed(engine))["beta"]["state"] == "active", "listed as its status before it runs"
+
+    engine._admit()
+
+    assert [a.name for a in engine.algorithms] == ["alpha", "beta"]
+    with stored(db) as store:
+        [revision] = store.revision_history("beta")
+        assert (revision.code, revision.state) == ("a1", REVISION_FIRST)
+    assert [h["status"] for h in history(db, "beta")] == ["active"], "its status as it was"
+
+
 async def test_new_code_restarts_probation_once_and_leaves_a_retired_one_retired(tmp_path: Path) -> None:
     """Input: alpha active, beta benched, gamma retired, delta a clone, each first recorded on
     code a1; then all four deployed on code a2. Output: alpha, beta and delta go back on probation

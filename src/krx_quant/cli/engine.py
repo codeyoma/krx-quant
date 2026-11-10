@@ -246,6 +246,15 @@ def _prevalidate(name: str, days: int, revision: bool = False) -> int:
             f"run before: {result.earlier_runs}, {result.earlier_on_these_days} of them on any of these days"
             " (a day replayed again after a fix is no longer out of sample)"
         )
+    promotion = result.promotion
+    if promotion is not None:  # #681
+        skipped = len(promotion.days) - len(promotion.judged_days)
+        print(
+            f"promotion: {promotion.outcome} - {promotion.detail}; {len(promotion.judged_days)} days judged"
+            f" ({skipped} skipped: no model trained before them); {len(promotion.family)} tests before on"
+            f" these days ({len(promotion.earlier_versions)} of an earlier version of it), budget"
+            f" {promotion.budget} at {promotion.level:.2%}"
+        )
     for line in result.diagnostic_lines:  # what it measured besides the checks (#283), never judged
         print(line)
     print(f"report: {report_path(settings.state_dir, name)}")
@@ -258,6 +267,12 @@ def _prevalidate(name: str, days: int, revision: bool = False) -> int:
         )
     elif name in REGISTERED_BEFORE:
         print(f"{name} was registered before pre-validation: the engine runs it either way")
+    elif promotion is not None and promotion.outcome == "active" and result.passed:
+        print(f"{name} is active from now; the engine runs it from its next bar close")
+    elif promotion is not None and promotion.on_probation:
+        print(f"{name} stays on probation, judged forward on live days")
+    elif promotion is not None and result.passed:
+        print(f"{name} is on probation, judged forward on live days, from the engine's next bar close")
     elif result.passed:
         print(f"the engine starts {name} on probation at its next bar close, unless it runs it already")
     else:

@@ -49,9 +49,9 @@ that kind's baselines, a clone looked for among the earlier algorithms of that k
 (by the first class's probability less the third's), and only the predictions of models
 trained on that kind's answers counted.
 
-A probation begun for a new algorithm (``REGISTERED``) or a new target (``target_changed``) can
-be simulated (#298, ``simulation.py``): the latest trading days replayed as if the algorithm had
-been on probation, its predictions and their answers kept apart from the live ones
+A probation begun for a new algorithm (``REGISTERED``: a daily kind's since #681) or a new target
+(``target_changed``) can be simulated (#298, ``simulation.py``): the latest trading days replayed as
+if the algorithm had been on probation, its predictions and their answers kept apart from the live ones
 (``Simulated``). Those days are its probation's first days, ahead of the live days after them
 (a live day they replayed is superseded), and on them its rows and its kind's baselines' are the
 simulation's, the other algorithms' (a clone's twin) the live ones. A simulation is judged as soon
@@ -61,6 +61,10 @@ and bench checks of the latest days read the simulation's rows on its days too, 
 it came out of did; the leaderboard and the statistics never do. An active algorithm's days active
 come after its simulated days, so from its tenth day active its decay is judged without them
 (#545).
+
+A new bar-close algorithm is not simulated (#681): its pre-validation's walk-forward replay judges it
+as a review would, at once (``prevalidation.py``, "Promotion"), and makes it active (``REPLAYED``, its
+replay kept as a simulation is), refuses it, or puts it on a probation judged forward (``FORWARD``).
 """
 
 from __future__ import annotations
@@ -105,6 +109,11 @@ CODE_REFUSED = "the pre-validation of its new code refused it"
 # How the reason it is made active ends when a review day passed while that pre-validation was due,
 # and it then passed (#454).
 CODE_PASSED = "the pre-validation of its new code passed since"
+# How the reason of a new bar-close algorithm's status starts when its pre-validation's walk-forward
+# replay judged it (#681): made active at once, or on a probation judged forward on live days (the
+# replay could not be judged: too few days scored, or the testing budget of its days spent).
+REPLAYED = "walk-forward replay"
+FORWARD = "registered; judged forward"
 
 
 def target_changed(kind: str, version: int) -> str:
@@ -114,11 +123,18 @@ def target_changed(kind: str, version: int) -> str:
     return f"the {kind} target changed to version {version}{_RESTARTS}"
 
 
-def starts_simulation(reason: str) -> bool:
+def starts_simulation(reason: str, *, bar_close: bool = False) -> bool:
     """Whether a probation begun for ``reason`` is simulated (#298): a new algorithm's, once its
     pre-validation passed (``REGISTERED``), and a restart on a new target (#170, #187). Not one
     put back by command (``unretire``), a clone's return, nor a restart on new code
-    (``CODE_CHANGED``, #454: the latest days replayed may be those the change was chosen on)."""
+    (``CODE_CHANGED``, #454: the latest days replayed may be those the change was chosen on).
+
+    A bar-close kind's (``bar_close``, #681) only on a new target: a new bar-close algorithm is
+    judged by its pre-validation's walk-forward replay (``prevalidation.py``, "Promotion"), which
+    makes it active, refuses it or puts it on a probation judged forward (``FORWARD``); one on a
+    ``REGISTERED`` probation from before is judged again by that replay, not simulated."""
+    if bar_close:
+        return reason.endswith(_RESTARTS)
     return reason == REGISTERED or reason.endswith(_RESTARTS)
 
 

@@ -90,7 +90,12 @@ async def test_an_algorithm_that_beats_the_baselines_on_its_own_features_passes(
         "budget": True,
         "correlation": True,
         "stats": True,
+        "promotion": True,
     }
+    # #681: its first day is predicted by its defaults (nothing recorded before it), so nine are scored,
+    # fewer than ten: its walk-forward replay cannot make it active, and its live days judge it.
+    assert saved["promotion"]["outcome"] == "forward" and not saved["promotion"]["tested"]
+    assert "9 days with a trained model, fewer than 10" in saved["promotion"]["detail"]
     assert saved["timed_out"] == 0
     assert saved["stats"]["n"] > 200 and saved["stats"]["lift"]["low"] > 0
     # The touch target's four baselines, the default (#170).
