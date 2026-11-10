@@ -1,9 +1,9 @@
 usage: krx-quant [-h]
-                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
     replay              replay a recorded day through the engine into its own
                         database (no KIS needed)
@@ -131,6 +131,13 @@ positional arguments:
                         engine's memory before and after, the server's and the
                         engine's memory by hour from 15:00, the server's now;
                         read-only, no price
+    close-restart-memory
+                        the evening's memory after the engine's restart after
+                        the close (#687): the restart's and the next start's
+                        engine memory, the server's and the engine's memory by
+                        hour from 15:00, and 21:00-23:59's lowest available
+                        and most swap against the evenings before; read-only,
+                        no price
     smt                 count a day's SMT divergences (#520), made again from
                         its recording or backfilled bars, beside the engine's
                         live ones; reads only, no price

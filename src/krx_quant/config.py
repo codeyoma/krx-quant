@@ -53,6 +53,12 @@ DEFAULT_KRX_OPENAPI_URL = "https://data-dbg.krx.co.kr"
 # after-market's close on, and over before the 06:00 deploy.
 JOBS_FROM = time(20, 0)
 JOBS_UNTIL = time(5, 30)
+# The restart after the close (#687) starts from KRX_CLOSE_RESTART_AT, never before this (the day's
+# archive after the close is 15:45, 16:45 on the exam day's late close: the restart waits for it
+# anyway), and is given up from the latest on: the night futures are recorded from 18:00 and a
+# minute missed there has no source to fetch it again. Both before the jobs' night (JOBS_FROM).
+CLOSE_RESTART_EARLIEST = time(15, 50)
+CLOSE_RESTART_LATEST = time(17, 50)
 RULES = RegimeRules()  # the regime's default thresholds
 # The target versions (#169) one may choose: 3, the touch target (#160) with crossed quotes counted
 # (#187), alone since #659 (1, the four-minute mid-point move, is refused as 2 is: ``GONE_TARGETS``).
@@ -179,6 +185,11 @@ class Settings:
     # for Docker to start it afresh with that day's contracts (KRX_RESTART_AT: 07:20 unless
     # set; "off"; before macro_at and the NXT pre-market at 08:00). None here, as macro_at.
     restart_at: time | None = None
+    # The collector stops once a trading day after the session and its review are over, from this
+    # time (KST) and before CLOSE_RESTART_LATEST, for Docker to start a fresh engine before the
+    # night's training (#687, ``close_restart.py``; KRX_CLOSE_RESTART_AT: 17:00 unless set; "off").
+    # None here, as macro_at.
+    close_restart_at: time | None = None
     # Free API keys of the Bank of Korea (ECOS) and FRED; a source without its key is skipped.
     ecos_api_key: str | None = None
     fred_api_key: str | None = None
@@ -402,6 +413,16 @@ class Settings:
                 f"KRX_RESTART_AT ({restart_at:%H:%M}) must be before KRX_MACRO_AT ({macro_at:%H:%M}): "
                 "the restarted collector reads the day's macro once"
             )
+        close_restart_at = _time_or_off("KRX_CLOSE_RESTART_AT", values.get("KRX_CLOSE_RESTART_AT", "17:00"))
+        if close_restart_at is not None and not (
+            CLOSE_RESTART_EARLIEST <= close_restart_at < CLOSE_RESTART_LATEST
+        ):
+            # Before: the day's archive after the close may still run (16:45 on the exam day's late
+            # close); from the latest on, the restart would cut the night futures (from 18:00).
+            raise SettingsError(
+                f"KRX_CLOSE_RESTART_AT must be from {CLOSE_RESTART_EARLIEST:%H:%M} and before"
+                f" {CLOSE_RESTART_LATEST:%H:%M} or off, got {close_restart_at:%H:%M}"
+            )
         api_port = int(number("KRX_API_PORT", "8080", int, maximum=65535))
         # The port next to the API's unless set (8081 beside 8080): never the API's by default.
         next_port = str(api_port + 1 if api_port < 65535 else api_port - 1)
@@ -478,6 +499,7 @@ class Settings:
             ),
             macro_at=macro_at,
             restart_at=restart_at,
+            close_restart_at=close_restart_at,
             ecos_api_key=values.get("KRX_ECOS_API_KEY") or None,
             fred_api_key=values.get("KRX_FRED_API_KEY") or None,
             ecos_url=values.get("KRX_ECOS_URL", DEFAULT_ECOS_URL),

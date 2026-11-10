@@ -78,6 +78,18 @@ def _session_memory(day: date | None, night: bool) -> int:
     return code
 
 
+def _close_restart_memory(day: date | None, last: bool) -> int:
+    """The evening's memory after the restart after the close (#687)."""
+    from krx_quant.close_restart_probe import close_restart_memory, last_restart_day
+
+    settings = Settings.from_env(require_kis=False)
+    report, code = close_restart_memory(
+        settings, last_restart_day(settings, datetime.now(KST)) if last else day
+    )
+    print(report)
+    return code
+
+
 def add(sub: Commands) -> None:
     """The probes' commands, each with its handler (``cli._parser``)."""
     sub.add_parser(
@@ -155,3 +167,18 @@ def add(sub: Commands) -> None:
         " job runs it; exit 1 when the engine stored no rest that day",
     )
     memory_cmd.set_defaults(run=lambda args: _session_memory(args.day, args.tonight))
+    restart_cmd = sub.add_parser(
+        "close-restart-memory",
+        help="the evening's memory after the engine's restart after the close (#687): the restart's and"
+        " the next start's engine memory, the server's and the engine's memory by hour from 15:00, and"
+        " 21:00-23:59's lowest available and most swap against the evenings before; read-only, no price",
+    )
+    restart_day = restart_cmd.add_mutually_exclusive_group(required=True)
+    restart_day.add_argument("--day", type=date.fromisoformat, help="the day, YYYY-MM-DD")
+    restart_day.add_argument(
+        "--last",
+        action="store_true",
+        help="the latest day before the night it runs in that the engine restarted after the close, as"
+        " the scheduled jobs run it; exit 1 when there is none",
+    )
+    restart_cmd.set_defaults(run=lambda args: _close_restart_memory(args.day, args.last))

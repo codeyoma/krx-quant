@@ -141,6 +141,8 @@ from krx_quant.scheduled.prevalidations import (
 )
 from krx_quant.scheduled.probes import (
     BAR_CLOSE_TIMES,
+    CLOSE_RESTART_MEMORY,
+    CLOSE_RESTART_MEMORY_AGAIN,
     NIGHT_BOOK_BYTES,
     NIGHT_BOOK_VERDICT,
     RECORDING_QUALITY,
@@ -182,6 +184,8 @@ __all__ = [
     "AGAIN",
     "BAR_CLOSE_SIMULATION",
     "BAR_CLOSE_TIMES",
+    "CLOSE_RESTART_MEMORY",
+    "CLOSE_RESTART_MEMORY_AGAIN",
     "CLIMATE_GATE",
     "DAILY_SIMULATION",
     "ERROR_HOLDOUT",
@@ -322,6 +326,8 @@ JOBS: tuple[Job[Any], ...] = (
     NIGHT_BOOK_VERDICT,
     BAR_CLOSE_TIMES,
     SESSION_MEMORY,
+    CLOSE_RESTART_MEMORY,
+    CLOSE_RESTART_MEMORY_AGAIN,
     INVERSE_REPLAY,
     VERDICT_REPLAY,
     SIGNAL_REVIEW_FIXED,

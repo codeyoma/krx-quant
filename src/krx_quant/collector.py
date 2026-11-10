@@ -25,6 +25,14 @@ from krx_quant.auth import TokenManager, tokens_and_client
 from krx_quant.backfill import keep_history
 from krx_quant.climate import load_climate, load_tables
 from krx_quant.clock import SessionClock, SystemClock
+from krx_quant.close_restart import (
+    Facts,
+    Running,
+    job_running,
+    keep_restart,
+    restart_after_close,
+    tell_started,
+)
 from krx_quant.closing_flow import keep_days, keep_demand, store_closing_demand
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, night_front_month
@@ -81,6 +89,7 @@ from krx_quant.ratelimit import RateLimiter
 from krx_quant.readiness import Readiness, keep_ready
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.rescore import EngineLock, keep_touches_filled
+from krx_quant.scheduled import STATE_FILE as JOBS_STATE_FILE
 from krx_quant.scheduled import keep_jobs
 from krx_quant.signals import Signals
 from krx_quant.snapshot import keep_snapshots
@@ -467,11 +476,14 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                     settings.symbols,
                 )
                 background.append(asyncio.create_task(keep_demand(store_at, calendar.calendar, now)))
+            running = Running()  # what the restart after the close waits for (#687)
             if settings.object_store is None:
                 log.warning("KRX_OBJECT_STORE is not set: recorded days are not archived nor trained on")
             else:
                 background.append(
-                    asyncio.create_task(_keep_archived(settings, recorder, calendar.calendar, alerts, now))
+                    asyncio.create_task(
+                        _keep_archived(settings, recorder, calendar.calendar, alerts, now, running)
+                    )
                 )
             object_store = open_store(settings)
             if object_store is not None:  # the server's state off the host each night at 05:35 (#576)
@@ -539,6 +551,34 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                 background.append(
                     asyncio.create_task(restart_each_day(settings.restart_at, calendar.calendar, now, stop))
                 )
+            if settings.close_restart_at is not None:
+
+                async def restart_facts() -> Facts:
+                    """The restart after the close's facts (#687): what runs that it would cut."""
+                    at = now()
+                    session = calendar.calendar.session(kst_day(at))
+                    archived = None if session is None else session.close + ARCHIVE_AFTER_CLOSE
+                    busy = (
+                        running.first()
+                        or (None if training.busy_until(at) is None else "the nightly training")
+                        or await asyncio.to_thread(job_running, settings.state_dir / JOBS_STATE_FILE)
+                    )
+                    if busy is None and archived is not None and at < archived:
+                        busy = f"the archive after the close ({archived.astimezone(KST):%H:%M})"
+                    return Facts(engine.predicted_at, engine.reviewed_through, busy)
+
+                background.append(
+                    asyncio.create_task(
+                        restart_after_close(
+                            settings.close_restart_at,
+                            calendar.calendar,
+                            now,
+                            stop,
+                            restart_facts,
+                            keep_restart(store),
+                        )
+                    )
+                )
             if settings.macro_at is not None:
                 macro_collector = MacroCollector(
                     settings, session, alerts, macro_recorder(recorder), calendar.calendar, now
@@ -595,6 +635,7 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
             )
             api = await _serve_api(settings, engine, live, alerts, names, session_clock)
             quote_stream = await _serve_quotes(settings, quotes, alerts)
+            tell_started(store, now())  # the engine's memory once started (#687)
             # The past bar closes' touch labels, once the API answers (#168): the 06:00 deploy
             # checks it within 3 minutes, and the fill can take longer.
             background.append(asyncio.create_task(keep_touches_filled(settings, engine, lock)))
@@ -750,8 +791,10 @@ async def _keep_archived(
     calendar: MarketCalendar,
     alerts: Alerts,
     now: Clock,
+    running: Running | None = None,
 ) -> None:
-    """Archive finished days at start, then every day after the close and at night.
+    """Archive finished days at start, then every day after the close and at night; while one
+    runs, ``running`` says so (the restart after the close waits for it, #687).
 
     Buffered rows are written first so the archive holds everything recorded so far;
     rows recorded later go into the next run. Each run prunes the raw days past 30 days on the
@@ -770,7 +813,8 @@ async def _keep_archived(
             store = open_store(settings)
             assert store is not None
             recorder.flush()
-            report = await archive(settings.data_dir, store, before=before, today=kst_day(now()))
+            with running.during("the archive") if running is not None else contextlib.nullcontext():
+                report = await archive(settings.data_dir, store, before=before, today=kst_day(now()))
         except Exception:
             log.exception("archiving failed")
             alerts.raise_(_ARCHIVE_ALERT, "장 마감 데이터 업로드가 실패했습니다.")

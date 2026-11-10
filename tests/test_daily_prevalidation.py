@@ -241,7 +241,7 @@ def job_night(
 def test_the_scheduled_walk_forward_does_not_wait_for_recorded_days_nor_its_turn() -> None:
     [job] = [j for j in JOBS if j.name == "prevalidate-cox"]
     assert job.command == ("prevalidate", "cox")
-    assert {t.issue for t in job.targets} == {204, 264}
+    assert [t.issue for t in job.targets] == [204]  # #264 closed: once on #204
     names = [j.name for j in JOBS]
     assert names.index("prevalidate-cox") < names.index("prevalidate-mandelbrot")
     day = date(2026, 10, 19)

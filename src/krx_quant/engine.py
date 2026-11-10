@@ -618,6 +618,9 @@ class PredictionEngine:
         self._special = SpecialSituations(calendar)
         self.leaders = leaders or Leaders()
         self._last_tick = clock.now()
+        # The latest bar close this engine predicted (#687): None until it predicts one. Whether this
+        # process ran a session that day, for the restart after the close (``close_restart.py``).
+        self.predicted_at: datetime | None = None
         # Each symbol's previous trading day's ranges (#181, ``range_prev_day``): without, unknown.
         self._market = MarketView(
             calendar,
@@ -662,6 +665,8 @@ class PredictionEngine:
         self._regime_days: dict[date, str | None] = {}
         # Reviews pick up where the last one left off: one missed while down runs at start.
         self._reviewed_through = store.last_run("review") or self._last_tick
+        # The latest review over (#687): set once ``_review`` has returned, never while it runs.
+        self._review_done = self._reviewed_through
         self._daily: DailyRunner | None = None
         self._daily_events: Callable[[str, dict[str, Any]], None] | None = None
         # A daily kind awaiting a probe's result (#310, ``DailyKind.awaiting``) is listed, not run.
@@ -1091,12 +1096,13 @@ class PredictionEngine:
             try:
                 await self._score_until(due)
                 if due == next_bar_close(self.calendar, self._last_tick):
-                    self._last_tick = due
+                    self._last_tick = self.predicted_at = due
                     predicted = True
                     await self._predict(due)
                 if due == self._next_review(self._reviewed_through):
                     self._reviewed_through = due
                     await self._review(due)
+                    self._review_done = due
                     reviewed = True
                 if self._daily is not None and due == self._daily.next_due():
                     await self._daily.run(due)
@@ -1113,6 +1119,12 @@ class PredictionEngine:
                 rested = self.garbage.rest(self._let_go, self._market.held, reviewed=reviewed)
                 if rested is not None:  # for the night's report, which cannot read Loki
                     self.store.add_run(REST_RUN, self.clock.now(), None, json.dumps(rested))
+
+    @property
+    def reviewed_through(self) -> datetime:
+        """The time of the latest daily review over, by this engine or before its start (#687): a
+        review still running is not (``_reviewed_through`` moves when it starts)."""
+        return self._review_done
 
     def _let_go(self) -> Mapping[str, int]:
         """Drop from the Market View what the next session's bar closes do not read (#623,

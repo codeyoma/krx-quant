@@ -21,7 +21,7 @@ from krx_quant.neyman_backfill import Progress as NeymanBackfill
 from krx_quant.neyman_variants import Progress as NeymanVariants
 from krx_quant.scheduled import JOBS, BackfillFacts, Job, Night, PrevalidationFacts, SignalReviewFacts
 from krx_quant.scheduled.prevalidations import read_prevalidation_facts
-from krx_quant.scheduled.probes import read_night_book_nights
+from krx_quant.scheduled.probes import read_last_restart, read_night_book_nights
 from krx_quant.scheduled.research import (
     read_backfill,
     read_hit_rate_nights,
@@ -56,6 +56,7 @@ OWN: dict[Any, Callable[[Mapping[str, Any]], Any]] = {
         f.get("neyman_variants", NeymanVariants()), f.get("neyman_backfill", NeymanBackfill())
     ),
     read_night_book_nights: lambda f: f.get("night_book_nights", 0),
+    read_last_restart: lambda f: f.get("close_restart_day"),
     read_fill_notice_apart: lambda f: f.get("fill_notice_apart", 0),
     read_live_kis: lambda f: f.get("trader_live_kis", False),
     read_last_backup: lambda f: f.get("state_backup"),
