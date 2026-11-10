@@ -887,6 +887,13 @@ class MarketView:
             return None
         return window.bid_start, window.ask_start
 
+    def best_quote(self, symbol: str, at: datetime) -> tuple[float, float] | None:
+        """``symbol``'s best quote (bid, ask) last received before ``at`` and not crossed (#676: what
+        an order then would trade at); None without one, or without kinds."""
+        log = self._logs.get(symbol)
+        quote = None if log is None else log.latest(at)
+        return None if quote is None else (quote.bid, quote.ask)
+
     def ended_windows(self, due: datetime, horizon: timedelta = WINDOW) -> list[tuple[str, datetime]]:
         """The windows over by ``due``, as (symbol, bar close), each handed out once per window
         length: the touch windows' four minutes (#167), or a longer kind's ``horizon`` (#263),

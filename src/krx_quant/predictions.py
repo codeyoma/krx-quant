@@ -55,6 +55,10 @@ never rewritten. A table of its own, as ``touches`` (``_SMT_SCHEMA``). ``smt_eve
 ``b_extreme`` (#521), when each side set the extreme it was judged against, are columns added as
 ``kind_predictions.band`` was: a row kept before them has none.
 
+``verdicts`` (#676, ``verdict.py``) keeps each symbol's verdict at each bar close it was made at, by
+the verdict's version: BUY, SELL or WAIT and the whole answer as ``GET /v1/verdict`` serves it
+(JSON), written once and never rewritten. A table of its own, as ``touches`` (``_VERDICT_SCHEMA``).
+
 Times are ISO 8601 strings in KST, which sort in time order.
 """
 
@@ -365,6 +369,19 @@ CREATE TABLE IF NOT EXISTS smt_events (  -- an SMT episode, by its first bar clo
     PRIMARY KEY (definition, version, bar_close, a, b, direction, minutes, source)
 );
 CREATE INDEX IF NOT EXISTS smt_events_by_close ON smt_events (bar_close);
+"""
+
+_VERDICT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS verdicts (  -- a symbol's verdict at a bar close (#676): never rewritten
+    symbol TEXT NOT NULL,
+    bar_close TEXT NOT NULL,
+    version INTEGER NOT NULL,         -- verdict.VERDICT_VERSION: its rules'
+    verdict TEXT NOT NULL,            -- buy, sell, wait
+    made_at TEXT NOT NULL,            -- when the engine made it, its members done
+    body TEXT NOT NULL,               -- JSON: the answer as GET /v1/verdict serves it
+    PRIMARY KEY (symbol, bar_close, version)
+);
+CREATE INDEX IF NOT EXISTS verdicts_by_close ON verdicts (bar_close);
 """
 
 # How a revision began (#454): as the engine found it when it first recorded one (the first start
@@ -1035,6 +1052,7 @@ class PredictionStore:
             + _SIMULATION_SCHEMA
             + _REVISION_SCHEMA
             + _SMT_SCHEMA
+            + _VERDICT_SCHEMA
             + _added_columns(self._db)
             + f"PRAGMA user_version={_VERSION};"
         )
@@ -1720,6 +1738,60 @@ class PredictionStore:
                 ],
             )
         return cursor.rowcount
+
+    def add_verdicts(
+        self, verdicts: Sequence[tuple[str, datetime, int, str, Mapping[str, Any]]], made_at: datetime
+    ) -> int:
+        """Keep verdicts (#676) made at ``made_at``: (symbol, bar close, version, verdict, body)
+        entries. One kept already (the same symbol, bar close and version) stays as it was. The rows
+        written."""
+        with self._writing():
+            cursor = self._db.executemany(
+                "INSERT OR IGNORE INTO verdicts (symbol, bar_close, version, verdict, made_at, body)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        symbol,
+                        iso(bar_close),
+                        version,
+                        verdict,
+                        iso(made_at),
+                        json.dumps(body, separators=(",", ":")),
+                    )
+                    for symbol, bar_close, version, verdict, body in verdicts
+                ],
+            )
+        return cursor.rowcount
+
+    def verdicts(self, symbols: Sequence[str], bar_close: datetime | None = None) -> list[dict[str, Any]]:
+        """The verdict (#676) of each of ``symbols`` at ``bar_close``, or at its latest bar close with
+        one: the newest version's, as served; a symbol without one is left out."""
+        at = "" if bar_close is None else " AND bar_close = ?"
+        found = []
+        for symbol in symbols:
+            row = self._db.execute(
+                f"SELECT body FROM verdicts WHERE symbol = ?{at}"
+                " ORDER BY bar_close DESC, version DESC LIMIT 1",
+                (symbol,) if bar_close is None else (symbol, iso(bar_close)),
+            ).fetchone()
+            if row is not None:
+                found.append(json.loads(row[0]))
+        return found
+
+    def kind_evidence(self, kind: str, answer_version: int, algorithms: Collection[str]) -> dict[str, int]:
+        """How many of each of ``algorithms``' predictions of ``kind`` were answered with a class of
+        ``answer_version`` (#676: a verdict member's evidence); one without any is left out."""
+        if not algorithms:
+            return {}
+        marks = ", ".join("?" * len(algorithms))
+        rows = self._db.execute(
+            "SELECT p.algorithm, count(*) FROM kind_predictions p JOIN kind_answers a ON a.kind = p.kind"
+            " AND a.symbol = p.symbol AND a.bar_close = p.bar_close AND a.answer_version = ?"
+            f" WHERE p.kind = ? AND p.algorithm IN ({marks}) AND p.status = 'ok' AND a.class IS NOT NULL"
+            " GROUP BY p.algorithm",
+            (answer_version, kind, *sorted(algorithms)),
+        )
+        return {r[0]: r[1] for r in rows}
 
     def smt_events(self, since: datetime, until: datetime) -> list[SmtEvent]:
         """The SMT events kept whose bar close is in ``[since, until)``, in time order (#520)."""

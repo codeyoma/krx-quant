@@ -238,8 +238,9 @@
 | `special_windows` | `kind`(`vi`, `circuit_breaker`, `sidecar`, `market_halt`(#625)), `symbol`(VI의 종목, 시장 전체면 비어 있음), `start`, `end`(해제 시각. 해제를 아직 모르는 VI는 발동 + 3분, 서킷브레이커 3단계는 그날 끝, 재개를 아직 모르는 시장 전체 매매 정지는 그날 장 마감), `detail`(서킷브레이커의 `1단계`·`2단계`·`3단계`, VI 종류 `static`·`dynamic`·`both`, 시장 전체 매매 정지의 `정지`·`단일가`·`재개`, 그 밖에는 비어 있음), `learned_at`(이 판을 받은 시각), `first_learned_at`(첫 판을 받은 시각, #625. 그 전에 남긴 행은 비어 있음: trader의 재생이 이때부터 구간을 안다). 엔진이 알게 된 특수 상황 구간(#236, 위 "특수 상황"). (`kind`, `symbol`, `start`)마다 하나이고, 새 판을 알면 그 행의 `end`, `detail`, `learned_at`을 바꾼다. 지난날은 엔진이 시작할 때 녹화로 채운다(아래 "지난 특수 상황 구간"). 따로 둔 표다 |
 | `special_days` | `day`, `source`(녹화를 읽은 곳. 어디에도 없었으면 비어 있음), `windows`(판정한 구간 수), `decided_at`, `rules`(판정한 규칙의 판 `special.RULES`, #625: 2. 그 전에 남긴 행은 1이고, 다음 시작 때 녹화로 다시 판정한다). 녹화로 특수 상황 구간을 판정한 지난날(#236). 구간이 없던 날도 남아서 다음 시작 때 다시 읽지 않는다. 따로 둔 표다 |
 | `smt_events` | `definition`(`rolling_extreme`), `version`(정의의 판, 지금 1), `bar_close`(묶음의 첫 봉 마감 t), `a`, `b`(쌍, `smt.PAIRS`의 순서: `005930`·`000660`, `005930`·`KOSPI200F`, `000660`·`KOSPI200F`), `direction`(`bearish`, `bullish`), `minutes`(L: 15, 30), `swept`(직전 L분의 극값을 넘은 쪽: `a`나 `b`의 코드), `source`(`live`), `recorded_at`(엔진이 쓴 시각), `a_extreme`, `b_extreme`(#521: 첫 봉 마감에서 `a`와 `b`가 견준 직전 L분 극값(하락은 최고가, 상승은 최저가)을 가진 1분봉의 시작. 같은 값이 여럿이면 가장 늦은 것. #521 전에 쓴 행은 비어 있다). 엔진이 봉 마감마다 판정한 SMT 다이버전스의 묶음 하나에 한 행(#520, [design.md](design.md) 5장 "SMT 다이버전스"). (`definition`, `version`, `bar_close`, `a`, `b`, `direction`, `minutes`, `source`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
+| `verdicts` | `symbol`, `bar_close`, `version`(판정 규칙의 판 `verdict.VERDICT_VERSION`, 지금 1), `verdict`(`buy`, `sell`, `wait`), `made_at`(엔진이 만든 시각, 그 봉 마감의 알고리즘이 다 끝난 뒤), `body`(JSON: 아래 `GET /v1/verdict`의 항목 하나 그대로): 종목의 봉 마감마다의 판정(#676, [design.md](design.md) 5장 "판정"). (`symbol`, `bar_close`, `version`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
 
-`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264), `inputs`(#304)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. `smt_events`(#520, `bar_close` 인덱스)도 그렇고, `smt_events.a_extreme`·`b_extreme`(#521)은 `band`처럼 더한 열이다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_predictions`(인덱스 (`run`, `bar_close`)), `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
+`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264), `inputs`(#304)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. `smt_events`(#520, `bar_close` 인덱스)도 그렇고, `verdicts`(#676, `bar_close` 인덱스)도 그렇다. `smt_events.a_extreme`·`b_extreme`(#521)은 `band`처럼 더한 열이다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_predictions`(인덱스 (`run`, `bar_close`)), `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
 
 시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 4). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다. 더 새 버전의 DB는 거부하고 시작하지 않는다(`... was written by a newer engine (schema N)`). 그래서 스키마를 올린 엔진을 배포한 뒤에는 옛 커밋으로 되돌려도 엔진이 뜨지 않는다([operations.md](operations.md#4-업데이트-배포) 4장).
 
@@ -1020,6 +1021,47 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 - `members`는 지금의 정식 알고리즘이다. `weights`는 마지막으로 계산한 칸별 가중치다(그때의 구성원).
 - 합의의 성적은 순위표와 `/v1/algorithms/consensus-final/stats`에서 다른 알고리즘처럼 볼 수 있다.
+
+### `GET /v1/verdict?symbol=S&bar_close=T` (#676)
+
+종목마다 봉 마감의 판정이다(#676, `verdict.py`, [design.md](design.md) 5장 "판정"): 매수·매도·대기, 그것이 기대는 지평과 목표가·손절가·기한, 장벽 지평마다 합친 확률과 기대 순손익, 구성원마다 그 의견, 그 옆의 방향·변동폭 예측. 엔진이 봉 마감마다 그 봉 마감의 알고리즘이 다 끝난 뒤 만들어 저장한 것(`verdicts`)을 그대로 준다.
+
+- 질의: `symbol`(없으면 모든 종목), `bar_close`(ISO 8601, 없으면 종목마다 판정이 있는 마지막 봉 마감). 모르는 종목은 404, 시각이 아니면 400이다. 판정이 없는 종목(예측 전, 그 봉 마감에 VI)은 빠진다.
+
+```json
+{
+  "version": 1,
+  "verdicts": [{
+    "symbol": "005930", "bar_close": "2026-10-12T10:00:00+09:00", "version": 1,
+    "verdict": "buy", "meaning": null, "reason": null, "strength": "strong", "margin": 0.5,
+    "horizon": {"kind": "barrier_15m", "minutes": 15}, "deadline": "2026-10-12T10:15:00+09:00",
+    "target": 82450.0, "stop": 80050.0, "held": false,
+    "horizons": [{"kind": "barrier_15m", "minutes": 15, "width_ticks": 12,
+      "probabilities": {"p_up_first": 0.7, "p_timeout": 0.1, "p_down_first": 0.2},
+      "families": 1, "members": 1, "lean": "up", "strength": "strong", "margin": 0.5,
+      "target": 82450.0, "stop": 80050.0, "expected_net": 361.35, "expected_net_ticks": 3.6135}],
+    "members": [{"name": "breiman-15m", "kind": "barrier_15m", "family": "breiman", "status": "probation",
+      "evidence": 390, "probabilities": {"p_up_first": 0.7, "p_timeout": 0.1, "p_down_first": 0.2},
+      "lean": "up", "strength": "strong", "margin": 0.5, "weight": 1.0, "counted": true}],
+    "side": [{"name": "newton", "kind": "direction", "status": "active",
+      "output": {"p_up": 0.4, "p_flat": 0.4, "p_down": 0.2, "expected_ticks": 0.3}}],
+    "rules": {"version": 1, "margin": 0.05, "lean_floor": 0.02, "moderate": 0.05, "strong": 0.15,
+      "families": {"breiman": "breiman", "breiman-15m": "breiman"}, "consensus": {}}
+  }]
+}
+```
+
+(값은 지어낸 것이다.)
+
+- `version`(맨 위): 지금 엔진의 판정 규칙 판. 항목의 `version`은 그 판정을 만든 판이다.
+- `verdict`: `buy`, `sell`, `wait`. `meaning`은 매도의 뜻이다: `exit`(trader가 들고 있는 것을 판다), `avoid`(들고 있지 않을 때 사지 않는다). 다른 판정은 `null`. `reason`은 대기의 까닭이다: `no_members`(그 봉 마감에 예측을 낸 장벽 알고리즘이 없다), `no_edge`(매수도 매도도 아니다), `holding`(들고 있고 남은 지평이 돌아서지 않았다). 다른 판정은 `null`.
+- `strength`: `none`, `weak`, `moderate`, `strong`. 매수·매도는 그 지평 `margin`의 크기로 정하고, 대기는 `none`이다. `margin`은 그 지평에서 합친 P(위 먼저) − P(아래 먼저)이고 대기면 `null`이다.
+- `horizon`: 판정이 기대는 지평(`kind`, `minutes`). 매수는 기대 순손익이 가장 큰 지평, 청산은 남은 시간을 덮는 지평, 매수 피하기는 가장 아래로 기운 지평, 대기는 기대 순손익이 가장 큰(없으면 첫) 지평이고, 구성원이 없으면 `null`이다.
+- `deadline`: 매수의 최대 보유 시간(봉 마감 + 지평), 청산은 포지션의 시간 장벽. 다른 판정은 `null`. `target`, `stop`: 매수의 목표가와 손절가(다른 판정은 `null`). `held`: trader가 그 종목을 들고 있었는지.
+- `horizons`: 그 봉 마감에 예측한 장벽 지평마다, 짧은 것부터. `width_ticks`(그 종류의 폭 w, 기준가가 없으면 `null`), `probabilities`(합친 세 확률, 구성원이 없으면 `null`), `families`·`members`(센 계열과 구성원 수), `lean`·`strength`·`margin`(합친 것의 기울기), `target`·`stop`(기준가 ± w × 호가단위), `expected_net`(그 지평에 지금 매도 1호가로 산 한 주의 기대 순손익, 원. 목표·손절·시간 만료 셋을 trader의 왕복 공식으로 센다. 호가가 없으면 `null`), `expected_net_ticks`(같은 값을 호가단위로).
+- `members`: 지평마다의 구성원. `name`, `kind`(그 지평의 종류), `family`, `status`(`probation`, `active`, `bench`, 기록이 없으면 `null`), `evidence`(그 종류의 예측 중 정답이 난 수. 엔진이 시작할 때와 날마다 점검 뒤에 센다), `probabilities`(자기 세 확률 그대로), `lean`(`up`, `down`, `none`)·`strength`·`margin`(자기 것), `weight`(합칠 때의 무게. 계열마다 같고 계열 안에서 나눈다), `counted`(셌는지. 자기 구성원과 함께 있는 합의는 `false`, 무게 0).
+- `side`: 섞지 않고 옆에 보이는 예측. 방향 알고리즘(`kind` `direction`, `output`은 `p_up`, `p_flat`, `p_down`, `expected_ticks`)과 최종 합의(`consensus-final`, `status` `null`), 변동폭 같은 장벽이 아닌 종류의 알고리즘(`output`은 그 종류의 출력 그대로).
+- `rules`: 그 판정의 규칙 상수(마진, 기울기 등급, 계열 표, 합의 표).
 
 ### `GET /v1/algorithms/{name}/stats?symbol=&period=&special=`
 

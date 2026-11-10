@@ -140,6 +140,10 @@ class Followed:
         return self.bar_close + self.horizon
 
 
+# The quotes ``QuoteLog.latest`` looks back over for one not crossed (crossed ones come a few at a time).
+_LATEST_SCAN = 64
+
+
 class QuoteLog:
     """A symbol's best quotes, REST book snapshots and trades as received, for the kinds'
     windows (#179): kept while a window may read them. A one-sided quote is dropped, as a
@@ -196,6 +200,17 @@ class QuoteLog:
         self._quotes = [q for q in self._quotes if q.received_at >= before]
         self._rests = [r for r in self._rests if r >= before]
         self._trades = [t for t in self._trades if t[0] >= before]
+
+    def latest(self, before: datetime) -> Quote | None:
+        """The last quote received before ``before`` that is not crossed (#676: the executable bid
+        and ask then); None without one."""
+        if self._ordered:
+            end = bisect_left(self._quotes, before, key=_received)
+            return next(
+                (q for q in reversed(self._quotes[max(0, end - _LATEST_SCAN) : end]) if not q.crossed), None
+            )
+        earlier = [q for q in self._quotes if q.received_at < before and not q.crossed]
+        return max(earlier, key=_received, default=None)
 
     def take(self, start: datetime, end: datetime) -> Taken:
         """What was received in [``start``, ``end``), copied: the quotes (crossed ones too), the

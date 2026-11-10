@@ -59,6 +59,10 @@ Endpoints (all under ``/v1``):
   with a direction's breakeven hit rate beside the leaderboard's hit rates (#307,
   ``cost_map.py``), with the period base rates (``base_rates.py``);
 - ``GET /consensus``: the consensus members now and the weights last fitted;
+- ``GET /verdict?symbol=S&bar_close=T`` (#676, ``verdict.py``): each symbol's verdict at its latest
+  bar close with one (BUY, SELL or WAIT, its horizon, target, stop and deadline, each barrier
+  horizon's pool and expected net, every member with its lean, the direction and range beside it),
+  or ``symbol``'s alone, or at ``bar_close``; as the engine stored it at the bar close;
 - ``GET /macro``: the latest day's market regime and macro readings (``macro.py``);
 - ``GET /calendar?limit=``: the economic calendar from the start of today, as the collector
   last read it (``econ_calendar.py``);
@@ -210,6 +214,7 @@ from krx_quant.trader.policy import read_policies
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import read_days as read_trader_days
 from krx_quant.trader.store import read_trader, read_trades, request_pause
+from krx_quant.verdict import VERDICT_VERSION
 
 ENGINE_KEY = web.AppKey("engine", PredictionEngine)
 # live: the collector; demo: `krx-quant demo-engine`; replay: tests.
@@ -388,6 +393,7 @@ def create_app(
     app.router.add_get("/v1/algorithms/{name}/stats", _algorithm_stats)
     app.router.add_get("/v1/cost-map", _cost_map)
     app.router.add_get("/v1/consensus", _consensus)
+    app.router.add_get("/v1/verdict", _verdict)
     app.router.add_get("/v1/macro", _macro)
     app.router.add_get("/v1/calendar", _calendar)
     app.router.add_get("/v1/briefing", _briefing)
@@ -1127,6 +1133,18 @@ async def _consensus(request: web.Request) -> web.Response:
             "weights": by_symbol,
         }
     )
+
+
+async def _verdict(request: web.Request) -> web.Response:
+    """The verdicts as stored at their bar close (#676): every symbol's latest, or ``symbol``'s, or
+    at ``bar_close``; a symbol without one is left out."""
+    engine = request.app[ENGINE_KEY]
+    symbol = request.query.get("symbol")
+    if symbol is not None and symbol not in engine.symbols:
+        raise _error(web.HTTPNotFound, f"unknown symbol {symbol!r}")
+    bar_close = _time_query(request, "bar_close")
+    verdicts = engine.store.verdicts([symbol] if symbol is not None else engine.symbols, bar_close)
+    return _json({"version": VERDICT_VERSION, "verdicts": verdicts})
 
 
 async def _macro(request: web.Request) -> web.Response:

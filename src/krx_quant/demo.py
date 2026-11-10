@@ -36,6 +36,11 @@ windows begun on those 20 days and the answers of those ended by the 8th, each a
 ``cox-5d`` makes none: its pre-validation was refused on the server, so neither engine runs it, and
 the API shows it refused, with a made-up report (#561). The 60-minute barrier's Breiman waits for its
 pre-validation, as on the server: no engine runs it either.
+The verdict (#676): each bar close's BUY, SELL or WAIT from the barrier's Breimans that run (the 4-,
+15- and 30-minute; the 60-minute waits), each with a made-up model (``demo_barrier_models``): trees
+fitted on made-up samples whose up first leans with the price's velocity and, a little, with the time
+of day, a phase a horizon, so the members lean apart and the verdict changes over the morning. The
+trader's position on the morning reads as held.
 The KRX day candles carry KIS's 락 구분 as the collector keeps it (``ex_code``): 00 every day but a
 made-up interim ex-dividend day (05) of 005930 on 2026-09-29, so the windows begun the four sessions
 before it are marked ``ex_dividend``.
@@ -916,6 +921,45 @@ def _finished_periods(days: list[Row], period: str) -> list[Row]:
     return out
 
 
+def demo_barrier_models() -> dict[str, Model]:
+    """Made-up models of the barrier Breimans the demo runs (#676, module doc): trees fitted on 3,000
+    made-up samples each, every feature missing but the velocity (−3 to 3 ticks a minute) and the
+    minutes since the open, its up first ``0.35 + d / 2`` and down first ``0.35 − d / 2`` for a lean
+    ``d = 0.6 tanh(velocity) + 0.15 sin(minutes / 9 + phase)``, the phase its horizon's. The same each
+    run (a seed a horizon, LightGBM deterministic)."""
+    import lightgbm as lgb
+    import numpy as np
+
+    from krx_quant.algorithms import KIND_ALGORITHMS
+    from krx_quant.algorithms.breiman import BOOSTING
+    from krx_quant.barriers import ANSWER_VERSION
+
+    models: dict[str, Model] = {}
+    for phase, algorithm in enumerate(a for a in KIND_ALGORITHMS if a.name.startswith("breiman")):
+        if algorithm.name in _WAITING:
+            continue
+        rng = np.random.default_rng(676 + phase)
+        x = np.full((3000, len(algorithm.features)), np.nan)
+        velocity = rng.uniform(-3, 3, len(x))
+        minutes = rng.uniform(0, 390, len(x))
+        x[:, algorithm.features.index("velocity")] = velocity
+        x[:, algorithm.features.index("minutes_since_open")] = minutes
+        lean = 0.6 * np.tanh(velocity) + 0.15 * np.sin(minutes / 9 + 2 * phase)
+        up = np.clip(0.35 + lean / 2, 0.02, 0.68)
+        down = 0.7 - up
+        y = np.array([rng.choice(3, p=(u, 0.3, d)) for u, d in zip(up, down, strict=True)])
+        data = lgb.Dataset(x, y, feature_name=list(algorithm.features), free_raw_data=True)
+        trees = lgb.train({**BOOSTING, "verbosity": -1}, data, num_boost_round=40)
+        models[algorithm.name] = Model(
+            f"{algorithm.name}-demo",
+            {"rounds": 40.0},
+            trained="made up for the demo (#676)",
+            blob=trees.model_to_string(),
+            target_version=ANSWER_VERSION,
+        )
+    return models
+
+
 def demo_settings(data_dir: Path) -> Settings:
     """The demo's settings (#647): its made-up symbols and fee, the touch target, no leading series
     besides the symbols and the two futures, the data under ``data_dir`` (its state in ``state/``),
@@ -965,6 +1009,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     write_demo_base_rates(data_dir / "state")  # the cost map's (#307)
     # The trader's trades (#398) on the quotes of the days before and of the morning.
     write_demo_trader(data_dir / "state", [e for day in PAST_DAYS for e in past_events(day)] + demo_events())
+    barriers = demo_barrier_models()  # the verdict's members (#676)
     for day in PAST_DAYS:
         # Each day by its own engine, ended before the daily review after the close, so
         # every algorithm stays active as on the morning.
@@ -977,7 +1022,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
             PredictionStore(db),
             clock,
             _CALENDAR,
-            models={},
+            models=barriers,
             gates=gates,  # the morning's waiting one never ran (#561)
         )  # no macro read those mornings: no regime
         await replay_into(engine, clock, past, until=datetime.combine(day, time(15, 30), KST))
@@ -993,7 +1038,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         PredictionStore(db),
         clock,
         _CALENDAR,
-        models={cox.version.split("-")[0]: cox},
+        models={cox.version.split("-")[0]: cox, **barriers},
         gates=gates,  # as the server's pre-validations (#310, #561)
     )
     await replay_into(engine, clock, events, until=_at(_END if pace is None else _PACED_FROM))
