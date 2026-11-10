@@ -1,0 +1,7 @@
+usage: krx-quant verdict-replay [-h] [--day DAY] [--days DAYS]
+
+options:
+  -h, --help   show this help message and exit
+  --day DAY    the last day replayed, YYYY-MM-DD (default: the latest trading
+               day whose session is over)
+  --days DAYS  the recorded trading days replayed (default 20)

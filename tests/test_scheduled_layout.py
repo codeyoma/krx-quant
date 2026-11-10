@@ -30,6 +30,7 @@ FIRST = (
     "bar-close-times-589",
     "session-memory-623",
     "inverse-replay-606",
+    "verdict-replay-679",
     "signal-review-206-1201",
     "probe-live-account-408",
     "fill-notice-columns-648",

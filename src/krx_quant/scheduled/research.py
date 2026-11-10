@@ -232,6 +232,41 @@ INVERSE_REPLAY = Job(
 )
 
 
+# The verdict replayed (#679): the verdict (#676) made again at each bar close of the latest 20 recorded
+# days, with the barrier algorithms the live engine ran and with every one walked forward (retrained before
+# each day on the days before it, as a pre-validation), and its BUYs replayed a share each by the paper
+# trader's rules (``verdict_replay.py``). A diagnosis: the margin and the family map are the verdict's
+# version, fixed in #676 before it runs. Once, the first night after it is deployed, trading or not; after a
+# failure, again once a deploy brings other code. One algorithm is walked forward at a time (about 2.5
+# minutes and 300 MB each for the queue screen's on 2026-11-10, four of them), then a day's recording at a
+# time: about 15 minutes, the hour a bound. Before the simulations and pre-validations, which may take the
+# rest of the night, and after the nightly training (every job is). Its output holds counts, rates, ticks
+# and won, no price.
+VERDICT_REPLAY_ISSUE = 679
+
+VERDICT_REPLAY = Job(
+    name="verdict-replay-679",
+    due=again_on_new_code,
+    command=("verdict-replay",),
+    timeout=timedelta(hours=1),
+    targets=(
+        Target(
+            VERDICT_REPLAY_ISSUE,
+            note=(
+                "판정(#676)을 기록된 최근 20거래일의 봉 마감마다 다시 내렸다(#679, 매매하지 않는다). "
+                "멤버는 두 가지다: 그날 라이브 엔진이 돌린 장벽 알고리즘(엔진이 저장한 예측)과, 장벽 "
+                "알고리즘 모두를 날마다 그 전 날들로만 다시 학습한 것(사전 검증의 전진 학습). 매수는 "
+                "trader의 규칙으로 1주씩 재생했다: 결정 뒤 첫 매도 호가에 사고, 목표·손절·기한(한 번에 "
+                "하나일 때는 판정의 매도도)에 판다. 순손익은 수수료와 거래세를 뺀 원이다. 진단이지 조정이 "
+                "아니다: m과 가족은 #676에서 정했고 이 날들로 고르지 않는다. 다시 돌리기(읽기만): "
+                "`docker compose run --rm engine verdict-replay [--day <날>] [--days N]`. 출력에는 가격이 "
+                "없다(개수, 비율, 틱, 원만)."
+            ),
+        ),
+    ),
+)
+
+
 # turing's hypotheses judged on a fixed holdout (#447): four hypotheses picked from #431's report,
 # fixed in #447 before the days after its period, are judged on the first ``holdout.DAYS`` (10) days
 # after 2026-10-30 with turing's predictions on answer version 3 (``holdout.py``). Once, on the first
