@@ -665,6 +665,8 @@ class PredictionEngine:
         self._regime_days: dict[date, str | None] = {}
         # Reviews pick up where the last one left off: one missed while down runs at start.
         self._reviewed_through = store.last_run("review") or self._last_tick
+        # The latest review over (#687): set once ``_review`` has returned, never while it runs.
+        self._review_done = self._reviewed_through
         self._daily: DailyRunner | None = None
         self._daily_events: Callable[[str, dict[str, Any]], None] | None = None
         # A daily kind awaiting a probe's result (#310, ``DailyKind.awaiting``) is listed, not run.
@@ -1100,6 +1102,7 @@ class PredictionEngine:
                 if due == self._next_review(self._reviewed_through):
                     self._reviewed_through = due
                     await self._review(due)
+                    self._review_done = due
                     reviewed = True
                 if self._daily is not None and due == self._daily.next_due():
                     await self._daily.run(due)
@@ -1119,8 +1122,9 @@ class PredictionEngine:
 
     @property
     def reviewed_through(self) -> datetime:
-        """The time of the latest daily review run, by this engine or before its start (#687)."""
-        return self._reviewed_through
+        """The time of the latest daily review over, by this engine or before its start (#687): a
+        review still running is not (``_reviewed_through`` moves when it starts)."""
+        return self._review_done
 
     def _let_go(self) -> Mapping[str, int]:
         """Drop from the Market View what the next session's bar closes do not read (#623,

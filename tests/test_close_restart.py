@@ -207,3 +207,53 @@ def test_the_setting_is_17_unless_set_off_or_within_its_bounds() -> None:
     for outside in ("15:45", "17:50", "21:00"):
         with pytest.raises(SettingsError, match="KRX_CLOSE_RESTART_AT"):
             Settings.from_env({**keys, "KRX_CLOSE_RESTART_AT": outside}, dotenv_path=None)
+
+
+async def test_a_review_still_running_at_the_restart_time_holds_the_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Input: a live engine whose day's review (15:40) is still running at 17:00 (it waits on the
+    workers), then ends. Output: while it runs the engine says its review is not over and the restart
+    waits; once it returned, the restart goes (#688 review: the review's start moved the mark)."""
+    from krx_quant.clock import FakeClock
+    from krx_quant.engine import PredictionEngine
+    from krx_quant.touch import TARGET_VERSION
+    from tests.replay_events import CALENDAR as REPLAY_CALENDAR
+    from tests.replay_events import FEE, SYMBOL
+    from tests.replay_events import at as replay_at
+
+    day = replay_at("15:40:00").astimezone(KST).date()
+    clock = FakeClock(replay_at("15:39:00"))
+    engine = PredictionEngine(
+        PredictionStore(tmp_path / DB_NAME),
+        REPLAY_CALENDAR,
+        (SYMBOL,),
+        FEE,
+        clock,
+        algorithms=[],
+        kind_algorithms=[],
+        target_version=TARGET_VERSION,
+    )
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_review(due: datetime) -> None:
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(engine, "_review", slow_review)
+    clock.set(replay_at("17:00:00"))
+    task = asyncio.create_task(engine.run_due())
+    async with asyncio.timeout(5):
+        await started.wait()
+
+    def decision() -> str:
+        facts = Facts(replay_at("15:16:00"), engine.reviewed_through, None)
+        return decide(datetime.combine(day, time(17, 0), KST), AT, REPLAY_CALENDAR, facts).action
+
+    assert decision() == WAIT
+    release.set()
+    async with asyncio.timeout(5):
+        await task
+    assert engine.reviewed_through == replay_at("15:40:00")
+    assert decision() == RESTART
+    engine.store.close()
