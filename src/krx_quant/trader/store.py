@@ -129,6 +129,7 @@ from krx_quant.trader.db import iso, reading
 from krx_quant.trader.gap import day_gap
 from krx_quant.trader.money import round_trip, settled
 from krx_quant.trader.selection import GONE, PREDICTOR_INACTIVE
+from krx_quant.verdict import Held
 
 if TYPE_CHECKING:
     from krx_quant.trader.selection import Selection
@@ -1960,6 +1961,34 @@ def read_trader(
             rows = db.execute("SELECT * FROM controls ORDER BY id DESC LIMIT ?", (CONTROLS_SHOWN,))
             body["controls"] = [_control(r).as_json() for r in rows]
     return body
+
+
+def read_held(path: Path, now: datetime) -> dict[str, Held]:
+    """The trader's positions at ``now`` (#676, a verdict's SELL): each symbol's champion trade (the
+    trader's own, ``CHAMPION_TRADE``; never a shadow's or a challenger's paper trade) of the mode it
+    runs in (its snapshot's) entered by ``now`` and not exited by then. None without a store, a
+    snapshot or a trade; nothing when the store cannot be read (one being made)."""
+    try:
+        with reading(path) as db:
+            if db is None:
+                return {}
+            row = db.execute("SELECT body FROM snapshot WHERE id = 1").fetchone()
+            mode = None if row is None else json.loads(row["body"]).get("mode")
+            if mode is None:
+                return {}
+            at = iso(now)
+            rows = db.execute(
+                "SELECT t.symbol, t.entry_price, t.target, t.stop, t.time_barrier FROM trades t"
+                f" WHERE t.mode = ? AND {CHAMPION_TRADE} AND t.entry_at <= ?"
+                " AND (t.exit_at IS NULL OR t.exit_at > ?) ORDER BY t.id",
+                (mode, at, at),
+            ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {
+        r["symbol"]: Held(r["entry_price"], r["target"], r["stop"], datetime.fromisoformat(r["time_barrier"]))
+        for r in rows
+    }
 
 
 def read_resident(path: Path, now: datetime) -> float | None:
