@@ -15,7 +15,8 @@ with its condition (``core._first_night`` and ``core._first_trading_night`` are 
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from collections.abc import Callable
+from datetime import date, timedelta
 from typing import Any
 
 from krx_quant.night_book import NIGHTS, VERDICT_DAY, complete_nights
@@ -312,6 +313,83 @@ SESSION_MEMORY = Job(
     ),
 )
 
+
+# The evening's memory after the engine's restart after the close (#687, ``close_restart.py``,
+# ``close_restart_probe.py``): the restart's and the next start's engine memory (the engine keeps them
+# in its store's ``runs``), the server's and the engine's memory by hour from 15:00 (``memory_hours.py``),
+# and 21:00-23:59's lowest available and most swap against 2026-11-06 and 2026-11-09, before the restart.
+# On the first two nights after an evening with a restart, each of the latest such evening before its
+# night (``--last``): its 21:00-23:59 is over by then. Every night, trading or not, so that a Friday's
+# evening is read on Saturday night, within the 72 hours ``memory_hours`` keeps. A run that fails or is
+# cut runs again the next night, on the same code too. It reads the engine's database and a state file,
+# in a second; five minutes is a bound. Its output holds times, counts and MB, no price.
+CLOSE_RESTART_ISSUE = 687
+_CLOSE_RESTART_FIRST = "close-restart-memory-687"
+
+
+async def read_last_restart(reads: Reads) -> date | None:
+    """The latest day before tonight the engine restarted after the close on
+    (``close_restart_probe.last_restart_day``)."""
+    from krx_quant.close_restart_probe import last_restart_day  # a leaf: imported as it runs (#650)
+
+    sources = reads.sources
+    return await asyncio.to_thread(last_restart_day, sources.settings, sources.clock.now())
+
+
+def _until_ok(night: Night[date | None]) -> bool:
+    """Until a run ends ok: the first night it may, and after a failure or a cut the next."""
+    record = night.record
+    return record is None or (record.outcome != OK and record.day != night.day)
+
+
+def _first_restart_evening(night: Night[date | None]) -> bool:
+    """Once an evening with a restart is over, until a run ends ok."""
+    return night.facts is not None and _until_ok(night)
+
+
+def _second_restart_evening(night: Night[date | None]) -> bool:
+    """Once the first run ended ok, and an evening with a restart is over that the first did not read
+    (on or after the first's night), until a run ends ok."""
+    first = night.records.get(_CLOSE_RESTART_FIRST)
+    return (
+        first is not None
+        and first.outcome == OK
+        and first.day < night.day
+        and night.facts is not None
+        and night.facts >= first.day
+        and _until_ok(night)
+    )
+
+
+def _close_restart_job(name: str, due: Callable[[Night[date | None]], bool], which: str) -> Job[date | None]:
+    return Job(
+        name=name,
+        due=due,
+        facts=read_last_restart,
+        command=("close-restart-memory", "--last"),
+        timeout=timedelta(minutes=5),
+        targets=(
+            Target(
+                CLOSE_RESTART_ISSUE,
+                note=(
+                    f"엔진이 장 마감 뒤 다시 시작한 배포(#687) 뒤 {which} 저녁의 메모리다. 1절: 다시 "
+                    "시작의 까닭과 멈출 때 엔진 RSS, 다시 뜬 엔진의 RSS(API가 답한 때). 2절: 15시부터 "
+                    "시간마다 서버의 여유 메모리 최소·swap 최대, 엔진의 RSS·스왑 최대. 3절: 21–23시의 "
+                    "여유 최소·swap 최대와 다시 시작 전의 값(2026-11-06, 2026-11-09). 에이전트가 견준 "
+                    '결과를 이 이슈에 적는다(docs/operations.md "장 마감 뒤 다시 시작 (#687)"). 다시 보기'
+                    "(읽기만, 엔진 옆에서 돌아도 된다): "
+                    "`docker compose exec engine krx-quant close-restart-memory --day <날>`. "
+                    "출력에는 시세 값이 없다(시각, 개수, MB만)."
+                ),
+            ),
+        ),
+    )
+
+
+CLOSE_RESTART_MEMORY = _close_restart_job(_CLOSE_RESTART_FIRST, _first_restart_evening, "첫")
+CLOSE_RESTART_MEMORY_AGAIN = _close_restart_job(
+    f"{_CLOSE_RESTART_FIRST}-again", _second_restart_evening, "둘째"
+)
 
 # The inverse ETF's KRX book (#606): ``probe-inverse-book-606`` read the frames the collector recorded
 # raw of 0193L0's ``H0STASP0`` on the first trading night after the deploy that brought it (2026-11-06:

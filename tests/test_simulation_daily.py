@@ -327,7 +327,7 @@ def night_of(
 def test_the_scheduled_job_runs_after_a_daily_pass_or_while_a_probation_waits() -> None:
     [job] = [j for j in JOBS if j.name == "simulate-daily-298"]
     assert job.command == ("simulate", "daily")
-    assert {t.issue for t in job.targets} == {298, 264}
+    assert {t.issue for t in job.targets} == {298, 204}  # #264 closed
     names = [j.name for j in JOBS]
     assert (
         names.index("prevalidate-cox")

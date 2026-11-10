@@ -1,0 +1,8 @@
+usage: krx-quant close-restart-memory [-h] (--day DAY | --last)
+
+options:
+  -h, --help  show this help message and exit
+  --day DAY   the day, YYYY-MM-DD
+  --last      the latest day before the night it runs in that the engine
+              restarted after the close, as the scheduled jobs run it; exit 1
+              when there is none

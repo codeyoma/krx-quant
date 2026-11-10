@@ -63,6 +63,7 @@ LEAVES = frozenset(
         "night_probe",
         "order_probe",
         "sample_keys_probe",
+        "close_restart_probe",
         "session_memory_probe",
         "supply_probe",
         "toss_probe",

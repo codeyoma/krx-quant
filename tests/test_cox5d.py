@@ -264,7 +264,7 @@ def test_its_pre_validation_posts_to_310_and_its_simulation_job_waits_for_the_da
     assert [t.issue for t in job.targets] == [204, 310]
     assert "분산 배율" in job.targets[1].note and "60·120·180일로 고정했다" in job.targets[1].note
     [cox_job] = daily_prevalidation_jobs(["cox"], {"cox": FEATURES}, {"cox": "open_to_close"})
-    assert [t.issue for t in cox_job.targets] == [204, 264]
+    assert [t.issue for t in cox_job.targets] == [204]  # #264 closed: once on #204
     passed_tonight = {
         prevalidation_job_name("cox-5d"): JobRecord(LAST, OK, NIGHT, "c", 0, 60.0),
     }
