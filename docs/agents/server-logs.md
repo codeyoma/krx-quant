@@ -108,6 +108,26 @@ scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "heartbeat: "'
   ```
 - Read it beside the job's own memory lines above (`memory on`) and the training's per-step lines (#355): those say peaks within the process; the heartbeat says what the server had left.
 
+**What a memory jump was** (#680): when the engine's `rss` grew more than 100 MB since the heartbeat before (at most 2 minutes earlier), the engine says one WARNING line: `memory jump: engine rss <MB> -> <MB> MB (+<MB>) in <s>s; cpu since the heartbeat before <s>s: <thread> <s>s, … (the 5 busiest), <N> more <s>s; python <N> blocks, malloc <MB> MB in use and <MB> MB free, arrow <MB> MB; allocations: traced from now on`. A thread is named as Python named it (`MainThread`, `asyncio_<n>` for the worker threads, `ThreadPoolExecutor-…`), else by the kernel's name (a native library's thread). `malloc … free` is what glibc keeps freed (what `malloc_trim` would give back). The jump starts `tracemalloc`; at the next heartbeat the lines that hold what was allocated since are named, `<folder>/<file>:<line> <MB> MB`, 5 of them, then `tracemalloc's own <MB> MB`: in that minute's WARNING (`allocations: held since tracing began <s>s ago: …`) when the memory jumped again, else in one INFO line `memory jump: allocation tracing stopped; held since it began <s>s ago: …`, and tracing stops. operations.md "엔진 메모리가 뛸 때 (#680)" says what each part is and what to do.
+
+```bash
+scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "memory jump: "' --since 7d --forward
+```
+
+- Read it beside the heartbeats of the same minutes (`|= "heartbeat: "`), the bar closes' slow steps (`|= "held the event loop"`), and the slow Engine API requests below.
+
+**Slow Engine API requests** (#680): a request that took more than 5 s to its answer is one WARNING line as it ends, by route pattern: `Engine API request slow: GET /v1/symbols/{symbol}/bars 200 in 6.2s`, or `… cancelled after <s>s` for one cancelled before its answer. The stream's WebSocket connections are not timed so.
+
+```bash
+scripts/loki-query.sh '{service="krx-quant", process="engine"} |= "Engine API request slow: "' --since 7d --forward
+```
+
+- How many a route, over a week (connector, `queryType: "instant"`):
+
+  ```
+  sum by (route) (count_over_time({service="krx-quant", process="engine"} |= "Engine API request slow: " | regexp `slow: (?P<route>\S+ \S+) ` [7d]))
+  ```
+
 **The engine's memory after the close** (#623): the live engine rests twice a trading day, after the session's last answers (about 15:20) and after the daily review (about 15:40), and says one INFO line each time: `memory handed back after the session|the review: let go of book updates <N>, kind quotes <N>, trades <N>, trade sides <N>, flows <N>; kept reference quotes <N>, bars <N>, touch windows <N>; engine rss <MB> -> <MB> MB, swapped <MB> MB; python <N> blocks, malloc <MB> MB in use and <MB> MB free, arrow <MB> MB; <seconds>s`. Counts and MB only. `let go of` is what the Market View dropped (`nothing` when none; a count of 0 is left out), `rss` the engine's resident memory before and after the rest, `swapped` its `VmSwap`, the last three what Python's, glibc's and Arrow's allocators hold. operations.md "장 마감 뒤 메모리 (#623)" says what each is and what to compare. The engine keeps the same figures on the server (its store's `runs`, kind `memory_rest`) and the heartbeat's memory by hour (`state/memory-hours.json`), and the scheduled job `session-memory-623` posts them on #623 on the first trading night after the deploy (`krx-quant session-memory --day <day>` by hand).
 
 ```bash

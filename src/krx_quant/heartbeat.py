@@ -27,6 +27,10 @@ Each reading also goes into its clock hour's extremes in ``state/memory-hours.js
 
 The ``/proc`` files are read on the event loop (the kernel answers them from memory, in
 microseconds); the trader's store in a worker thread, as the Engine API reads it.
+
+The engine's figure also goes to its jump watch (#680, ``memory_jump.py``), in a worker thread: a
+WARNING line naming what ran and what holds the memory when it grew more than 100 MB since the
+heartbeat before.
 """
 
 from __future__ import annotations
@@ -38,14 +42,20 @@ from pathlib import Path
 
 from krx_quant import memory_hours, process_log
 from krx_quant.footprint import PROCS, resident_mb, server_mb, swapped_mb
+from krx_quant.memory_jump import JumpWatch
 from krx_quant.trader.store import DB_NAME, read_resident
 
 READ_SECONDS = 10.0  # the trader's figure is left out (``?``) when its store takes longer
 
 
-async def readings(state_dir: Path | None, now: Callable[[], datetime], proc: Path = PROCS) -> str:
+async def readings(
+    state_dir: Path | None,
+    now: Callable[[], datetime],
+    proc: Path = PROCS,
+    jumps: JumpWatch | None = None,
+) -> str:
     """The heartbeat's memory now (the module's doc): the trader's from its store in ``state_dir``
-    (``?`` without one)."""
+    (``?`` without one); the engine's also to ``jumps`` (#680)."""
     children = process_log.running()
     trader = None
     if state_dir is not None:
@@ -55,17 +65,24 @@ async def readings(state_dir: Path | None, now: Callable[[], datetime], proc: Pa
             )
         except TimeoutError:
             trader = None
+    engine = resident_mb(None, proc)
+    if jumps is not None:
+        await asyncio.to_thread(jumps.note, engine)
     if state_dir is not None:  # each hour's extremes, for the jobs that cannot read Loki (#623)
-        memory_hours.note(state_dir, now(), *server_mb(proc), resident_mb(None, proc), swapped_mb(None, proc))
-    return line(trader, children, proc)
+        memory_hours.note(state_dir, now(), *server_mb(proc), engine, swapped_mb(None, proc))
+    return line(trader, children, proc, engine)
 
 
-def line(trader_mb: float | None, children: Mapping[int, str], proc: Path = PROCS) -> str:
+def line(
+    trader_mb: float | None, children: Mapping[int, str], proc: Path = PROCS, engine_mb: float | None = None
+) -> str:
     """``memory available 812 MB, swap used 0 MB; rss engine 431 MB, trader 182 MB, job x 300 MB``:
     the server's memory, then this process's, the trader's (``trader_mb``) and each of
-    ``children``'s (pid -> its name), in the order they started."""
+    ``children``'s (pid -> its name), in the order they started. The engine's is ``engine_mb``
+    when given, else read now."""
     available, swap = server_mb(proc)
-    rss = [("engine", resident_mb(None, proc)), ("trader", trader_mb)]
+    engine = resident_mb(None, proc) if engine_mb is None else engine_mb
+    rss = [("engine", engine), ("trader", trader_mb)]
     rss += [(name, resident_mb(pid, proc)) for pid, name in children.items()]
     shown = ", ".join(f"{name} {_mb(mb)} MB" for name, mb in rss)
     return f"memory available {_mb(available)} MB, swap used {_mb(swap)} MB; rss {shown}"
