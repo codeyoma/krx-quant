@@ -77,6 +77,7 @@ LEAVES = frozenset(
         "neyman_variants",
         "signal_review",
         "smt_experiment",
+        "verdict_replay",
     }
 )
 NOT_LEAVES = {

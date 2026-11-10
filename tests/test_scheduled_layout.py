@@ -32,6 +32,7 @@ FIRST = (
     "close-restart-memory-687",
     "close-restart-memory-687-again",
     "inverse-replay-606",
+    "verdict-replay-679",
     "signal-review-206-1201",
     "probe-live-account-408",
     "fill-notice-columns-648",
