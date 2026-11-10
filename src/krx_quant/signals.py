@@ -41,7 +41,8 @@ BLOCKED = "signal_blocked"
 @dataclass(frozen=True)
 class SignalRule:
     # Of the move, in the final consensus; at least 0.5. 0.6 until 2026-11-03: #206 moved it to 0.70,
-    # provisionally, until the scheduled job ``signal-review-206-1201`` measures it again.
+    # provisionally. Its review on a fixed window (``signal-review-206-1201``) left with #206 (#689):
+    # the alerts stay off, and the verdict (#676) is the buy/sell signal.
     min_probability: float = 0.7
     min_agree: int = 2  # active algorithms predicting the move
 

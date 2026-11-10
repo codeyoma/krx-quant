@@ -5,7 +5,7 @@ with live code lives in the live module, and the probe imports it from there (``
 
 And no live module imports a probe, a check or an experiment (#650): each is a leaf that only the
 commands (``cli/``) and the scheduled jobs (``scheduled/``) that run it import, besides other leaves.
-What one shares with live code lives in its owner (``base_rates.day_prices``, ``stats.arm_stats``,
+What one shares with live code lives in its owner (``base_rates.day_prices``,
 ``recording_quality.group_line``) and the leaf imports it from there.
 
 Input: a fresh interpreter importing one module; the syntax trees of the package's modules. Output:
@@ -70,12 +70,8 @@ LEAVES = frozenset(
         # Checks (``*_check``), a claim measured on the stored data: none since #658 removed the last
         # (``closing_flow_check``, ``daily_check``, ``structure_check``).
         # Experiments and research reports: a hypothesis judged, or a report an agent reads.
-        "climate_gate",
         "holdout",
         "inverse_replay",
-        "neyman_backfill",
-        "neyman_variants",
-        "signal_review",
         "smt_experiment",
         "verdict_replay",
     }
@@ -143,14 +139,14 @@ def test_every_module_named_as_a_probe_a_check_or_an_experiment_is_listed() -> N
 def test_the_rule_sees_a_live_module_that_imports_a_leaf() -> None:
     # The same check finds an import of a leaf, at the top or in a function, in either form.
     found = {
-        "base_rates": ast.parse("from krx_quant.holdout import read_scored"),
+        "base_rates": ast.parse("from krx_quant.holdout import judge"),
         "collector": ast.parse("def f():\n    from krx_quant import gaps_probe"),
-        "engine": ast.parse("import krx_quant.signal_review"),
+        "engine": ast.parse("import krx_quant.smt_experiment"),
         "cli.probes": ast.parse("from krx_quant.gaps_probe import probe_gaps"),
-        "holdout": ast.parse("from krx_quant.climate_gate import climate_gate"),
+        "smt_experiment": ast.parse("from krx_quant.holdout import judge"),
     }
     assert leaves_imported_by_live_modules(found) == [
         "base_rates -> holdout",
         "collector -> gaps_probe",
-        "engine -> signal_review",
+        "engine -> smt_experiment",
     ]

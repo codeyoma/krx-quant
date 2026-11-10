@@ -9,7 +9,8 @@ empty ``state/models`` publishes the defaults as ``live.json`` and prunes the st
 longer names (``swap.keep_models``), so a new server needs them back before its first start. And the
 experiments' reports their writers name (``EXPERIMENT_REPORTS``, #604), with those kept as records
 after their experiment's code went (``KEPT_REPORTS``): neyman's holds the window's N and plan, fixed
-before the window and never computed again; the user decided on 2026-11-06.
+before the window and never computed again; the user decided on 2026-11-06. No experiment writes a
+report now: neyman's two left with their code (#689) and are kept.
 
 **Backup** (``back_up``). Every night at ``BACKUP_AT`` (05:35 KST: the scheduled jobs' night ends at
 05:30, the 06:00 deploy comes after) the collector packs them into one ``tar.gz`` in a scratch folder
@@ -117,16 +118,19 @@ FOLDERS = ("prevalidations", "models")
 # more and whose results are in their issues (#439, #448). ``tests/test_state_backup.py`` checks that
 # every module naming a file under ``experiments/`` has its pattern here.
 EXPERIMENTS = "experiments"
-EXPERIMENT_REPORTS = {
-    "krx_quant.neyman_variants": "neyman-variants-283.json",
-    "krx_quant.neyman_backfill": "neyman-backfill-532.json",
-}
+EXPERIMENT_REPORTS: dict[str, str] = {}
 # The reports a backup holds though their experiment's code is gone: each stays on the server as the
 # record of its result, and nothing writes or reads it any more. The label-order experiment's (#529),
 # removed once its result was in (none of the five a candidate, the night of 2026-11-08); the climate
 # prior's (#429), whose command went with #505's other kept research commands (#658; its result made
-# shannon read the prior, #435).
-KEPT_REPORTS = ("normal-order-529.json", "climate-prior-429.json")
+# shannon read the prior, #435); neyman's variants' and their backfill's (#455, #532), removed when the
+# user closed #455 on 2026-11-10 (#689: neyman is judged by the walk-forward promotion, #681).
+KEPT_REPORTS = (
+    "normal-order-529.json",
+    "climate-prior-429.json",
+    "neyman-variants-283.json",
+    "neyman-backfill-532.json",
+)
 # Refused though its pattern names it (#604): an experiment report with one of these words in its
 # name or in a key of its JSON, at any depth. A name or a key is split into words at anything but a
 # letter or a digit and where a lower case letter meets an upper case one, then lowered; each word is

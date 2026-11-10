@@ -1,9 +1,0 @@
-usage: krx-quant signal-review [-h] [--days DAYS] [--from SINCE]
-
-options:
-  -h, --help    show this help message and exit
-  --days DAYS   the latest N days with predictions (default 20, the
-                leaderboard's 20d)
-  --from SINCE  instead, the first N days with predictions on or after this
-                day, YYYY-MM-DD: a fixed window, the same days however late it
-                runs (#206)

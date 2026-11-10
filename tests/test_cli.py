@@ -105,7 +105,7 @@ def test_arguments_added_as_the_command_parses_parse_and_fail_as_the_others(
     args = cli._parser().parse_args(["prevalidate", "kalman"])
 
     assert (args.algorithm, args.days, args.revision) == ("kalman", PREVALIDATION_DAYS, False)
-    for wrong in (["prevalidate"], ["simulate", "nope"], ["signal-review", "--days", "0"]):
+    for wrong in (["prevalidate"], ["simulate", "nope"], ["nightly-hit-rates", "--nights", "0"]):
         with pytest.raises(SystemExit) as exited:
             cli.main(wrong)
         assert exited.value.code == 2, wrong

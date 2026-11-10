@@ -494,7 +494,7 @@ def _excluded(days: Sequence[date], symbol: str | None, db: sqlite3.Connection) 
 
 @contextlib.contextmanager
 def read_only(db: Path) -> Iterator[sqlite3.Connection | None]:
-    """The engine DB, read without writing (``diagnose``, ``signal-review``): while the engine
+    """The engine DB, read without writing (the research commands): while the engine
     runs (its write-ahead log is there) as a reader beside it, else as a file nothing changes
     (no ``-wal`` or ``-shm`` is made); None if there is no DB."""
     if not db.exists():
@@ -744,20 +744,6 @@ def days_with_predictions(db: sqlite3.Connection, until: date, limit: int) -> li
         days.append(day)
         before = iso(datetime.combine(day, time(), KST))
     return days
-
-
-def within_days(days: Sequence[date], column: str) -> tuple[str, list[str]]:
-    """A condition on ``column`` (a time as stored) being on one of ``days`` (at least one), and its
-    parameters: the range lets SQLite use its index, the list leaves out the days in between."""
-    marks = ", ".join("?" * len(days))
-    return (
-        f"{column} >= ? AND {column} < ? AND substr({column}, 1, 10) IN ({marks})",
-        [
-            iso(datetime.combine(min(days), time(), KST)),
-            iso(datetime.combine(max(days) + timedelta(days=1), time(), KST)),
-            *(d.isoformat() for d in days),
-        ],
-    )
 
 
 def iso(at: datetime) -> str:

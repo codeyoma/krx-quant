@@ -31,61 +31,6 @@ def _smt(day: date | None) -> int:
     return 0 if made is not None or live else 1
 
 
-def _moment(text: str) -> datetime:
-    """A time with its offset (``--until``); one without is read as KST."""
-    try:
-        found = datetime.fromisoformat(text)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(f"not an ISO 8601 time: {text!r}") from e
-    return found if found.tzinfo is not None else found.replace(tzinfo=KST)
-
-
-def _neyman_variants(backfill: bool = False, until: datetime | None = None) -> int:
-    """Neyman's variants experiment (#455): its next step's lines (the discovery, the window's
-    progress or its verdict), or with ``backfill`` its verdict on the backfilled days (#532), walked
-    by day until ``until`` at most and gone on with by the next run (#643); exit 1 without a recorded
-    day in the discovery period (without a discovery, for the backfill), with a report that cannot be
-    read, or a discovery that cannot set N."""
-    from krx_quant.neyman_backfill import neyman_backfill
-    from krx_quant.neyman_variants import neyman_variants
-
-    settings = Settings.from_env(require_kis=False)
-    try:
-        run = neyman_backfill(settings, until=until) if backfill else neyman_variants(settings)
-    except (FileNotFoundError, ValueError) as e:
-        print(e, file=sys.stderr)
-        return 1
-    print("\n".join(run.lines))
-    return 0
-
-
-def _signal_review(days: int, since: date | None) -> int:
-    from krx_quant.predictions import DB_NAME
-    from krx_quant.signal_review import signal_review
-
-    settings = Settings.from_env(require_kis=False)
-    print(signal_review(settings.state_dir / DB_NAME, settings, datetime.now(KST).date(), days, since))
-    return 0
-
-
-def _error_holdout() -> int:
-    from krx_quant.holdout import error_holdout
-    from krx_quant.predictions import DB_NAME
-
-    settings = Settings.from_env(require_kis=False)
-    print(error_holdout(settings.state_dir / DB_NAME))
-    return 0
-
-
-def _climate_gate() -> int:
-    from krx_quant.climate_gate import climate_gate
-    from krx_quant.predictions import DB_NAME
-
-    settings = Settings.from_env(require_kis=False)
-    print(climate_gate(settings.state_dir / DB_NAME))
-    return 0
-
-
 def _smt_experiment(holdout: bool) -> int:
     """The SMT experiment (#523): the discovery, or with ``holdout`` the pre-registered verdict."""
     from krx_quant.market_calendar import calendar_store
@@ -111,24 +56,6 @@ def _nightly_hit_rates(nights: int) -> int:
     found = compared_nights(store, nights)
     print("\n".join(lines(found, nights)))
     return 0 if found else 1
-
-
-def _signal_review_arguments(parser: argparse.ArgumentParser) -> None:
-    from krx_quant.signal_review import DEFAULT_DAYS
-
-    parser.add_argument(
-        "--days",
-        type=positive,
-        default=DEFAULT_DAYS,
-        help=f"the latest N days with predictions (default {DEFAULT_DAYS}, the leaderboard's 20d)",
-    )
-    parser.add_argument(
-        "--from",
-        dest="since",
-        type=date.fromisoformat,
-        help="instead, the first N days with predictions on or after this day, YYYY-MM-DD: a fixed window,"
-        " the same days however late it runs (#206)",
-    )
 
 
 def _nightly_hit_rates_arguments(parser: argparse.ArgumentParser) -> None:
@@ -170,41 +97,6 @@ def add(sub: Commands) -> None:
     )
     smt_cmd.add_argument("--day", type=date.fromisoformat, help="the day, YYYY-MM-DD (default: today)")
     smt_cmd.set_defaults(run=lambda args: _smt(args.day))
-    neyman_variants_cmd = sub.add_parser(
-        "neyman-variants",
-        help="neyman's variants (#455): the discovery that fixes the window's N, then the verdict on the"
-        " window after 2026-11-02 once it is full (reads the training samples, replays nothing)",
-    )
-    neyman_variants_cmd.add_argument(
-        "--backfill",
-        action="store_true",
-        help="judge the three comparisons as registered on the backfilled days before the discovery's"
-        " training instead, once (#532)",
-    )
-    neyman_variants_cmd.add_argument(
-        "--until",
-        type=_moment,
-        default=None,
-        help="with --backfill: start no day that would end after this time (ISO 8601 with its offset);"
-        " the days walked are kept and the next run goes on from there (#643; the scheduled job passes"
-        " the night's 05:30)",
-    )
-    neyman_variants_cmd.set_defaults(run=lambda args: _neyman_variants(args.backfill, args.until))
-    sub.add_parser(
-        "signal-review",
-        help="print what choosing the Telegram signal settings needs (#206); reads only, writes nothing",
-        arguments=_signal_review_arguments,
-    ).set_defaults(run=lambda args: _signal_review(args.days, args.since))
-    sub.add_parser(
-        "error-holdout",
-        help="print turing's four pre-registered hypotheses of #431's report judged on the fixed holdout"
-        " (#447): the first 10 trading days after 2026-10-30; reads only, writes nothing, no price",
-    ).set_defaults(run=lambda args: _error_holdout())
-    sub.add_parser(
-        "climate-gate",
-        help="print the gate that takes baseline-climate's prediction when quiet or at lunch and turing's"
-        " elsewhere, against both, on #447's holdout (#449); reads only, writes nothing, no price",
-    ).set_defaults(run=lambda args: _climate_gate())
     smt_experiment_cmd = sub.add_parser(
         "smt-experiment",
         help="print whether the SMT (#520) raises the four-minute prediction's hit rate (#523): the frozen"

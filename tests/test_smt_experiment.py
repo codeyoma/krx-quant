@@ -35,7 +35,6 @@ from krx_quant.scheduled import (
     FAILED,
     INTERRUPTED,
     JOBS,
-    NEYMAN_VARIANTS,
     OK,
     SMT_DISCOVERY,
     SMT_HOLDOUT,
@@ -429,7 +428,8 @@ def test_the_discovery_runs_once_on_the_first_night_and_the_verdict_once_its_win
     for job in (SMT_DISCOVERY, SMT_HOLDOUT):
         assert [t.issue for t in job.targets] == [519] and job.label == ("ready-for-agent",)
         assert "바꾸지 않는다" in job.targets[0].note and "가격이 없다" in job.targets[0].note
-        assert JOBS.index(job) > JOBS.index(NEYMAN_VARIANTS), "last: after the experiments on inputs"
+        last_prevalidation = max(i for i, j in enumerate(JOBS) if j.command[0] == "prevalidate")
+        assert JOBS.index(job) > last_prevalidation, "last: after the pre-validations"
     saturday = date(2026, 11, 7)
     assert SMT_DISCOVERY.due(night(HOLDOUT[0])) and SMT_DISCOVERY.due(night(saturday)), "trading or not"
     ran = JobRecord(HOLDOUT[0], OK, at(HOLDOUT[0], "22:30"), "abc", 0, 60.0)

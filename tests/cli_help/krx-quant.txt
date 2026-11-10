@@ -1,9 +1,9 @@
 usage: krx-quant [-h]
-                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,neyman-variants,signal-review,error-holdout,climate-gate,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-nav,probe-krx-etf,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
     replay              replay a recorded day through the engine into its own
                         database (no KIS needed)
@@ -141,20 +141,6 @@ positional arguments:
     smt                 count a day's SMT divergences (#520), made again from
                         its recording or backfilled bars, beside the engine's
                         live ones; reads only, no price
-    neyman-variants     neyman's variants (#455): the discovery that fixes the
-                        window's N, then the verdict on the window after
-                        2026-11-02 once it is full (reads the training
-                        samples, replays nothing)
-    signal-review       print what choosing the Telegram signal settings needs
-                        (#206); reads only, writes nothing
-    error-holdout       print turing's four pre-registered hypotheses of
-                        #431's report judged on the fixed holdout (#447): the
-                        first 10 trading days after 2026-10-30; reads only,
-                        writes nothing, no price
-    climate-gate        print the gate that takes baseline-climate's
-                        prediction when quiet or at lunch and turing's
-                        elsewhere, against both, on #447's holdout (#449);
-                        reads only, writes nothing, no price
     smt-experiment      print whether the SMT (#520) raises the four-minute
                         prediction's hit rate (#523): the frozen rule against
                         the engine's final consensus on the same bar closes,
