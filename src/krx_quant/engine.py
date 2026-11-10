@@ -1789,7 +1789,7 @@ class PredictionEngine:
                                 ],
                             )
                         )
-                    quote = self._market.best_quote(symbol, now) or self._market.quote_at(symbol, bar_close)
+                    quote = self._latest_quote(symbol, bar_close)
                     bid, ask = quote if quote is not None else (None, None)
                     found = verdict(
                         symbol,
@@ -1810,6 +1810,16 @@ class PredictionEngine:
             )
         except Exception:
             log.exception("verdicts not made at %s", bar_close)
+
+    def _latest_quote(self, symbol: str, bar_close: datetime) -> tuple[float, float] | None:
+        """``symbol``'s best quote (bid, ask) last received, crossed ones aside (#676: what an order now
+        trades at): the last of its touch window's quotes so far (a few seconds of them, the members
+        just done), else the one standing at the bar close; None without either."""
+        window = self._market.followed(symbol, bar_close)
+        if window is not None and window.quotes:
+            last = window.quotes[-1]
+            return last.bid, last.ask
+        return self._market.quote_at(symbol, bar_close)
 
     def _count_evidence(self) -> None:
         """Count each barrier algorithm's evidence (#676): its predictions answered, by (kind,
