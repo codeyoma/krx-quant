@@ -8,7 +8,7 @@ breakdown and the climate, link and turing prior experiments ran, posted their r
 #658). The measure of where making a recorded day's samples spends its time (``sample-profile-512``)
 ran on 2026-11-07, its fix (#630) is in, and it left with its command and module (#644).
 
-> **삭제됨** (2026-11-10, #NNN): the signal threshold's review on a fixed window
+> **삭제됨** (2026-11-10, #690): the signal threshold's review on a fixed window
 > (``signal-review-206-1201``), turing's holdout and the climate gate on it (``error-holdout-447``,
 > ``climate-gate-449``), and neyman's variants and their backfill (``neyman-variants-283``,
 > ``neyman-backfill-532``), with the commands and modules only they ran (#689). 이유: the user closed

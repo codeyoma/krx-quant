@@ -11,7 +11,7 @@ experiment's holdout (``smt_experiment.py``, #523) judges its claims by.
   at the same level, counts each record as independent (the four-minute windows overlap, the symbols
   move together): it only describes.
 
-> **삭제됨** (2026-11-10, #NNN): turing's four hypotheses of #431's report judged on the first 10
+> **삭제됨** (2026-11-10, #690): turing's four hypotheses of #431's report judged on the first 10
 > trading days after 2026-10-30 (``krx-quant error-holdout``, the job ``error-holdout-447``): the
 > window (``window_days``, ``days_in_window``), its reading (``read_holdout``, ``read_scored``,
 > ``read_sigmas``, σ̂₄'s cuts from the discovery period) and the hypotheses (``HYPOTHESES``), and the
