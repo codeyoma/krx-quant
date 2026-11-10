@@ -1985,6 +1985,25 @@ mock으로 시작한 날부터 비용 지도에서 시장가 왕복으로 통과
   - 넘친 알고리즘은 WARNING으로도 남는다: `<이름> took over 10.0s at <봉 마감>; skipped`(알고리즘 하나의 한도), `<이름> skipped at <봉 마감> for the CPU budget (expected …s; budget 30.0s per bar close)`. 질의: `{service="krx-quant", process="engine"} |~ "took over|for the CPU budget"`.
   - 알고리즘마다 봉 마감 한 번에 걸린 시간의 지수 평균은 `/v1/status`의 `cpu.algorithms`다([engine-api.md](engine-api.md)). 엔진 API에 닿는 사용자가 화면이나 `curl -s http://krx-quant:8080/v1/status | jq .cpu`로 본다. 잰 값으로는 ito가 봉 마감마다 수 ms다. 0.1초를 넘는 일이 잦으면 고정이 들었는지 본다(컨테이너 안 `printenv OPENBLAS_NUM_THREADS`가 `1`인지 본다).
 
+#### 엔진 메모리가 뛸 때 (#680)
+
+2026-11-10 09:53–09:55에 엔진의 RSS가 약 330 MB 뛰고(631 → 978 MB, 서버의 `available` 774 → 448 MB) 그대로 남았는데, 로그는 그 까닭을 말하지 않았다. 그 봉 마감의 baselines 단계가 2.69초였지만 가벼운 단계라, 엔진 안의 다른 일이 GIL을 쥔 동안 기다린 것뿐이었다. 메모리가 그만큼 줄면 밤 학습(21:30)이 스왑하거나 메모리 부족으로 죽을 수 있다. 그래서 다음에 뛸 때는 그 줄이 까닭을 말한다(`memory_jump.py`, 엔진의 heartbeat가 1분마다 부른다).
+
+- 엔진의 RSS가 바로 앞 heartbeat(2분 안쪽. 1분마다지만 늦은 것도 친다)보다 100 MB(`memory_jump.JUMP_MB`) 넘게 늘면 WARNING 한 줄을 남긴다(텔레그램은 보내지 않는다):
+
+  ```
+  memory jump: engine rss 631 -> 978 MB (+347) in 60s; cpu since the heartbeat before 41.3s: MainThread 30.1s, asyncio_2 9.0s, ThreadPoolExecutor-0_0 2.0s, 3 more 0.2s; python 4120001 blocks, malloc 880 MB in use and 40 MB free, arrow 0 MB; allocations: traced from now on
+  ```
+
+  - `cpu since the heartbeat before`: 앞 heartbeat부터 스레드마다 쓴 CPU 시간(사용자와 시스템, `/proc/self/task/<tid>/stat`)과 그 합이다. 많이 쓴 다섯 스레드와 나머지의 수·합이다. 이름은 파이썬이 붙인 것(`MainThread`는 이벤트 루프, `asyncio_<n>`은 `asyncio.to_thread`의 작업 스레드, `ThreadPoolExecutor-…`는 알고리즘의 작업 스레드)이고, 파이썬이 모르는 스레드(네이티브 라이브러리의 것)는 커널의 이름(`comm`)이다. 그 사이 시작한 스레드는 쓴 시간 전부, 그 사이 끝난 스레드는 빠진다.
+  - `python … blocks`, `malloc … in use and … free`, `arrow`: 위 "장 마감 뒤 메모리 (#623)"의 줄과 같은 값이다(`footprint.allocated`). `free`가 glibc가 풀었지만 들고 있는 몫, 곧 `malloc_trim`이 돌려줄 수 있는 몫이다.
+  - `allocations`: 뛰면 `tracemalloc`을 켠다(블록마다 프레임 하나). 켠 뒤의 할당만 본다. 다음 heartbeat에 켠 뒤 할당되어 아직 남은 것을 가장 많이 쥔 줄 다섯을 `<폴더>/<파일>:<줄> <MB> MB`로, 그리고 `tracemalloc's own <MB> MB`(추적 자신의 메모리)를 남긴다. 그 1분에도 뛰었으면 그 WARNING의 `allocations: held since tracing began 60s ago: …`에, 아니면 INFO 한 줄 `memory jump: allocation tracing stopped; held since it began 60s ago: …`에 남기고 끈다. 11-10처럼 두 heartbeat에 걸쳐 뛰면 두 번째 줄이 그 줄들을 말한다. 처음부터 추적이 켜져 있으면(`PYTHONTRACEMALLOC`) 읽기만 하고 끄지 않는다.
+- 비용(이미지의 파이썬, 맥의 리눅스 컨테이너, CPU 둘): 뛰지 않은 heartbeat는 작업 스레드에서 `/proc/self/task`를 읽는 것뿐이라 중앙값 0.16 ms(스레드 22개)다. 뛸 때만 할당자 값과 추적을 읽는다. 추적하는 1–2분 동안 할당이 느려지고(작은 리스트를 만드는 반복에서 1.7배), 추적한 블록마다 약 60바이트를 더 쓴다(120만 개에 69 MB). 120만 개를 줄마다 묶는 데 1.9초가 들었고, 작업 스레드에서 해 그동안 이벤트 루프가 차례 없이 간 가장 긴 시간은 66 ms였다.
+- 함께 볼 것: 같은 분의 heartbeat(`rss engine`, `available`), 봉 마감의 루프 막힘(위 "봉 마감의 이벤트 루프 막힘 (#538)"), 느린 엔진 API 요청(6장 "엔진 API 요청 수 (#588)"의 `Engine API request slow`).
+- Loki: `{service="krx-quant", process="engine"} |= "memory jump: "`. 질의 예는 [agents/server-logs.md](agents/server-logs.md)의 "What a memory jump was".
+- 할 일(에이전트): 줄이 남으면 이름 붙은 스레드와 줄로 그 메모리를 쥔 코드를 찾아 이슈를 연다. 쉬고 난 뒤(위 "장 마감 뒤 메모리 (#623)", `memory handed back …`의 `engine rss A -> B`)에 돌아왔는지도 적는다.
+- 장 마감 뒤의 쉼은 #680이 묻기 전부터(#623) 매번 `malloc_trim`으로 풀린 메모리를 돌려주고 그 앞뒤 RSS를 남긴다(위 "장 마감 뒤 메모리 (#623)"의 3번과 줄). #680은 그것을 바꾸지 않았다.
+
 #### trader 침묵 (#542)
 
 trader는 수집기와 따로 산다(위, [design.md](design.md#14-자동-매매-393) 14장 "프로세스"). 그래서 trader만 멈추면(메모리 부족, 예외로 끝남, 손으로 멈춤, 시작하자마자 끝나며 다시 뜨기를 되풀이함) 서버와 엔진은 그대로 돌고 watchdog(#385)도 재부팅하지 않는다. 그동안 손절가와 시간 장벽을 아무도 보지 않는다(위 "시작할 때 계좌 맞추기 (#406)"의 "서버가 멈춰 있던 동안의 위험"). 엔진(수집기)이 그것을 텔레그램으로 알린다(`trader_watch.py`). trader의 코드와 동작은 바뀌지 않았다: 엔진이 없어도 전처럼 돈다.
@@ -3508,6 +3527,7 @@ Engine API requests from 2026-11-05T07:20:04+09:00 to 2026-11-06T00:00:00+09:00:
 - `not called`: 그 줄의 구간에 답한 요청도 열린 연결도 없는 경로다. aiohttp가 GET마다 더하는 HEAD는 뺀다.
 - 줄에는 경로 패턴, 상태, 수, 시간만 있다. 클라이언트 주소, 쿼리 값, 경로의 값, 가격은 싣지 않는다(`tests/test_route_counts.py`가 본다).
 - 이벤트 루프(#538): 요청마다 시계를 두 번 읽고 사전 몇 개를 더한다(맥에서 요청당 약 0.6 µs). 줄은 하루 한 번, 요청 수가 아니라 경로마다 서로 다른 밀리초 값으로 만든다(경로 35개에 값 3,000개씩이면 맥에서 약 5 ms).
+- 느린 요청(#680): 답까지 5초(`route_counts.SLOW_SECONDS`)를 넘긴 요청은 끝날 때 WARNING 한 줄을 따로 남긴다(텔레그램은 보내지 않는다): `Engine API request slow: GET /v1/symbols/{symbol}/bars 200 in 6.2s`. 경로 패턴, 상태, 초뿐이다. 답하기 전에 취소된 요청(엔진이 멈췄다)은 `… cancelled after 7.0s`다. 스트림의 WebSocket 연결은 재지 않는다. 엔진의 메모리가 뛴 2026-11-10에 그때 요청이 돌았는지 알 수 없었다(3장 "엔진 메모리가 뛸 때 (#680)"). Loki: `{service="krx-quant", process="engine"} |= "Engine API request slow: "`.
 - 수집기가 여는 엔진 API만 센다. 데모 엔진(`demo-engine`)과 테스트의 API는 세지 않는다.
 - Loki:
   - 줄: `{service="krx-quant", process="engine"} |= "Engine API requests from "`.

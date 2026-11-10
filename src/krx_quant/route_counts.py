@@ -26,6 +26,13 @@ counted since the line before, and the counting starts again from zero::
 - The line holds route patterns, statuses, counts and times only: never a client's address, a
   query, a value of the path or a price.
 
+A request that takes longer than ``SLOW_SECONDS`` to its answer (#680) is also one WARNING line
+as it ends, by its route's pattern: ``Engine API request slow: GET /v1/symbols/{symbol}/bars 200
+in 6.2s``, or ``… cancelled after 7.0s`` for one cancelled before its answer (the client gave up,
+the engine stopped). A WebSocket connection is not timed so. On 2026-11-10 the engine's memory
+jumped while a bar close's step waited for the interpreter lock, and nothing said whether a
+request ran then.
+
 Cheap on the event loop the collector shares with KIS and the trader's quotes (#538): a request
 costs two reads of a clock and a few dictionary increments (about 0.6 µs on a laptop), and the line
 is made once a day from those counts, a route's distinct milliseconds rather than its requests
@@ -55,6 +62,7 @@ log = logging.getLogger(__name__)
 
 UNMATCHED = "unmatched"  # a request no route matched
 PERCENTILE = 95  # the line's p95
+SLOW_SECONDS = 5.0  # a request longer than this to its answer is a WARNING line (#680)
 _NS_PER_MS = 1_000_000
 _NS_PER_S = 1_000_000_000
 
@@ -97,11 +105,15 @@ class RouteCounts:
         start = self._elapsed()
         try:
             response = await handler(request)
+        except asyncio.CancelledError:
+            if not upgrade:
+                _slow(key, None, self._elapsed() - start)
+            raise
         except web.HTTPException as e:
-            self._answered(key, e.status, start, websocket=False)
+            self._answered(key, e.status, start, websocket=False, timed=not upgrade)
             raise
         except Exception:
-            self._answered(key, 500, start, websocket=False)  # aiohttp answers it with 500
+            self._answered(key, 500, start, websocket=False, timed=not upgrade)  # aiohttp answers it with 500
             raise
         finally:
             if upgrade:
@@ -109,8 +121,10 @@ class RouteCounts:
         self._answered(key, response.status, start, websocket=isinstance(response, web.WebSocketResponse))
         return response
 
-    def _answered(self, key: str, status: int, start: int, *, websocket: bool) -> None:
+    def _answered(self, key: str, status: int, start: int, *, websocket: bool, timed: bool = True) -> None:
         took = self._elapsed() - start
+        if timed and not websocket:
+            _slow(key, status, took)
         route = self._counted.get(key)
         if route is None:
             route = self._counted[key] = _Route()
@@ -181,6 +195,14 @@ def install(
 def _key(route: AbstractRoute) -> str:
     resource = route.resource
     return UNMATCHED if resource is None else f"{route.method} {resource.canonical}"
+
+
+def _slow(key: str, status: int | None, took: int) -> None:
+    """A WARNING line for a request past ``SLOW_SECONDS`` (``took`` in nanoseconds), answered with
+    ``status`` or cancelled (None)."""
+    if took > SLOW_SECONDS * _NS_PER_S:
+        how = "cancelled after" if status is None else f"{status} in"
+        log.warning("Engine API request slow: %s %s %.1fs", key, how, took / _NS_PER_S)
 
 
 def _told(key: str, route: _Route, open_now: int) -> str:
