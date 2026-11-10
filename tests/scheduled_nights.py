@@ -17,8 +17,6 @@ from typing import Any
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import DAILY_KINDS
-from krx_quant.neyman_backfill import Progress as NeymanBackfill
-from krx_quant.neyman_variants import Progress as NeymanVariants
 from krx_quant.night_book import NIGHTS
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS
 from krx_quant.prevalidation import MIN_DAYS, LastReport
@@ -107,11 +105,6 @@ def _facts(level: str, day: date) -> dict[str, Any]:
             "recorded_days": MIN_DAYS - 1,
             "waiting": (*BAR_CLOSE, *DAILY),
             "hit_rate_nights": HIT_RATE_NIGHTS - 1,
-            "holdout_days": 9,
-            "neyman_variants": NeymanVariants(read=True),
-            "neyman_backfill": NeymanBackfill(read=True),
-            "signal_review_days": 19,
-            "official": 1,
             "smt_holdout_days": 9,
             "night_book_nights": NIGHTS - 1,
             "fill_notice_apart": APART - 1,
@@ -120,17 +113,12 @@ def _facts(level: str, day: date) -> dict[str, Any]:
         return {
             "recorded_days": 30,
             "waiting": (*BAR_CLOSE, *DAILY),
-            "official": 2,
             "simulating": tuple(BAR_CLOSE[:1]),
             "simulating_daily": tuple(DAILY[:1]),
             "revising": _revising(day, report=False),
             "trader_kis": True,
             "trader_live_kis": True,
             "hit_rate_nights": HIT_RATE_NIGHTS,
-            "holdout_days": 10,
-            "neyman_variants": NeymanVariants(True, 56, False, 56),
-            "neyman_backfill": NeymanBackfill(True, False),
-            "signal_review_days": 20,
             "smt_holdout_days": 10,
             "state_backup": day - timedelta(days=1),
             "night_book_nights": 0,
@@ -144,8 +132,6 @@ def _facts(level: str, day: date) -> dict[str, Any]:
             "reports": _reports(day),
             "revising": _revising(day, report=True),
             "simulating": tuple(BAR_CLOSE),
-            "neyman_variants": NeymanVariants(True, 56, False, 55),
-            "neyman_backfill": NeymanBackfill(True, True),
             "state_backup": day,
             "queue": ("nobody", *BAR_CLOSE[1:3]),
         }
@@ -157,8 +143,6 @@ def _facts(level: str, day: date) -> dict[str, Any]:
             "pending_inputs": tuple(features),
             "pending_answers": tuple(k.name for k in DAILY_KINDS),
             "simulating_daily": tuple(DAILY),
-            "neyman_variants": NeymanVariants(True, 56, True, 80),
-            "neyman_backfill": NeymanBackfill(False, False),
             "night_book_nights": NIGHTS,
         }
     raise ValueError(level)

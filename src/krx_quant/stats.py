@@ -50,7 +50,6 @@ from __future__ import annotations
 
 import json
 import math
-from collections import Counter
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -925,75 +924,9 @@ def interval_json(i: Interval | None) -> dict[str, Any] | None:
     return None if i is None else {"value": i.value, "low": i.low, "high": i.high, "n": i.n}
 
 
-def interval_text(i: Interval | None) -> str:
-    """A ratio as a report prints it: its value and, when it has one, its interval, in percent;
-    "—" without one."""
-    if i is None:
-        return "—"
-    if i.low is None or i.high is None:
-        return f"{i.value:.1%}"
-    return f"{i.value:.1%} [{i.low * 100:.1f}–{i.high * 100:.1f}%]"
-
-
 def points_text(value: float | None) -> str:
     """A difference of ratios, in percentage points, as a report prints it; "—" without one."""
     return "—" if value is None else f"{value * 100:+.1f}%p"
-
-
-@dataclass(frozen=True)
-class ArmStats:
-    """An arm's statistics on the bar closes every arm of an experiment predicted (#429's climate
-    prior, #455's neyman variants)."""
-
-    n: int
-    accuracy: Interval | None
-    coverage: Interval | None  # the up and down calls' share
-    directional_precision: Interval | None  # of the up and down calls, those that happened
-    brier: Interval | None
-    recall: dict[Direction, Interval | None]  # of each class that happened, the share called
-    precision: dict[Direction, Interval | None]  # of each class called, the share that happened
-    predicted: dict[Direction, int]
-    happened: dict[Direction, int]
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "n": self.n,
-            "accuracy": interval_json(self.accuracy),
-            "coverage": interval_json(self.coverage),
-            "directional_precision": interval_json(self.directional_precision),
-            "brier": interval_json(self.brier),
-            "by_class": {
-                d.value: {
-                    "recall": interval_json(self.recall[d]),
-                    "precision": interval_json(self.precision[d]),
-                    "predicted": self.predicted[d],
-                    "happened": self.happened[d],
-                }
-                for d in Direction
-            },
-        }
-
-
-def arm_stats(records: Sequence[Scored]) -> ArmStats:
-    """``records``' hit rate, coverage, Brier score and each class's recall and precision, with
-    95% Wilson intervals (normal for the Brier score's mean), as the leaderboard's."""
-    predicted = Counter(r.predicted for r in records)
-    happened = Counter(r.outcome for r in records)
-    hits = Counter(r.outcome for r in records if r.correct)
-    directional = [r for r in records if r.predicted is not Direction.FLAT]
-    return ArmStats(
-        n=len(records),
-        accuracy=wilson(sum(hits.values()), len(records)),
-        coverage=wilson(len(directional), len(records)),
-        directional_precision=wilson(sum(r.correct for r in directional), len(directional)),
-        brier=mean_interval(
-            [sum((r.probability(d) - (d is r.outcome)) ** 2 for d in Direction) for r in records]
-        ),
-        recall={d: wilson(hits[d], happened[d]) for d in Direction},
-        precision={d: wilson(hits[d], predicted[d]) for d in Direction},
-        predicted={d: predicted[d] for d in Direction},
-        happened={d: happened[d] for d in Direction},
-    )
 
 
 def entry_json(e: Entry) -> dict[str, Any]:

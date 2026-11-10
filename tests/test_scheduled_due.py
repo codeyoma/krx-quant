@@ -17,17 +17,11 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
-from krx_quant.neyman_backfill import Progress as NeymanBackfill
-from krx_quant.neyman_variants import Progress as NeymanVariants
-from krx_quant.scheduled import JOBS, BackfillFacts, Job, Night, PrevalidationFacts, SignalReviewFacts
+from krx_quant.scheduled import JOBS, Job, Night, PrevalidationFacts
 from krx_quant.scheduled.prevalidations import read_prevalidation_facts
 from krx_quant.scheduled.probes import read_last_restart, read_night_book_nights
 from krx_quant.scheduled.research import (
-    read_backfill,
     read_hit_rate_nights,
-    read_holdout_days,
-    read_neyman_variants,
-    read_signal_review,
     read_smt_holdout_days,
 )
 from krx_quant.scheduled.trader import read_fill_notice_apart, read_live_kis
@@ -47,14 +41,8 @@ def _prevalidation(facts: Mapping[str, Any]) -> PrevalidationFacts:
 # Each reader's facts from the one ``Facts``'s fields of before #651, by name, with its defaults.
 OWN: dict[Any, Callable[[Mapping[str, Any]], Any]] = {
     read_prevalidation_facts: _prevalidation,
-    read_signal_review: lambda f: SignalReviewFacts(f.get("signal_review_days", 0), f.get("official", 0)),
     read_hit_rate_nights: lambda f: f.get("hit_rate_nights", 0),
-    read_holdout_days: lambda f: f.get("holdout_days", 0),
-    read_neyman_variants: lambda f: f.get("neyman_variants", NeymanVariants()),
     read_smt_holdout_days: lambda f: f.get("smt_holdout_days", 0),
-    read_backfill: lambda f: BackfillFacts(
-        f.get("neyman_variants", NeymanVariants()), f.get("neyman_backfill", NeymanBackfill())
-    ),
     read_night_book_nights: lambda f: f.get("night_book_nights", 0),
     read_last_restart: lambda f: f.get("close_restart_day"),
     read_fill_notice_apart: lambda f: f.get("fill_notice_apart", 0),

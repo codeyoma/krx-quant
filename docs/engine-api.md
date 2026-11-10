@@ -2935,6 +2935,8 @@ docker compose run --rm --no-deps engine climate-prior --days 5   # 빨리 훑�
 
 #283의 진단(Neyman 사전 검증, 2026-10-12–10-30, #204)이 내놓은 고친 안 셋을 그 뒤의 날들로 판정한다(`neyman_variants.py`, #458). 세 안은 그 15일을 보고 골랐으므로, 규칙을 돌리기 전에 정하고(사전 등록) 2026-11-02 뒤의 날들로만 판정한다. Neyman의 코드는 바꾸지 않는다. Neyman은 2026-11-02부터 수습으로 돌고, 엔진은 상태가 있는 봉 마감 알고리즘을 리포트나 코드가 바뀌어도 계속 돌린다(`Engine._admit`). 그래서 패키지를 고치면 새 날로 판정받지 않은 모델이 실시간으로 돈다. 이 모듈은 Neyman 패키지 밖이라 Neyman의 코드 digest가 그대로다(시험이 사전 검증을 통과한 digest `650316eaa37bfbe7`을 확인한다). 후보를 넣는 길은 #454이고, 사용자가 정한다.
 
+> **삭제됨** (2026-11-10, #690): 명령 `neyman-variants`, 그 모듈 `src/krx_quant/neyman_variants.py`, 테스트, 예약 작업 `neyman-variants-283`. 발견(2026-11-03 밤)은 #455에 올렸고 실시간 창의 평가는 돌기 전에 뺐다. 아래는 지운 때의 설명이다. 아래의 `docker compose run …` 명령도 더는 없다. 이유: 사용자가 #455를 닫았다(2026-11-10, #689): Neyman은 전진 학습 승격(#681)이 판정한다. 대신: 전진 학습 승격. 리포트 `state/experiments/neyman-variants-283.json`은 기록으로 서버에 남고 백업이 받는다([operations.md](operations.md) 8장).
+
 ```bash
 docker compose run --rm --no-deps engine neyman-variants   # 다음 단계: 발견, 창의 진행, 판정
 ```
@@ -2971,6 +2973,8 @@ docker compose run --rm --no-deps engine neyman-variants   # 다음 단계: 발�
 #### Neyman 변형의 백필 판정 (#532)
 
 #455의 세 비교를 등록 그대로 지난 시점으로 옮겨 판정한다(`neyman_backfill.py`). 발견 단계(2026-11-03 밤)가 정한 N 206으로는 실시간 녹화일로 2027년 8–9월에야 판정이 나온다. 사용자가 2026-11-04에 실시간 날을 기다리지 않고, 날 t마다 그 전 날들로 학습해 t를 예측하는 백테스트처럼 판정하기로 정했다(Codex와 교차 확인). 세 안은 2026-10-12–10-30을 보고 골랐고, 그 날들을 예측한 팔은 그 전 20거래일로 학습했다. 그래서 둘 다 판정에 쓰지 않는다. 그보다 앞선 백필 날은 어느 팔도 판정받은 적이 없는 날이라 판정할 수 있다. Neyman의 코드와 digest는 바꾸지 않는다(시험이 `650316eaa37bfbe7`을 확인한다).
+
+> **삭제됨** (2026-11-10, #690): `neyman-variants --backfill [--until 시각]`, 그 모듈 `src/krx_quant/neyman_backfill.py`, 테스트, 예약 작업 `neyman-backfill-532`. 판정이 나기 전에 뺐다. 아래는 지운 때의 설명이다. 아래의 `docker compose run …` 명령도 더는 없다. 이유: 사용자가 #455를 닫았다(2026-11-10, #689): Neyman은 전진 학습 승격(#681)이 판정하고, 이 작업은 밤마다 3.4시간쯤 썼다. 대신: 전진 학습 승격. 리포트 `neyman-backfill-532.json`은 기록으로 남고 백업이 받는다. 체크포인트 `neyman-backfill-532.days.jsonl`은 지워도 된다.
 
 ```bash
 docker compose run --rm --no-deps engine neyman-variants --backfill   # 백필 판정(한 번), 판정 뒤에는 저장한 줄

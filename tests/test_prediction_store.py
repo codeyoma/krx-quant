@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from krx_quant.baselines import Forecast
 from krx_quant.feeds import KST
 from krx_quant.lifecycle import Standing, Status
-from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionStore, Score, iso, within_days
+from krx_quant.predictions import NewKindPrediction, NewPrediction, PredictionStore, Score, iso
 from krx_quant.pricing import Direction
 from krx_quant.touch import TouchResult
 
@@ -152,14 +152,3 @@ def test_with_checkpoints_aside_no_write_copies_the_log_and_the_checkpoint_threa
             assert reader.execute(
                 "SELECT COUNT(*), MIN(detail) = MAX(detail) FROM runs WHERE kind = 'test'"
             ).fetchone() == (50, 1)
-
-
-def test_a_time_on_one_of_the_days_asked_matches_and_one_between_them_does_not() -> None:
-    conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE t (at TEXT)")
-    times = [datetime(2026, 11, d, h, tzinfo=KST) for d in (2, 3, 4, 5) for h in (0, 9, 23)]
-    conn.executemany("INSERT INTO t VALUES (?)", [(iso(t),) for t in times])
-    on, params = within_days([date(2026, 11, 5), date(2026, 11, 3)], "at")  # in any order
-    found = [r[0] for r in conn.execute(f"SELECT at FROM t WHERE {on} ORDER BY at", params)]
-    # The 3rd and the 5th asked: the 4th between them is left out, every hour of the two days kept.
-    assert found == [iso(t) for t in times if t.day in (3, 5)]

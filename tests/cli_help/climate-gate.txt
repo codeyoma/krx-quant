@@ -1,4 +1,0 @@
-usage: krx-quant climate-gate [-h]
-
-options:
-  -h, --help  show this help message and exit

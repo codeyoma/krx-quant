@@ -14,23 +14,21 @@ import os
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, time, timedelta
 from pathlib import Path
 from typing import Any
 
 import aiohttp
 import pytest
 
-from krx_quant.baselines import Forecast
 from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.config import Settings, SettingsError
 from krx_quant.fake_kis import FakeKis
-from krx_quant.feeds.base import KST
 from krx_quant.github import GitHub
 from krx_quant.notify import Alerts
 from krx_quant.predictions import DB_NAME as ENGINE_DB
-from krx_quant.predictions import NewPrediction, PredictionStore
+from krx_quant.predictions import PredictionStore
 from krx_quant.process_log import Child
 from krx_quant.scheduled import (
     FAILED,
@@ -38,9 +36,6 @@ from krx_quant.scheduled import (
     JOBS,
     OK,
     RUNNING,
-    SIGNAL_REVIEW_FIXED,
-    SIGNAL_REVIEW_FIXED_DAYS,
-    SIGNAL_REVIEW_FROM,
     STATE_FILE,
     TRADER_REPORT,
     Attachment,
@@ -52,7 +47,6 @@ from krx_quant.scheduled import (
     Reader,
     Reads,
     Scheduler,
-    SignalReviewFacts,
     Sources,
     Target,
     again_on_new_code,
@@ -79,7 +73,6 @@ from tests.scheduled_doubles import (
     Runs,
     Told,
     at,
-    faking,
     saved,
     scheduling,
     settle,
@@ -1064,106 +1057,6 @@ def empty_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def fixed(day: date, days: int, n: int = 2, record: JobRecord | None = None) -> Night[SignalReviewFacts]:
-    return Night(day, CALENDAR.is_trading_day(day), COMMIT, record, {}, SignalReviewFacts(days, n))
-
-
-def test_the_signal_review_runs_a_third_time_once_its_fixed_window_of_20_days_is_in() -> None:
-    job = SIGNAL_REVIEW_FIXED
-    assert (job.name, job.timeout) == ("signal-review-206-1201", timedelta(hours=1))
-    # The window is fixed: the first 20 days with predictions from 2026-11-04, however late it runs.
-    assert job.command == ("signal-review", "--from", "2026-11-04", "--days", "20")
-    assert (SIGNAL_REVIEW_FROM, SIGNAL_REVIEW_FIXED_DAYS) == (date(2026, 11, 4), 20)
-    assert [t.issue for t in job.targets] == [206] and job.label == ("ready-for-agent",)
-    note = job.targets[0].note
-    for rule in (
-        "0.75로 올린다",
-        "0.60으로 되돌린다",
-        "0.70을 둔다",
-        "하루 5번 이상",
-        "점추정이 0 이하",
-        "30번 미만이나 5일 미만",
-        "`KRX_SIGNAL_ALERT`",
-        "사용자가 정한다",
-    ):
-        assert rule in note, rule
-    names = [j.name for j in JOBS]
-    first_prevalidation = next(i for i, j in enumerate(JOBS) if j.command[0] == "prevalidate")
-    assert names.index(job.name) < first_prevalidation
-
-    tuesday = date(2026, 12, 1)  # the 20th trading day from 11-04: no market holiday in between
-    assert not job.due(fixed(tuesday, 19)), "19 days: the window is not in"
-    assert job.due(fixed(tuesday, 20))
-    assert not job.due(fixed(tuesday, 20, 0)), "no official algorithm: no consensus to review"
-    assert not job.due(fixed(date(2026, 12, 5), 20)), "a Saturday: it waits for a trading night"
-    ran = JobRecord(tuesday, OK, at(tuesday, "22:30"), COMMIT, 0, 30.0)
-    wednesday = tuesday + timedelta(days=1)
-    assert not job.due(fixed(wednesday, 20, record=ran)), "once"
-    assert not job.due(fixed(wednesday, 20, record=replace(ran, outcome=FAILED, exit_code=1)))
-    assert job.due(fixed(wednesday, 20, record=replace(ran, outcome=INTERRUPTED))), "a cut run is not a run"
-
-
-async def test_the_signal_review_s_facts_count_the_fixed_window_s_days_in_the_engine_db(
-    tmp_path: Path,
-) -> None:
-    from krx_quant.scheduled.research import read_signal_review
-    from tests.daily_doubles import CALENDAR as DAILY_CALENDAR
-    from tests.daily_doubles import NIGHT, engine_on
-    from tests.daily_doubles import settings as daily_settings
-
-    s = daily_settings(tmp_path, signal=0.0, days=30)
-    store = PredictionStore(s.state_dir / ENGINE_DB)
-    for day in (date(2026, 11, 3), date(2026, 11, 4), date(2026, 11, 5), date(2026, 11, 6)):
-        t = datetime.combine(day, time(9, 1), KST)
-        store.add_all(
-            [
-                NewPrediction(
-                    "005930",
-                    "newton",
-                    "v1",
-                    t,
-                    t,
-                    Forecast(0.4, 0.3, 0.3, 0.0),
-                    t + timedelta(minutes=4),
-                    1,
-                    1,
-                    2,
-                )
-            ]
-        )
-    store.close()
-    clock = FakeClock(NIGHT)
-    e = engine_on(s, clock, [])
-    try:
-        facts = await Reads(Sources(s, DAILY_CALENDAR, clock, e))(read_signal_review)
-    finally:
-        e.store.close()
-    assert facts.days == 3  # 11-04 to 11-06: the day before the window is not counted
-
-
-async def test_the_fixed_signal_review_job_runs_the_real_command(empty_server: Path) -> None:
-    state = JobState.load(empty_server / STATE_FILE)
-
-    facts = SignalReviewFacts(SIGNAL_REVIEW_FIXED_DAYS, 1)
-    async with fake_github() as hub, aiohttp.ClientSession() as session:
-        scheduler = Scheduler(
-            faking([SIGNAL_REVIEW_FIXED], {SIGNAL_REVIEW_FIXED.facts: facts}),
-            AT,
-            CALENDAR,
-            state,
-            GitHub(session, TOKEN, REPO, hub.url),
-            Told(),
-            FakeClock(at(FRIDAY, "23:00")),
-            commit=COMMIT,
-        )
-        await asyncio.wait_for(scheduler.run_night(FRIDAY), 25)
-    [body] = hub.bodies(206)
-    assert "신호 기준 검토: 데이터 없음" in body
-    assert "KRX_SIGNAL_MIN_PROBABILITY 0.7 · KRX_SIGNAL_MIN_AGREE 2" in body  # the new default
-    assert "signal-review --from 2026-11-04 --days 20" in body  # how to run it again
-    assert state.jobs["signal-review-206-1201"].exit_code == 0
-
-
 async def test_a_first_night_s_job_runs_on_the_first_night_then_never(tmp_path: Path) -> None:
     once = job("once", due=_first_night)
     async with scheduling(tmp_path, at(FRIDAY, "22:00"), [once]) as (clock, runs, _, state):
@@ -1207,16 +1100,17 @@ async def test_a_job_waits_for_what_the_engine_knows_then_runs_once(tmp_path: Pa
 async def test_the_collector_runs_the_night_s_jobs(
     kis: FakeKis, empty_server: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The list as a job made here, whose real command is cheap on an empty server: the signal review
-    # (the diagnosis was until its command was removed, #658).
-    review = Job(
-        name="signal-review",
+    # The list as a job made here, whose real command is cheap on an empty server: the SMT holdout's
+    # verdict, which judges nothing without the engine DB (the diagnosis was until its command was
+    # removed, #658; the signal review until its, #689).
+    smt = Job(
+        name="smt-holdout",
         due=never_ran,
-        command=("signal-review", "--days", "20"),
+        command=("smt-experiment", "--holdout"),
         timeout=timedelta(hours=1),
         targets=TWO_ISSUES.targets,
     )
-    monkeypatch.setattr("krx_quant.scheduled.JOBS", (review,))
+    monkeypatch.setattr("krx_quant.scheduled.JOBS", (smt,))
     async with fake_github() as hub:
         settings = replace(
             settings_for(kis, empty_server),
@@ -1230,7 +1124,7 @@ async def test_the_collector_runs_the_night_s_jobs(
 
         def posted() -> bool:
             """Both comments are up and saved (the labels come between a comment and its save)."""
-            record = JobState.load(empty_server / "state" / STATE_FILE).jobs.get("signal-review")
+            record = JobState.load(empty_server / "state" / STATE_FILE).jobs.get("smt-holdout")
             return record is not None and record.comments.keys() == {203, 187}
 
         try:
@@ -1238,7 +1132,7 @@ async def test_the_collector_runs_the_night_s_jobs(
         finally:
             stop.set()
             await asyncio.wait_for(task, 10)
-    record = JobState.load(empty_server / "state" / STATE_FILE).jobs["signal-review"]
+    record = JobState.load(empty_server / "state" / STATE_FILE).jobs["smt-holdout"]
     assert record.outcome == OK and record.day == FRIDAY and record.comments.keys() == {203, 187}
 
 

@@ -205,7 +205,7 @@ class Settings:
     regime_rules: RegimeRules = RegimeRules()
     signal_rule: SignalRule | None = None  # Telegram signal alerts; None: off
     # The signal settings (KRX_SIGNAL_MIN_PROBABILITY, KRX_SIGNAL_MIN_AGREE) whether the alerts
-    # are on or off: what ``signal-review`` (#206) shows and reviews.
+    # are on or off: the engine's rule, served by its status (#617).
     signal_thresholds: SignalRule = SIGNALS
     commit: str = "unknown"  # the commit the image was built from (KRX_COMMIT, set by the deploy)
     probation_review_days: tuple[int, ...] = (10, 20, 40)  # days on probation it is judged on (#87)

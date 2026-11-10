@@ -49,9 +49,7 @@ from krx_quant.stats import (
     Interval,
     Prices,
     Scored,
-    arm_stats,
     benjamini_hochberg,
-    interval_text,
     lift,
     points_text,
     summarize,
@@ -260,26 +258,7 @@ def test_each_calibration_bin_says_how_sure_its_observed_rate_is() -> None:
     assert observed.high is not None and round(observed.high, 4) == 0.6576
 
 
-def test_an_arm_s_statistics_are_the_example_s() -> None:
-    a = arm_stats(ALGORITHM)
-    assert a.n == 10
-    assert (known(a.accuracy).value, known(a.coverage).value) == (0.5, 0.5)
-    assert known(a.directional_precision).value == 0.4
-    assert known(a.brier).value == pytest.approx(0.5375)
-    # Called: up #1–3, down #4–5, flat #6–10; happened: up #1, 5, 8; flat #2, 6, 7, 10; down #3, 4, 9.
-    assert a.predicted == {UP: 3, FLAT: 5, DOWN: 2}
-    assert a.happened == {UP: 3, FLAT: 4, DOWN: 3}
-    assert known(a.recall[FLAT]).value == 3 / 4 and known(a.precision[FLAT]).value == 3 / 5
-    assert known(a.recall[UP]).value == 1 / 3 and known(a.precision[DOWN]).value == 1 / 2
-    assert list(a.as_dict()["by_class"]) == ["up", "flat", "down"]
-    accuracy = known(a.accuracy)
-    assert a.as_dict()["accuracy"] == {"value": 0.5, "low": accuracy.low, "high": accuracy.high, "n": 10}
-
-
-def test_a_report_prints_a_ratio_with_its_interval_and_a_difference_in_points() -> None:
-    assert interval_text(None) == "—"
-    assert interval_text(Interval(0.5, None, None, 1)) == "50.0%"
-    assert interval_text(Interval(0.5, 0.2366, 0.7634, 10)) == "50.0% [23.7–76.3%]"
+def test_a_report_prints_a_difference_in_points() -> None:
     assert points_text(None) == "—"
     assert points_text(0.0123) == "+1.2%p"
     assert points_text(-0.05) == "-5.0%p"
