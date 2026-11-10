@@ -46,9 +46,10 @@ from krx_quant.barriers import CLASSES as BARRIER_CLASSES
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import KINDS as ALL_KINDS
 from krx_quant.pricing import tick_size
-from krx_quant.trader import VERDICT
+from krx_quant.trader import SYMBOL, VERDICT
 from krx_quant.trader.cells import Cell, Signal
 from krx_quant.trader.selection import Pick
+from krx_quant.trader.store import OpenTrade
 from krx_quant.verdict import BUY, EXIT, SELL
 
 log = logging.getLogger(__name__)
@@ -155,6 +156,43 @@ def verdict_signal(row: sqlite3.Row, symbol: str) -> Signal:
             deadline=_time(body.get("deadline")),
             body=body,
         ),
+    )
+
+
+# Telegram's words for a verdict trade (#677, ``bought_text``, ``sold_text``): the symbol traded, and why
+# a trade was sold.
+NAMED = f"삼성전자({SYMBOL})"
+EXITS = {
+    "take_profit": "목표가 도달",
+    "stop_loss": "손절가 도달",
+    "time": "마감 시한",
+    "verdict_sell": "판정 SELL",
+    "daily_limit": "하루 손실 한도",
+    "cumulative_limit": "누적 손실 한도",
+    "pause": "정지(즉시 매도)",
+}
+
+
+def _won(value: float) -> str:
+    return f"{value:,.0f}원"
+
+
+def bought_text(mode: str, trade: OpenTrade) -> str:
+    """The ``[buy]`` message of a verdict trade bought (#677): the symbol, the shares, the average price,
+    the target, the stop and the deadline. No account or order number."""
+    return (
+        f"[buy] 판정 매수({mode}): {NAMED} {trade.quantity}주 {_won(trade.entry_price)} · "
+        f"목표가 {_won(trade.target)} · 손절가 {_won(trade.stop)} · "
+        f"마감 {trade.time_barrier.astimezone(KST):%H:%M}"
+    )
+
+
+def sold_text(mode: str, trade: OpenTrade, reason: str, net: float) -> str:
+    """The ``[sell]`` message of a verdict trade sold (#677): the symbol, the shares, why and its net
+    after costs. No account or order number."""
+    return (
+        f"[sell] 판정 매도({mode}): {NAMED} {trade.quantity}주 · {EXITS.get(reason, reason)} · "
+        f"순손익 {net:+,.0f}원"
     )
 
 

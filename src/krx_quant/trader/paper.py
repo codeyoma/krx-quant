@@ -393,8 +393,11 @@ class PaperTrader:
         practice: bool = False,
         since: datetime | None = None,
         fills: Fills | None = None,
+        announce: Notify | None = None,
     ) -> None:
         self.fills: Fills = fills or QuoteFills()
+        # Where a verdict trade's buy and sale are told (#677: Telegram's ``[buy]``, ``[sell]``).
+        self.announce = announce
         self.fills.bind(self)
         self.store = store
         self.rules = rules
@@ -1115,6 +1118,20 @@ class PaperTrader:
             verdict_version=None if signal.call is None else signal.call.version,
             verdict=None if signal.call is None else signal.call.opened(),
         )
+
+    def announce_bought(self, trade: OpenTrade) -> None:
+        """A verdict trade's buy settled (#677): ``[buy]`` to ``announce``; nothing for another trade."""
+        if self.announce is not None and trade.predictor == VERDICT:
+            from krx_quant.trader.verdicts import bought_text
+
+            self.announce(bought_text(self.mode, trade))
+
+    def announce_sold(self, trade: OpenTrade, reason: str, net: float) -> None:
+        """A verdict trade sold whole (#677): ``[sell]`` to ``announce``; nothing for another trade."""
+        if self.announce is not None and trade.predictor == VERDICT:
+            from krx_quant.trader.verdicts import sold_text
+
+            self.announce(sold_text(self.mode, trade, reason, net))
 
     def give_up(self, waiting: _Waiting, reason: str) -> None:
         self._waiting = None

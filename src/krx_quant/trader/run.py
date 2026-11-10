@@ -272,6 +272,7 @@ async def _run(
                     timing=timing,
                     practice=trader.mock_practice and mode == MOCK,  # #427: the settings allow mock alone
                     verdict=trader.mock_verdict and mode == MOCK,  # #677: likewise
+                    announce=alerts.trade,  # #677: the verdict trades' [buy] and [sell]
                     engine=settings.state_dir / ENGINE_DB,  # where a policy's predictor is found gone (#469)
                 )
                 watch = LiveWatch(trader.mode, mode, book, sessions, alerts.notice, broker=broker)

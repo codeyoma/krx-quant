@@ -152,6 +152,12 @@ async def test_a_verdict_trade_takes_profit_at_the_verdict_s_target(
 
     [trade] = desk.trades()
     assert trade["exit"]["reason"] == TAKE_PROFIT and trade["net"] > 0
+    # Telegram is told of the buy and the sale (#677), with no account or order number.
+    assert desk.announced == [
+        "[buy] 판정 매수(mock): 삼성전자(005930) 6주 70,050원 · 목표가 70,550원 · 손절가 69,550원"
+        " · 마감 10:15",
+        f"[sell] 판정 매도(mock): 삼성전자(005930) 6주 · 목표가 도달 · 순손익 {trade['net']:+,.0f}원",
+    ]
     # The nightly report counts it apart, by its verdict's version: not as the champion's.
     lines = report.render(report.read(tmp_path / DB_NAME, DAY, CALENDAR)).splitlines()
     assert any(line.startswith(f"판정 v{VERDICT_VERSION}(KIS 모의) | 1건 |") for line in lines)
@@ -168,6 +174,9 @@ async def test_a_verdict_trade_is_stopped_at_the_verdict_s_stop(
 
     [trade] = desk.trades()
     assert trade["exit"]["reason"] == STOP_LOSS and trade["exit"]["at"] == "2026-10-14T10:05:00+09:00"
+    assert desk.announced[-1].startswith(
+        "[sell] 판정 매도(mock): 삼성전자(005930) 6주 · 손절가 도달 · 순손익 -"
+    )
 
 
 async def test_a_verdict_trade_is_sold_at_the_verdict_s_deadline(
@@ -182,6 +191,7 @@ async def test_a_verdict_trade_is_sold_at_the_verdict_s_deadline(
 
     [trade] = desk.trades()
     assert trade["exit"]["reason"] == TIME
+    assert " · 마감 시한 · " in desk.announced[-1]
 
 
 async def test_a_later_sell_verdict_sells_the_verdict_trade_at_the_next_quote(
@@ -204,6 +214,7 @@ async def test_a_later_sell_verdict_sells_the_verdict_trade_at_the_next_quote(
     [trade] = desk.trades()
     assert trade["exit"]["reason"] == VERDICT_SELL and trade["exit"]["at"].startswith("2026-10-14T10:05:03")
     assert [o["purpose"] for o in trade["orders"]][-1] == VERDICT_SELL
+    assert " · 판정 SELL · 순손익 " in desk.announced[-1]
     assert decisions(tmp_path) == {"10:00": ("buy", None), "10:05": ("skip", VERDICT_SELL)}
 
 
@@ -318,6 +329,7 @@ async def test_the_verdict_is_not_picked_while_a_champion_cell_trades(
         None,
     )
     assert decisions(tmp_path) == {}
+    assert desk.announced == [], "only the verdict's trades are told"
 
 
 async def test_the_verdict_ranks_before_the_practice_cell_and_one_position_waits_at_a_time(

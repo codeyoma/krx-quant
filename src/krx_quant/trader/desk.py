@@ -154,7 +154,8 @@ class Desk:
     books are in paper as ever. More than ``stall_after`` without a quote in continuous trading is a
     stall of the quotes (#407; None watches nothing). With ``practice`` (#427, mock mode alone) the
     champion's book practises a cell on a day no champion cell trades, and with ``verdict`` (#677, mock
-    mode alone) trades the engine's verdict then too (module doc)."""
+    mode alone) trades the engine's verdict then too (module doc), each of its buys and sales told to
+    ``announce`` (Telegram's ``[buy]`` and ``[sell]``)."""
 
     def __init__(
         self,
@@ -172,6 +173,7 @@ class Desk:
         practice: bool = False,
         verdict: bool = False,
         engine: Path | None = None,
+        announce: Notify | None = None,
     ) -> None:
         if practice and mode != MOCK:  # #427: the settings refuse it before (``settings.py``)
             raise ValueError(f"the mock practice is for the mock mode alone, not {mode}")
@@ -194,7 +196,16 @@ class Desk:
             if broker is None or clock is None:
                 raise ValueError(f"the {mode} mode's champion orders through a broker, at a clock")
             self.champion = kis_book(
-                store, rules, sessions, started_at, broker, clock, notify, timing, mode=mode
+                store,
+                rules,
+                sessions,
+                started_at,
+                broker,
+                clock,
+                notify,
+                timing,
+                mode=mode,
+                announce=announce,
             )
         else:
             self.champion = PaperTrader(store, rules, sessions, started_at, mode, notify)

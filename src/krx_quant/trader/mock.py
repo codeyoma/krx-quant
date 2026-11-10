@@ -360,11 +360,12 @@ def kis_book(
     notify: Notify | None = None,
     timing: Timing | None = None,
     mode: str = MOCK,
+    announce: Notify | None = None,
 ) -> PaperTrader:
     """The champion's book in mock (or live) mode (module doc): ``paper.PaperTrader``'s decisions,
-    its orders on KIS through ``broker`` (``KisFills``)."""
+    its orders on KIS through ``broker`` (``KisFills``); its verdict trades told to ``announce`` (#677)."""
     fills = KisFills(broker, clock, notify, timing, mode)
-    return PaperTrader(store, rules, sessions, started_at, mode, notify, fills=fills)
+    return PaperTrader(store, rules, sessions, started_at, mode, notify, fills=fills, announce=announce)
 
 
 class KisFills:
@@ -1113,6 +1114,7 @@ class KisFills:
             trade.id,
         )
         if not live:
+            self.book.announce_bought(trade)  # #677: a verdict trade's ``[buy]``
             await self._place_take_profit(trade)
 
     async def _account_clear(self, waiting: _Waiting) -> bool:
@@ -1216,6 +1218,7 @@ class KisFills:
             self.store.close_entry(
                 self.book.position.id, FILLED if filled >= live.placed.quantity else CANCELLED, at
             )
+            self.book.announce_bought(self.book.position)  # #677: its shares all known now
         self._live_buy = None
 
     def _buy_failed(
@@ -1710,6 +1713,7 @@ class KisFills:
         self._stop_following()
         self.book.dirty = True
         log.info("trader: trade %s sold on KIS (%s): net %.0f won", trade.id, reason, net)
+        self.book.announce_sold(trade, reason, net)  # #677: a verdict trade's ``[sell]``
         if self.book.holds.exited(net, at, trade.practice) is not None:  # its realized loss reached a limit
             self.book.enforce(at)
 
