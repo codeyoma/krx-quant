@@ -13,9 +13,11 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import Session
-from krx_quant.trader import SYMBOL
+from krx_quant.trader import SYMBOL, action
 from krx_quant.trader import policy as policies
 from krx_quant.trader.action import BUY, SELL, WAIT, card, read_action
 from tests.api_schema import check
@@ -40,6 +42,7 @@ def trade(
     """A champion's trade of the barrier's breiman (``GET /v1/trader/trades``), open unless ``exited``."""
     return {
         "id": 7,
+        "mode": "paper",
         "symbol": SYMBOL,
         "kind": "barrier",
         "predictor": "breiman",
@@ -259,3 +262,25 @@ def test_the_store_s_champion_trade_makes_the_card_at_its_moment(tmp_path: Path)
     assert sold["exit"] is not None and sold["exit"]["at"].startswith("2026-10-14T10:15:02")
     assert sold["record"] is None  # the doubles' policy cell keeps no signals of the night
     assert (after["action"], after["why"], after["plan"]) == (WAIT, "trader_off", None)
+
+
+def test_a_trade_another_mode_left_open_is_not_the_card_s() -> None:
+    # The trader restarted in mock with nothing held; paper's book still has its trade open.
+    got = the_card(trader(mode="mock"), [trade("10:10:02.5")], "10:10:30", policy=champion())
+
+    assert (got["action"], got["why"], got["plan"]) == (WAIT, "no_signal", None)
+    assert the_card(trader(mode="paper"), [trade("10:10:02.5")], "10:10:30")["action"] == BUY
+
+
+def test_a_replayed_store_is_read_up_to_its_moment_before_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    desk_day(tmp_path)  # the champion buys the 10:00 rise at 10:00:02.5, and the 10:10 one later
+    monkeypatch.setattr(action, "_TRADES_READ", 1)
+
+    body = read_action(tmp_path / "trader.sqlite3", at("10:00:30"), lambda _: SESSION, {}, {})
+
+    [got] = body["symbols"]
+    assert got["plan"] is not None and got["plan"]["entry_at"].startswith("2026-10-14T10:00:02")
+    at_entry = read_action(tmp_path / "trader.sqlite3", at("10:00:02.500000"), lambda _: SESSION, {}, {})
+    assert at_entry["symbols"][0]["plan"] is not None  # entered at that very moment

@@ -58,8 +58,11 @@ PAUSE, DAILY_LIMIT, CUMULATIVE_LIMIT = "pause", "daily_limit", "cumulative_limit
 TRADER_OFF, HOLDING, OUTSIDE_HOURS, STOPPED = "trader_off", "holding", "outside_hours", "stopped"
 NO_CELL, NO_POLICY, HELD, NO_SIGNAL = "no_cell", "no_policy", "held", "no_signal"
 
-# The trades read: the latest few are enough, the trader holding one position at a time.
-_TRADES_READ = 5
+# The trades read: the latest are enough, the trader holding one position at a time (a mock trade's
+# paper shadow and the practice's among them).
+_TRADES_READ = 20
+# ``read_trades`` reads those entered before its time: one a microsecond on reads one entered at ``now``.
+_AT_NOW = timedelta(microseconds=1)
 # The trader's statuses that buy nothing new (``GET /v1/trader``'s ``status``), in Korean.
 _STOPPED = {
     "entries_paused": "새 매수를 정지해 두었습니다(서버에서 재개합니다).",
@@ -102,7 +105,8 @@ def read_action(
     champion: policies.Policy | None = None
     unreadable = False
     if path is not None:
-        trades = read_trades(path, None, _TRADES_READ)
+        # Those entered by ``now`` (a replayed store holds later ones), at ``now`` itself too.
+        trades = read_trades(path, now + _AT_NOW, _TRADES_READ)
         try:
             champion = _champion(path)
         except policies.PolicyError:
@@ -158,7 +162,7 @@ def card(
     """The card of ``symbol`` (module doc), from the trader's state (``GET /v1/trader``), its last
     trades newest first (``GET /v1/trader/trades``), its champion policy (None: none, or
     ``unreadable``) at ``now``, on that day's ``session`` (None: not a trading day)."""
-    trade = _last_champion_trade(trades, symbol, now)
+    trade = _last_champion_trade(trades, symbol, now, trader.get("mode"))
     closed = (
         trade is not None and trade["exit"] is not None and datetime.fromisoformat(trade["exit"]["at"]) <= now
     )
@@ -259,13 +263,16 @@ def _said(
 
 
 def _last_champion_trade(
-    trades: Sequence[Mapping[str, Any]], symbol: str, now: datetime
+    trades: Sequence[Mapping[str, Any]], symbol: str, now: datetime, mode: str | None
 ) -> Mapping[str, Any] | None:
     """The newest of ``trades`` (newest first) that is the champion's own: neither a practice trade
-    nor a shadow's, of ``symbol``, entered by ``now`` (a replayed store may hold later ones; one exited
-    after ``now`` is open then)."""
+    nor a shadow's, of ``symbol``, of the ``mode`` the trader runs in (a trade another mode left open
+    is not this book's: the trader keeps a position a mode; any mode while it never wrote its state),
+    entered by ``now`` (a replayed store may hold later ones; one exited after ``now`` is open then)."""
     for t in trades:
         if t.get("practice") or t.get("shadow") or t["symbol"] != symbol:
+            continue
+        if mode is not None and t.get("mode") != mode:
             continue
         if datetime.fromisoformat(t["entry"]["at"]) > now:
             continue
