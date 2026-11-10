@@ -170,16 +170,20 @@ def test_a_positive_expected_net_needs_the_margin_too() -> None:
     assert body["horizon"] == {"kind": "barrier", "minutes": 4}
 
 
-def test_no_buy_once_the_ask_reached_the_target_or_without_a_quote() -> None:
-    """Input: (0.9, 0.05, 0.05) at w = 1 (target 81,350), first with the ask at 81,350, then with no
-    quote. Output: WAIT both times (no expected net without a quote)."""
+def test_no_buy_once_the_ask_passed_a_barrier_or_without_a_quote() -> None:
+    """Input: (0.9, 0.05, 0.05) at w = 1 (target 81,350, stop 81,150), with the ask at the target
+    81,350; with the bid and ask fallen to 80,800 / 80,900, below the stop (#683's review); with no
+    quote. Output: WAIT each time, without an expected net: no trade to plan there."""
     p = (0.9, 0.05, 0.05)
-    reached = verdict("005930", T, [horizon(4, member("a", p), width=1)], Market(81_250, 81_300, 81_350, 0.0))
-    unquoted = verdict("005930", T, [horizon(4, member("a", p), width=1)], Market(81_250, None, None, 0.0))
-
-    assert reached.as_json()["verdict"] == WAIT
-    assert unquoted.as_json()["verdict"] == WAIT
-    assert by_minutes(unquoted)[4]["expected_net"] is None
+    quotes = {
+        "at the target": Market(81_250, 81_300, 81_350, 0.0),
+        "below the stop": Market(81_250, 80_800, 80_900, 0.0),
+        "no quote": Market(81_250, None, None, 0.0),
+    }
+    for why, market in quotes.items():
+        found = verdict("005930", T, [horizon(4, member("a", p), width=1)], market)
+        assert found.as_json()["verdict"] == WAIT, why
+        assert by_minutes(found)[4]["expected_net"] is None, why
 
 
 def test_a_tiny_lean_reads_weak_and_none_below_its_floor() -> None:

@@ -37,10 +37,11 @@ the pool. The spread is in the prices alone (bought at the ask, sold at a bid), 
 
 **The verdict**:
 
-- **BUY** when nothing is held, the horizon with the greatest expected net has it above 0, its
-  pooled up first beats its down first by the margin ``Rules.margin``, and the ask is below its
-  target. That horizon is the maximum holding time: the verdict's deadline is the bar close plus it,
-  with its target and stop.
+- **BUY** when nothing is held, the horizon with the greatest expected net has it above 0 and its
+  pooled up first beats its down first by the margin ``Rules.margin``. A horizon whose ask is not
+  between its stop and its target (the price moved past a barrier while the members worked) has no
+  expected net: no trade to plan there. The BUY's horizon is the maximum holding time: the verdict's
+  deadline is the bar close plus it, with its target and stop.
 - **SELL** means **exit** while the trader holds the symbol (``Held``) and the pool at the remaining
   horizon (the shortest pooled horizon at least the time left to the position's time barrier, else
   the longest pooled) has down first beating up first by the margin; and **avoid** buying while
@@ -351,10 +352,11 @@ def _pool(horizon: Horizon, market: Market, rules: Rules) -> tuple[Pooled, list[
 def _expected_net(
     probabilities: tuple[float, float, float], market: Market, target: float, stop: float
 ) -> float | None:
-    """A share's expected net of a long bought at the ask now (module doc); None without a quote or
-    with a stop that is not a price."""
+    """A share's expected net of a long bought at the ask now (module doc); None without a quote, or
+    with the ask not between the stop and the target (the price moved past a barrier while the members
+    worked: no trade to plan, as ``money.size`` refuses a stop not below the ask)."""
     ask, bid, fee = market.ask, market.bid, market.fee_rate
-    if ask is None or bid is None or stop <= 0:
+    if ask is None or bid is None or not 0 < stop < ask < target:
         return None
     up, timeout, down = probabilities
     stopped = stop - tick_size(stop)  # the first bid below the stop sells (``money.at_risk``)
@@ -399,14 +401,7 @@ def verdict(
         return made(WAIT, None, HOLDING, at)
     priced = [p for p in seen if p.expected_net is not None and math.isfinite(p.expected_net)]
     best = max(priced, key=lambda p: p.expected_net or 0.0, default=None)
-    if (
-        best is not None
-        and (best.expected_net or 0.0) > 0
-        and (best.margin or 0.0) >= rules.margin
-        and market.ask is not None
-        and best.target is not None
-        and market.ask < best.target
-    ):
+    if best is not None and (best.expected_net or 0.0) > 0 and (best.margin or 0.0) >= rules.margin:
         return made(BUY, None, None, best)
     against = min(seen, key=lambda p: p.margin or 0.0)
     if (against.margin or 0.0) <= -rules.margin:
