@@ -12,6 +12,7 @@ the probation's, the budget's record, and the scheduled jobs' turn.
 
 from __future__ import annotations
 
+import fcntl
 import json
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time
@@ -30,6 +31,7 @@ from krx_quant.prevalidation import (
     LastReport,
     admits,
     attempts_path,
+    budget_lock_path,
     family,
     last_report,
     prevalidate,
@@ -206,6 +208,33 @@ async def test_a_fail_refuses_a_new_algorithm_and_enrolls_nothing(
     assert statuses(s.state_dir / DB_NAME) == {}
     assert [a["outcome"] for a in attempts(s.state_dir)] == ["refused"], "it counts against the budget"
     assert not admits(s.state_dir, s.target_version)(Contrarian("contrarian"))
+
+
+async def test_the_budget_is_read_judged_and_recorded_under_one_lock_every_algorithm_shares(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #684 review: two pre-validations of other algorithms on the same days at once could each read
+    # an empty family and both pass as the first test. While one judges, the budget's lock is held.
+    s = settings(tmp_path, FOUR)
+    held: list[bool] = []
+
+    def judged(*args: Any) -> _Measured:
+        with budget_lock_path(s.state_dir).open("a") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                held.append(True)
+            else:
+                held.append(False)
+        return _Measured(0.01)
+
+    monkeypatch.setattr(prevalidation, "_promotion_stats", judged)
+
+    await prevalidate(s, "contrarian", algorithms=[ALPHA, Contrarian("contrarian")], now=AFTER)
+
+    assert held == [True], "another process would wait for it"
+    [attempt] = attempts(s.state_dir)
+    assert attempt["outcome"] == "active", "recorded before the lock is let go"
 
 
 async def test_with_the_days_budget_spent_it_is_not_tested_and_goes_on_probation_judged_forward(

@@ -674,6 +674,24 @@ def family(state_dir: Path, days: Sequence[date]) -> list[dict[str, Any]]:
     return out
 
 
+def budget_lock_path(state_dir: Path) -> Path:
+    """The promotion budget's lock (#681, #684 review): held while a test reads its family, is judged
+    and is recorded."""
+    return state_dir / "prevalidations" / "promotion-attempts.lock"
+
+
+@contextlib.contextmanager
+def _budget_held(state_dir: Path) -> Iterator[None]:
+    """Hold the promotion budget's lock (``flock``, waiting for another holder): every algorithm's
+    pre-validation shares the budget, while ``_held`` locks one algorithm's only. The kernel lets it
+    go when the process ends."""
+    path = budget_lock_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
 def _record_attempt(state_dir: Path, result: Prevalidation) -> None:
     promotion = result.promotion
     assert promotion is not None
@@ -885,10 +903,16 @@ async def prevalidate(
         standing = None if revision is not None else _promotable(settings, name)
         if standing is not None:
             tested = DayUsage(Meter())  # it reads the candidate's and the baselines' rows again
-            with tested.phase("promotion"):
+            # The budget is every algorithm's: its family read, the test and its record under one
+            # lock, so two pre-validations on the same days at once (by hand beside the night's)
+            # cannot both be its first test. Recorded before the report: a stop in between counts it
+            # once more, never once less.
+            with _budget_held(settings.state_dir), tested.phase("promotion"):
                 promotion = _promotion(settings, candidate, kind, trained, db, result, standing.on_probation)
+                result = replace(result, promotion=promotion)
+                if promotion.tested:
+                    _record_attempt(settings.state_dir, result)
             log.info("%s: memory of the promotion test: %s", name, tested.line())
-            result = replace(result, promotion=promotion)
             if result.checks and all(c.passed for c in result.checks):
                 result = replace(result, checks=[*result.checks, promotion.check()])
         path = report_path(settings.state_dir, name)
@@ -896,11 +920,8 @@ async def prevalidate(
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(result.as_dict(), indent=2, ensure_ascii=False))
         # The run is recorded before its report replaces the last one: a stop between the two
-        # counts it once more, never once less (a rerun on the same days must not look fresh). So
-        # is a promotion test, against its days' budget (#681).
+        # counts it once more, never once less (a rerun on the same days must not look fresh).
         _record_run(settings.state_dir, result)
-        if result.promotion is not None and result.promotion.tested:
-            _record_attempt(settings.state_dir, result)
         tmp.replace(path)
         if result.promotion is not None and standing is not None:
             _enroll(settings, candidate, kind, result, result.promotion, db, now)

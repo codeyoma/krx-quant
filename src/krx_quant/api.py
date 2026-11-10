@@ -941,9 +941,10 @@ async def _standings(engine: PredictionEngine, state_dir: Path | None = None) ->
         name, standing = a.name, statuses.get(a.name)
         if name in running:  # every one run has a status: it starts on probation (``_admit``)
             out[name] = _Standing(Status.PROBATION.value if standing is None else standing.status.value)
-        elif standing is not None:
-            # Enrolled by its pre-validation while the engine runs (#681): the engine runs it from
-            # its next bar close, with this status.
+        elif standing is not None and name in bar_close and name not in refused:
+            # A bar-close one its pre-validation enrolled while the engine runs (#681): the engine
+            # runs it from its next bar close, with this status. Not a daily one with a status the
+            # engine keeps out (on probation, its report stale: #264): it waits, as below.
             out[name] = _Standing(standing.status.value)
         elif name in refused:
             out[name] = _Standing("refused", refused[name])
