@@ -41,6 +41,7 @@ ROUTES = {
     "/v1/symbols/{symbol}/kinds/{kind}/predictions": "kind_predictions",
     "/v1/trader/trades": "trader_trades",  # #394
     "/v1/trader": "trader",  # #396
+    "/v1/action": "action",  # #672
     "/v1/trader/days": "trader_days",
     "/v1/trader/policies": "trader_policies",  # #399
     "/v1/trader/decisions": "trader_decisions",  # #584

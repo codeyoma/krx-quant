@@ -3797,6 +3797,91 @@
         "net": {"type": ["number", "null"]}
       }
     },
+    "action": {
+      "description": "GET /v1/action (#672, spec #671): what to do now, a card for each symbol the trader trades, following the champion's book alone.",
+      "type": "object",
+      "required": ["as_of", "mode", "alive", "symbols"],
+      "additionalProperties": false,
+      "properties": {
+        "as_of": {"$ref": "#/$defs/time"},
+        "mode": {"enum": ["paper", "mock", "live", null]},
+        "alive": {"type": "boolean"},
+        "symbols": {"type": "array", "items": {"$ref": "#/$defs/action_card"}}
+      }
+    },
+    "action_card": {
+      "description": "A symbol's card (#672): wait, buy or sell, why (a word) and said (a line of Korean), since and until for a buy or a sale shown, the open or just-closed trade's plan, a sale's exit, and the cell's record.",
+      "type": "object",
+      "required": ["symbol", "name", "action", "why", "said", "since", "until", "plan", "exit", "record"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "name": {"type": ["string", "null"]},
+        "action": {"enum": ["wait", "buy", "sell"]},
+        "why": {"enum": ["bought", "selling", "take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", "trader_off", "holding", "outside_hours", "stopped", "no_cell", "no_policy", "held", "no_signal"]},
+        "said": {"type": "string"},
+        "since": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "until": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+        "plan": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["entry_price", "entry_at", "target", "stop", "sell_by", "bid", "bid_at"],
+              "additionalProperties": false,
+              "properties": {
+                "entry_price": {"type": "number"},
+                "entry_at": {"$ref": "#/$defs/time"},
+                "target": {"type": "number"},
+                "stop": {"type": "number"},
+                "sell_by": {"$ref": "#/$defs/time"},
+                "bid": {"type": ["number", "null"]},
+                "bid_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]}
+              }
+            }
+          ]
+        },
+        "exit": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["reason", "price", "at"],
+              "additionalProperties": false,
+              "properties": {
+                "reason": {"enum": ["take_profit", "stop_loss", "time", "pause", "daily_limit", "cumulative_limit", null]},
+                "price": {"type": ["number", "null"]},
+                "at": {"$ref": "#/$defs/time"}
+              }
+            }
+          ]
+        },
+        "record": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["kind", "predictor", "threshold", "days", "signals", "bought", "wins", "per_signal_ticks", "low_ticks", "tick", "per_signal_won", "low_won"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": {"type": "string"},
+                "predictor": {"type": "string"},
+                "threshold": {"type": "number", "minimum": 0, "maximum": 1},
+                "days": {"type": ["integer", "null"], "minimum": 0},
+                "signals": {"type": ["integer", "null"], "minimum": 0},
+                "bought": {"type": ["integer", "null"], "minimum": 0},
+                "wins": {"type": ["integer", "null"], "minimum": 0},
+                "per_signal_ticks": {"type": ["number", "null"]},
+                "low_ticks": {"type": ["number", "null"]},
+                "tick": {"type": ["number", "null"]},
+                "per_signal_won": {"type": ["number", "null"]},
+                "low_won": {"type": ["number", "null"]}
+              }
+            }
+          ]
+        }
+      }
+    },
     "trader_marks": {
       "description": "GET /v1/symbols/{symbol}/trader-marks?before=T&limit=N (#398): the trader's buys and sells of the symbol as the chart marks them, the last N before T if given, newest first, and any more at the moment of the last of them; none before its first trade or for a symbol it does not trade.",
       "type": "object",

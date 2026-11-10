@@ -136,6 +136,7 @@ async def walk(get: Get) -> dict[str, int]:
     await ask("/v1/trader/trades?limit=5&before=2026-10-12T10:00:00%2B09:00", "trader_trades")
     await ask("/v1/trader/trades?policy=1", "trader_trades")  # #400
     await ask("/v1/trader", "trader")  # #396
+    await ask("/v1/action", "action")  # #672
     await ask("/v1/trader/days", "trader_days")
     await ask("/v1/trader/days?from=2026-10-01&to=2026-10-12", "trader_days")
     await ask("/v1/trader/policies?limit=5", "trader_policies")  # #399

@@ -100,6 +100,10 @@ Endpoints (all under ``/v1``):
   symbol as the chart marks them (#398, ``trader/marks.py``): the last N (default 100, at most 1000)
   before ``T`` if given, newest first, each at its fill's time and price, with its trade's quantity,
   mode and cell, and a sell's exit reason and net P&L.
+- ``GET /action``: what to do now (#672, spec #671, ``trader/action.py``): a card for each symbol the
+  trader trades, ``wait``, ``buy`` or ``sell``, following the champion's book alone, with why in a
+  line of Korean, the open or just-closed trade's prices and times, and its cell's record; read from
+  the trader's store.
 
 An algorithm is of a kind (``kind`` in ``/algorithms``). ``/leaderboard?kind=`` ranks a kind's
 algorithms against its baselines (the direction's by default, as before); an algorithm's
@@ -204,6 +208,7 @@ from krx_quant.stats import (
 from krx_quant.stream import EventStream, LiveStatus, kind_prediction_json, kind_target, prediction_json
 from krx_quant.supply import FIELDS as SUPPLY_FIELDS
 from krx_quant.supply import stored_supply
+from krx_quant.trader.action import read_action
 from krx_quant.trader.decisions import BOOKS, read_decisions
 from krx_quant.trader.marks import read_marks
 from krx_quant.trader.policy import read_policies
@@ -397,6 +402,7 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/kinds/{kind}/predictions", _kind_predictions)
     app.router.add_get("/v1/trader/trades", _trader_trades)
     app.router.add_get("/v1/trader", _trader)
+    app.router.add_get("/v1/action", _action)
     app.router.add_get("/v1/trader/days", _trader_days)
     app.router.add_post("/v1/trader/pause", _trader_pause)
     app.router.add_get("/v1/trader/policies", _trader_policies)
@@ -1910,6 +1916,24 @@ async def _trader(request: web.Request) -> web.Response:
     path = None if state_dir is None else state_dir / TRADER_DB
     # The review cycle (#469) counted on the engine's market calendar.
     return _json(await asyncio.to_thread(read_trader, path, now, engine.calendar.session))
+
+
+async def _action(request: web.Request) -> web.Response:
+    """What to do now (#672): a card for each symbol the trader trades, from its store (read-only, off
+    the event loop); ``wait`` and ``trader_off`` without one."""
+    engine = request.app[ENGINE_KEY]
+    now = engine.clock.now()
+    state_dir = request.app[STATE_DIR_KEY]
+    path = None if state_dir is None else state_dir / TRADER_DB
+    names = request.app[NAMES_KEY]
+    ticks: dict[str, float | None] = {}
+    for symbol in engine.symbols:
+        mid = engine.mid(symbol)
+        ticks[symbol] = tick_size(mid) if mid is not None else None
+    body = await asyncio.to_thread(
+        read_action, path, now, engine.calendar.session, {s: names.get(s) for s in engine.symbols}, ticks
+    )
+    return _json(body)
 
 
 async def _trader_days(request: web.Request) -> web.Response:
