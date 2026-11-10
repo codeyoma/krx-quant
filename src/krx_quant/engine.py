@@ -895,14 +895,20 @@ class PredictionEngine:
             return
         running: list[Algorithm | KindAlgorithm] = [*admitted, *kind_admitted]
         for a in running:
-            if a.name not in known:
+            standing = known.get(a.name)
+            if standing is None:
                 self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
                 self._tell_admitted(a)
-                if self._revisions is not None and a.name not in self._revision_of:
-                    try:
-                        self._revise(a, None, self.clock.now(), Status.PROBATION)
-                    except Exception:  # recorded at the next start, as one never recorded
-                        log.exception("%s: its code could not be recorded", a.name)
+            # A new one, or one its pre-validation enrolled while the engine ran (#681: made active
+            # by its walk-forward replay, or on a probation judged forward): its code is its first
+            # revision.
+            if self._revisions is not None and a.name not in self._revision_of:
+                try:
+                    self._revise(
+                        a, None, self.clock.now(), Status.PROBATION if standing is None else standing.status
+                    )
+                except Exception:  # recorded at the next start, as one never recorded
+                    log.exception("%s: its code could not be recorded", a.name)
         for d in daily_admitted:
             if d.name not in known:
                 self.store.add_status(d.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
@@ -990,7 +996,7 @@ class PredictionEngine:
         (a daily one on probation waits for its pre-validation otherwise, #264)."""
         bar_close = [a.name for a in self.registered] + [a.name for a in self.kind_registered]
         daily = [a.name for a in self.daily_algorithms]
-        return self.store.to_simulate(bar_close), self.store.to_simulate(daily)
+        return self.store.to_simulate(bar_close, bar_close=True), self.store.to_simulate(daily)
 
     def simulated(self, kind: PredictionKind) -> dict[str, Simulated]:
         """The algorithms of ``kind`` with a simulated probation (#298), as the reviews and the

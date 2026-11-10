@@ -20,6 +20,7 @@ from krx_quant.config import Settings
 from krx_quant.daily import DailyAlgorithm, DailyKind
 from krx_quant.daily_features import pending_inputs
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
+from krx_quant.lifecycle import REGISTERED, Standing, Status
 from krx_quant.market_calendar import MarketCalendar, first_whole_day
 from krx_quant.predictions import Revision
 from krx_quant.prevalidation import (
@@ -77,6 +78,9 @@ class PrevalidationFacts:
     # The order of the bar-close pre-validations the latest queue screen set (#599, ``read_queue``):
     # none without a screen of the last few nights.
     queue: tuple[str, ...] = ()
+    # The bar-close algorithms on a probation begun when their pre-validation passed before #681
+    # (``lifecycle.REGISTERED``) whose report holds no promotion test: judged again by it (#681).
+    rejudging: tuple[str, ...] = ()
 
 
 def recorded_days(data_dir: Path, symbols: Sequence[str], now: datetime) -> int:
@@ -161,6 +165,7 @@ async def read_prevalidation_facts(reads: Reads) -> PrevalidationFacts:
     answers = await asyncio.to_thread(pending_answers, settings, calendar, clock.now())
     simulating, simulating_daily = engine.to_simulate()  # the engine's database: on this thread
     revising = engine.revising()  # likewise (#454)
+    rejudging = to_rejudge(engine.store.statuses(), [*engine.registered, *engine.kind_registered], reports)
     return PrevalidationFacts(
         recorded_days=recorded,
         waiting=tuple(engine.waiting()),
@@ -171,6 +176,28 @@ async def read_prevalidation_facts(reads: Reads) -> PrevalidationFacts:
         simulating=tuple(simulating),
         revising=await asyncio.to_thread(revising_facts, settings, calendar, clock.now(), revising),
         queue=await reads(read_queue),
+        rejudging=rejudging,
+    )
+
+
+def to_rejudge(
+    statuses: Mapping[str, Standing],
+    bar_close: Sequence[Algorithm | KindAlgorithm],
+    reports: Mapping[str, LastReport],
+) -> tuple[str, ...]:
+    """The bar-close algorithms of ``bar_close`` (the registries' order) on a probation begun when
+    their pre-validation passed before #681 (``REGISTERED``), whose report of the code they run holds
+    no promotion test (``LastReport.promotion``): their pre-validation judges them again (#681)."""
+    return tuple(
+        a.name
+        for a in bar_close
+        if a.name not in REGISTERED_BEFORE
+        and (s := statuses.get(a.name)) is not None
+        and s.status is Status.PROBATION
+        and s.reason == REGISTERED
+        and (r := reports.get(a.name)) is not None
+        and r.current
+        and r.promotion is None
     )
 
 
@@ -206,8 +233,9 @@ PREVALIDATIONS_A_NIGHT = 2
 # limit (02:30; the other kinds' 01:00).
 PREVALIDATION_TIMEOUT = timedelta(hours=3)
 PREVALIDATION_TIMEOUTS = {a.name: timedelta(hours=4, minutes=30) for a in KIND_ALGORITHMS}
-# An algorithm's turn tonight: never tried (or cut by a restart), or tried again.
-FRESH, AGAIN = "fresh", "again"
+# An algorithm's turn tonight: never tried (or cut by a restart), or tried again; or on a probation
+# judged again by the walk-forward replay (#681), before them.
+FRESH, AGAIN, REJUDGE = "fresh", "again", "rejudge"
 
 
 def prevalidation_job_name(algorithm: str) -> str:
@@ -222,10 +250,18 @@ def prevalidation_order(names: Sequence[str]) -> tuple[str, ...]:
 
 
 def prevalidation_turn(night: Turn, algorithm: str) -> str | None:
-    """Whether ``algorithm`` would be pre-validated tonight: FRESH, AGAIN (its last run left
-    no verdict, on older code: it waits for the FRESH ones), or None (not tonight)."""
+    """Whether ``algorithm`` would be pre-validated tonight: REJUDGE (on a probation its walk-forward
+    replay judges again, #681: first), FRESH, AGAIN (its last run left no verdict, on older code: it
+    waits for the FRESH ones), or None (not tonight)."""
     facts = night.facts
-    if facts.recorded_days < MIN_DAYS or algorithm not in facts.waiting:
+    if facts.recorded_days < MIN_DAYS:
+        return None
+    if algorithm in facts.rejudging:  # #681
+        record = night.records.get(prevalidation_job_name(algorithm))
+        if record is not None and record.outcome in (OK, FAILED) and record.commit == night.commit:
+            return None  # it ran on this code and left no promotion test: another deploy may
+        return REJUDGE
+    if algorithm not in facts.waiting:
         return None
     report = facts.reports.get(algorithm)
     if report is not None and report.judged:
@@ -253,11 +289,11 @@ def prevalidation_turn(night: Turn, algorithm: str) -> str | None:
 def prevalidation_tonight(night: Turn, order: Sequence[str]) -> str | None:
     """The algorithm pre-validated tonight in its turn, of ``order``: none if one was tonight
     already (whatever came of it), a changed code's too (#454, ``revision_tonight``); else the first
-    FRESH, else the first AGAIN."""
+    REJUDGE (#681), else the first FRESH, else the first AGAIN."""
     if _ran_tonight(night, order):
         return None
     turns = [(name, prevalidation_turn(night, name)) for name in order]
-    return next((n for n, t in turns if t == FRESH), None) or next((n for n, t in turns if t == AGAIN), None)
+    return next(iter(_in_turn(turns)), None)
 
 
 def prevalidations_quiet(night: Turn, order: Sequence[str]) -> tuple[str, ...]:
@@ -272,9 +308,11 @@ def prevalidations_quiet(night: Turn, order: Sequence[str]) -> tuple[str, ...]:
 
 
 def _in_turn(turns: Sequence[tuple[str, str | None]]) -> tuple[str, ...]:
-    """Of each name's turn, those FRESH, else those AGAIN."""
-    fresh = tuple(n for n, t in turns if t == FRESH)
-    return fresh or tuple(n for n, t in turns if t == AGAIN)
+    """Of each name's turn, those REJUDGE (#681), else those FRESH, else those AGAIN."""
+    for turn in (REJUDGE, FRESH, AGAIN):
+        if found := tuple(n for n, t in turns if t == turn):
+            return found
+    return ()
 
 
 def screened_order(screened: Sequence[str], order: Sequence[str]) -> tuple[str, ...]:
@@ -694,9 +732,13 @@ BAR_CLOSE_SIMULATION = Job(
 
 
 _PREVALIDATION_NOTE = (
-    "통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로 돌리고, 수습이 시작된 그 밤 "
-    "`simulate-bar-close-298`이 최근 녹화일로 수습을 시뮬레이션해 바로 판정한다(#298). "
-    "거부(`refused`)되면 같은 코드·정답 버전으로는 다시 돌지 않고, 고친 코드가 배포되면 다시 돈다."
+    "검사 다섯을 넘으면 같은 walk-forward 재생으로 승격을 판정한다(#681, 리포트의 `promotion`): 수습 판정과 "
+    "같은 통계(가장 약한 기준 대비 거래일 단위 lift의 하한 > 0)를 그 날들의 시험 예산으로 나눈 "
+    "수준에서 본다. "
+    "통과하면 그 밤 바로 정식(`active`)이고 엔진이 다음 봉 마감부터 돌린다. 못 하면 거부(`refused`)다. "
+    "판정할 수 없으면(채점한 날 10일 미만, 그 날들의 예산 소진, 채점 부족) 실시간 날로 판정하는 수습"
+    "(`forward`)이다. 이미 수습인 알고리즘을 다시 판정한 것이면 못 해도 수습에 남는다. 거부되면 같은 "
+    "코드·정답 버전으로는 다시 돌지 않고, 고친 코드가 배포되면 다시 돈다."
 )
 # What an agent does with the diagnostics a candidate's report carries (#283,
 # ``contract.Diagnostics``): measured besides the checks, never judged.
@@ -739,7 +781,8 @@ def _queue_screen_due(order: tuple[str, ...]) -> Callable[[Turn], bool]:
         record = night.record
         if record is not None and record.day == night.day and record.outcome in (OK, FAILED):
             return False  # once a night
-        return sum(prevalidation_turn(night, name) is not None for name in order) >= 2
+        # Of the waiting ones only: one judged again (#681) is no candidate it orders.
+        return sum(prevalidation_turn(night, name) in (FRESH, AGAIN) for name in order) >= 2
 
     return due
 
