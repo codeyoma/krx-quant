@@ -151,6 +151,16 @@ def _inverse_replay(day: date | None) -> int:
     return code
 
 
+def _verdict_replay(day: date | None, days: int) -> int:
+    """The verdict (#676) made again at each recorded bar close and its BUYs replayed (#679): counts, ticks
+    and won."""
+    from krx_quant.verdict_replay import verdict_replay
+
+    report, code = verdict_replay(Settings.from_env(require_kis=False), datetime.now(KST), day, days)
+    print(report)
+    return code
+
+
 def add(sub: Commands) -> None:
     """The research's commands, each with its handler (``cli._parser``)."""
     smt_cmd = sub.add_parser(
@@ -225,3 +235,18 @@ def add(sub: Commands) -> None:
         help="the last day replayed, YYYY-MM-DD (default: the latest trading day whose session is over)",
     )
     inverse_cmd.set_defaults(run=lambda args: _inverse_replay(args.day))
+    verdict_cmd = sub.add_parser(
+        "verdict-replay",
+        help="make the verdict (#676) again at each bar close of the recorded days, with the barrier"
+        " algorithms the live engine ran and with every one walked forward (#679), and replay its BUYs a"
+        " share each by the paper trader's rules; reads only, places no order, no price",
+    )
+    verdict_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the last day replayed, YYYY-MM-DD (default: the latest trading day whose session is over)",
+    )
+    verdict_cmd.add_argument(
+        "--days", type=positive, default=20, help="the recorded trading days replayed (default 20)"
+    )
+    verdict_cmd.set_defaults(run=lambda args: _verdict_replay(args.day, args.days))

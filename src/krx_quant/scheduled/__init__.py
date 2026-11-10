@@ -161,6 +161,7 @@ from krx_quant.scheduled.research import (
     SIGNAL_REVIEW_FROM,
     SMT_DISCOVERY,
     SMT_HOLDOUT,
+    VERDICT_REPLAY,
     BackfillFacts,
     SignalReviewFacts,
 )
@@ -214,6 +215,7 @@ __all__ = [
     "SMT_HOLDOUT",
     "STATE_FILE",
     "TRADER_REPORT",
+    "VERDICT_REPLAY",
     "Attachment",
     "BackfillFacts",
     "Job",
@@ -321,6 +323,7 @@ JOBS: tuple[Job[Any], ...] = (
     BAR_CLOSE_TIMES,
     SESSION_MEMORY,
     INVERSE_REPLAY,
+    VERDICT_REPLAY,
     SIGNAL_REVIEW_FIXED,
     LIVE_PROBE,
     FILL_NOTICE_COLUMNS,
