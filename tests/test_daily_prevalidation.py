@@ -49,6 +49,7 @@ from krx_quant.scheduled import (
 )
 from krx_quant.touch import TARGET_VERSION
 from tests.daily_doubles import SYMBOLS, made_history
+from tests.replay_events import api, get_json
 
 FEE = 0.015 / 100
 LAST = date(2026, 10, 16)
@@ -348,7 +349,7 @@ def _engine(s: Settings, clock: FakeClock) -> PredictionEngine:
     )
 
 
-def test_a_report_on_answer_version_1_has_cox_on_probation_judged_again_before_it_runs(
+async def test_a_report_on_answer_version_1_has_cox_on_probation_judged_again_before_it_runs(
     tmp_path: Path,
 ) -> None:
     """#264: answer version 2 ends the day at the closing auction. Cox's report of version 1
@@ -380,6 +381,13 @@ def test_a_report_on_answer_version_1_has_cox_on_probation_judged_again_before_i
     assert e.daily_algorithms == () and e.waiting() == ["cox", "cox-5d"], (
         "on probation, judged on version 1: waits"
     )
+    # Listed as waiting, not by its stored probation, and not predicting (#684 review): only a
+    # bar-close algorithm its pre-validation enrolled at night is listed by its status before it runs.
+    async with api(e) as client:
+        body = await get_json(client, "/v1/algorithms")
+    assert {a["name"]: a["state"] for a in body["algorithms"]}["cox"] == "waiting"
+    [kind] = [k for k in body["kinds"] if k["kind"] == "open_to_close"]
+    assert "cox" not in kind["predicting"]
     found = last_report(s.state_dir, cox)
     assert found is not None and not found.current
     [job] = [j for j in JOBS if j.name == "prevalidate-cox"]

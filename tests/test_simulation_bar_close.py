@@ -128,7 +128,12 @@ def night_after(days: Sequence[date]) -> datetime:
     return datetime.combine(days[-1], time(23), KST)
 
 
-def on_probation(s: Settings, *names: str, reason: str = REGISTERED, at: datetime | None = None) -> datetime:
+# The probation a bar-close simulation is made for (#681): a new target's restart. A new algorithm's
+# (``REGISTERED``) is judged by its pre-validation's walk-forward replay instead.
+RESTARTED = target_changed("direction", TARGET_VERSION)
+
+
+def on_probation(s: Settings, *names: str, reason: str = RESTARTED, at: datetime | None = None) -> datetime:
     """``names`` on probation since ``at`` (default: the morning before the last recorded day)."""
     at = at or datetime.combine(date(2026, 9, 14), time(8), KST)
     store = PredictionStore(s.state_dir / DB_NAME)
@@ -189,6 +194,19 @@ def simulated(tmp_path_factory: pytest.TempPathFactory) -> Simulated:
         )
     )
     return Simulated(s, run, days, contrarian, frequency)
+
+
+def test_a_new_algorithm_s_probation_is_not_simulated_its_pre_validation_judges_it(tmp_path: Path) -> None:
+    # #681: a new bar-close algorithm's probation from before (``REGISTERED``) is judged again by its
+    # pre-validation's walk-forward replay, not simulated; a daily kind's still is.
+    s = settings(tmp_path, RECORDED[:1])
+    on_probation(s, "contrarian", reason=REGISTERED)
+    store = PredictionStore(s.state_dir / DB_NAME)
+    try:
+        assert store.to_simulate(["contrarian"], bar_close=True) == []
+        assert store.to_simulate(["contrarian"]) == ["contrarian"]
+    finally:
+        store.close()
 
 
 @TEN_DAYS

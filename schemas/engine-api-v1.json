@@ -912,7 +912,7 @@
           "properties": {
             "made_at": {"$ref": "#/$defs/time"},
             "probation_began": {"description": "When the probation it was made for began: its status change's at.", "$ref": "#/$defs/time"},
-            "cadence": {"description": "daily: refitted before each day on the days before it; bar_close: trained once before the days. null when it could not be simulated.", "oneOf": [{"type": "null"}, {"enum": ["daily", "bar_close"]}]},
+            "cadence": {"description": "daily: refitted before each day on the days before it; bar_close: trained once before the days; walk_forward: a new bar-close algorithm's pre-validation replay, refitted before each day, that made it active (#681). null when it could not be simulated.", "oneOf": [{"type": "null"}, {"enum": ["daily", "bar_close", "walk_forward"]}]},
             "days": {"type": "integer", "minimum": 0, "description": "the days replayed; 0 when it could not be simulated"},
             "first_day": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
             "last_day": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
@@ -930,6 +930,7 @@
                     "review_day": {"type": ["integer", "null"], "minimum": 1, "description": "the largest review day its days reach; null below the first"},
                     "scored": {"type": "integer", "minimum": 0},
                     "enough": {"type": "boolean"},
+                    "level": {"type": "number", "description": "walk_forward only (#681): the two-sided level its lift by trading day was held to, the reviews' shared by the days' testing budget"},
                     "weakest": {
                       "description": "its weakest lift by trading day over the days, at the review's level",
                       "oneOf": [

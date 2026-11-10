@@ -63,7 +63,12 @@ from krx_quant.scheduled import (
     revision_job_name,
     revision_turn,
 )
-from krx_quant.scheduled.prevalidations import Turn, prevalidations_quiet, revisions_quiet
+from krx_quant.scheduled.prevalidations import (
+    _PREVALIDATION_NOTE,
+    Turn,
+    prevalidations_quiet,
+    revisions_quiet,
+)
 from krx_quant.touch import TARGET_VERSION
 from tests.fake_github import REPO, TOKEN, fake_github
 from tests.scheduled_doubles import (
@@ -168,7 +173,7 @@ def test_each_job_prevalidates_its_algorithm_and_posts_on_204() -> None:
         assert listed.label == ("ready-for-agent",)
         # Neyman's result asks the agent to summarise its diagnostics on #283; the others' do not.
         assert ("#283에 요약한다" in listed.targets[0].note) == (name == "neyman")
-        assert listed.targets[0].note.startswith("통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로")
+        assert listed.targets[0].note.startswith("검사 다섯을 넘으면 같은 walk-forward 재생으로 승격을")
 
 
 # The conditions
@@ -394,9 +399,7 @@ async def test_in_turn_one_a_night_two_on_a_quiet_one_each_refusal_on_204_with_i
         "종료 코드 1 · 0초",
         "",
         "다시 돌리기: `docker compose run --rm engine prevalidate mandelbrot`",
-        "통과(`passed`)하면 엔진이 다음 봉 마감부터 수습으로 돌리고, 수습이 시작된 그 밤 "
-        "`simulate-bar-close-298`이 최근 녹화일로 수습을 시뮬레이션해 바로 판정한다(#298). "
-        "거부(`refused`)되면 같은 코드·정답 버전으로는 다시 돌지 않고, 고친 코드가 배포되면 다시 돈다.",
+        _PREVALIDATION_NOTE,
     ]
     assert (
         f"```\nmandelbrot: refused ({MIN_DAYS} recorded days)\n  stats: FAILED - weakest lift\n```" in first

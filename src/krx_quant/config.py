@@ -200,6 +200,11 @@ class Settings:
     probation_review_days: tuple[int, ...] = (10, 20, 40)  # days on probation it is judged on (#87)
     bench_review_days: tuple[int, ...] = (20, 40, 60)  # days on the bench it may recover on
     review_confidence: float = 0.983  # the lift-by-day interval's level those judgements need
+    # The promotion tests a family of recorded days may hold (#681, KRX_PROMOTION_BUDGET): each
+    # pre-validation's walk-forward replay judged for promotion on days another such test judged
+    # counts against it, and is held to 1 − (1 − review_confidence) / this (Bonferroni). Spent, a
+    # new algorithm goes on probation, judged forward on live days.
+    promotion_budget: int = 10
     # The target the engine learns and forecasts (KRX_TARGET_VERSION, #169): 3, the touch target
     # with crossed quotes counted (#160, #187), the only one. 2, the touch target with crossed
     # quotes dropped (the default from #170 to #187), and 1, the four-minute mid-point move (gone
@@ -500,6 +505,7 @@ class Settings:
             review_confidence=float(
                 number("KRX_REVIEW_CONFIDENCE", "0.983", float, minimum=0.5, maximum=0.9999)
             ),
+            promotion_budget=int(number("KRX_PROMOTION_BUDGET", "10", int, minimum=1, maximum=100)),
             target_version=_target_version(values.get("KRX_TARGET_VERSION", str(TOUCH_TARGET))),
             jobs_at=jobs_at,
             github_token=values.get("KRX_GITHUB_TOKEN", "").strip() or None,

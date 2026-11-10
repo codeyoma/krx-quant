@@ -8,7 +8,8 @@ engine has already enrolled run as before.
 
 The check replays the last ``PREVALIDATION_DAYS`` recorded trading days, one at a time,
 with every registered algorithm, into a database of its own
-(``state/prevalidation-<name>.sqlite3``): nothing reaches the official record. The
+(``state/prevalidation-<name>.sqlite3``): no prediction reaches the official record (the status
+its promotion test gives does, below). The
 algorithm is retrained before each day on its own window of the days before it
 (walk-forward), never on the day it predicts; the others run the models the server runs. One
 the engine does not run because its latest report refused the code, target and inputs it has
@@ -27,6 +28,33 @@ It passes when all of these hold:
 - **stats**: the leaderboard's statistics of the replay (the touch label, special
   predictions left out) have at least ``min_sample`` scored predictions and pairs with each
   baseline, and its weakest lift over the baselines is above 0.
+
+**Promotion** (#681). The same walk-forward replay is the test that makes a new bar-close algorithm
+active, in place of a probation waited for on live days (user decision 2026-11-10: judged on the
+past, not forward). Once the five checks pass, the candidate is judged as a probation review judges
+(``lifecycle``: its weakest lift over its kind's baselines by trading day, only the predictions of
+models trained on the target, with at least ``min_sample`` scored predictions and pairs), on the
+replayed days its model was trained for (``DayTrained``: a day its defaults predicted, with nothing
+to learn before it, is skipped, not scored), and passes when that lift's lower bound is above 0 at
+``promotion_level``: the reviews' level (``KRX_REVIEW_CONFIDENCE``, 98.3%) shared by Bonferroni among
+the tests a family of days may hold (``KRX_PROMOTION_BUDGET``, 10: 99.83%). Every test is kept
+(``state/prevalidations/promotion-attempts.jsonl``) with the days it judged; those before on any of
+the same days, of any algorithm, a revised version of the same one too, are its family
+(``family``): with ``budget`` of them already, it is not tested. The outcome (``Promotion``, the
+report's ``promotion``, its ``promotion`` check):
+
+- passed: **active** at once, in the engine's database (``_enroll``): its replay of the days judged
+  kept as its probation's (``simulation.keep_replayed``), as a simulated probation's review keeps it
+  (#298), so the active check of its first ten days reads them (#545); the engine runs it from its
+  next bar close;
+- failed: **refused** (the ``promotion`` check fails): it waits for new code, as any refusal;
+- not tested (fewer than ``MIN_DAYS`` days scored, the days' budget spent, too few scored to decide):
+  on a probation **judged forward** on live days (``lifecycle.FORWARD``), never simulated.
+
+An algorithm on a probation begun when its pre-validation passed before this (``REGISTERED``) is
+judged by it again (the scheduled job, ``scheduled/prevalidations.py``): passed, it is made active; not,
+it stays on probation. Those the engine runs with any other status, a revision's run and those
+registered before pre-validation are not judged by it.
 
 A direction algorithm may offer diagnostics (``contract.Diagnostics``, #283: Neyman's flips and
 its first model's probabilities): the walk-forward trains it through them (the same model), each
@@ -96,7 +124,7 @@ import inspect
 import json
 import logging
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time
 from functools import partial
 from pathlib import Path
@@ -132,7 +160,18 @@ from krx_quant.kind_stats import entry_json as kind_entry_json
 from krx_quant.kind_stats import leaderboard as kind_leaderboard
 from krx_quant.kind_stats import split as kind_split
 from krx_quant.kinds import DIRECTION, Kind, table_baselines
-from krx_quant.lifecycle import CLONE_CORRELATION, Standing, Status, correlations, most_correlated
+from krx_quant.lifecycle import (
+    CLONE_CORRELATION,
+    DIRECTION_SCORING,
+    FORWARD,
+    REGISTERED,
+    REPLAYED,
+    Standing,
+    Status,
+    _weakest_by_day,
+    correlations,
+    most_correlated,
+)
 from krx_quant.market_calendar import MarketCalendar, calendar_store
 from krx_quant.predictions import DB_NAME, PredictionStore, read_statuses
 from krx_quant.replay import recorded_events, replay_recorded, sqlite_files
@@ -227,14 +266,7 @@ def _record_run(state_dir: Path, result: Prevalidation) -> None:
         "weakest_lift": result.stats.weakest_lift,
         "day_low": result.stats.day_low,
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+") as f:
-        f.seek(0, 2)
-        if f.tell():  # a last line cut short (no newline) must not swallow this one
-            f.seek(f.tell() - 1)
-            if f.read(1) != "\n":
-                f.write("\n")
-        f.write(json.dumps(line) + "\n")
+    _append_line(path, line)
 
 
 def code_digest(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> str:
@@ -294,6 +326,9 @@ class LastReport:
     current: bool  # made with the code, and on the target, the algorithm runs now
     passed: bool
     days: int  # the recorded days it replayed
+    # What its walk-forward replay's promotion test made of it (#681, ``Promotion.outcome``); None in
+    # a report without one (before #681, or of a run that judges no promotion).
+    promotion: str | None = None
 
     @property
     def judged(self) -> bool:
@@ -320,11 +355,14 @@ def last_report(
     if made_at is not None and made_at.tzinfo is None:
         made_at = None  # not comparable with the scheduler's times
     days = report.get("days")
+    promotion = report.get("promotion")
+    outcome = promotion.get("outcome") if isinstance(promotion, Mapping) else None
     return LastReport(
         made_at=made_at,
         current=_stale(report, algorithm, target_version, kinds) is None,
         passed=report.get("passed") is True,
         days=len(days) if isinstance(days, list) else 0,
+        promotion=outcome if isinstance(outcome, str) else None,
     )
 
 
@@ -557,6 +595,9 @@ class Prevalidation:
     # The revision it judged (#454, ``prevalidate --revision``): its boundary and first day; None
     # for a first pre-validation.
     revision: dict[str, str] | None = None
+    # Its walk-forward replay's promotion test (#681); None for a run that judges none (a revision's,
+    # one registered before pre-validation, one the engine runs with another status).
+    promotion: Promotion | None = None
 
     @property
     def passed(self) -> bool:
@@ -591,7 +632,139 @@ class Prevalidation:
             out["diagnostics"] = self.diagnostics
         if self.revision is not None:
             out["revision"] = self.revision
+        if self.promotion is not None:
+            out["promotion"] = self.promotion.as_dict()
         return out
+
+
+# The promotion test (#681): see the module doc, "Promotion".
+ACTIVE, REFUSED, JUDGED_FORWARD = "active", "refused", "forward"  # ``Promotion.outcome``
+
+
+def promotion_level(confidence: float, budget: int) -> float:
+    """The two-sided level of the lift-by-day interval a promotion test is held to (#681): the
+    probation reviews' ``confidence`` shared among the ``budget`` tests a family of days may hold
+    (Bonferroni)."""
+    return 1 - (1 - confidence) / budget
+
+
+def attempts_path(state_dir: Path) -> Path:
+    """Every promotion test, a JSON line each, oldest first (#681): the days' budget is counted on it."""
+    return state_dir / "prevalidations" / "promotion-attempts.jsonl"
+
+
+def family(state_dir: Path, days: Sequence[date]) -> list[dict[str, Any]]:
+    """The promotion tests before that judged any of ``days`` (#681), oldest first: each one's
+    algorithm, code, time, outcome and how many of ``days`` it judged. Lines that cannot be read are
+    skipped."""
+    path = attempts_path(state_dir)
+    if not path.exists():
+        return []
+    asked = {d.isoformat() for d in days}
+    out = []
+    for line in path.read_text().splitlines():
+        try:
+            data = json.loads(line)
+            shared = len(set(data["days"]) & asked)
+            judged = {key: data[key] for key in ("algorithm", "code", "at", "outcome")}
+        except (ValueError, KeyError, TypeError):
+            continue
+        if shared:
+            out.append({**judged, "shared_days": shared})
+    return out
+
+
+def budget_lock_path(state_dir: Path) -> Path:
+    """The promotion budget's lock (#681, #684 review): held while a test reads its family, is judged
+    and is recorded."""
+    return state_dir / "prevalidations" / "promotion-attempts.lock"
+
+
+@contextlib.contextmanager
+def _budget_held(state_dir: Path) -> Iterator[None]:
+    """Hold the promotion budget's lock (``flock``, waiting for another holder): every algorithm's
+    pre-validation shares the budget, while ``_held`` locks one algorithm's only. The kernel lets it
+    go when the process ends."""
+    path = budget_lock_path(state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
+def _record_attempt(state_dir: Path, result: Prevalidation) -> None:
+    promotion = result.promotion
+    assert promotion is not None
+    line = {
+        "at": result.prevalidated_at.isoformat(),
+        "algorithm": result.algorithm,
+        "code": result.code,
+        "kind": result.kind,
+        "days": [d.isoformat() for d in promotion.judged_days],
+        "level": promotion.level,
+        "outcome": promotion.outcome,
+    }
+    _append_line(attempts_path(state_dir), line)
+
+
+def _append_line(path: Path, line: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+") as f:
+        f.seek(0, 2)
+        if f.tell():  # a last line cut short (no newline) must not swallow this one
+            f.seek(f.tell() - 1)
+            if f.read(1) != "\n":
+                f.write("\n")
+        f.write(json.dumps(line) + "\n")
+
+
+@dataclass(frozen=True)
+class Promotion:
+    """A pre-validation's promotion test (#681): what it made of the candidate (``outcome``: ACTIVE,
+    REFUSED, or JUDGED_FORWARD, on a probation judged on live days), why, and what it was judged on."""
+
+    algorithm: str
+    code: str  # the digest of the code it judged
+    outcome: str
+    detail: str
+    tested: bool  # judged, against its days' budget; not: it could not be (too few days, the budget spent)
+    level: float  # the two-sided level its lift by trading day is held to (``promotion_level``)
+    budget: int  # the tests its days' family may hold (``Settings.promotion_budget``)
+    days: list[dict[str, Any]]  # each replayed day's training (``DayTrained.as_dict``)
+    family: list[dict[str, Any]]  # the tests before on any of the days it judged (``family``)
+    on_probation: bool  # on a probation begun before #681, judged again: a fail leaves it there
+    judged_days: list[date] = field(default_factory=list)  # the days scored: its model was trained
+    scored: int = 0  # its scored predictions on them
+    enough: bool = False  # enough of them, and pairs, to decide on (``stats.enough``)
+    weakest: dict[str, Any] | None = None  # its weakest lift by trading day, and which baseline's
+
+    @property
+    def earlier_versions(self) -> list[dict[str, Any]]:
+        """Of ``family``, the tests of the same algorithm with other code: a revised algorithm judged
+        again on days its earlier version was judged on (they count against the budget too)."""
+        return [d for d in self.family if d.get("algorithm") == self.algorithm and d.get("code") != self.code]
+
+    def check(self) -> Check:
+        """The report's ``promotion`` check: failed only when it refused the candidate."""
+        return Check("promotion", self.outcome != REFUSED, self.detail)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "outcome": self.outcome,
+            "detail": self.detail,
+            "tested": self.tested,
+            "level": self.level,
+            "budget": self.budget,
+            "attempt": len(self.family) + 1 if self.tested else None,
+            "family": self.family,
+            "earlier_versions": self.earlier_versions,
+            "on_probation": self.on_probation,
+            "judged_days": [d.isoformat() for d in self.judged_days],
+            "scored": self.scored,
+            "enough": self.enough,
+            "weakest": self.weakest,
+            "days": self.days,
+        }
 
 
 class PrevalidationRunning(Exception):
@@ -689,7 +862,7 @@ async def prevalidate(
         measured = _measured(candidate) if kind is None else None  # a direction algorithm's (#283)
         # The days the nights stored (#370) are keyed by what every registry reads.
         night = night_reads(algorithms, kind_algorithms, kinds)
-        models = await _replay(
+        trained = await _replay(
             settings,
             candidate,
             kind,
@@ -702,6 +875,7 @@ async def prevalidate(
             measured,
             night,
         )
+        models = {d: how.model for d, how in trained.items()}
         seed_history(settings.state_dir, name)
         before, on_days = earlier_runs(settings.state_dir, name, replayed)
         tries = on_days + 1  # this run among those on any of these days: the bar it is held to
@@ -724,6 +898,23 @@ async def prevalidate(
                 "since": (since or replayed[0]).isoformat(),
             }
             result = replace(result, revision=bound)
+        # The promotion test (#681): a new one, or one on a probation begun before it, is judged as
+        # its probation would be, on this walk-forward replay.
+        standing = None if revision is not None else _promotable(settings, name)
+        if standing is not None:
+            tested = DayUsage(Meter())  # it reads the candidate's and the baselines' rows again
+            # The budget is every algorithm's: its family read, the test and its record under one
+            # lock, so two pre-validations on the same days at once (by hand beside the night's)
+            # cannot both be its first test. Recorded before the report: a stop in between counts it
+            # once more, never once less.
+            with _budget_held(settings.state_dir), tested.phase("promotion"):
+                promotion = _promotion(settings, candidate, kind, trained, db, result, standing.on_probation)
+                result = replace(result, promotion=promotion)
+                if promotion.tested:
+                    _record_attempt(settings.state_dir, result)
+            log.info("%s: memory of the promotion test: %s", name, tested.line())
+            if result.checks and all(c.passed for c in result.checks):
+                result = replace(result, checks=[*result.checks, promotion.check()])
         path = report_path(settings.state_dir, name)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
@@ -732,6 +923,8 @@ async def prevalidate(
         # counts it once more, never once less (a rerun on the same days must not look fresh).
         _record_run(settings.state_dir, result)
         tmp.replace(path)
+        if result.promotion is not None and standing is not None:
+            _enroll(settings, candidate, kind, result, result.promotion, db, now)
         return result
 
 
@@ -747,19 +940,27 @@ async def _replay(
     db: Path,
     measured: _Measured | None = None,
     night: NightReads | None = None,
-) -> dict[date, str]:
+) -> dict[date, DayTrained]:
     """Replay each day into ``db``, the candidate trained on the days before it (on its kind's
-    answers, #179); the version it predicted each day with. With ``measured`` (#283), the
-    candidate is trained by its diagnostics' fit, and they are given each replayed day's samples
-    and the model that predicted it. The recorded days are read from the sample store when a
-    night stored them, by ``night``'s key (#370)."""
+    answers, #179); how it was trained for each day (#681: the version it predicted the day with,
+    its window's days). With ``measured`` (#283), the candidate is trained by its diagnostics' fit,
+    and they are given each replayed day's samples and the model that predicted it. The recorded
+    days are read from the sample store when a night stored them, by ``night``'s key (#370)."""
     calendar = calendar_store(settings).calendar
     leaders = Leaders.of(settings)
     everyone: list[Algorithm | KindAlgorithm] = [*algorithms, *kind_algorithms]
     running = load_models(settings.state_dir, [a for a in everyone if a is not candidate])
     fit = None if measured is None else measured.fit
     trainer = _WalkForward(settings, candidate, available, calendar, leaders, kind, fit, night)
-    versions: dict[date, str] = {}
+    target = settings.target_version if kind is None else kind.answer_version
+    recorded: dict[date, bool] = {}  # each window day's, read once
+
+    def was_recorded(d: date) -> bool:
+        if d not in recorded:
+            recorded[d] = is_recorded(settings.data_dir, d, settings.symbols)
+        return recorded[d]
+
+    trained: dict[date, DayTrained] = {}
     meter = Meter()
     for n, day in enumerate(replayed, 1):
         usage = DayUsage(meter)  # its memory, logged (#383)
@@ -767,7 +968,13 @@ async def _replay(
             model = trainer.before(day)
             climate = trainer.climate_before(day)
             tables = trainer.tables_before(day)  # its kind's baselines' (#180)
-        versions[day] = model.version
+        window = [d for d in available if d < day][-candidate.training_days :]
+        trained[day] = DayTrained(
+            model.version,
+            len(window),
+            sum(1 for d in window if was_recorded(d)),
+            model.target_version == target,
+        )
         with usage.phase("replay"):
             await _replay_day(
                 settings,
@@ -788,7 +995,30 @@ async def _replay(
                 # alone is read for this).
                 measured.day(day, model, partial(trainer.samples_on, day))
         log.info("%s: memory on %s (day %d of %d): %s", candidate.name, day, n, len(replayed), usage.line())
-    return versions
+    return trained
+
+
+@dataclass(frozen=True)
+class DayTrained:
+    """How the candidate was trained before a replayed day (#681): the version of the model it
+    predicted the day with; its window's days before the day (``training_days`` of them at most,
+    backfilled ones too) and of them the recorded ones; and whether the model was trained on its
+    target. Not (nothing to learn before the day: its defaults predicted, which never count), the day
+    is skipped by the promotion test, not scored."""
+
+    model: str
+    training_days: int
+    recorded: int
+    trained: bool
+
+    def as_dict(self, day: date) -> dict[str, Any]:
+        return {
+            "day": day.isoformat(),
+            "model": self.model,
+            "training_days": self.training_days,
+            "recorded": self.recorded,
+            "scored": self.trained,
+        }
 
 
 async def _replay_day(
@@ -992,6 +1222,183 @@ def _judge_kind(
         target_version=kind.answer_version,
         kind=kind.name,
     )
+
+
+@dataclass(frozen=True)
+class _Promotable:
+    """A candidate the promotion test judges (#681): new (no status), or on a probation begun when its
+    pre-validation passed before #681 (``REGISTERED``), from ``stint``."""
+
+    on_probation: bool
+    stint: datetime | None = None
+
+
+def _promotable(settings: Settings, name: str) -> _Promotable | None:
+    """Whether ``name``'s pre-validation judges its promotion (#681), by the engine's statuses (read
+    without writing): not one registered before pre-validation (it runs without a report), nor one the
+    engine runs with any other status (active, on the bench, a clone, retired, on a probation of new
+    code, a new target or judged forward)."""
+    if name in REGISTERED_BEFORE:
+        return None
+    standing = read_statuses(settings.state_dir / DB_NAME).get(name)
+    if standing is None:
+        return _Promotable(False)
+    if standing.status is Status.PROBATION and standing.reason == REGISTERED:
+        return _Promotable(True, standing.since)
+    return None
+
+
+def _promotion(
+    settings: Settings,
+    candidate: Algorithm | KindAlgorithm,
+    kind: Kind | None,
+    trained: Mapping[date, DayTrained],
+    db: Path,
+    result: Prevalidation,
+    on_probation: bool,
+) -> Promotion:
+    """The candidate's promotion test (#681) on its replay in ``db``: judged as a probation review
+    judges, on the days its model was trained (``DayTrained.trained``), held to its days' share of
+    the budget. Passed, it is active at once; failed, refused (one on probation stays there, judged
+    forward); not judged (its checks refused it, too few days scored, its days' budget spent, too few
+    scored predictions), on a probation judged forward on live days."""
+    budget = settings.promotion_budget
+    level = promotion_level(settings.review_confidence, budget)
+    days = sorted(trained)
+    scored = [d for d in days if trained[d].trained]
+    before = family(settings.state_dir, scored)
+    untested = REFUSED if not on_probation else JUDGED_FORWARD
+    base = partial(
+        Promotion,
+        candidate.name,
+        result.code,
+        level=level,
+        budget=budget,
+        days=[trained[d].as_dict(d) for d in days],
+        family=before,
+        on_probation=on_probation,
+        judged_days=scored,
+    )
+    forward = "judged forward on live days"
+    if not all(c.passed for c in result.checks):
+        return base(untested, "not tested: its checks refused it", False)
+    if len(scored) < MIN_DAYS:
+        why = f"not tested: {len(scored)} days with a trained model, fewer than {MIN_DAYS}; {forward}"
+        return base(JUDGED_FORWARD, why, False)
+    if len(before) >= budget:
+        spent = f"{len(before)} of {budget} tests judged them"
+        return base(JUDGED_FORWARD, f"not tested: these days' budget is spent ({spent}); {forward}", False)
+    judged = _promotion_stats(settings, candidate, kind, scored, db, level)
+    weakest = _weakest_by_day(judged)
+    n, decided = judged.summary.n, enough(judged, settings.min_sample)
+    if not decided or weakest is None:
+        few = f"{n} scored, at least {settings.min_sample}"
+        return base(JUDGED_FORWARD, f"not tested: too few to decide ({few}); {forward}", False, scored=n)
+    baseline, lift = weakest
+    low = "-" if lift.low is None else f"{lift.low:.4f}"
+    detail = (
+        f"weakest lift by trading day vs {baseline} {lift.value:.4f}, low {low} at {level:.2%}"
+        f" ({lift.n} days scored); test {len(before) + 1} of {budget} on these days"
+    )
+    lifted = {"baseline": baseline, "n": lift.n, "value": lift.value, "low": lift.low, "high": lift.high}
+    judging = partial(base, tested=True, scored=n, enough=True, weakest=lifted)
+    if lift.low is not None and lift.low > 0:
+        return judging(ACTIVE, f"{detail}: active")
+    if on_probation:
+        return judging(JUDGED_FORWARD, f"{detail}: not passed, it stays on probation")
+    return judging(REFUSED, f"{detail}: not passed")
+
+
+def _promotion_stats(
+    settings: Settings,
+    candidate: Algorithm | KindAlgorithm,
+    kind: Kind | None,
+    days: Sequence[date],
+    db: Path,
+    level: float,
+) -> Lifted:
+    """The candidate's stats against its kind's baselines on ``days`` of its replay, as a probation
+    review measures them (``lifecycle.Scoring.measure``: only the predictions of models trained on
+    the target, its lifts by trading day at ``level``); its rows and the baselines' only are read."""
+    store = PredictionStore(db)
+    try:
+        if kind is None:
+            scoring = DIRECTION_SCORING
+            names = {b.name for b in TOUCH_BASELINES}
+            rows = store.reviewed(days, False, {candidate.name, *names})
+        else:
+            scoring = kind_scoring(kind)
+            names = {b.name for b in kind.baselines}
+            wanted = {candidate.name, *names}
+            rows = [
+                r
+                for r in store.kind_reviewed(kind.name, kind.answer_version, days, False)
+                if r["algorithm"] in wanted
+            ]
+    finally:
+        store.close()
+    rows = on_target(rows, names, scoring.target_version)
+    return scoring.measure(candidate.name, rows, names, settings.fee_rate, level)
+
+
+def _enroll(
+    settings: Settings,
+    candidate: Algorithm | KindAlgorithm,
+    kind: Kind | None,
+    result: Prevalidation,
+    promotion: Promotion,
+    db: Path,
+    now: datetime,
+) -> None:
+    """What the promotion test made of the candidate, in the engine's database (#681), as a simulated
+    probation's review keeps it (#298): made active, its replay of the days judged kept as its
+    probation's (the active check of its first days reads them, #545) and the change marked
+    ``simulated``; on a probation judged forward (never simulated: ``lifecycle.starts_simulation``).
+    A new one is enrolled first. The engine runs it from its next bar close. Nothing is written for a
+    refusal, nor for one whose status changed since the test began."""
+    from krx_quant.simulation import WALK_FORWARD, keep_replayed  # it imports this module
+
+    name = candidate.name
+    store = PredictionStore(settings.state_dir / DB_NAME)
+    try:
+        standing = store.statuses().get(name)
+        fresh = standing is None
+        if not fresh and not (
+            standing is not None and standing.status is Status.PROBATION and standing.reason == REGISTERED
+        ):
+            log.info("%s: its status changed meanwhile; the promotion test is not applied", name)
+            return
+        if promotion.outcome == REFUSED or (promotion.outcome == JUDGED_FORWARD and not fresh):
+            return
+        if fresh:
+            # Judged forward until made active below: a stop in between leaves it there.
+            reason = FORWARD if promotion.outcome == ACTIVE else f"{FORWARD}: {promotion.detail}"
+            store.add_status(name, now, None, Status.PROBATION, reason)
+            log.info("%s: enrolled on probation (%s)", name, reason)
+            if promotion.outcome != ACTIVE:
+                return
+        stint = now if standing is None else standing.since
+        days = promotion.judged_days
+        run = store.add_simulation_run(now, WALK_FORWARD, days)
+        keep_replayed(store, db, run, [(name, kind)], days)
+        changed = f"{REPLAYED} {days[0]}..{days[-1]} ({len(days)} days): {promotion.detail}"
+        review = {
+            "days": len(days),
+            "review_day": None,
+            "scored": promotion.scored,
+            "enough": promotion.enough,
+            "weakest": promotion.weakest,
+            "level": promotion.level,
+            "status": Status.ACTIVE.value,
+            "reason": changed,
+        }
+        training = {"cadence": WALK_FORWARD, "models": {d.isoformat(): m for d, m in result.models.items()}}
+        kind_name = DIRECTION if kind is None else kind.name
+        store.add_simulation(name, stint, kind_name, run, now, {"training": training, "review": review})
+        if store.change_status(name, now, Status.PROBATION, Status.ACTIVE, changed, simulated=True):
+            log.info("%s: probation -> active (%s)", name, changed)
+    finally:
+        store.close()
 
 
 def _checks(
