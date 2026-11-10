@@ -31,7 +31,12 @@ narrow the capital, never widen it (#393).
 - ``KRX_TRADER_MOCK_PRACTICE_SPACING_MINUTES`` (#598): the least minutes between two practice buys,
   from the bar close of the day's last practice buy order to the next one's (15 unless set; from 0,
   which spaces none: ``book.spaced``). The practice's pace, no risk rule: ``.env`` may set it either
-  way. Read in every mode, used with the practice alone.
+  way. Read in every mode, used with the practice alone; the verdict policy's buys are spaced by it
+  too (#677).
+- ``KRX_TRADER_MOCK_VERDICT`` (#677): ``on`` or ``off``; unset, ``on`` in mock mode and ``off`` in the
+  others. On a day no champion cell trades, the mock book trades the engine's verdict too
+  (``verdicts.py``), sized by the loss budget. For ``KRX_TRADER_MODE=mock`` alone: ``on`` with ``paper``
+  or ``live`` is a configuration error, as the practice's. ``off`` narrows what the trader does.
 
 ``KRX_TRADER_KIND`` and ``KRX_TRADER_PREDICTOR`` (#394: the one cell traded) are gone: the cost map
 picks the cells (#395). One still set is not read, and since #644 nothing says so: in the 14 days
@@ -89,6 +94,8 @@ class TraderSettings:
     # this many minutes apart at least (#598).
     mock_practice: bool = False
     practice_spacing_minutes: float = PRACTICE_SPACING.total_seconds() / 60
+    # The mock book trades the engine's verdict on a day no champion cell trades (#677, ``verdicts.py``).
+    mock_verdict: bool = False
 
     @classmethod
     def from_env(
@@ -138,6 +145,14 @@ class TraderSettings:
                 f"KRX_TRADER_MOCK_PRACTICE=on is for KRX_TRADER_MODE=mock alone, not {mode} (#427): the"
                 " practice trades order on KIS's mock server only"
             )
+        verdict = values.get("KRX_TRADER_MOCK_VERDICT", "").strip().lower() or (ON if mode == MOCK else OFF)
+        if verdict not in (ON, OFF):
+            raise SettingsError(f"KRX_TRADER_MOCK_VERDICT must be on or off, got {verdict!r}")
+        if verdict == ON and mode != MOCK:
+            raise SettingsError(
+                f"KRX_TRADER_MOCK_VERDICT=on is for KRX_TRADER_MODE=mock alone, not {mode} (#677): the"
+                " verdict's trades order on KIS's mock server only"
+            )
         spacing = float(
             _number(
                 values,
@@ -162,6 +177,7 @@ class TraderSettings:
             engine_url=engine_url,
             mock_practice=practice == ON,
             practice_spacing_minutes=spacing,
+            mock_verdict=verdict == ON,
         )
 
 

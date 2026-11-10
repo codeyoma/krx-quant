@@ -5,7 +5,8 @@ the same predictions and the same quotes make the same decisions in each, and a 
 changed for all of them. What each rule does is in the paper book's module doc (``paper.py``), which
 applies them all.
 
-- **The entry** (``plan``): whether a prediction read may buy, and its barriers.
+- **The entry** (``plan``): whether a prediction read may buy, and its barriers; a verdict's
+  (``plan_verdict``, #677: the verdict policy, ``verdicts.py``).
 - **The priority** (``admit``, ``settle``): a rise waits for the cells ranked above it.
 - **Why not now** (``not_now``, ``held_off``): the book's status, a stall, what it holds or waits to
   buy (``Taken``: the cell and bar close, for ``outranked``; a reason of the book's own, such as the KIS
@@ -73,8 +74,11 @@ TARGET_REACHED, NO_QUOTE, RESTARTED = "target_reached", "no_quote", "restarted"
 # A buy below one share, or its stop not below the ask, takes none: ``money.NO_SHARES``, ``BAD_STOP``.
 # The risk rules hold new buys (#471, ``risk_held``): the day's buy orders, the losses in a row.
 BUY_LIMIT, COOLING_DOWN = "buy_limit", "cooldown"
-# A practice buy too soon after the day's last (#598, ``spaced``).
+# A practice buy too soon after the day's last (#598, ``spaced``); a verdict buy likewise (#677).
 SPACING = "spacing"
+# Why a verdict bought nothing (#677, ``plan_verdict``): it said WAIT, or SELL. A SELL that exits a
+# verdict trade sells it with the same reason (``paper.py``).
+VERDICT_WAIT, VERDICT_SELL = "verdict_wait", "verdict_sell"
 BUY, SKIP = "buy", "skip"
 # The status of a prediction the engine did not make for a VI (``engine._record_not_predicted``), and
 # for a market halt (#625).
@@ -184,6 +188,39 @@ def plan(
         return SPECIAL
     move = signal.width * signal.tick
     return Plan(signal.anchor + move, signal.anchor - move, barrier)
+
+
+def plan_verdict(
+    signal: Signal,
+    rules: Rules,
+    session: Session | None,
+    at: datetime,
+    special: Sequence[Window] = (),
+) -> Plan | str:
+    """A verdict read at ``at`` (#677, ``verdicts.py``), with the special windows known then: a BUY's
+    barriers, the verdict's own target, stop and deadline; or why it buys nothing: ``stale`` (as a
+    prediction), ``verdict_wait``, ``verdict_sell``, ``no_reference`` (a BUY without its barriers),
+    ``expired``, and the session's and the special windows' reasons as ``plan``'s."""
+    call = signal.call
+    if call is None:
+        return NOT_OK
+    if at - signal.displayed_at > rules.fresh:
+        return STALE
+    if not call.buys:
+        return VERDICT_SELL if call.sells else VERDICT_WAIT
+    if call.target is None or call.stop is None or call.deadline is None:
+        return NO_REFERENCE
+    if at >= call.deadline:
+        return EXPIRED
+    if session is None:
+        return CLOSED
+    if signal.bar_close < session.open + rules.entry_after_open:
+        return BEFORE_ENTRY
+    if call.deadline > session.closing_auction - rules.exit_before_auction:
+        return PAST_LAST_EXIT
+    if touching(special, signal.symbol, signal.bar_close, call.deadline):
+        return SPECIAL
+    return Plan(call.target, call.stop, call.deadline)
 
 
 @dataclass(frozen=True)

@@ -44,6 +44,7 @@ from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import kind_named
@@ -51,6 +52,9 @@ from krx_quant.kinds import DIRECTION, Kind
 from krx_quant.pricing import tick_size
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
+
+if TYPE_CHECKING:
+    from krx_quant.trader.verdicts import Call, VerdictReader
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +89,8 @@ class Signal:
     horizon: timedelta  # the kind's: the time barrier is the bar close plus it
     blocked: str | None = None  # why the engine blocked a final consensus (#88)
     model_version: str | None = None  # the model that made it (#469)
+    # The engine's verdict it is (#677, ``verdicts.py``): a verdict policy's horizon, not a prediction.
+    call: Call | None = None
 
     @property
     def rise_probability(self) -> float | None:
@@ -214,22 +220,34 @@ def _rise(kind: Kind) -> int:
 
 class EngineReader:
     """The engine's database, read-only at each read: the followed cells' new predictions of
-    ``symbol`` and the special windows kept that touch it."""
+    ``symbol`` and the special windows kept that touch it. The verdict policy's cells (#677) are read
+    together, from the engine's verdicts (``verdicts.VerdictReader``)."""
 
     def __init__(self, path: Path, symbol: str) -> None:
         self.path = path
         self.symbol = symbol
         self._readers: dict[Cell, CellReader] = {}
+        self._verdict: VerdictReader | None = None
         self._missing = False
 
     @property
     def cells(self) -> list[Cell]:
-        return list(self._readers)
+        from krx_quant.trader.verdicts import CELLS
+
+        return [*self._readers, *(CELLS if self._verdict is not None else ())]
 
     def follow(self, cells: Iterable[Cell], since: datetime) -> None:
         """Read ``cells`` from now on: one already followed goes on from where it was, a new one
-        from the predictions of bar closes after ``since``; the others are no longer read."""
-        self._readers = {c: self._readers.get(c) or CellReader(c, self.symbol, since) for c in cells}
+        from the predictions of bar closes after ``since``; the others are no longer read. The
+        verdict policy's cells, any of them, follow the verdicts (#677)."""
+        from krx_quant.trader import VERDICT
+        from krx_quant.trader.verdicts import VerdictReader
+
+        cells = list(cells)
+        verdict = any(c.predictor == VERDICT for c in cells)
+        self._verdict = (self._verdict or VerdictReader(self.symbol, since)) if verdict else None
+        followed = [c for c in cells if c.predictor != VERDICT]
+        self._readers = {c: self._readers.get(c) or CellReader(c, self.symbol, since) for c in followed}
 
     def read(self, windows_since: datetime) -> tuple[list[Window], list[Signal]] | None:
         """The special windows kept that end after ``windows_since``, and the followed cells' new
@@ -244,6 +262,8 @@ class EngineReader:
         try:
             windows = special_windows(db, self.symbol, windows_since)
             signals = [s for reader in self._readers.values() for s in reader.read(db)]
+            if self._verdict is not None:
+                signals += self._verdict.read(db)
         finally:
             db.close()
         signals.sort(key=lambda s: (s.bar_close, s.displayed_at))

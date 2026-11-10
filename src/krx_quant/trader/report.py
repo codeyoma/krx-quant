@@ -539,20 +539,37 @@ def _sources(
     challengers: Sequence[int],
 ) -> tuple[Source, ...]:
     """Each decision source's trades entered on ``day`` (#560, ``Source``): the champion's book (of
-    ``mode``) always; the mock book's practice when it traded; the champion policy's paper shadow on a
-    KIS day; each challenger running that day. A store from before a column has none of what it
-    tells apart (a practice, a shadow, a challenger)."""
+    ``mode``) always; the mock book's practice when it traded; the mock book's verdict trades, each
+    version of the verdict apart, when it traded (#677); the champion policy's paper shadow on a KIS
+    day; each challenger running that day. A store from before a column has none of what it tells
+    apart (a practice, a verdict, a shadow, a challenger)."""
     columns = _columns(db, "trades")
     champions, practised = champion_of(db), practice_of(db)
+    verdicts: list[int] = []
+    unverdicted = ""
+    if "verdict_version" in columns:
+        unverdicted = " AND t.verdict_version IS NULL"
+        verdicts = [
+            int(r[0])
+            for r in db.execute(
+                "SELECT DISTINCT t.verdict_version FROM trades t WHERE t.mode = ?"
+                " AND substr(t.entry_at, 1, 10) = ? AND t.verdict_version IS NOT NULL ORDER BY 1",
+                (mode, day.isoformat()),
+            )
+        ]
     wanted: list[tuple[str, str, str, tuple[Any, ...], bool]] = [
         (
             "챔피언 없음" if champion is None else f"챔피언 정책 {champion}",
             mode,
-            f"{champions} AND NOT {practised}",
+            f"{champions} AND NOT {practised}{unverdicted}",
             (),
             True,
         ),
         ("연습(KIS 모의)", mode, f"{champions} AND {practised}", (), False),
+        *(
+            (f"판정 v{v}(KIS 모의)", mode, f"{champions} AND t.verdict_version = ?", (v,), False)
+            for v in verdicts
+        ),
     ]
     if mode in KIS_MODES and "shadow" in columns:
         whose = "" if champion is None else f"챔피언 정책 {champion}, "

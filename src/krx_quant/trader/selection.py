@@ -68,7 +68,7 @@ from typing import Any
 
 import aiohttp
 
-from krx_quant.trader import COST_MAP_PERIOD, ROLES, SYMBOL, TRADED_KINDS
+from krx_quant.trader import COST_MAP_PERIOD, ROLES, SYMBOL, TRADED_KINDS, VERDICT
 from krx_quant.trader.cells import Cell
 
 log = logging.getLogger(__name__)
@@ -141,6 +141,11 @@ class Pick:
         return Cell(self.kind, self.predictor)
 
     @property
+    def verdict(self) -> bool:
+        """Whether it is a horizon of the verdict policy (#677, ``verdicts.py``), not a cell's pick."""
+        return self.role == VERDICT
+
+    @property
     def priority(self) -> float | None:
         """Its hit rate's lower bound less p*; None without either."""
         return None if self.low is None or self.p_star is None else self.low - self.p_star
@@ -208,8 +213,18 @@ class Selection:
         """Whether its picks are the practice cell (#427, ``desk.Desk``): no champion cell trades."""
         return any(p.practice for p in self.picks)
 
+    @property
+    def on_verdict(self) -> bool:
+        """Whether its picks hold the verdict policy's horizons (#677, ``verdicts.py``): no champion
+        cell trades."""
+        return any(p.verdict for p in self.picks)
+
     def describe(self) -> str:
         """A line for the log."""
+        if self.on_verdict:
+            rest = replace(self, picks=tuple(p for p in self.picks if not p.verdict)).describe()
+            kinds = ", ".join(p.kind for p in self.picks if p.verdict)
+            return f"the verdict on {kinds}, sized by the loss budget; then {rest}"
         if self.practising:
             why = replace(self, picks=()).describe()
             p = self.picks[0]

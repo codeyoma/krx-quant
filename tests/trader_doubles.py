@@ -56,6 +56,7 @@ from krx_quant.trader.store import (
     read_trades,
     request_pause,
 )
+from krx_quant.verdict import VERDICT_VERSION, Held, Horizon, Market, Member, verdict
 from tests.server_doubles import free_port
 
 DAY = (2026, 10, 14)  # a Wednesday: the calendar guesses it trades, 09:00 to 15:30
@@ -223,12 +224,46 @@ class Special:
 
 
 @dataclass(frozen=True)
+class Said:
+    """The engine's verdict of 005930 at a bar close (#676), made by ``verdict.verdict`` from one horizon
+    of ``minutes`` with one member saying ``p`` (up first, timeout, down first), its width ``w`` ticks
+    about the mid-point ``anchor`` (tick 100), the best quote ``bid`` / ``ask`` then and the trader's
+    position ``held``; kept ``shown`` seconds after the bar close, as the engine keeps it."""
+
+    bar_close: str
+    p: tuple[float, float, float] = (0.7, 0.2, 0.1)
+    minutes: int = 15
+    w: int = 5
+    anchor: float = 70_050.0
+    bid: float = 70_000.0
+    ask: float = 70_100.0
+    held: Held | None = None
+    shown: float = 3.0
+    version: int = VERDICT_VERSION
+
+    def made(self) -> dict[str, Any]:
+        """The verdict as ``GET /v1/verdict`` serves it."""
+        kind = "barrier" if self.minutes == 4 else f"barrier_{self.minutes}m"
+        horizon = Horizon(kind, self.minutes, self.w, [Member("breiman", kind, "probation", 40, self.p)])
+        market = Market(self.anchor, self.bid, self.ask, FEE)
+        return verdict(SYMBOL, at(self.bar_close), [horizon], market, self.held).as_json()
+
+    def write(self, store: PredictionStore) -> None:
+        body = self.made()
+        close = at(self.bar_close)
+        store.add_verdicts(
+            [(SYMBOL, close, self.version, body["verdict"], body | {"version": self.version})],
+            close + timedelta(seconds=self.shown),
+        )
+
+
+@dataclass(frozen=True)
 class Read:
     """The engine displays ``shown`` (or learns a special window); the trader reads its database
     at ``hms``."""
 
     hms: str
-    shown: Sequence[Barrier | Direction | Special] = ()
+    shown: Sequence[Barrier | Direction | Special | Said] = ()
 
     @property
     def time(self) -> datetime:

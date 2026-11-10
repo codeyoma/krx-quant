@@ -138,6 +138,13 @@ class Alerts:
         re-arms, #396), sent and not waited for."""
         self._send(f"[알림] {text}")
 
+    def trade(self, text: str) -> None:
+        """A trade the trader made (#677: the mock book's verdict trades, ``[buy]`` or ``[sell]``), sent as
+        it is and not waited for; logged at INFO, being no warning."""
+        log.info("alert: %s", text)
+        if self._url is not None:
+            self._enqueue(text)
+
     def signal(self, text: str) -> None:
         """A prediction signal (``signals.py``), sent and not waited for."""
         self._send(f"[신호] {text}")

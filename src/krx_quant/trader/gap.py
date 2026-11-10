@@ -27,6 +27,9 @@ champion policy's trade of the day is in exactly one pair (``pairing``): a predi
 holds more than once (it should not: a book decides a prediction once) pairs none of them, each
 one-sided, so that no trade is dropped unseen.
 
+**The verdict** (#677, ``verdicts.py``). The mock book's verdict trades (``store.VERDICT_TRADE``) are
+left out too: the verdict has no paper shadow, and its legs are measured as the practice's are.
+
 > **바뀜** (2026-11-05, #557): a pair was of one book, the practice trades against the practice
 > shadow's (each pair's ``practice``), and ``Pairing.alone`` counted the KIS trades the live mode's gap
 > check did not measure → the practice is left out and the pairs have no ``practice``. 이유: the
@@ -53,13 +56,15 @@ Key = tuple[str, str, int, str]  # the prediction
 
 def _trades(db: sqlite3.Connection, mode: str, days: Iterable[date]) -> tuple[list[Any], list[Any]]:
     """``mode``'s champion trades entered on ``days`` and the champion policy's paper shadow's, oldest
-    first: none of the practice (#548, module doc)."""
+    first: none of the practice (#548, module doc), nor of the verdict (#677)."""
     wanted = sorted({d.isoformat() for d in days})
     columns = {r[1] for r in db.execute("PRAGMA table_info(trades)")}
     if "shadow" not in columns or not wanted:
         return [], []
     # A store the trader has not opened since #427 holds no practice trade.
     unpractised = " AND coalesce(practice, 0) = 0" if "practice" in columns else ""
+    # Nor one opened before #677 a verdict trade.
+    unpractised += " AND verdict_version IS NULL" if "verdict_version" in columns else ""
     marks = ",".join("?" * len(wanted))
     kis = db.execute(
         f"SELECT {_COLUMNS} FROM trades t WHERE mode = ? AND coalesce(champion, 1) = 1{unpractised}"

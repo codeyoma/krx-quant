@@ -123,7 +123,7 @@ from typing import TYPE_CHECKING, Any
 
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, Session
-from krx_quant.trader import KIS_MODES, MOCK, PAPER, policy, promotion, review
+from krx_quant.trader import KIS_MODES, MOCK, PAPER, VERDICT, policy, promotion, review
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.db import iso, reading
 from krx_quant.trader.gap import day_gap
@@ -417,6 +417,11 @@ _ADDED = {
         ("decided_mid", "REAL"),
         ("sale_at", "TEXT"),
         ("sale_mid", "REAL"),
+        # A verdict trade (#677, ``verdicts.py``): the version of the verdict's rules that opened it
+        # (``verdict.VERDICT_VERSION``, ``VERDICT_TRADE``) and that verdict (JSON, ``verdicts.Call.opened``).
+        # Null for every other trade, and before #677.
+        ("verdict_version", "INTEGER"),
+        ("verdict", "TEXT"),
     ),
     "unfilled_buys": (
         ("practice", "INTEGER"),  # 1: a practice buy (#427); null or 0 otherwise
@@ -496,6 +501,10 @@ SHADOW_TRADE = "coalesce(t.shadow, 0) = 1"
 # trader's own: the cash, the risk rules and the KIS checks count it) or its paper shadow's
 # (``shadow`` 1). Of no policy: no record counts it; since #533 no loss limit either.
 PRACTICE_TRADE = "coalesce(t.practice, 0) = 1"
+# A verdict trade ``t`` (#677, ``verdicts.py``): the mock book's on the engine's verdict (``champion`` 1,
+# the trader's own: the cash, the loss limits, the risk rules and the KIS checks count it), of no
+# policy (no record counts it); the verdict's version that opened it is kept on it.
+VERDICT_TRADE = "t.verdict_version IS NOT NULL"
 
 BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
@@ -571,6 +580,10 @@ class Entry:
     model_version: str | None = None
     # The mid-point of the latest quote the book had at its decision (#475); None without one.
     decided_mid: float | None = None
+    # A verdict trade (#677): the version of the verdict's rules that opened it, and that verdict
+    # (``verdicts.Call.opened``); None for every other trade.
+    verdict_version: int | None = None
+    verdict: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -1381,6 +1394,25 @@ class TraderStore:
             ).fetchone()
         return None if row[0] is None else datetime.fromisoformat(row[0])
 
+    def last_verdict_buy(self, mode: str, since: datetime) -> datetime | None:
+        """The bar close of the champion's book's last verdict buy order of ``mode`` since ``since`` (its
+        day's 00:00), what the verdict's spacing counts from (#677, ``book.spaced``), counted as
+        ``last_practice_buy`` counts the practice's: of the KIS book each verdict buy it sent or tried to
+        send (by its decision's predictor), of a paper book each it filled. None without one."""
+        if mode in KIS_MODES:
+            row = self._db.execute(
+                "SELECT max(d.bar_close) FROM unfilled_buys u JOIN decisions d ON d.id = u.decision_id"
+                " WHERE u.mode = ? AND u.placed_at >= ? AND d.predictor = ?",
+                (mode, iso(since), VERDICT),
+            ).fetchone()
+        else:
+            row = self._db.execute(
+                "SELECT max(t.bar_close) FROM trades t WHERE t.mode = ? AND t.entry_at >= ?"
+                f" AND {CHAMPION_TRADE} AND {VERDICT_TRADE}",
+                (mode, iso(since)),
+            ).fetchone()
+        return None if row[0] is None else datetime.fromisoformat(row[0])
+
     def open_challengers(self, mode: str) -> list[int]:
         """The challengers with a paper trade of ``mode`` not exited (#400: the trader stopped before
         its exit), whose books go on with it."""
@@ -1705,8 +1737,9 @@ class TraderStore:
             "INSERT INTO trades (mode, symbol, kind, predictor, prediction_id, bar_close, probability,"
             " threshold, anchor, tick, width_ticks, target, stop, time_barrier, decided_at, entry_at,"
             " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction,"
-            " policy_id, champion, shadow, practice, model_version, evaluation, decided_mid)"
-            f" VALUES ({', '.join('?' * 32)})",
+            " policy_id, champion, shadow, practice, model_version, evaluation, decided_mid,"
+            " verdict_version, verdict)"
+            f" VALUES ({', '.join('?' * 34)})",
             (
                 entry.mode,
                 entry.symbol,
@@ -1740,6 +1773,8 @@ class TraderStore:
                 entry.model_version,
                 review.version_on(self._db, entry.entry_at.astimezone(KST).date()),
                 entry.decided_mid,
+                entry.verdict_version,
+                None if entry.verdict is None else json.dumps(entry.verdict, ensure_ascii=False),
             ),
         )
         assert cursor.lastrowid is not None
@@ -2205,6 +2240,8 @@ def _trade_json(
         "champion": bool(row["by_champion"]),  # the champion's (#400): the trader's, which the limits hold
         "shadow": bool(row.get("shadow")),  # the champion's paper shadow's (#405, mock mode)
         "practice": bool(row.get("practice")),  # the mock book's practice trade, or its shadow's (#427)
+        # The verdict that opened a verdict trade (#677), its version first; null for every other trade.
+        "verdict": None if row.get("verdict") is None else json.loads(row["verdict"]),
         "anchor": row["anchor"],
         "tick": row["tick"],
         "width_ticks": row["width_ticks"],

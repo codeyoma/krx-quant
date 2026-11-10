@@ -81,6 +81,11 @@ same cells' predictions and the same quotes, in one process.
   > (``Selection.practice``: the greatest lower bound less p* of the cells with a verdict), at
   > ``KRX_TRADER_THRESHOLD`` → the cell and θ kept for the review cycle. 이유: spec #468 6 "연습"
   > (the user's choice, 2026-11-02): one practice strategy frozen for a cycle.
+- **Verdict** (#677, ``KRX_TRADER_MOCK_VERDICT``, mock mode alone, ``verdicts.py``): on the picks the
+  practice would take (no champion cell to trade), the champion's book trades the engine's verdict too,
+  its horizons ranked before the practice cell, each BUY sized by the loss budget; the KIS book stays
+  the one owner of the account's orders, one position at a time. Its trades are of no policy and the
+  loss limits count them. Once a pick finds a champion cell again the verdict is picked no more.
 - **Records** (``record``): while a trading day's session is open (from its open to the end of its
   closing auction), each running book's policy ran that day (``policy_days``), always in paper
   (#405): the champion's (in mock and live mode its shadow's), stopped once a pause or a failed
@@ -148,7 +153,9 @@ class Desk:
     and the champion policy's paper shadow (``shadow``) keeps its paper record; the challengers'
     books are in paper as ever. More than ``stall_after`` without a quote in continuous trading is a
     stall of the quotes (#407; None watches nothing). With ``practice`` (#427, mock mode alone) the
-    champion's book practises a cell on a day no champion cell trades (module doc)."""
+    champion's book practises a cell on a day no champion cell trades, and with ``verdict`` (#677, mock
+    mode alone) trades the engine's verdict then too (module doc), each of its buys and sales told to
+    ``announce`` (Telegram's ``[buy]`` and ``[sell]``)."""
 
     def __init__(
         self,
@@ -164,11 +171,16 @@ class Desk:
         timing: Timing | None = None,
         stall_after: timedelta | None = STALL_AFTER,
         practice: bool = False,
+        verdict: bool = False,
         engine: Path | None = None,
+        announce: Notify | None = None,
     ) -> None:
         if practice and mode != MOCK:  # #427: the settings refuse it before (``settings.py``)
             raise ValueError(f"the mock practice is for the mock mode alone, not {mode}")
+        if verdict and mode != MOCK:  # #677: likewise
+            raise ValueError(f"the verdict policy is for the mock mode alone, not {mode}")
         self.practice = practice
+        self.verdict = verdict
         self.engine = engine  # the engine's database, where a policy's predictor is found gone (#469)
         self.store = store
         self.rules = rules
@@ -184,7 +196,16 @@ class Desk:
             if broker is None or clock is None:
                 raise ValueError(f"the {mode} mode's champion orders through a broker, at a clock")
             self.champion = kis_book(
-                store, rules, sessions, started_at, broker, clock, notify, timing, mode=mode
+                store,
+                rules,
+                sessions,
+                started_at,
+                broker,
+                clock,
+                notify,
+                timing,
+                mode=mode,
+                announce=announce,
             )
         else:
             self.champion = PaperTrader(store, rules, sessions, started_at, mode, notify)
@@ -318,7 +339,14 @@ class Desk:
         if cycle is not None:
             selection = replace(selection, evaluation=cycle.evaluation, cycle=cycle.number)
         picked = buyable.champion(
-            self.store, selection, cycle, at, engine=self.engine, mode=self.mode, practice=self.practice
+            self.store,
+            selection,
+            cycle,
+            at,
+            engine=self.engine,
+            mode=self.mode,
+            practice=self.practice,
+            verdict=self.verdict,
         )
         self.champion.practice_state = picked.practice
         self.champion.select(picked.chosen, at)
