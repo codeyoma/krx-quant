@@ -912,7 +912,7 @@
           "properties": {
             "made_at": {"$ref": "#/$defs/time"},
             "probation_began": {"description": "When the probation it was made for began: its status change's at.", "$ref": "#/$defs/time"},
-            "cadence": {"description": "daily: refitted before each day on the days before it; bar_close: trained once before the days. null when it could not be simulated.", "oneOf": [{"type": "null"}, {"enum": ["daily", "bar_close"]}]},
+            "cadence": {"description": "daily: refitted before each day on the days before it; bar_close: trained once before the days; walk_forward: a new bar-close algorithm's pre-validation replay, refitted before each day, that made it active (#681). null when it could not be simulated.", "oneOf": [{"type": "null"}, {"enum": ["daily", "bar_close", "walk_forward"]}]},
             "days": {"type": "integer", "minimum": 0, "description": "the days replayed; 0 when it could not be simulated"},
             "first_day": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
             "last_day": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/day"}]},
@@ -930,6 +930,7 @@
                     "review_day": {"type": ["integer", "null"], "minimum": 1, "description": "the largest review day its days reach; null below the first"},
                     "scored": {"type": "integer", "minimum": 0},
                     "enough": {"type": "boolean"},
+                    "level": {"type": "number", "description": "walk_forward only (#681): the two-sided level its lift by trading day was held to, the reviews' shared by the days' testing budget"},
                     "weakest": {
                       "description": "its weakest lift by trading day over the days, at the review's level",
                       "oneOf": [
@@ -2851,6 +2852,126 @@
         "at": {"$ref": "#/$defs/time"},
         "prediction_kind": {"type": "string"},
         "answers": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/kind_answer_item"}}
+      }
+    },
+
+    "verdict": {
+      "description": "GET /v1/verdict (#676): each symbol's verdict at its latest bar close with one, or a symbol's, or at a bar close",
+      "type": "object",
+      "required": ["version", "verdicts"],
+      "additionalProperties": false,
+      "properties": {
+        "version": {"type": "integer", "minimum": 1, "description": "the verdict rules' version now (verdict.VERDICT_VERSION)"},
+        "verdicts": {"type": "array", "items": {"$ref": "#/$defs/verdict_item"}}
+      }
+    },
+    "verdict_item": {
+      "type": "object",
+      "required": ["symbol", "bar_close", "version", "verdict", "meaning", "reason", "strength", "margin", "horizon", "deadline", "target", "stop", "held", "horizons", "members", "side", "rules"],
+      "additionalProperties": false,
+      "properties": {
+        "symbol": {"type": "string"},
+        "bar_close": {"$ref": "#/$defs/time"},
+        "version": {"type": "integer", "minimum": 1},
+        "verdict": {"enum": ["buy", "sell", "wait"]},
+        "meaning": {"enum": ["exit", "avoid", null], "description": "a sell's: exit while held, avoid buying otherwise"},
+        "reason": {"enum": ["no_members", "no_edge", "holding", null], "description": "a wait's"},
+        "strength": {"$ref": "#/$defs/verdict_strength"},
+        "margin": {"type": ["number", "null"], "minimum": -1, "maximum": 1, "description": "the horizon's pooled up first less down first; null for a wait"},
+        "horizon": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "required": ["kind", "minutes"],
+              "additionalProperties": false,
+              "properties": {"kind": {"type": "string"}, "minutes": {"type": "integer", "minimum": 1}}
+            }
+          ]
+        },
+        "deadline": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}], "description": "a buy's maximum holding time; an exit's position's time barrier"},
+        "target": {"type": ["number", "null"]},
+        "stop": {"type": ["number", "null"]},
+        "held": {"type": "boolean"},
+        "horizons": {"type": "array", "items": {"$ref": "#/$defs/verdict_horizon"}},
+        "members": {"type": "array", "items": {"$ref": "#/$defs/verdict_member"}},
+        "side": {"type": "array", "items": {"$ref": "#/$defs/verdict_side"}},
+        "rules": {"$ref": "#/$defs/verdict_rules"}
+      }
+    },
+    "verdict_strength": {"enum": ["none", "weak", "moderate", "strong"]},
+    "verdict_lean": {"enum": ["up", "down", "none"]},
+    "barrier_probabilities": {
+      "type": "object",
+      "required": ["p_up_first", "p_timeout", "p_down_first"],
+      "additionalProperties": false,
+      "properties": {
+        "p_up_first": {"type": "number", "minimum": 0, "maximum": 1},
+        "p_timeout": {"type": "number", "minimum": 0, "maximum": 1},
+        "p_down_first": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "verdict_horizon": {
+      "type": "object",
+      "required": ["kind", "minutes", "width_ticks", "probabilities", "families", "members", "lean", "strength", "margin", "target", "stop", "expected_net", "expected_net_ticks"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string"},
+        "minutes": {"type": "integer", "minimum": 1},
+        "width_ticks": {"type": ["integer", "null"], "minimum": 1},
+        "probabilities": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/barrier_probabilities"}]},
+        "families": {"type": "integer", "minimum": 0},
+        "members": {"type": "integer", "minimum": 0},
+        "lean": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/verdict_lean"}]},
+        "strength": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/verdict_strength"}]},
+        "margin": {"type": ["number", "null"], "minimum": -1, "maximum": 1},
+        "target": {"type": ["number", "null"]},
+        "stop": {"type": ["number", "null"]},
+        "expected_net": {"type": ["number", "null"], "description": "won a share of a long entered there"},
+        "expected_net_ticks": {"type": ["number", "null"]}
+      }
+    },
+    "verdict_member": {
+      "type": "object",
+      "required": ["name", "kind", "family", "status", "evidence", "probabilities", "lean", "strength", "margin", "weight", "counted"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "kind": {"type": "string"},
+        "family": {"type": "string"},
+        "status": {"enum": ["probation", "active", "bench", "retired", "clone", null]},
+        "evidence": {"type": "integer", "minimum": 0},
+        "probabilities": {"$ref": "#/$defs/barrier_probabilities"},
+        "lean": {"$ref": "#/$defs/verdict_lean"},
+        "strength": {"$ref": "#/$defs/verdict_strength"},
+        "margin": {"type": "number", "minimum": -1, "maximum": 1},
+        "weight": {"type": "number", "minimum": 0, "maximum": 1},
+        "counted": {"type": "boolean"}
+      }
+    },
+    "verdict_side": {
+      "type": "object",
+      "required": ["name", "kind", "status", "output"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "kind": {"type": "string"},
+        "status": {"enum": ["probation", "active", "bench", "retired", "clone", null]},
+        "output": {"type": "object", "additionalProperties": {"type": "number"}}
+      }
+    },
+    "verdict_rules": {
+      "type": "object",
+      "required": ["version", "margin", "lean_floor", "moderate", "strong", "families", "consensus"],
+      "additionalProperties": false,
+      "properties": {
+        "version": {"type": "integer", "minimum": 1},
+        "margin": {"type": "number", "minimum": 0, "maximum": 1},
+        "lean_floor": {"type": "number", "minimum": 0, "maximum": 1},
+        "moderate": {"type": "number", "minimum": 0, "maximum": 1},
+        "strong": {"type": "number", "minimum": 0, "maximum": 1},
+        "families": {"type": "object", "additionalProperties": {"type": "string"}},
+        "consensus": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}}
       }
     },
 

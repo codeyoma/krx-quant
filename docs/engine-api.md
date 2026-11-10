@@ -227,7 +227,7 @@
 | `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `loop_held`: 봉 마감이 이벤트 루프를 1초 넘게 쥠(#589. `at`은 그 봉 마감, `detail`은 JSON: `seconds`(차례 없이 간 가장 긴 초), `parts`(그동안 돈 단계와 그 초, `other` 포함), `gc`(그동안 돈 GC의 `seconds`와 가장 오래된 `generation`, 돌지 않았으면 `null`. #621부터, 그 전 행에는 없다). 장중 엔진의 `held the event loop` WARNING과 같은 때 남는다, #538), `memory_rest`: 장이 끝난 뒤 엔진이 쉼(#623. `detail`은 JSON: `after`(`the session`이나 `the review`), `let_go`와 `kept`(놓은 것과 남긴 것의 개수), `rss_before_mb`, `rss_mb`, `swapped_mb`, `python_blocks`, `malloc_mb`, `malloc_free_mb`, `arrow_mb`, `seconds`. `memory handed back` INFO 줄과 같은 값이다), `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `prevalidation_refused`: 사전 검증 거부 알림(`detail`은 거부한 리포트의 열쇠 JSON: `prevalidated_at`, `code`, `target_version`, `inputs`. 그 열쇠마다 한 번 보낸다, #369), `revision_refused`: 바뀐 코드의 사전 검증 거부 알림(`detail`은 `revisions.id`. 리비전마다 한 번 보낸다, #454), `revision_review`: 바뀐 코드의 사전 검증을 기다리는 수습의 판정일(`detail`은 JSON: `revision`, `boundary`, `stint`, `days`, `passed`, `reason`. 사전 검증이 통과하면 마지막 것이 통과였을 때 정식이 된다, #454), `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80), `touch_fill`: 엔진이 시작할 때 지난 예측의 도달 정답을 채움(한 행이라도 썼을 때), `rescore`: `krx-quant rescore`를 돌림(둘 다 `detail`은 날마다 `day`, `source`(녹화를 읽은 곳), `labeled`(녹화로 낸 창 수), `written`(쓴 행 수), `not_recorded`, `failed`(읽지 못한 이유)의 JSON 목록, #168), `kind_fill`: 엔진이 시작할 때 다른 종류의 지난 정답을 채움(한 행이라도 썼을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 답한 창 수, `not_recorded`는 녹화가 없는 예측된 봉 마감 수다, #180), `target`: 상태가 도달 정답으로 다시 시작됨(`detail` `2`. 엔진이 이 DB를 처음 열 때 한 번, #170), `special_fill`: 엔진이 시작할 때 지난날의 특수 상황 구간을 채움(한 날이라도 판정했을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 판정한 구간 수, `written`은 쓴 행 수, `source`가 `null`이면 그날 녹화가 어디에도 없었다, #236)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`, `simulated`(그 판정이 시뮬레이션 날을 셌으면 1, #298): 알고리즘 상태 이력(#17) |
 | `revisions` | `id`, `algorithm`, `code`(`prevalidation.code_digest`), `target_version`(그때 돈 정답 버전. 다른 종류는 그 종류의 정답 버전), `inputs`(JSON: 입력의 버전. 4분 종류는 `{}`), `seen_at`(엔진이 그 코드를 처음 돌린 시각), `boundary`(그 리비전이 시작된 시각: `seen_at`, 대응표로 같은 리비전이 된 코드는 원래 리비전의 것), `state`(`first`: 처음 기록할 때 돌던 그대로, `changed`: 코드가 바뀌어 수습으로 돌아감), `mapped_from`(대응표로 같은 리비전이 된 코드면 옛 digest, 아니면 비어 있음), `verdict`(`changed`의 사전 검증 판정 `passed`·`refused`. 아직이면 비어 있음), `judged_at`, `detail`(거부의 통과하지 못한 검사, 대응표의 증거): 돌고 있는 4분(봉 마감) 알고리즘이 돌린 코드, 오래된 것부터(#454, 아래 "상태 관리"의 "코드가 바뀌는 날"). 알고리즘마다 마지막 행이 지금 리비전이다. 따로 둔 표다 |
-| `simulation_runs` | `id`, `made_at`, `cadence`(`daily`: 날마다 다시 학습, `bar_close`: 첫날 전까지로 한 번 학습), `days`(JSON: 재생한 날, 오래된 것부터): 수습 시뮬레이션의 재생 한 번(#298, 위 "상태 관리"). 따로 둔 표다 |
+| `simulation_runs` | `id`, `made_at`, `cadence`(`daily`: 날마다 다시 학습, `bar_close`: 첫날 전까지로 한 번 학습, `walk_forward`: 새 4분 알고리즘을 정식으로 올린 사전 검증의 재생, #681), `days`(JSON: 재생한 날, 오래된 것부터): 수습 시뮬레이션의 재생 한 번(#298, 위 "상태 관리"). 따로 둔 표다 |
 | `simulations` | `algorithm`, `stint`(그 수습이 시작된 시각, 그 상태의 `statuses.at`), `kind`, `run`(`simulation_runs.id`. 시뮬레이션하지 못했으면 비어 있음), `made_at`, `detail`(JSON: `training`(어떻게 학습했는지. 하루 한 번 종류는 날마다의 모델 `models`, 4분 종류는 한 번 학습한 모델 `model`과 그 날들 `first_day`·`last_day`, 정답 출처별 날 수 `days`), `review`(바로 한 판정: `days`, `review_day`, `scored`, `enough`, `weakest`, `status`, `reason`), 시뮬레이션하지 못했으면 `why`). (알고리즘, 수습)마다 하나다. 따로 둔 표다 |
 | `sim_predictions` | `run`, `symbol`, `algorithm`(시뮬레이션한 방향 알고리즘, 방향의 기준 예측), `model_version`, `model_target`, `bar_close`, `status`, `p_up`, `p_flat`, `p_down`, `expected_ticks`, `special`(`outcomes.special`과 같다), `touch_version`, `touch_class`, `touch_unscorable`, `touch_path`(그 예측을 채점한 도달 정답, `touches`와 같은 값): 시뮬레이션의 방향 예측. 실시간 표(`predictions`, `outcomes`, `touches`)와 따로 둔다. 순위표와 통계는 읽지 않고 상태 판정만 읽는다. 따로 둔 표다 |
 | `sim_kind_predictions` | `run`, `kind`, `symbol`, `algorithm`(시뮬레이션한 알고리즘, 그 종류의 기준 예측), `model_version`, `model_target`(그 모델이 학습한 정답 버전, 기본 모델은 비어 있음), `bar_close`, `status`, `output`, `flat_ticks`, `width_ticks`, `anchor`, `tick`, `band`(`kind_predictions`와 같다), `answer_version`, `answer_class`, `answer_unscorable`, `answer_special`, `answer_path`(그 예측을 채점한 정답, `kind_answers`와 같은 값): 시뮬레이션의 다른 종류(하루 한 번 종류 포함) 예측. 실시간 표(`kind_predictions`, `kind_answers`)와 따로 둔다. 순위표와 통계는 읽지 않고 상태 판정만 읽는다. 따로 둔 표다 |
@@ -238,8 +238,9 @@
 | `special_windows` | `kind`(`vi`, `circuit_breaker`, `sidecar`, `market_halt`(#625)), `symbol`(VI의 종목, 시장 전체면 비어 있음), `start`, `end`(해제 시각. 해제를 아직 모르는 VI는 발동 + 3분, 서킷브레이커 3단계는 그날 끝, 재개를 아직 모르는 시장 전체 매매 정지는 그날 장 마감), `detail`(서킷브레이커의 `1단계`·`2단계`·`3단계`, VI 종류 `static`·`dynamic`·`both`, 시장 전체 매매 정지의 `정지`·`단일가`·`재개`, 그 밖에는 비어 있음), `learned_at`(이 판을 받은 시각), `first_learned_at`(첫 판을 받은 시각, #625. 그 전에 남긴 행은 비어 있음: trader의 재생이 이때부터 구간을 안다). 엔진이 알게 된 특수 상황 구간(#236, 위 "특수 상황"). (`kind`, `symbol`, `start`)마다 하나이고, 새 판을 알면 그 행의 `end`, `detail`, `learned_at`을 바꾼다. 지난날은 엔진이 시작할 때 녹화로 채운다(아래 "지난 특수 상황 구간"). 따로 둔 표다 |
 | `special_days` | `day`, `source`(녹화를 읽은 곳. 어디에도 없었으면 비어 있음), `windows`(판정한 구간 수), `decided_at`, `rules`(판정한 규칙의 판 `special.RULES`, #625: 2. 그 전에 남긴 행은 1이고, 다음 시작 때 녹화로 다시 판정한다). 녹화로 특수 상황 구간을 판정한 지난날(#236). 구간이 없던 날도 남아서 다음 시작 때 다시 읽지 않는다. 따로 둔 표다 |
 | `smt_events` | `definition`(`rolling_extreme`), `version`(정의의 판, 지금 1), `bar_close`(묶음의 첫 봉 마감 t), `a`, `b`(쌍, `smt.PAIRS`의 순서: `005930`·`000660`, `005930`·`KOSPI200F`, `000660`·`KOSPI200F`), `direction`(`bearish`, `bullish`), `minutes`(L: 15, 30), `swept`(직전 L분의 극값을 넘은 쪽: `a`나 `b`의 코드), `source`(`live`), `recorded_at`(엔진이 쓴 시각), `a_extreme`, `b_extreme`(#521: 첫 봉 마감에서 `a`와 `b`가 견준 직전 L분 극값(하락은 최고가, 상승은 최저가)을 가진 1분봉의 시작. 같은 값이 여럿이면 가장 늦은 것. #521 전에 쓴 행은 비어 있다). 엔진이 봉 마감마다 판정한 SMT 다이버전스의 묶음 하나에 한 행(#520, [design.md](design.md) 5장 "SMT 다이버전스"). (`definition`, `version`, `bar_close`, `a`, `b`, `direction`, `minutes`, `source`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
+| `verdicts` | `symbol`, `bar_close`, `version`(판정 규칙의 판 `verdict.VERDICT_VERSION`, 지금 1), `verdict`(`buy`, `sell`, `wait`), `made_at`(엔진이 만든 시각, 그 봉 마감의 알고리즘이 다 끝난 뒤), `body`(JSON: 아래 `GET /v1/verdict`의 항목 하나 그대로): 종목의 봉 마감마다의 판정(#676, [design.md](design.md) 5장 "판정"). (`symbol`, `bar_close`, `version`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
 
-`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264), `inputs`(#304)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. `smt_events`(#520, `bar_close` 인덱스)도 그렇고, `smt_events.a_extreme`·`b_extreme`(#521)은 `band`처럼 더한 열이다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_predictions`(인덱스 (`run`, `bar_close`)), `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
+`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264), `inputs`(#304)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. `smt_events`(#520, `bar_close` 인덱스)도 그렇고, `verdicts`(#676, `bar_close` 인덱스)도 그렇다. `smt_events.a_extreme`·`b_extreme`(#521)은 `band`처럼 더한 열이다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_predictions`(인덱스 (`run`, `bar_close`)), `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
 
 시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 4). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다. 더 새 버전의 DB는 거부하고 시작하지 않는다(`... was written by a newer engine (schema N)`). 그래서 스키마를 올린 엔진을 배포한 뒤에는 옛 커밋으로 되돌려도 엔진이 뜨지 않는다([operations.md](operations.md#4-업데이트-배포) 4장).
 
@@ -845,7 +846,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
   - `simulated`(#298): `days` 가운데 시뮬레이션한 날 수(아래 "상태 관리"의 "수습 시뮬레이션"). 시뮬레이션한 수습은 그 날들을 먼저 세고 그 뒤의 실시간 날을 더한다. 그래서 `counted_from`이 `null`(아직 실시간으로 센 날이 없음)이어도 `days`와 `next_review_on`이 있을 수 있다. 벤치와 시뮬레이션이 없는 수습은 0이다. `weakest`는 시뮬레이션 날에는 시뮬레이션 예측으로 잰다.
 - `simulation`(#298): 그 알고리즘의 가장 최근 수습 시뮬레이션. 없으면 `null`이다. 상태와 상관없이 남는다(통과해 정식이 된 뒤에도). 시뮬레이션 예측은 순위표와 상세 통계에 들지 않으므로 여기와 `stage`로만 보인다.
   - `made_at`: 시뮬레이션한 시각. `probation_began`: 그것이 만들어진 수습이 시작된 시각(그 상태 이력 항목의 `at`).
-  - `cadence`: `daily`(하루 한 번 종류, 날마다 그 전날까지로 다시 학습) 또는 `bar_close`(4분 종류, 첫날 전까지로 한 번 학습). 시뮬레이션하지 못했으면 `null`.
+  - `cadence`: `daily`(하루 한 번 종류, 날마다 그 전날까지로 다시 학습), `bar_close`(4분 종류의 정답 버전 재시작, 첫날 전까지로 한 번 학습) 또는 `walk_forward`(#681: 4분 종류의 새 알고리즘을 정식으로 올린 사전 검증의 재생, 날마다 다시 학습. `training.models`가 날마다의 모델, `review`에 `level`이 더 있다). 시뮬레이션하지 못했으면 `null`.
   - `days`, `first_day`, `last_day`: 재생한 날 수와 첫날·끝날. 시뮬레이션하지 못했으면 0과 `null`.
   - `training`: 어떻게 학습했는지. `daily`는 `models`(날마다 그날 예측한 모델 버전), `bar_close`는 `model`, `target_version`, `first_day`·`last_day`(학습한 날들), `samples`, `days`(정답 출처별 날 수: `recorded`, `bars`).
   - `review`: 바로 한 판정. `days`(센 날), `review_day`(그 날 수가 닿는 가장 큰 판정일, 첫 판정일보다 적으면 `null`), `scored`(채점된 예측 수), `enough`, `weakest`(`stage`의 것과 같은 형식), `status`(판정 뒤 상태), `reason`(바꾼 상태의 이유, 바꾸지 않았으면 `null`).
@@ -1020,6 +1021,47 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 - `members`는 지금의 정식 알고리즘이다. `weights`는 마지막으로 계산한 칸별 가중치다(그때의 구성원).
 - 합의의 성적은 순위표와 `/v1/algorithms/consensus-final/stats`에서 다른 알고리즘처럼 볼 수 있다.
+
+### `GET /v1/verdict?symbol=S&bar_close=T` (#676)
+
+종목마다 봉 마감의 판정이다(#676, `verdict.py`, [design.md](design.md) 5장 "판정"): 매수·매도·대기, 그것이 기대는 지평과 목표가·손절가·기한, 장벽 지평마다 합친 확률과 기대 순손익, 구성원마다 그 의견, 그 옆의 방향·변동폭 예측. 엔진이 봉 마감마다 그 봉 마감의 알고리즘이 다 끝난 뒤 만들어 저장한 것(`verdicts`)을 그대로 준다.
+
+- 질의: `symbol`(없으면 모든 종목), `bar_close`(ISO 8601, 없으면 종목마다 판정이 있는 마지막 봉 마감). 모르는 종목은 404, 시각이 아니면 400이다. 판정이 없는 종목(예측 전, 그 봉 마감에 VI)은 빠진다.
+
+```json
+{
+  "version": 1,
+  "verdicts": [{
+    "symbol": "005930", "bar_close": "2026-10-12T10:00:00+09:00", "version": 1,
+    "verdict": "buy", "meaning": null, "reason": null, "strength": "strong", "margin": 0.5,
+    "horizon": {"kind": "barrier_15m", "minutes": 15}, "deadline": "2026-10-12T10:15:00+09:00",
+    "target": 82450.0, "stop": 80050.0, "held": false,
+    "horizons": [{"kind": "barrier_15m", "minutes": 15, "width_ticks": 12,
+      "probabilities": {"p_up_first": 0.7, "p_timeout": 0.1, "p_down_first": 0.2},
+      "families": 1, "members": 1, "lean": "up", "strength": "strong", "margin": 0.5,
+      "target": 82450.0, "stop": 80050.0, "expected_net": 361.35, "expected_net_ticks": 3.6135}],
+    "members": [{"name": "breiman-15m", "kind": "barrier_15m", "family": "breiman", "status": "probation",
+      "evidence": 390, "probabilities": {"p_up_first": 0.7, "p_timeout": 0.1, "p_down_first": 0.2},
+      "lean": "up", "strength": "strong", "margin": 0.5, "weight": 1.0, "counted": true}],
+    "side": [{"name": "newton", "kind": "direction", "status": "active",
+      "output": {"p_up": 0.4, "p_flat": 0.4, "p_down": 0.2, "expected_ticks": 0.3}}],
+    "rules": {"version": 1, "margin": 0.05, "lean_floor": 0.02, "moderate": 0.05, "strong": 0.15,
+      "families": {"breiman": "breiman", "breiman-15m": "breiman"}, "consensus": {}}
+  }]
+}
+```
+
+(값은 지어낸 것이다.)
+
+- `version`(맨 위): 지금 엔진의 판정 규칙 판. 항목의 `version`은 그 판정을 만든 판이다.
+- `verdict`: `buy`, `sell`, `wait`. `meaning`은 매도의 뜻이다: `exit`(trader가 들고 있는 것을 판다), `avoid`(들고 있지 않을 때 사지 않는다). 다른 판정은 `null`. `reason`은 대기의 까닭이다: `no_members`(그 봉 마감에 예측을 낸 장벽 알고리즘이 없다), `no_edge`(매수도 매도도 아니다), `holding`(들고 있고 남은 지평이 돌아서지 않았다). 다른 판정은 `null`.
+- `strength`: `none`, `weak`, `moderate`, `strong`. 매수·매도는 그 지평 `margin`의 크기로 정하고, 대기는 `none`이다. `margin`은 그 지평에서 합친 P(위 먼저) − P(아래 먼저)이고 대기면 `null`이다.
+- `horizon`: 판정이 기대는 지평(`kind`, `minutes`). 매수는 기대 순손익이 가장 큰 지평, 청산은 남은 시간을 덮는 지평, 매수 피하기는 가장 아래로 기운 지평, 대기는 기대 순손익이 가장 큰(없으면 첫) 지평이고, 구성원이 없으면 `null`이다.
+- `deadline`: 매수의 최대 보유 시간(봉 마감 + 지평), 청산은 포지션의 시간 장벽. 다른 판정은 `null`. `target`, `stop`: 매수의 목표가와 손절가(다른 판정은 `null`). `held`: trader가 그 종목을 들고 있었는지.
+- `horizons`: 그 봉 마감에 예측한 장벽 지평마다, 짧은 것부터. `width_ticks`(그 종류의 폭 w, 기준가가 없으면 `null`), `probabilities`(합친 세 확률, 구성원이 없으면 `null`), `families`·`members`(센 계열과 구성원 수), `lean`·`strength`·`margin`(합친 것의 기울기), `target`·`stop`(기준가 ± w × 호가단위), `expected_net`(그 지평에 지금 매도 1호가로 산 한 주의 기대 순손익, 원. 목표·손절·시간 만료 셋을 trader의 왕복 공식으로 센다. 호가가 없거나 매도 1호가가 손절가와 목표가 사이에 있지 않으면 `null`), `expected_net_ticks`(같은 값을 호가단위로).
+- `members`: 지평마다의 구성원. `name`, `kind`(그 지평의 종류), `family`, `status`(`probation`, `active`, `bench`, 기록이 없으면 `null`), `evidence`(그 종류의 예측 중 정답이 난 수. 엔진이 시작할 때와 날마다 점검 뒤에 센다), `probabilities`(자기 세 확률 그대로), `lean`(`up`, `down`, `none`)·`strength`·`margin`(자기 것), `weight`(합칠 때의 무게. 계열마다 같고 계열 안에서 나눈다), `counted`(셌는지. 자기 구성원과 함께 있는 합의는 `false`, 무게 0).
+- `side`: 섞지 않고 옆에 보이는 예측. 방향 알고리즘(`kind` `direction`, `output`은 `p_up`, `p_flat`, `p_down`, `expected_ticks`)과 최종 합의(`consensus-final`, `status` `null`), 변동폭 같은 장벽이 아닌 종류의 알고리즘(`output`은 그 종류의 출력 그대로).
+- `rules`: 그 판정의 규칙 상수(마진, 기울기 등급, 계열 표, 합의 표).
 
 ### `GET /v1/algorithms/{name}/stats?symbol=&period=&special=`
 
@@ -2313,7 +2355,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 
 | 상태 | 뜻 | 바뀌는 규칙 |
 |---|---|---|
-| `probation` 수습 | 처음 돌기 시작한 알고리즘. 새 알고리즘은 사전 검증(아래)을 통과한 뒤부터 돈다 | 수습 판정일(`KRX_PROBATION_REVIEW_DAYS`, 기본 10·20·40거래일째)에만, 수습 기간 전체에서 가장 약한 lift의 거래일 단위 신뢰구간(`KRX_REVIEW_CONFIDENCE`, 기본 98.3%) 하한이 0보다 크면 `active`. 목록의 마지막 날(기본 40일)이 지나도 정식이 못 되면 텔레그램으로 은퇴 후보 알림을 한 번 보낸다 |
+| `probation` 수습 | 처음 돌기 시작한 알고리즘. 새 알고리즘은 사전 검증(아래)을 통과한 뒤부터 돈다. 새 4분 알고리즘은 사전 검증의 승격 재생이 판정할 수 없었을 때만 수습으로 든다(#681, 아래 "사전 검증"의 "승격 재생". 그 밖에는 그 밤 `active`이거나 거부) | 수습 판정일(`KRX_PROBATION_REVIEW_DAYS`, 기본 10·20·40거래일째)에만, 수습 기간 전체에서 가장 약한 lift의 거래일 단위 신뢰구간(`KRX_REVIEW_CONFIDENCE`, 기본 98.3%) 하한이 0보다 크면 `active`. 목록의 마지막 날(기본 40일)이 지나도 정식이 못 되면 텔레그램으로 은퇴 후보 알림을 한 번 보낸다 |
 | `active` 정식 | 합의(#18)에 들어간다 | 가장 약한 lift가 0 이하이면 `bench`. 정식이 된 지 수습 첫 판정일(`KRX_PROBATION_REVIEW_DAYS`의 첫 날, 기본 10거래일)부터는 정식으로 센 날 가운데 최근 날(최대 20일)로, 그 전에는 최근 20거래일로 본다(#545, 아래 표 밑의 노트) |
 | `bench` 벤치 | 예측과 채점은 계속한다 | 벤치 판정일(`KRX_BENCH_REVIEW_DAYS`, 기본 20·40·60거래일째)에만, 최근 20거래일의 가장 약한 lift의 거래일 단위 하한(같은 신뢰수준)이 0보다 크면 `active`로 회복. 목록의 마지막 날(기본 60일)이 지나도 회복하지 못하면 텔레그램으로 은퇴 후보 알림을 한 번 보낸다 |
 | `retired` 은퇴 | 더 돌리지 않는다. 기록은 남는다 | 명령으로만: `krx-quant retire <이름>`. `krx-quant unretire <이름>`은 `probation`으로 되돌린다 |
@@ -2430,7 +2472,9 @@ docker compose run --rm --no-deps engine prevalidate <이름> --revision  # 코�
   > **바뀜** (2026-11-05, #555): 등록된 모든 방향 알고리즘(과 그 종류의 알고리즘)을 돌렸다 → 거부되어 엔진이 돌리지 않는 것은 빼고 돌린다. 이유: 실시간에서 돌지 않는 알고리즘의 모델을 불러와 시간 예산과 `correlation` 검사에 넣었다(#544).
 
 - 등록 검사(위)를 통과하지 못하는 `ALGORITHMS`는 엔진이 시작할 때부터 거부되므로, 재생하지 않고 오류로 끝난다.
-- **기준**: 다섯을 모두 넘어야 통과한다.
+- **기준**: 다섯을 모두 넘고, 승격을 판정받는 알고리즘(아래 "승격 재생")은 `promotion`도 넘어야 통과한다.
+
+  > **바뀜** (2026-11-10, #684): 다섯을 모두 넘어야 통과했다 → 새 4분 알고리즘은 여섯째 검사 `promotion`도 있다. 이유: 사용자 결정(2026-11-10, #681): 새 알고리즘은 오늘부터 20일을 기다리지 말고, 20일 전으로 돌아가 날마다 그날 전까지의 데이터로 배우게 하고 지금 기준으로 판정한다.
 
 | 검사 | 통과 조건 |
 |---|---|
@@ -2439,6 +2483,7 @@ docker compose run --rm --no-deps engine prevalidate <이름> --revision  # 코�
 | `budget` | 시간 예산(`KRX_ALGORITHM_SECONDS`, 기본 10초)을 넘긴 예측(`timed_out`)이 0번이다 |
 | `correlation` | 다른 알고리즘과의 p_up − p_down 상관이 모두 0.9 이하다(복제 규칙과 같다. 짝 30개 이상, 특수 예측 포함). 먼저 등록된 것만이 아니라 재생한 다른 모든 알고리즘과 비교한다(거부되어 엔진이 돌리지 않는 것은 재생하지 않는다, #544). 그래서 서로 닮은 두 알고리즘이 함께 기다리면 둘 다 거부된다. 잴 수 없는 상대(짝 부족, 늘 같은 값)는 빠진다 |
 | `stats` | 재생 결과의 순위표(도달 정답, 특수 예측 제외)에서, 채점된 예측과 각 기준 예측과의 짝이 `KRX_MIN_SAMPLE`(기본 200) 이상이고, 가장 약한 lift의 값이 0보다 크다. 이번 날짜를 하나라도 재생한 실행이 전에 있으면(이번이 그 날들의 N번째 실행, N ≥ 2, #262) 가장 약한 lift의 거래일 단위 하한도 0보다 커야 한다. 그 구간은 양쪽 1 − 0.05/N 수준이다(Bonferroni: 2번째 97.5%, 3번째 98.3%, 4번째 98.75%). 처음 돌리는 날들(N = 1)은 신뢰구간 하한을 보지 않는다. 거래일 단위 하한(95%)은 수습 10거래일 뒤 정식 승격의 기준이다 |
+| `promotion` | 승격 재생(#681, 아래)의 결과가 `refused`가 아니다. 다섯이 모두 넘었을 때만 있다. `active`이면 그 밤 정식, `forward`(판정할 수 없었다)이면 실시간 날로 판정하는 수습이다. 이미 수습인 알고리즘을 다시 판정한 것은 못 해도 `forward`(수습에 남는다) |
 
 > **바뀜** (2026-10-18, #279): `stats`는 몇 번째 실행이든 가장 약한 lift의 값만 봤다 → 같은 날로 다시 돌린 N번째 실행(N ≥ 2)은 거래일 단위 하한이 1 − 0.05/N 수준에서 0을 넘어야 한다. 이유: 고쳐 가며 같은 날로 다시 돌리면 그 날들은 더는 표본 밖이 아니고, 여러 번 해서 가장 좋은 것을 고르면 우연으로도 통과하기 쉽다(Harvey, Liu & Zhu 2016). 사용자가 처음 돌리는 날은 지금 규칙대로 두기로 정했다(2026-10-18, #262).
 
@@ -2457,6 +2502,8 @@ docker compose run --rm --no-deps engine prevalidate <이름> --revision  # 코�
   - `stats`: 순위표 항목과 같은 형식(`rank`, `n`, `accuracy`, `precision`, `coverage`, `brier`, `pnl`, `pnl_inverse`, `lift`). 재생한 알고리즘들끼리 매긴 순위와 FDR 보정(`q`, `significant`)이다. 종목·시간대별 분할은 없다
   - `correlations`(알고리즘 → r), `timed_out`, `statuses`(예측 상태별 개수), `skipped_for_cpu`(CPU 예산으로 건너뛴 봉 마감 수, 판정에는 쓰지 않는다), `db`, `target_version`(재생하고 채점한 정답 버전, #191. 없으면 1)
   - `earlier_runs`, `earlier_runs_on_these_days`(#262): 위 "리포트".
+  - `promotion`(#681): 승격 재생의 판정. 판정받지 않는 실행(사전 검증 전에 등록된 알고리즘, `--revision`, 엔진이 다른 상태로 돌리는 알고리즘)에는 없다. `outcome`(`active`, `refused`, `forward`), `detail`, `tested`(예산을 쓴 판정이었는지), `level`(구간의 양쪽 수준, `1 − (1 − KRX_REVIEW_CONFIDENCE) / budget`), `budget`(`KRX_PROMOTION_BUDGET`), `attempt`(그 날들의 몇째 시험, 판정하지 않았으면 `null`), `family`(판정한 날을 하루라도 판정한 앞선 시험: `algorithm`, `code`, `at`, `outcome`, `shared_days`), `earlier_versions`(그중 같은 알고리즘의 다른 코드), `on_probation`(#681 전부터 수습인 것을 다시 판정했는지), `judged_days`(채점한 날: 그 전에 모델이 학습된 날), `scored`, `enough`, `weakest`(`baseline`, `n` 날 수, `value`, `low`, `high`), `days`(재생한 날마다 `day`, `model`, `training_days`(학습 구간의 날, 백필 포함), `recorded`(그중 녹화일), `scored`).
+- **승격 재생 (#681).** 다섯을 넘은 4분 알고리즘(새 것, 또는 #681 전에 통과해 이유 `registered`로 수습인 것)은 같은 재생으로 승격을 판정받는다. `judged_days`에서 후보와 그 종류의 기준 예측의 채점된 예측(특수 예측 제외, 목표 정답으로 학습한 모델의 예측만)으로 수습 판정과 같은 통계(가장 약한 기준 대비 거래일 단위 lift, Student t)를 `level`에서 잰다. 채점한 날이 10일 이상이고, 그 날들의 가족이 `budget`보다 적고, 채점·짝이 `KRX_MIN_SAMPLE` 이상이면 판정한다(아니면 `forward`). 하한이 0보다 크면 `active`: 엔진 DB(`state/engine.sqlite3`)에 그 밤 정식으로 쓰이고(새 것은 이유 `registered; judged forward`인 수습을 거친다), 판정한 날의 예측이 그 수습의 재생으로 남는다(`simulation_runs.cadence` `walk_forward`, `/v1/algorithms`의 `simulation`). 아니면 새 것은 `refused`, 수습인 것은 `forward`. `forward`인 새 것은 그 밤 수습으로 들어간다(이유 `registered; judged forward: …`, 시뮬레이션하지 않는다). 판정마다 `state/prevalidations/promotion-attempts.jsonl`에 한 줄(`at`, `algorithm`, `code`, `kind`, `days`, `level`, `outcome`)이 남는다. 명령 출력에는 `promotion: <outcome> - <detail>; …` 줄이 있다. 운영은 [operations.md](operations.md#새-알고리즘-사전-검증-24)의 "승격 재생 (#681)".
   - `diagnostics`(#283): 방향 알고리즘이 진단을 내면(`diagnostics()`, `contract.Diagnostics`. 지금은 Neyman, 아래 "Neyman"의 "사전 검증의 진단") 검사 밖에서 잰 것이다. 판정에 쓰지 않는다. 진단을 내지 않는 알고리즘의 리포트에는 이 칸이 없다. 진단을 내는 알고리즘은 walk-forward 학습을 진단의 `fit`으로 한다(알고리즘의 `fit`과 같은 모델을 내고, 가는 길에 본 것을 잰다). 재생한 날마다 그날의 표본(밤 학습이 읽는 것처럼 그날의 기준가(`reference`)를 단 것)과 그날을 예측한 모델을 진단에 준다. 그 표본은 다음 날의 학습에도 쓰이므로 더 읽는 것은 마지막 날 하나다. 진단의 오류는 실행을 멈추지 않는다: 리포트에 `{"error": …}`로 남고, 그 뒤로는 알고리즘의 `fit`이 학습한다. 명령의 출력에도 진단이 낸 줄이 나온다.
 - **실행 기록**(#262): `state/prevalidations/<이름>.history.jsonl`. 리포트를 남긴 실행마다 한 줄(학습 오류, 잠금, 시간 제한으로 리포트 없이 끝난 실행은 없다. `prevalidated_at`, `code`, `target_version`, `passed`, `days`, 그리고 #262부터 `weakest_lift`(가장 약한 lift의 값)와 `day_low`(가장 약한 lift의 거래일 단위 95% 하한). 둘은 잴 수 없으면 `null`이고, 그 전의 줄과 리포트로 만든 첫 줄에는 없다)을 덧붙인다. 리포트는 마지막 것만 남기므로, 몇 번 돌렸는지는 여기서 센다. 기록이 없는데 리포트가 있으면(이 기록이 생기기 전에 돈 사전 검증) 그 리포트를 첫 줄로 삼는다. 명령은 전에 돈 적이 있으면 `run before: N, M of them on any of these days`를 출력한다. M이 1 이상이면 이번 실행은 그 날들의 M + 1번째이고, `stats` 검사가 더 엄격하다(위 "기준"). 빨리 훑어보는 `--days 5`도 그 날들의 실행으로 센다.
 - 명령은 검사별 결과를 출력하고, 통과하면 0, 아니면 1로 끝난다.

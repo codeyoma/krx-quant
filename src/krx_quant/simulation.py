@@ -50,6 +50,11 @@ and answers, are kept. The answers are the current answer versions' (the touch t
 ``touch.TARGET_VERSION``; each kind's). Pre-validation's replay is not reused: it refits before
 each day (walk-forward), not once before the days, and it replays the days before the probation.
 
+A new bar-close algorithm's probation is not simulated (#681): its pre-validation's walk-forward
+replay judges it at once (``prevalidation.py``, "Promotion"), so only a new target's restart is
+(``lifecycle.starts_simulation``). A replay that made one active is kept as its probation's
+(``keep_replayed``, cadence ``WALK_FORWARD``).
+
 A probation is simulated once (``simulations``, by the algorithm and when its probation began):
 one that could not be (its training learned nothing before the days, say) is kept as such, with
 why, and its probation goes on live.
@@ -105,6 +110,9 @@ log = logging.getLogger(__name__)
 DAILY_DAYS = 20  # open_to_close's simulated days: its first review day (``daily.DAILY_RULES``)
 BAR_CLOSE_DAYS = 20  # a bar-close kind's, at most: the recorded days there are, at least MIN_DAYS
 DAILY, BAR_CLOSE = "daily", "bar_close"  # how a replay trains (``simulation_runs.cadence``)
+# A new bar-close algorithm's pre-validation replay, refitted before each day, kept as its probation's
+# replay when it made it active (#681, ``prevalidation.py``, "Promotion").
+WALK_FORWARD = "walk_forward"
 # The command's argument for each (``krx-quant simulate <which>``).
 BAR_CLOSE_COMMAND = "bar-close"
 
@@ -558,7 +566,7 @@ async def simulate_bar_close(
         store = PredictionStore(settings.state_dir / DB_NAME)
         try:
             everyone: list[Algorithm | KindAlgorithm] = [*algorithms, *kind_algorithms]
-            waiting = store.to_simulate([a.name for a in everyone])
+            waiting = store.to_simulate([a.name for a in everyone], bar_close=True)
             available = finished_days(settings.data_dir, settings.symbols, now)
             recorded = [d for d in available if is_recorded(settings.data_dir, d, settings.symbols)]
             if not waiting or len(recorded) < MIN_DAYS:
@@ -692,23 +700,7 @@ async def _replay_bar_close(
         log.info("simulated %s with %s", day, ", ".join(c.algorithm.name for c in ready))
         log.info("simulation: memory on %s (day %d of %d): %s", day, n, len(days), usage.line())
     run = store.add_simulation_run(now, BAR_CLOSE, days)
-    replay_db = PredictionStore(db)
-    try:
-        if any(c.kind is None for c in ready):
-            names = {c.algorithm.name for c in ready if c.kind is None}
-            names |= {b.name for b in TOUCH_BASELINES}
-            rows = [r for r in replay_db.made_on(days) if r["algorithm"] in names]
-            store.add_sim_predictions(run, rows, TARGET_VERSION)
-        for kind in {c.kind.name: c.kind for c in ready if c.kind is not None}.values():
-            names = {c.algorithm.name for c in ready if c.kind is kind} | {b.name for b in kind.baselines}
-            kept = [
-                _sim_kind_row(r)
-                for r in replay_db.kind_made_on(kind.name, kind.answer_version, days)
-                if r["algorithm"] in names
-            ]
-            store.add_sim_kind_predictions(run, kind.name, kind.answer_version, kept)
-    finally:
-        replay_db.close()
+    keep_replayed(store, db, run, [(c.algorithm.name, c.kind) for c in ready], days)
     out: list[Simulation] = []
     for c in ready:
         training = _training_json(c)
@@ -717,6 +709,40 @@ async def _replay_bar_close(
         )
         out.append(Simulation(c.algorithm.name, kind_of(c.algorithm), list(days), training))
     return out
+
+
+def keep_replayed(
+    store: PredictionStore,
+    db: Path,
+    run: int,
+    replayed: Sequence[tuple[str, Kind | None]],
+    days: Sequence[date],
+) -> None:
+    """Keep in ``store``'s replay ``run`` what each of ``replayed`` (an algorithm and its kind; None:
+    the direction) and its kind's baselines predicted in the replay's database ``db`` on ``days``,
+    each with its answer, a day at a time (a day's every predictor's rows are read at once, not the
+    run's: #681)."""
+    replay_db = PredictionStore(db)
+    try:
+        direction = {name for name, kind in replayed if kind is None}
+        if direction:
+            direction |= {b.name for b in TOUCH_BASELINES}
+        kinds = {kind.name: kind for _, kind in replayed if kind is not None}
+        for day in days:
+            if direction:
+                rows = [r for r in replay_db.made_on([day]) if r["algorithm"] in direction]
+                store.add_sim_predictions(run, rows, TARGET_VERSION)
+            for kind in kinds.values():
+                names = {n for n, k in replayed if k is not None and k.name == kind.name}
+                names |= {b.name for b in kind.baselines}
+                kept = [
+                    _sim_kind_row(r)
+                    for r in replay_db.kind_made_on(kind.name, kind.answer_version, [day])
+                    if r["algorithm"] in names
+                ]
+                store.add_sim_kind_predictions(run, kind.name, kind.answer_version, kept)
+    finally:
+        replay_db.close()
 
 
 def _sim_kind_row(row: Mapping[str, Any]) -> SimKindPrediction:

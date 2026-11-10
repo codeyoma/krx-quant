@@ -14,6 +14,9 @@ simulation, ``krx-quant replay``). The mode decides the rest, and only that:
   nothing live.
 - ``DEMO`` (the demo's morning): as ``REPLAY``, with the daily kinds; its gates are the demo's own.
 
+``LIVE`` and ``DEMO`` read the trader's positions from its store (``state/trader.sqlite3``) for each
+bar close's verdicts (#676, ``held``); ``REPLAY`` holds nothing.
+
 A caller gives what is the mode's own input, not the server's configuration: the store, the clock,
 the models and the climate table, the algorithms and kinds (pre-validation's candidate) and, but
 live, the gates.
@@ -41,7 +44,7 @@ from krx_quant.config import Settings
 from krx_quant.daily import DailyAlgorithm, DailySource, StoredDays
 from krx_quant.daily import Features as DailyFeatures
 from krx_quant.daily_features import DAILY_FEATURES, LiveFeatures
-from krx_quant.engine import Admits, Budget, PredictionEngine, Refused, Regimes
+from krx_quant.engine import Admits, Budget, HeldNow, PredictionEngine, Refused, Regimes
 from krx_quant.features import Leaders, PreviousDays
 from krx_quant.garbage import Garbage
 from krx_quant.kind_registry import KINDS
@@ -52,6 +55,8 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import PredictionStore
 from krx_quant.signals import SignalRule
+from krx_quant.trader.store import DB_NAME as TRADER_DB
+from krx_quant.trader.store import read_held
 
 if TYPE_CHECKING:  # the revisions read the pre-validation, which replays through this module
     from krx_quant.revisions import RevisionGate
@@ -99,13 +104,15 @@ class EngineOptions(TypedDict):
     daily_feature_names: Collection[str]
     watch_loop: bool
     garbage: Garbage | None
+    held: HeldNow | None
 
 
 # The options each mode sets of its own (module doc); the others are the settings', in every mode.
 GATES = frozenset({"admits", "refused", "revisions"})
 DAILY = frozenset({"daily", "daily_algorithms", "daily_features", "daily_feature_names"})
+TRADER = frozenset({"held"})  # the trader's positions (#676), live and in the demo
 LIVE_ONLY = frozenset({"commit", "signal_rule", "watch_loop", "garbage"})
-MODE_OPTIONS = GATES | DAILY | LIVE_ONLY
+MODE_OPTIONS = GATES | DAILY | TRADER | LIVE_ONLY
 
 
 def live_gates(settings: Settings) -> Gates:
@@ -180,6 +187,8 @@ def engine_options(
         watch_loop=live,
         # A garbage collection and a freeze after each bar close, let go when idle (#621).
         garbage=Garbage() if live else None,
+        # The trader's positions, for a verdict's SELL (#676): its store, live and in the demo.
+        held=partial(read_held, settings.state_dir / TRADER_DB) if mode is not Mode.REPLAY else None,
     )
 
 

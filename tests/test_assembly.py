@@ -21,6 +21,7 @@ from krx_quant.assembly import (
     GATES,
     LIVE_ONLY,
     MODE_OPTIONS,
+    TRADER,
     EngineOptions,
     Gates,
     Mode,
@@ -144,7 +145,8 @@ def test_only_the_live_engine_has_the_live_parts_and_the_replay_no_daily_kinds(t
         assert other["admits"] is None and other["refused"] is None and other["revisions"] is None
     assert replayed["daily"] is None and not replayed["daily_algorithms"]
     assert demo["daily"] is not None and demo["daily_algorithms"] == live["daily_algorithms"]
-    assert differing(demo, replayed) == DAILY
+    assert differing(demo, replayed) == DAILY | TRADER
+    assert replayed["held"] is None and demo["held"] is not None, "the trader's positions (#676)"
     assert differing(live, demo) == GATES | LIVE_ONLY
 
 

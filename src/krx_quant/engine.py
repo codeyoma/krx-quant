@@ -161,6 +161,7 @@ from krx_quant.algorithms import (
     register_kind_algorithms,
 )
 from krx_quant.algorithms.forecasts import forecasting
+from krx_quant.barriers import CLASSES as BARRIER_CLASSES
 from krx_quant.baselines import NO_PREVIOUS, TOUCH_BASELINES, Baseline, Forecast, Inputs
 from krx_quant.climate import CLIMATE
 from krx_quant.climate import DEFAULT as NO_CLIMATE
@@ -268,6 +269,7 @@ from krx_quant.smt import Detector as SmtDetector
 from krx_quant.special import HALT_STATUS, KOSPI, Kind, SpecialSituations, Window, in_halt, in_vi, touching
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 from krx_quant.touch import RESTARTED, TARGET_VERSION, WINDOW
+from krx_quant.verdict import VERDICT_VERSION, Held, Horizon, Market, Member, Side, verdict
 
 if TYPE_CHECKING:  # the pre-validation replays through this module: its type only
     from krx_quant.prevalidation import Refusal
@@ -315,6 +317,9 @@ class KindAnswered:
 
 Change = PredictionsStored | OutcomesScored | KindPredictionsStored | KindAnswered
 Listener = Callable[[Change], None]  # told of each, as it happens (the stream)
+# The trader's open positions at a time, by symbol (#676, ``trader.store.read_held``): read off the
+# event loop at each bar close's verdict.
+HeldNow = Callable[[datetime], Mapping[str, Held]]
 # Whether the engine may start a new algorithm (``prevalidation.admits``).
 Admits = Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], bool]
 # Whether its latest pre-validation refused the code and target it runs now (``prevalidation.refusals``).
@@ -344,6 +349,7 @@ RECORDS = "records"
 SMT_STEP = "SMT"
 KIND_BASELINES = "the kinds' baselines"
 CONSENSUS = "consensus"
+VERDICT = "the verdicts"  # each symbol's at the bar close, its members done (#676, ``verdict.py``)
 GARBAGE = "garbage collection"  # the live engine's after each bar close (#621, ``garbage.py``)
 SQLITE = "SQLite writes"  # the store's write transactions, inside the steps that store (#637)
 # Days with predictions a review reads back over: the longest rule counts 60 on the bench,
@@ -513,6 +519,7 @@ class PredictionEngine:
         daily_feature_names: Collection[str] = (),
         watch_loop: bool = False,
         garbage: Garbage | None = None,
+        held: HeldNow | None = None,
     ) -> None:
         self.store = store
         self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
@@ -600,6 +607,11 @@ class PredictionEngine:
         store.checkpoint_aside()
         # The live engine's garbage collection after each bar close (#621); without: Python's own.
         self.garbage = garbage
+        # The trader's positions, for a verdict's SELL (#676); without: nothing held (replay, tests).
+        self._held = held
+        # Each barrier member's evidence (#676) by (kind, algorithm): counted at start and at each
+        # daily review, never during the session (a few hundred milliseconds over 40 days).
+        self._evidence: dict[tuple[str, str], int] = {}
         # The kinds' answers made at the last scoring, by (kind, symbol, bar close): the kinds'
         # baselines read the window just over from them (#538).
         self._answered: dict[tuple[str, str, datetime], Answer] = {}
@@ -673,6 +685,7 @@ class PredictionEngine:
         self._check_revisions()
         self._admit()
         self._record_models(self.models)
+        self._count_evidence()
 
     def _restart_on_target(self) -> None:
         """Once per target version (#170, #187): when the statuses first go by the direction's
@@ -895,14 +908,20 @@ class PredictionEngine:
             return
         running: list[Algorithm | KindAlgorithm] = [*admitted, *kind_admitted]
         for a in running:
-            if a.name not in known:
+            standing = known.get(a.name)
+            if standing is None:
                 self.store.add_status(a.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
                 self._tell_admitted(a)
-                if self._revisions is not None and a.name not in self._revision_of:
-                    try:
-                        self._revise(a, None, self.clock.now(), Status.PROBATION)
-                    except Exception:  # recorded at the next start, as one never recorded
-                        log.exception("%s: its code could not be recorded", a.name)
+            # A new one, or one its pre-validation enrolled while the engine ran (#681: made active
+            # by its walk-forward replay, or on a probation judged forward): its code is its first
+            # revision.
+            if self._revisions is not None and a.name not in self._revision_of:
+                try:
+                    self._revise(
+                        a, None, self.clock.now(), Status.PROBATION if standing is None else standing.status
+                    )
+                except Exception:  # recorded at the next start, as one never recorded
+                    log.exception("%s: its code could not be recorded", a.name)
         for d in daily_admitted:
             if d.name not in known:
                 self.store.add_status(d.name, self.clock.now(), None, Status.PROBATION, REGISTERED)
@@ -990,7 +1009,7 @@ class PredictionEngine:
         (a daily one on probation waits for its pre-validation otherwise, #264)."""
         bar_close = [a.name for a in self.registered] + [a.name for a in self.kind_registered]
         daily = [a.name for a in self.daily_algorithms]
-        return self.store.to_simulate(bar_close), self.store.to_simulate(daily)
+        return self.store.to_simulate(bar_close, bar_close=True), self.store.to_simulate(daily)
 
     def simulated(self, kind: PredictionKind) -> dict[str, Simulated]:
         """The algorithms of ``kind`` with a simulated probation (#298), as the reviews and the
@@ -1403,6 +1422,7 @@ class PredictionEngine:
                 self._told_held.update(unsaid)
         await self._report_budgets(at)
         await self._refit_weights(at)
+        self._count_evidence()  # the verdicts' members' evidence, with the day's answers (#676)
         # Last: a review that failed part way is run again after a restart.
         self.store.add_run("review", at, None, f"{len(changes)} status changes")
 
@@ -1697,12 +1717,128 @@ class PredictionEngine:
             if mine:
                 await asyncio.wait(mine)
             with self._step(CONSENSUS):
-                self._record_consensus(FINAL, bar_close, at_close, members, _finished(mine))
+                final = self._record_consensus(FINAL, bar_close, at_close, members, _finished(mine))
             await asyncio.gather(*runs.values(), *kind_runs, return_exceptions=True)
         except BaseException:
             for task in [*runs.values(), *kind_runs]:  # shutting down: none may write after the store closes
                 task.cancel()
             raise
+        # Every algorithm done: each symbol's verdict from what they said (#676).
+        direction = [r.result() for r in runs.values() if not r.cancelled() and r.exception() is None]
+        kinds = [r.result() for r in kind_runs if not r.cancelled() and r.exception() is None]
+        await self._judge(bar_close, at_close, standings, direction, kinds, final, late)
+
+    async def _judge(
+        self,
+        bar_close: datetime,
+        at_close: Mapping[str, _AtClose],
+        standings: Mapping[str, Standing],
+        direction: Sequence[tuple[str, Mapping[str, Forecast | None]]],
+        kinds: Sequence[tuple[str, str, Mapping[str, KindForecast | None]]],
+        final: Mapping[str, Forecast],
+        late: Collection[str],
+    ) -> None:
+        """Each predicted symbol's verdict at ``bar_close`` (#676, ``verdict.py``), from what every
+        algorithm said there: the barrier kinds' (not ``late``) for its horizons, the direction's and
+        the other kinds' beside it; stored and logged with its time. A failure is logged, and the
+        engine goes on."""
+        started = timer.perf_counter()
+        try:
+            held: Mapping[str, Held] = {}
+            if self._held is not None:
+                try:
+                    held = await asyncio.to_thread(self._held, self.clock.now())
+                except Exception:
+                    log.warning("the trader's positions not read at %s", bar_close, exc_info=True)
+            with self._step(VERDICT):
+                now = self.clock.now()
+                status = {name: s.status.value for name, s in standings.items()}
+                evidence = self._evidence
+                rows = []
+                for symbol, c in at_close.items():
+                    horizons: list[Horizon] = []
+                    side = [
+                        Side(name, DIRECTION, status.get(name), _direction_output(f))
+                        for name, made in direction
+                        if (f := made.get(symbol)) is not None
+                    ]
+                    if (pooled := final.get(symbol)) is not None:
+                        side.append(Side(FINAL, DIRECTION, None, _direction_output(pooled)))
+                    for kind in self.kinds:
+                        made_here = [
+                            (n, kf)
+                            for n, k, m in kinds
+                            if k == kind.name and (kf := m.get(symbol)) is not None
+                        ]
+                        if kind.classes != BARRIER_CLASSES:
+                            side += [
+                                Side(n, kind.name, status.get(n), kind.output(kf)) for n, kf in made_here
+                            ]
+                            continue
+                        if kind.name in late:
+                            continue
+                        width = self._market.kind_width(kind, symbol, bar_close)
+                        horizons.append(
+                            Horizon(
+                                kind.name,
+                                round(kind.horizon.total_seconds() / 60),
+                                None if width is None else width.ticks,
+                                [
+                                    Member(
+                                        n,
+                                        kind.name,
+                                        status.get(n),
+                                        evidence.get((kind.name, n), 0),
+                                        kf.probabilities,
+                                    )
+                                    for n, kf in made_here
+                                ],
+                            )
+                        )
+                    quote = self._latest_quote(symbol, bar_close)
+                    bid, ask = quote if quote is not None else (None, None)
+                    found = verdict(
+                        symbol,
+                        bar_close,
+                        horizons,
+                        Market(c.mid, bid, ask, self.fee_rate),
+                        held.get(symbol),
+                        side,
+                    )
+                    rows.append((symbol, bar_close, VERDICT_VERSION, found.action, found.as_json()))
+                self.store.add_verdicts(rows, now)
+            told = ", ".join(f"{r[0]} {r[3]}" for r in rows)
+            log.info(
+                "verdicts at %s in %.1f ms: %s",
+                f"{bar_close.astimezone(KST):%H:%M}",
+                (timer.perf_counter() - started) * 1000,
+                told,
+            )
+        except Exception:
+            log.exception("verdicts not made at %s", bar_close)
+
+    def _latest_quote(self, symbol: str, bar_close: datetime) -> tuple[float, float] | None:
+        """``symbol``'s best quote (bid, ask) last received, crossed ones aside (#676: what an order now
+        trades at): the last of its touch window's quotes so far (a few seconds of them, the members
+        just done), else the one standing at the bar close; None without either."""
+        window = self._market.followed(symbol, bar_close)
+        if window is not None and window.quotes:
+            last = window.quotes[-1]
+            return last.bid, last.ask
+        return self._market.quote_at(symbol, bar_close)
+
+    def _count_evidence(self) -> None:
+        """Count each barrier algorithm's evidence (#676): its predictions answered, by (kind,
+        algorithm). At start and after each daily review: over 40 days it takes a few hundred
+        milliseconds, kept off the session's bar closes."""
+        counted: dict[tuple[str, str], int] = {}
+        for kind in self.kinds:
+            if kind.classes != BARRIER_CLASSES:
+                continue
+            names = [a.name for a in self.kind_registered if a.kind == kind.name]
+            found = self.store.kind_evidence(kind.name, kind.answer_version, names)
+            counted |= {(kind.name, name): n for name, n in found.items()}
+        self._evidence = counted
 
     def _judge_smt(self, frozen: BarsAtClose) -> None:
         """Keep the SMT episodes that begin at this bar close (#520). A failure is logged, and the
@@ -1861,8 +1997,9 @@ class PredictionEngine:
         at_close: Mapping[str, _AtClose],
         members: Sequence[str],
         finished: Mapping[str, Mapping[str, Forecast | None]],
-    ) -> None:
-        """The consensus of the members' forecasts finished so far; empty where there are none."""
+    ) -> dict[str, Forecast]:
+        """The consensus of the members' forecasts finished so far; empty where there are none. Its
+        forecasts by symbol."""
         pooled: dict[str, Forecast] = {}
         empty: dict[str, Forecast | None] = {}
         pooled_from: dict[str, dict[str, Forecast]] = {}
@@ -1895,6 +2032,7 @@ class PredictionEngine:
                 self._signal(self.signals, bar_close, pooled, pooled_from, blocked)
             except Exception:  # an alert never stops predicting
                 log.exception("signal alert failed")
+        return pooled
 
     def _blocked(
         self, bar_close: datetime, at_close: Mapping[str, _AtClose], pooled: Mapping[str, Forecast]
@@ -1984,8 +2122,9 @@ class PredictionEngine:
 
     async def _run_kind(
         self, algorithm: KindAlgorithm, bar_close: datetime, at_close: Mapping[str, _AtClose]
-    ) -> None:
-        """Run and record one algorithm of a kind besides the direction (#179), as ``_run``."""
+    ) -> tuple[str, str, Mapping[str, KindForecast | None]]:
+        """Run and record one algorithm of a kind besides the direction (#179), as ``_run``; its
+        name, kind and forecasts."""
         kind = self.kind_named(algorithm.kind)
         assert kind is not None  # registered with its kind
         name, model = algorithm.name, self.models[algorithm.name]
@@ -1997,6 +2136,7 @@ class PredictionEngine:
             self._record_kind(
                 kind, bar_close, at_close, _entries(name, model.version, made, declined, status)
             )
+        return name, kind.name, made
 
     async def _timed(
         self,
@@ -2181,6 +2321,11 @@ class PredictionEngine:
                 listener(change)
             except Exception:  # a listener never stops predicting
                 log.exception("engine listener failed")
+
+
+def _direction_output(f: Forecast) -> dict[str, float]:
+    """A direction forecast as a verdict shows it beside its horizons (#676)."""
+    return {"p_up": f.p_up, "p_flat": f.p_flat, "p_down": f.p_down, "expected_ticks": f.expected_ticks}
 
 
 def _votes(forecasts: Mapping[str, Forecast]) -> tuple[int, int, int]:

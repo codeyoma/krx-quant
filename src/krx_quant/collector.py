@@ -67,6 +67,7 @@ from krx_quant.krx_net_assets import KrxClient, KrxNetAssetKeeper, keep_krx_net_
 from krx_quant.macro import MacroCollector, keep_macro, macro_recorder
 from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store, next_on_trading_day
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
+from krx_quant.memory_jump import JumpWatch
 from krx_quant.model_shelf import Shelf
 from krx_quant.names import fill_names
 from krx_quant.net_assets import NetAssetKeeper, keep_net_assets
@@ -518,7 +519,8 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                     )
                 )
             if loki.active() is not None:  # the log-absence alert's line, from this loop (#358)
-                memory = partial(heartbeat.readings, settings.state_dir, now)  # and the memory (#547)
+                # And the memory (#547), with what holds a jump in it (#680).
+                memory = partial(heartbeat.readings, settings.state_dir, now, jumps=JumpWatch())
                 background.append(asyncio.create_task(loki.keep_heartbeat(fields=memory)))
             if settings.disk_min_free_percent > 0:
                 disks = DiskWatch(

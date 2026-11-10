@@ -33,6 +33,7 @@ from krx_quant.engine import (
     Admits,
     Budget,
     Event,
+    HeldNow,
     Notify,
     PredictionEngine,
     Refused,
@@ -89,6 +90,7 @@ async def replay(
     daily_algorithms: Sequence[DailyAlgorithm] = (),
     daily_features: DailyFeatures | None = None,
     daily_feature_names: Collection[str] = (),
+    held: HeldNow | None = None,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
@@ -102,7 +104,8 @@ async def replay(
     trading days' ranges from ``previous`` (#181; without: unknown); the daily kinds (#264) only
     given their KRX days (``daily``), with their algorithms and features. With ``revisions`` (#454,
     tests) it keeps the code each running bar-close algorithm runs, as live; ``refused`` tells which
-    of those ``admits`` keeps out were refused (#561: the demo's).
+    of those ``admits`` keeps out were refused (#561: the demo's). ``held`` (#676, tests) gives the
+    trader's positions its verdicts read; without, nothing is held.
     """
     clock = FakeClock(start or datetime.combine(kst_day(until), time(), KST))
     engine = PredictionEngine(
@@ -133,6 +136,7 @@ async def replay(
         daily_algorithms=daily_algorithms,
         daily_features=daily_features,
         daily_feature_names=daily_feature_names,
+        held=held,
     )
     await replay_into(engine, clock, events, until=until, display_delay=display_delay)
     return engine

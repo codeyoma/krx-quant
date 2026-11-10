@@ -32,6 +32,7 @@ ROUTES = {
     "/v1/leaderboard/days": "leaderboard_days",  # #561
     "/v1/cost-map": "cost_map",  # #307
     "/v1/consensus": "consensus",
+    "/v1/verdict": "verdict",  # #676
     "/v1/macro": "macro",
     "/v1/calendar": "calendar",
     "/v1/briefing": "briefing",  # #304
