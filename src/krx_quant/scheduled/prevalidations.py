@@ -207,7 +207,7 @@ Turn = Night[PrevalidationFacts]
 # The daily kinds' issue, open_to_close's: its pre-validation and simulation post there too. The daily
 # check (``daily-check-264``, ``probes``) named it until that job left ``JOBS`` (#505).
 #
-# > **바뀜** (2026-11-10, #PR): #264 → #204 (``PREVALIDATION_ISSUE``, below). 이유: the user closes
+# > **바뀜** (2026-11-10, #688): #264 → #204 (``PREVALIDATION_ISSUE``, below). 이유: the user closes
 # > #264 (2026-11-10); the pre-validations' issue stays open. A daily pre-validation of open_to_close
 # > then posts once there (``daily_prevalidation_jobs`` drops a target named twice).
 DAILY_CHECK_ISSUE = 204
@@ -511,7 +511,7 @@ def _revision_note(algorithm: str) -> str:
 # the keeper has stored them), it waits: a run then would be judged on the old data. Minutes, not
 # hours; the hour is a bound. Before the bar-close pre-validations, which may take the rest of the
 # night. Its result goes to #204, with them, and to its daily kind's issue (``DAILY_KIND_ISSUES``:
-# open_to_close's ``DAILY_CHECK_ISSUE``, #204 too since #PR, so once there; open_to_close_5d's #310,
+# open_to_close's ``DAILY_CHECK_ISSUE``, #204 too since #688, so once there; open_to_close_5d's #310,
 # whose review days were fixed from the variance ratio its first pre-validation measured: a later
 # algorithm's report measures it again).
 DAILY_PREVALIDATION_TIMEOUT = timedelta(hours=1)
