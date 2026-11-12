@@ -1,7 +1,8 @@
 """``krx-quant probe-night``: what the collector recorded of a KOSPI200 night session (#264).
 
-The collector registers the night futures' trades (``H0MFCNT0``) and book (``H0MFASP0``)
-all day; KRX trades them from 18:00 to 06:00 the next morning. What only the server can
+The collector registers the night futures' trades (``H0MFCNT0``) all day (their book,
+``H0MFASP0``, until #694, which stopped recording it: this report no longer reads it); KRX
+trades them from 18:00 to 06:00 the next morning. What only the server can
 see is whether KIS streams them for this app key, under the contract code the collector
 asks for, in the layout KIS's example gives. So after the first night the collector
 subscribed for, a scheduled job (``probe-night-264``) ran this once, on 2026-10-20, and posted it
@@ -11,7 +12,7 @@ For a night (the evening of a trading day, from 18:00 to 06:00 the next morning,
 the two days' partitions) it prints:
 
 - KIS's answers to the night feeds' registrations that day (``raw``, ``_system``);
-- for each night feed: the frames and records received, by partition and key, the fields
+- for the night trades: the frames and records received, by partition and key, the fields
   per record, when they came (first, last, by hour, the longest silence), the time field's
   values (the session crosses midnight), the events recorded and their times against the
   times received, the fields that were always blank or zero;
@@ -58,7 +59,6 @@ from krx_quant.recording_quality import (
     night_window,
     subscribed_nights,
 )
-from krx_quant.recording_quality import NIGHT_FEEDS as FEEDS
 
 # The night futures master KIS publishes beside the index one (stocks_info/domestic_cme_future_code.py:
 # "CME연계 야간선물"), read to see what it lists now that KRX runs its own night session.
@@ -348,22 +348,20 @@ def report(
     ]
     acks = [a for d in _days(day) for a in acknowledgements(raw, d) if a.received_at < night_window(day)[1]]
     sections: list[tuple[str, list[str]]] = [("1. 구독 응답(KIS, raw _system)", _ack_lines(acks))]
-    for n, feed in enumerate(FEEDS, start=2):
-        name = "체결" if feed is NIGHT_FUTURES else "호가"
-        sections.append(
-            (f"{n}. {feed.tr_id} {name}", _feed_section(read_night(data_dir, raw, day, feed), day))
-        )
-    sections.append(("4. 결측 구간(gaps)", _gaps(data_dir, day)))
+    sections.append(
+        (f"2. {NIGHT_FUTURES.tr_id} 체결", _feed_section(read_night(data_dir, raw, day, NIGHT_FUTURES), day))
+    )
+    sections.append(("3. 결측 구간(gaps)", _gaps(data_dir, day)))
     day_frames = _frames_in(raw, day, KOSPI200_FUTURES.tr_id)
-    sections.append(("5. 같은 밤 주간 선물 피드", [f"{KOSPI200_FUTURES.tr_id} 프레임 {day_frames}개"]))
-    sections.append(("6. KIS 마스터", list(masters) or ["읽지 않았다"]))
+    sections.append(("4. 같은 밤 주간 선물 피드", [f"{KOSPI200_FUTURES.tr_id} 프레임 {day_frames}개"]))
+    sections.append(("5. KIS 마스터", list(masters) or ["읽지 않았다"]))
     others = []
     for other in (d for d in nights if d != day):
-        trades, book = (read_night(data_dir, raw, other, f) for f in FEEDS)
-        received = sorted(trades.received + book.received)
+        trades = read_night(data_dir, raw, other, NIGHT_FUTURES)
+        received = sorted(trades.received)
         span = f" · 첫 {_when(received[0], other)} · 마지막 {_when(received[-1], other)}" if received else ""
-        others.append(f"{other}: 체결 레코드 {trades.records} · 호가 레코드 {book.records}{span}")
-    sections.append(("7. 지난 밤들", others or ["없음"]))
+        others.append(f"{other}: 체결 레코드 {trades.records}{span}")
+    sections.append(("6. 지난 밤들", others or ["없음"]))
     out = [*lines, ""]
     for heading, body in sections:
         out += [heading, *(f"  {line}" for line in body), ""]

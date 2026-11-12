@@ -26,7 +26,7 @@ from krx_quant.raw_days import RawDays
 from krx_quant.recording_quality import subscribed_nights
 from krx_quant.scheduled import run_command
 from tests.collector_doubles import TRADE_KEY, Clock, collect, serve_masters, settings_for
-from tests.kis_frames import FUTURES_COLUMNS, frame, master_zips, night_book_frame, night_futures_frame
+from tests.kis_frames import FUTURES_COLUMNS, frame, master_zips, night_futures_frame
 from tests.kis_rest import HOLIDAYS, holiday_api
 from tests.test_calendar_health import health_checks
 from tests.test_resilience import with_telegram
@@ -41,7 +41,7 @@ THURSDAY, FRIDAY, SATURDAY, MONDAY = (
 CALENDAR = MarketCalendar(
     {THURSDAY: True, FRIDAY: True, SATURDAY: False, date(2026, 10, 18): False, MONDAY: True}
 )
-TRADES, BOOK = ("H0MFCNT0", "A01612"), ("H0MFASP0", "A01612")
+TRADES = ("H0MFCNT0", "A01612")
 
 
 def at(day: date, hhmmss: str) -> datetime:
@@ -60,22 +60,6 @@ def night_trade(hhmmss: str, price: str = "1062.35") -> str:
             "hts_otst_stpl_qty": "301122",
             "futs_askp1": "1062.40",
             "futs_bidp1": "1062.35",
-        }
-    )
-
-
-def night_book(hhmmss: str) -> str:
-    return night_book_frame(
-        {
-            "futs_shrn_iscd": "A01612",
-            "bsop_hour": hhmmss,
-            "futs_askp1": "1062.40",
-            "futs_askp5": "1063.40",
-            "futs_bidp1": "1062.35",
-            "askp_csnu1": "7",
-            "bidp_rsqn2": "41",
-            "total_askp_rsqn": "820",
-            "total_bidp_rsqn_icdc": "-12",
         }
     )
 
@@ -133,22 +117,6 @@ async def test_after_midnight_a_night_goes_on_in_the_next_day_s_partition(
     assert times == [at(THURSDAY, "23:59:59"), at(FRIDAY, "00:00:01")]
 
 
-async def test_the_night_book_keeps_five_levels_and_their_orders(kis: FakeKis, tmp_path: Path) -> None:
-    kis.script[BOOK] = [night_book("221000")]
-
-    await collect(kis, settings_for(kis, tmp_path), now=at(THURSDAY, "22:10:00"))
-
-    [book] = events(tmp_path, THURSDAY, "H0MFASP0")
-    assert book["event_time"] == at(THURSDAY, "22:10:00")
-    assert (book["ask_px_1"], book["ask_px_5"], book["bid_px_1"], book["ask_count_1"]) == (
-        1062.4,
-        1063.4,
-        1062.35,
-        7,
-    )
-    assert (book["bid_qty_2"], book["total_ask_qty"], book["total_bid_qty_change"]) == (41, 820, -12)
-
-
 async def test_a_night_trade_in_the_day_futures_layout_stays_raw(kis: FakeKis, tmp_path: Path) -> None:
     # KIS's example gives 49 fields; the day futures have 50. A frame that does not fit the
     # layout is kept raw, for another look, and not guessed at.
@@ -173,7 +141,9 @@ async def test_the_night_futures_follow_the_day_futures(kis: FakeKis, tmp_path: 
     await collect(kis, settings_for(kis, tmp_path), now=at(THURSDAY, "07:20:00"))
 
     sent = [(s["body"]["input"]["tr_id"], s["body"]["input"]["tr_key"]) for s in kis.subscriptions]
-    assert sent[:4] == [("H0IFCNT0", "A01612"), ("H0CFCNT0", "A75610"), TRADES, BOOK]
+    assert sent[:3] == [("H0IFCNT0", "A01612"), ("H0CFCNT0", "A75610"), TRADES]
+    # Their book (H0MFASP0) is not registered since #694: no algorithm read it.
+    assert all(tr != "H0MFASP0" for tr, _ in sent)
 
 
 async def test_without_masters_the_night_futures_come_first(kis: FakeKis, tmp_path: Path) -> None:
@@ -183,7 +153,7 @@ async def test_without_masters_the_night_futures_come_first(kis: FakeKis, tmp_pa
     await collect(kis, settings_for(kis, tmp_path), now=at(THURSDAY, "07:20:00"))
 
     sent = [(s["body"]["input"]["tr_id"], s["body"]["input"]["tr_key"]) for s in kis.subscriptions]
-    assert sent[:3] == [TRADES, BOOK, ("H0UNCNT0", "005930")]
+    assert sent[:2] == [TRADES, ("H0UNCNT0", "005930")]
 
 
 @pytest.mark.parametrize(
@@ -249,27 +219,25 @@ async def test_the_night_feeds_quiet_all_day_are_never_stale(
 
 async def collect_again(kis: FakeKis, settings: Settings, now: datetime) -> None:
     """Run another collector until its night registrations' frames are handled."""
-    count = kis.subscription_count(BOOK) + 1
+    count = kis.subscription_count(TRADES) + 1
     stop = asyncio.Event()
     task = asyncio.create_task(run_collector(settings, stop=stop, clock=lambda: now))
-    await kis.wait_for_subscription_count(BOOK, count)
+    await kis.wait_for_subscription_count(TRADES, count)
     await kis.round_trip()
     stop.set()
     await asyncio.wait_for(task, 5)
 
 
 async def record_a_night(kis: FakeKis, data_dir: Path) -> None:
-    """Thursday: registered at 07:20, trades and books from 22:10, more after midnight."""
+    """Thursday: registered at 07:20, trades from 22:10, more after midnight."""
     settings = settings_for(kis, data_dir)
     await collect_again(kis, settings, at(THURSDAY, "07:20:00"))
     kis.script[TRADES] = [night_trade("221000"), night_trade("221005")]
-    kis.script[BOOK] = [night_book("221000")]
     await collect_again(kis, settings, at(THURSDAY, "22:10:05"))
     kis.script[TRADES] = [
         night_trade("235959"),
         frame("H0MFCNT0", FUTURES_COLUMNS, {"futs_shrn_iscd": "A01612", "bsop_hour": "003000"}),
     ]
-    kis.script[BOOK] = []
     await collect_again(kis, settings, at(FRIDAY, "00:30:00"))
 
 
@@ -297,7 +265,7 @@ async def test_the_report_counts_and_times_a_night_without_its_prices(kis: FakeK
     assert any(line.startswith("구독한 밤") and line.endswith("2026-10-15") for line in lines)
     assert "만기 규칙이 이 밤에 고르는 월물: A01612" in lines
     assert "H0MFCNT0 A01612: SUBSCRIBE SUCCESS 3번(첫 07:20:00, 마지막 10-16 00:30:00)" in lines
-    trades = text.split("2. H0MFCNT0 체결")[1].split("3. H0MFASP0 호가")[0]
+    trades = text.split("2. H0MFCNT0 체결")[1].split("3. 결측 구간")[0]
     assert "raw: 프레임 4 · 레코드 4 (날짜 파티션별 프레임: 2026-10-15 2, 2026-10-16 2)" in trades
     assert "레코드당 필드 수: 49개 3, 50개 1 (KIS 예제는 49개)" in trades
     assert "수신: 첫 22:10:05 · 마지막 10-16 00:30:00" in trades
@@ -306,10 +274,9 @@ async def test_the_report_counts_and_times_a_night_without_its_prices(kis: FakeK
     assert "event_time: 첫 22:10:00 · 마지막 23:59:59" in trades
     assert "받은 날과 날짜가 다른 행 1" in trades  # 23:59:59 received after midnight
     assert "늘 비거나 0인 필드: futs_prdy_vrss" in trades
-    book = text.split("3. H0MFASP0 호가")[1].split("4. 결측 구간")[0]
-    assert "raw: 프레임 1 · 레코드 1" in book and "events: 행 1" in book
+    assert "H0MFASP0" not in text, "the night book is not recorded since #694"
     assert "H0IFCNT0 프레임 0개" in text
-    assert "6. KIS 마스터\n  마스터 줄" in text
+    assert "5. KIS 마스터\n  마스터 줄" in text
     for price in ("1062.35", "1062.40", "15234", "301122", "820"):
         assert price not in text, price
 

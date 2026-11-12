@@ -85,12 +85,12 @@ HALT_QUIET = frozenset(
 )
 HALT_DETAIL = "market halt"  # a stale gap's detail when a market halt explains it
 
-# The KOSPI200 night futures' trades and book (#264): they deliver from 18:00 to 06:00 only,
-# so they are quiet all through continuous trading and their silence never counts. KRX
+# The KOSPI200 night futures' trades (#264; their book until #694): they deliver from 18:00 to
+# 06:00 only, so they are quiet all through continuous trading and their silence never counts. KRX
 # also closes some nights it does not announce through the holiday API (the evening before
 # a long holiday). A disconnect still opens their gaps; a night's recording is looked at
 # by ``krx-quant probe-night``.
-NIGHT_FEEDS = frozenset({"H0MFCNT0", "H0MFASP0"})
+NIGHT_FEEDS = frozenset({"H0MFCNT0"})
 
 
 @dataclass

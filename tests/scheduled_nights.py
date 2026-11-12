@@ -17,14 +17,14 @@ from typing import Any
 from krx_quant.algorithms import ALGORITHMS, DAILY_ALGORITHMS, KIND_ALGORITHMS
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import DAILY_KINDS
-from krx_quant.night_book import NIGHTS
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS
 from krx_quant.prevalidation import MIN_DAYS, LastReport
 from krx_quant.scheduled import FAILED, INTERRUPTED, OK, RUNNING, JobRecord, Revising
 from krx_quant.trader.notice_columns import APART
 
 NOW, BEFORE = "new-commit", "old-commit"  # the code running, and an older one
-# A Wednesday, a Saturday, the night book's verdict day (a Friday) and the first of a month (a Tuesday).
+# A Wednesday, a Saturday, a Friday (the night book's verdict day, #605, until #694 removed it) and the
+# first of a month (a Tuesday).
 DAYS = {
     date(2026, 11, 11): True,
     date(2026, 11, 14): False,
@@ -106,7 +106,6 @@ def _facts(level: str, day: date) -> dict[str, Any]:
             "waiting": (*BAR_CLOSE, *DAILY),
             "hit_rate_nights": HIT_RATE_NIGHTS - 1,
             "smt_holdout_days": 9,
-            "night_book_nights": NIGHTS - 1,
             "fill_notice_apart": APART - 1,
         }
     if level == "ready":
@@ -121,7 +120,6 @@ def _facts(level: str, day: date) -> dict[str, Any]:
             "hit_rate_nights": HIT_RATE_NIGHTS,
             "smt_holdout_days": 10,
             "state_backup": day - timedelta(days=1),
-            "night_book_nights": 0,
             "queue": tuple(reversed(BAR_CLOSE[::2])),
             "fill_notice_apart": APART,
         }
@@ -143,7 +141,6 @@ def _facts(level: str, day: date) -> dict[str, Any]:
             "pending_inputs": tuple(features),
             "pending_answers": tuple(k.name for k in DAILY_KINDS),
             "simulating_daily": tuple(DAILY),
-            "night_book_nights": NIGHTS,
         }
     raise ValueError(level)
 

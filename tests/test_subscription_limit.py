@@ -91,7 +91,7 @@ async def test_configured_subscription_cap_sends_the_rest_straight_to_rest(
     serve_snapshots(kis)
     settings = replace(
         settings_for(kis, tmp_path, symbols=("005930", "000660")),
-        ws_max_subscriptions=4,
+        ws_max_subscriptions=3,
         fallback_poll_seconds=0.1,
     )
 
@@ -99,7 +99,7 @@ async def test_configured_subscription_cap_sends_the_rest_straight_to_rest(
         kis, settings, lambda: polled(kis, QUOTE, "000660") and polled(kis, BOOK_SNAPSHOT, "000660")
     )
 
-    night = {("H0MFCNT0", "A01612"), ("H0MFASP0", "A01612")}  # first without the masters (#264)
+    night = {("H0MFCNT0", "A01612")}  # first without the masters (#264); its book left with #694
     assert kis.subscribed_keys() == night | {("H0UNCNT0", "005930"), ("H0UNASP0", "005930")}
 
 

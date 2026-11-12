@@ -1,21 +1,18 @@
-"""A stand-in for the Toss Securities Open API's token, daily trading-trend (#235) and stock
-information (#250) endpoints.
+"""A stand-in for the Toss Securities Open API's token and stock information (#250) endpoints (its
+daily trading-trend ones, #235, left with the daily supply's Toss part, #694).
 
 It keeps Toss's rules: one valid token per client (issuing revokes the one before, 401
 ``token-revoked``), the IP allowlist (403 ``access_denied`` from the token endpoint, 403
-``ip-not-allowed`` from the others), pages of ``count`` records newest first up to ``until``
-with ``nextUntil`` the day before the last one given (null when nothing is older). Stock
-information lists the asked symbols it has a name for.
+``ip-not-allowed`` from the others), 429 with ``Retry-After`` when busy. Stock information lists
+the asked symbols it has a name for.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import date, timedelta
-from typing import Any
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
@@ -23,23 +20,9 @@ from aiohttp.test_utils import TestServer
 CLIENT_ID = "toss-client-id-for-tests"
 CLIENT_SECRET = "toss-client-secret-for-tests"
 
-# (symbol, endpoint name) -> the records, newest first; or an error (status, code).
-Records = Callable[[str, str], list[dict[str, Any]] | tuple[int, str]]
-
-
-def page(records: list[dict[str, Any]], until: str | None, count: int) -> dict[str, Any]:
-    """Toss's page: ``count`` records up to ``until`` (inclusive), newest first."""
-    last = date.fromisoformat(until) if until else None
-    upto = [r for r in records if last is None or date.fromisoformat(r["date"]) <= last]
-    given = upto[:count]
-    older = len(upto) > count
-    next_until = str(date.fromisoformat(given[-1]["date"]) - timedelta(days=1)) if older else None
-    return {"result": {"nextUntil": next_until, "records": given}}
-
 
 @dataclass
 class FakeToss:
-    records: Records
     url: str = ""
     ip_allowed: bool = True  # the token endpoint and the API both refuse when False
     api_ip_allowed: bool = True  # the API alone refuses when False
@@ -117,20 +100,10 @@ class FakeToss:
         ]
         return web.json_response({"result": found})
 
-    async def _trend(self, request: web.Request) -> web.Response:
-        if (refused := self._refused(request)) is not None:
-            return refused
-        found = self.records(request.match_info["symbol"], request.match_info["name"])
-        if isinstance(found, tuple):
-            return _error(found[0], found[1], "")
-        count = int(request.query.get("count", "10"))
-        return web.json_response(page(found, request.query.get("until"), count))
-
     def app(self) -> web.Application:
         app = web.Application()
         app.router.add_post("/oauth2/token", self._token)
         app.router.add_get("/api/v1/stocks", self._stocks)
-        app.router.add_get("/api/v1/stocks/{symbol}/{name}", self._trend)
         return app
 
 
@@ -140,8 +113,8 @@ def _error(status: int, code: str, message: str) -> web.Response:
 
 
 @asynccontextmanager
-async def fake_toss(records: Records) -> AsyncIterator[FakeToss]:
-    fake = FakeToss(records)
+async def fake_toss() -> AsyncIterator[FakeToss]:
+    fake = FakeToss()
     server = TestServer(fake.app())
     await server.start_server()
     fake.url = str(server.make_url("")).rstrip("/")
