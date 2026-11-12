@@ -67,7 +67,7 @@ way from its ranked members, and called up when its up beats its down by the mar
 flat between, ``wait`` without a ranked member. They are shown, never acted on: BUY and SELL rest on the
 barrier horizons alone, whose shape the trader reads (#677) is v1's.
 
-> **바뀜** (2026-11-12, #PR): every algorithm with a forecast at the bar close took part, whatever its
+> **바뀜** (2026-11-12, #704): every algorithm with a forecast at the bar close took part, whatever its
 > status (v1) → only the ranking's members of each kind (v2), and the day and the week are shown beside
 > as advisory. 이유: the user's decision (#697): the raw hit rate rewards always saying timeout, and the
 > algorithms that showed skill against the baseline vote. v1 stays a version (``RULES_V1``) the replay
