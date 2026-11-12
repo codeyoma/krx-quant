@@ -5,7 +5,7 @@ that, everything that could name a secret or the server is replaced with ``[к∞Ал
 
 - every secret setting's value (``secrets_of``): the KIS app key and secret, the Telegram
   token and chat, the AWS keys, the macro API keys, the GitHub token, the Toss client ID and
-  secret (#235), the KRX Open API key (#305), the Object Store (and its bucket), the S3 endpoint,
+  secret (#235), the Object Store (and its bucket), the S3 endpoint,
   ``KRX_BIND_ADDRESS``, Grafana Cloud Loki's address, user and token (#358), and the trader's KIS
   key, secret, account (also its digits alone and its 8-digit number) and HTS ID (#403), and its
   live key, secret and account (#408) the same way.
@@ -58,7 +58,6 @@ def secrets_of(settings: Settings) -> tuple[str, ...]:
         settings.github_token,
         settings.toss_client_id,
         settings.toss_client_secret,
-        settings.krx_openapi_key,
         settings.object_store,
         settings.s3_endpoint_url,
         settings.bind_address,

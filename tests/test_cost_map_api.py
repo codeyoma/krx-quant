@@ -9,7 +9,7 @@ the leaderboard and the stats window of the same query.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +17,9 @@ import pytest
 from aiohttp.test_utils import TestClient
 
 from krx_quant.barriers import PERSIST
-from krx_quant.base_rates import NOT_COMPUTED, PERIODS, keep_base_rates
 from krx_quant.cost_map import NOT_SYMMETRIC
 from krx_quant.kinds import Answer
 from krx_quant.lifecycle import Status
-from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import ANSWER_VERSION as OTC_VERSION
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import NewKindPrediction, PredictionStore
@@ -40,7 +38,6 @@ from tests.api_doubles import (
 )
 from tests.api_schema import check
 from tests.replay_events import DAY, at
-from tests.test_base_rates import SYMBOL, bar, flat_bar, write_bars
 
 UP, FLAT, DOWN = Direction.UP, Direction.FLAT, Direction.DOWN
 FEE = 0.00015
@@ -354,39 +351,11 @@ async def test_the_daily_kind_s_row_is_in_basis_points_without_a_breakeven(tmp_p
     assert climate["pnl"]["trades"] == 3
 
 
-async def test_the_cost_map_serves_the_period_base_rates_the_history_task_keeps(tmp_path: Path) -> None:
-    """The bar rule's labels of a day after the listing (``test_base_rates``'s): 376
-    windows, four of them up; the history task keeps them, the cost map serves them."""
-    day = date(2026, 6, 8)
-    price = 81_200
-    bars = [flat_bar(day, h, m, price) for h in range(9, 16) for m in range(60) if (h, m) < (15, 20)]
-    bars[next(i for i, b in enumerate(bars) if b.start.time() == time(10, 0))] = bar(
-        day, 10, 0, price, price + 300, price, price
-    )
-    data = tmp_path / "data"
-    write_bars(data, day, bars)
-    calendar = MarketCalendar({day: True})
-
+async def test_the_cost_map_answers_no_period_base_rates(tmp_path: Path) -> None:
+    """The period base rates (#307) went with the screens that showed them (#693): the trader reads
+    the rows alone (``trader/selection.py``)."""
     async with cost_map(tmp_path) as (_, client):
-        before = await ask(client)
-        keep_base_rates(data, tmp_path / "state", calendar, SYMBOLS, FEE, at("20:31:00"))
-        after = await ask(client)
-        other = await ask(client, "?symbol=000660")
+        body = await ask(client)
 
-    assert (before["regimes"], before["regimes_missing"]) == (None, NOT_COMPUTED)
-    regimes = after["regimes"]
-    assert after["regimes_missing"] is None
-    assert (regimes["computed_at"], regimes["first_day"], regimes["last_day"]) == (
-        "2026-10-12T20:31:00+09:00",
-        "2026-06-08",
-        "2026-06-08",
-    )
-    [one] = regimes["rows"]
-    assert (one["symbol"], one["period"], one["from"], one["to"]) == (
-        SYMBOL,
-        PERIODS[1][0],
-        "2026-05-27",
-        "2026-07-30",
-    )
-    assert (one["days"], one["windows"], one["k"], one["persist_windows"]) == (1, 376, 2, 372)
-    assert other["regimes"]["rows"] == [], "000660 has no bars"
+    assert "regimes" not in body and "regimes_missing" not in body
+    assert body["rows"] and body["symbols"]

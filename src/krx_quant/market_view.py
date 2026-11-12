@@ -947,8 +947,8 @@ class MarketView:
         through the evening and the night, when the nightly training needs the server's memory.
         This drops exactly what each log would drop at the next session's first events.
 
-        The reference prices' quotes stay (a late look back reads the last minutes: the 15:20
-        closing demand), as do the bars and the touch windows (the day's chart, a late score)."""
+        The reference prices' quotes stay (a late look back reads the last minutes), as do the bars
+        and the touch windows (the day's chart, a late score)."""
         if self._unanswered({WINDOW, *horizons}):
             return {}
         kind_quotes = self.held()[KIND_QUOTES]

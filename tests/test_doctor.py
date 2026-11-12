@@ -561,7 +561,6 @@ def test_the_lenient_settings_mask_what_the_full_ones_do(tmp_path: Path) -> None
         "KRX_GITHUB_TOKEN": GITHUB_TOKEN,
         "TOSS_CLIENT_ID": "T" * 24,
         "TOSS_CLIENT_SECRET": "t" * 48,
-        "KRX_OPENAPI_KEY": "K" * 40,
         "KRX_OBJECT_STORE": "s3://krx-quant-example/engine",
         "KRX_S3_ENDPOINT_URL": "https://objects.example.test",
         "KRX_BIND_ADDRESS": BIND_ADDRESS,
@@ -580,7 +579,7 @@ def test_the_lenient_settings_mask_what_the_full_ones_do(tmp_path: Path) -> None
     lenient, error = lenient_settings({**env, "KRX_TARGET_VERSION": "2"}, None)
     assert error is not None and error.startswith("KRX_TARGET_VERSION 2")
     # 19, and the trader's key, secret, account (written, its digits, its 8) and HTS ID (#403).
-    assert secrets_of(lenient) == secrets_of(full) and len(secrets_of(full)) == 25
+    assert secrets_of(lenient) == secrets_of(full) and len(secrets_of(full)) == 24
     assert (lenient.data_dir, lenient.state_dir, lenient.api_port) == (tmp_path / "data", Path("state"), 8081)
     bad_port, _ = lenient_settings({**env, "KRX_API_PORT": "soon"}, None)
     assert bad_port.api_port == 8080

@@ -128,7 +128,7 @@ to ``kind_answers`` (special when a VI, circuit breaker or sidecar known at its 
 learned since, touches it) and scores every predictor of the kind there. Each answer is made
 once, in a worker thread (#538): a longer kind's window holds up to an hour of quotes, and the
 baselines' last window over is that answer. The kinds have no
-consensus and no signals. Each daily review also judges each kind's algorithms against that
+consensus. Each daily review also judges each kind's algorithms against that
 kind's baselines, within the kind. A kind that fails (its answer function, a baseline) is
 logged and never holds up the direction. A kind baseline that predicts from a table (the
 range's climate, #180, ``kinds.TableBaseline``) runs the table the engine holds for it
@@ -153,6 +153,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import enum
 import heapq
 import json
 import logging
@@ -285,7 +286,6 @@ from krx_quant.ranking import BAR_CLOSE, DAILY, RANKING_VERSION, Snapshot, WalkF
 from krx_quant.ranking import Window as RankingWindow
 from krx_quant.ranking import text as ranking_text
 from krx_quant.reference import Bar
-from krx_quant.signals import SENT, Blocked, Judged, SignalRule, Signals
 from krx_quant.smt import LIVE as SMT_LIVE
 from krx_quant.smt import Detector as SmtDetector
 from krx_quant.special import HALT_STATUS, KOSPI, Kind, SpecialSituations, Window, in_halt, in_vi, touching
@@ -438,6 +438,20 @@ ENGINE_FEEDS: dict[str, tuple[str, ...]] = {
 _BLOCKING = (Kind.VI, Kind.CIRCUIT_BREAKER, Kind.MARKET_HALT)
 
 
+class Blocked(enum.Enum):
+    """Why a final consensus is not to be acted on (#88), stored with it (``blocked``).
+
+    > **바뀜** (2026-11-12, #701): ``signals.Blocked``, why a Telegram signal was not sent → the
+    > engine's own. 이유: the signal alerts are gone (#693); the final consensus still says why.
+    """
+
+    # A VI or circuit breaker touches its four minutes. Narrower than a special prediction's
+    # windows: a sidecar halts program trading only and does not block.
+    SPECIAL = "special"
+    NO_REFERENCE = "no_reference"  # no mid-point at its bar close: the book was silent a minute
+    EXPIRED = "expired"  # its target time is past
+
+
 def partitions(feed: str, symbols: Sequence[str], leaders: Leaders) -> list[str] | None:
     """The partitions of ``feed`` the engine reads; None for every one (a futures feed's
     single front month, whichever it was that day, and the options near the money that day).
@@ -521,8 +535,6 @@ class PredictionEngine:
         notify: Notify | None = None,
         consensus_timing: Timing | None = None,
         leaders: Leaders | None = None,
-        signals: Signals | None = None,
-        signal_rule: SignalRule | None = None,
         regimes: Regimes | None = None,
         admits: Admits | None = None,
         refused: Refused | None = None,
@@ -691,11 +703,6 @@ class PredictionEngine:
         # The statuses' stages and what they were computed for (``stages``).
         self._stages: tuple[Any, dict[str, Stage]] | None = None
         self.listeners: list[Listener] = []
-        self.signals = signals  # Telegram signal alerts, off without
-        # The signal settings in force, whether the alerts are on or off: the status serves them,
-        # and the screen's signal alerts follow them unless the user set their own (#617).
-        self.signal_rule = signal_rule or SignalRule()
-        self._signals_resumed = False  # from the signals sent before a restart, at the first final
         self._regimes = regimes  # without: no macro regime, and nothing to say about it
         self._regime_days: dict[date, str | None] = {}
         # Reviews pick up where the last one left off: one missed while down runs at start.
@@ -1228,11 +1235,6 @@ class PredictionEngine:
 
     def mid(self, symbol: str) -> float | None:
         return self._market.mid(symbol, self.clock.now())
-
-    def mid_at(self, symbol: str, at: datetime) -> float | None:
-        """The reference price just before ``at`` in continuous trading (the quotes of the last
-        minutes are kept: the closing flow's minute and its 15:20, #305)."""
-        return self._market.mid(symbol, at)
 
     def latest_lead(self, series: str) -> tuple[float, datetime] | None:
         """A leading series' latest trade today (e.g. the USD futures): price and time."""
@@ -2248,11 +2250,6 @@ class PredictionEngine:
             {s: _votes(f) for s, f in pooled_from.items()},
             {s: tuple(f) for s, f in pooled_from.items()},
         )
-        if name == FINAL and self.signals is not None:
-            try:
-                self._signal(self.signals, bar_close, pooled, pooled_from, blocked)
-            except Exception:  # an alert never stops predicting
-                log.exception("signal alert failed")
         return pooled
 
     def _blocked(
@@ -2273,30 +2270,6 @@ class PredictionEngine:
             elif now >= target_at:
                 blocked[symbol] = Blocked.EXPIRED
         return blocked
-
-    def _signal(
-        self,
-        signals: Signals,
-        bar_close: datetime,
-        pooled: Mapping[str, Forecast],
-        pooled_from: Mapping[str, Mapping[str, Forecast]],
-        blocked: Mapping[str, Blocked],
-    ) -> None:
-        """Judge a final consensus for signals, block what should not be acted on, and keep
-        each signal judged (``runs``)."""
-        now = self.clock.now()
-        if not self._signals_resumed:
-            self._signals_resumed = True  # once, even if reading fails
-            midnight = datetime.combine(now.astimezone(KST).date(), time(), KST)
-            signals.resume(r.detail for r in self.store.runs(SENT, midnight))
-        target_at = bar_close + HORIZON
-
-        def keep(judged: Judged) -> None:
-            self.store.add_run(judged.kind, now, None, judged.detail(signals.rule))
-            if judged.blocked is not None:
-                log.info("signal blocked (%s): %s", judged.blocked.value, judged.signal.text())
-
-        signals.final(bar_close, target_at, pooled, pooled_from, blocked, keep)
 
     def _record_not_predicted(
         self, bar_close: datetime, symbols: Sequence[str], status: str, running: Sequence[Algorithm]

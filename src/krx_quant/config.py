@@ -13,7 +13,6 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 from krx_quant.regime import RegimeRules
-from krx_quant.signals import SignalRule
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 
 DEFAULT_REST_URL = "https://openapi.koreainvestment.com:9443"
@@ -36,10 +35,6 @@ DEFAULT_TELEGRAM_API_URL = "https://api.telegram.org"
 DEFAULT_ECOS_URL = "https://ecos.bok.or.kr/api"
 DEFAULT_FRED_URL = "https://api.stlouisfed.org"
 DEFAULT_YAHOO_URL = "https://query1.finance.yahoo.com"
-# The economic calendar (econ_calendar.py, #150).
-DEFAULT_CALENDAR_URL = "https://economic-calendar.tradingview.com/events"
-DEFAULT_CALENDAR_COUNTRIES = "US,KR,CN,JP,EU,DE,GB"
-MIN_CALENDAR_MINUTES = 5  # the feed is not ours: no faster than this
 # Where the scheduled jobs post their results (#215).
 DEFAULT_GITHUB_REPO = "codeyoma/krx-quant"
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
@@ -47,8 +42,6 @@ DEFAULT_GITHUB_API_URL = "https://api.github.com"
 MIN_SNAPSHOT_MINUTES = 1
 # The Toss Securities Open API: the company names (#250; the daily supply's second source until #694).
 DEFAULT_TOSS_URL = "https://openapi.tossinvest.com"
-# The KRX Open API (openapi.krx.co.kr): the ETFs' daily net assets and listed units (#305).
-DEFAULT_KRX_OPENAPI_URL = "https://data-dbg.krx.co.kr"
 # The scheduled jobs' night runs from KRX_JOBS_AT to the next 05:30 (#215): from the NXT
 # after-market's close on, and over before the 06:00 deploy.
 JOBS_FROM = time(20, 0)
@@ -66,7 +59,6 @@ RULES = RegimeRules()  # the regime's default thresholds
 # this one; a test keeps the two equal).
 TOUCH_TARGET = 3
 TARGETS = (str(TOUCH_TARGET),)
-SIGNALS = SignalRule()  # the signal alerts' defaults
 
 
 class SettingsError(ValueError):
@@ -196,17 +188,7 @@ class Settings:
     ecos_url: str = DEFAULT_ECOS_URL
     fred_url: str = DEFAULT_FRED_URL
     yahoo_url: str = DEFAULT_YAHOO_URL
-    # The collector reads the economic calendar this often (KRX_CALENDAR_EVERY: 15 minutes
-    # unless set; "off"), for these countries (KRX_CALENDAR_COUNTRIES, two-letter codes).
-    # None here, as macro_at: a collector built in a test never does.
-    calendar_every: timedelta | None = None
-    calendar_countries: tuple[str, ...] = tuple(DEFAULT_CALENDAR_COUNTRIES.split(","))
-    calendar_url: str = DEFAULT_CALENDAR_URL
     regime_rules: RegimeRules = RegimeRules()
-    signal_rule: SignalRule | None = None  # Telegram signal alerts; None: off
-    # The signal settings (KRX_SIGNAL_MIN_PROBABILITY, KRX_SIGNAL_MIN_AGREE) whether the alerts
-    # are on or off: the engine's rule, served by its status (#617).
-    signal_thresholds: SignalRule = SIGNALS
     commit: str = "unknown"  # the commit the image was built from (KRX_COMMIT, set by the deploy)
     probation_review_days: tuple[int, ...] = (10, 20, 40)  # days on probation it is judged on (#87)
     bench_review_days: tuple[int, ...] = (20, 40, 60)  # days on the bench it may recover on
@@ -246,12 +228,6 @@ class Settings:
     toss_client_id: str | None = field(default=None, repr=False)
     toss_client_secret: str | None = field(default=None, repr=False)
     toss_url: str = DEFAULT_TOSS_URL
-    # The KRX Open API key (KRX_OPENAPI_KEY, from openapi.krx.co.kr, each service applied for and
-    # approved there; #305): the single-stock ETFs' daily net assets and listed units. Unset:
-    # nothing asks KRX (its scheduled probe, ``probe-krx-etf-305``, ran on 2026-10-23 and left
-    # ``JOBS``, #505).
-    krx_openapi_key: str | None = field(default=None, repr=False)
-    krx_openapi_url: str = DEFAULT_KRX_OPENAPI_URL
     # Grafana Cloud Loki (#358): each process's log lines also go to
     # ``<KRX_LOKI_URL>/loki/api/v1/push`` (basic auth KRX_LOKI_USER and KRX_LOKI_TOKEN, a
     # ``logs:write`` token), where they are kept and an agent queries them (``loki.py``). All three
@@ -373,22 +349,6 @@ class Settings:
             raise SettingsError(
                 "KRX_INDEX_CODES must include 0001 (KOSPI): circuit breakers are called from it"
             )
-        # Checked even while the alerts are off, so a wrong value shows before they are turned on.
-        signal_rule = SignalRule(
-            min_probability=float(
-                number("KRX_SIGNAL_MIN_PROBABILITY", str(SIGNALS.min_probability), float, 0.5, 1)
-            ),
-            min_agree=int(number("KRX_SIGNAL_MIN_AGREE", str(SIGNALS.min_agree), int, 1)),
-        )
-        calendar_every = _minutes_or_off(
-            "KRX_CALENDAR_EVERY", values.get("KRX_CALENDAR_EVERY", "15"), MIN_CALENDAR_MINUTES
-        )
-        calendar_countries = tuple(
-            c.upper() for c in codes("KRX_CALENDAR_COUNTRIES", DEFAULT_CALENDAR_COUNTRIES)
-        )
-        if not calendar_countries or any(len(c) != 2 or not c.isalpha() for c in calendar_countries):
-            raw = values.get("KRX_CALENDAR_COUNTRIES")
-            raise SettingsError(f"KRX_CALENDAR_COUNTRIES must be two-letter country codes, got {raw!r}")
         macro_at = _time_or_off("KRX_MACRO_AT", values.get("KRX_MACRO_AT", "07:30"))
         train_at = _time_or_off("KRX_TRAIN_AT", values.get("KRX_TRAIN_AT", "21:30"))
         jobs_at = _at_night("KRX_JOBS_AT", values.get("KRX_JOBS_AT", "22:30"))
@@ -505,9 +465,6 @@ class Settings:
             ecos_url=values.get("KRX_ECOS_URL", DEFAULT_ECOS_URL),
             fred_url=values.get("KRX_FRED_URL", DEFAULT_FRED_URL),
             yahoo_url=values.get("KRX_YAHOO_URL", DEFAULT_YAHOO_URL),
-            calendar_every=calendar_every,
-            calendar_countries=calendar_countries,
-            calendar_url=values.get("KRX_CALENDAR_URL", DEFAULT_CALENDAR_URL),
             regime_rules=RegimeRules(
                 shock_sox_pct=float(number("KRX_REGIME_SHOCK_SOX_PERCENT", str(RULES.shock_sox_pct), float)),
                 shock_vix=float(number("KRX_REGIME_SHOCK_VIX", str(RULES.shock_vix), float)),
@@ -517,10 +474,6 @@ class Settings:
                 sox_move_pct=float(number("KRX_REGIME_SOX_MOVE_PERCENT", str(RULES.sox_move_pct), float)),
                 weak_won_pct=float(number("KRX_REGIME_WEAK_WON_PERCENT", str(RULES.weak_won_pct), float)),
             ),
-            signal_rule=signal_rule
-            if _on_or_off("KRX_SIGNAL_ALERT", values.get("KRX_SIGNAL_ALERT", "off"))
-            else None,
-            signal_thresholds=signal_rule,
             commit=values.get("KRX_COMMIT", "").strip() or "unknown",
             probation_review_days=review_days("KRX_PROBATION_REVIEW_DAYS", "10,20,40"),
             bench_review_days=review_days("KRX_BENCH_REVIEW_DAYS", "20,40,60"),
@@ -540,8 +493,6 @@ class Settings:
             toss_client_id=values.get("TOSS_CLIENT_ID", "").strip() or None,
             toss_client_secret=values.get("TOSS_CLIENT_SECRET", "").strip() or None,
             toss_url=values.get("TOSS_URL", DEFAULT_TOSS_URL).strip().rstrip("/"),
-            krx_openapi_key=values.get("KRX_OPENAPI_KEY", "").strip() or None,
-            krx_openapi_url=values.get("KRX_OPENAPI_URL", DEFAULT_KRX_OPENAPI_URL).strip().rstrip("/"),
             loki_url=values.get("KRX_LOKI_URL", "").strip() or None,
             loki_user=values.get("KRX_LOKI_USER", "").strip() or None,
             loki_token=values.get("KRX_LOKI_TOKEN", "").strip() or None,
@@ -601,7 +552,6 @@ def lenient_settings(
         github_token=text("KRX_GITHUB_TOKEN"),
         toss_client_id=text("TOSS_CLIENT_ID"),
         toss_client_secret=text("TOSS_CLIENT_SECRET"),
-        krx_openapi_key=text("KRX_OPENAPI_KEY"),
         object_store=text("KRX_OBJECT_STORE"),
         s3_endpoint_url=text("KRX_S3_ENDPOINT_URL"),
         bind_address=text("KRX_BIND_ADDRESS"),

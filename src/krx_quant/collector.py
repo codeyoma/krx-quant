@@ -33,12 +33,10 @@ from krx_quant.close_restart import (
     restart_after_close,
     tell_started,
 )
-from krx_quant.closing_flow import keep_days, keep_demand, store_closing_demand
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200, night_front_month
 from krx_quant.disk_watch import DiskWatch, keep_disks
 from krx_quant.doctor import RecentLog, engine_status, report
-from krx_quant.econ_calendar import CalendarCollector, keep_calendar
 from krx_quant.engine import PredictionEngine, run_live
 from krx_quant.feeds import (
     BOOK,
@@ -70,27 +68,23 @@ from krx_quant.feeds import (
 from krx_quant.feeds.base import kst_day
 from krx_quant.health import FeedHealth, FeedState
 from krx_quant.kind_registry import KINDS
-from krx_quant.krx_net_assets import KrxClient, KrxNetAssetKeeper, keep_krx_net_assets
 from krx_quant.macro import MacroCollector, keep_macro, macro_recorder
 from krx_quant.market_calendar import MarketCalendar, Phase, calendar_store, next_on_trading_day
 from krx_quant.masters import FrontMonths, MasterError, fetch_front_months
 from krx_quant.memory_jump import JumpWatch
 from krx_quant.model_shelf import Shelf
 from krx_quant.names import fill_names
-from krx_quant.net_assets import NetAssetKeeper, keep_net_assets
 from krx_quant.notify import Alerts
 from krx_quant.object_store import open_store
 from krx_quant.poll_outages import PollOutages, PollState
 from krx_quant.polling import CALL_ERRORS, NORMALIZE_ERRORS, Poller, PollJob
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
-from krx_quant.products import INVERSE_PRODUCTS, products_of
-from krx_quant.ratelimit import RateLimiter
+from krx_quant.products import INVERSE_PRODUCTS
 from krx_quant.readiness import Readiness, keep_ready
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.rescore import EngineLock, keep_touches_filled
 from krx_quant.scheduled import STATE_FILE as JOBS_STATE_FILE
 from krx_quant.scheduled import keep_jobs
-from krx_quant.signals import Signals
 from krx_quant.snapshot import keep_snapshots
 from krx_quant.special import REOPENED, Window
 from krx_quant.state_backup import keep_backed_up
@@ -285,13 +279,9 @@ def night_contract(at: datetime, calendar: MarketCalendar) -> str | None:
 def started(settings: Settings) -> dict[str, Any]:
     """What an engine start is recorded with (``runs``, kind ``start``): the code and the
     settings its results depend on, so stats can be told apart by them (#85)."""
-    rule = settings.signal_rule
     return {
         "commit": settings.commit,
         "fee_rate": settings.fee_rate,
-        "signal_rule": None
-        if rule is None
-        else {"min_probability": rule.min_probability, "min_agree": rule.min_agree},
         "algorithm_seconds": settings.algorithm_seconds,
         "cpu_budget_seconds": settings.cpu_budget_seconds,
     }
@@ -371,8 +361,6 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                 session, settings.telegram_bot_token, settings.telegram_chat_id, settings.telegram_api_url
             )
             engine.notify = alerts.deliver  # retirement candidates
-            if settings.signal_rule is not None:
-                engine.signals = Signals(settings.signal_rule, alerts.signal)
             tokens, client = tokens_and_client(session, settings, now)
             await _warm_up(tokens)
             # The polls' calls and outages by feed and key, alerted on when one goes on (#441).
@@ -410,21 +398,6 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                 calendar.calendar,
                 engine.market_halt,
             )
-            # The closing flow's days (#305): after the history task's runs and after KRX's net
-            # assets come in, one computation at a time (they write the same file).
-            days_lock = asyncio.Lock()
-
-            async def closing_days(at: datetime) -> None:
-                async with days_lock:
-                    await keep_days(
-                        settings.data_dir,
-                        settings.state_dir,
-                        calendar.calendar,
-                        settings.symbols,
-                        engine.store.special_windows,
-                        at,
-                    )
-
             background = [
                 asyncio.create_task(_every(_TICK_SECONDS, recorder.flush_due, "periodic flush")),
                 asyncio.create_task(
@@ -436,42 +409,10 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                         client,
                         calendar,
                         now,
-                        closing_days,  # from the bars just filled and the auctions just kept
                     )
                 ),
                 asyncio.create_task(run_live(engine, session_clock)),
             ]
-            # The single-stock ETFs' net assets the closing flow reads (#305): at start, at 20:30
-            # and on trading-day mornings until the previous day's are in (``net_assets``).
-            products = [p for symbol in settings.symbols for p in products_of(symbol)]
-            if products:
-                pace = RateLimiter(1, 1 / settings.backfill_max_per_second, margin=0)  # as the history task's
-                keeper = NetAssetKeeper(client, calendar.calendar, settings.state_dir, products, pace)
-                background.append(asyncio.create_task(keep_net_assets(keeper, now)))
-                # And from the KRX Open API, read first: the past days, and the previous trading
-                # day's from 08:05 (``krx_net_assets``).
-                if settings.krx_openapi_key:
-                    krx = KrxNetAssetKeeper(
-                        KrxClient(session, settings.krx_openapi_url, settings.krx_openapi_key),
-                        calendar.calendar,
-                        settings.state_dir,
-                        products,
-                        now,
-                        after=closing_days,
-                    )
-                    background.append(asyncio.create_task(keep_krx_net_assets(krx, now)))
-                else:
-                    log.info("KRX_OPENAPI_KEY is not set: the ETF net assets come from KIS alone")
-                # Their 15:20 demand, from the engine's reference price then (#305).
-                store_at = partial(
-                    store_closing_demand,
-                    engine.mid_at,
-                    settings.data_dir,
-                    settings.state_dir,
-                    calendar.calendar,
-                    settings.symbols,
-                )
-                background.append(asyncio.create_task(keep_demand(store_at, calendar.calendar, now)))
             running = Running()  # what the restart after the close waits for (#687)
             if settings.object_store is None:
                 log.warning("KRX_OBJECT_STORE is not set: recorded days are not archived nor trained on")
@@ -599,19 +540,6 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                             ran=readiness.ran,  # kept until the readiness line tells them (#614)
                         )
                     )
-                )
-            if settings.calendar_every is not None:
-                calendar_collector = CalendarCollector(
-                    session=session,
-                    data_dir=settings.data_dir,
-                    countries=settings.calendar_countries,
-                    alerts=alerts,
-                    recorder=recorder,
-                    now=now,
-                    url=settings.calendar_url,
-                )
-                background.append(
-                    asyncio.create_task(keep_calendar(calendar_collector, settings.calendar_every))
                 )
             live = _live_status(stream, health, outages, now)
             if settings.snapshot_every is not None:

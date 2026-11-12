@@ -1,4 +1,0 @@
-usage: krx-quant probe-nav [-h]
-
-options:
-  -h, --help  show this help message and exit

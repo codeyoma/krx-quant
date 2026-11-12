@@ -296,55 +296,13 @@ async def test_the_demo_has_the_five_session_kind_s_windows(demo: TestClient[Any
     assert {e["algorithm"] for e in board["baselines"]} == baselines
 
 
-@ON_THE_SHARED_DEMO
-async def test_the_demo_has_a_briefing_of_its_morning(demo: TestClient[Any, Any]) -> None:
-    """#304. Output: the night begun on the 8th, each symbol's pre-market and the auction's last
-    expected price, the morning's economic calendar, US closes and Cox's 08:50 inputs."""
-    body = await get_json(demo, "/v1/briefing")
-
-    check("briefing", body)
-    assert (body["day"], body["previous_day"]) == ("2026-10-12", "2026-10-08")
-    assert body["night_futures"]["recorded"] and body["night_futures"]["evening"] == "2026-10-08"
-    for symbol in body["symbols"]:
-        assert symbol["premarket"]["window"] == "08:40-08:50"
-        assert symbol["expected_open"]["final"] is True, "the clock is past the open"
-        assert symbol["after_hours"] is None, "the 8th's bars end at 15:20"
-    assert [e["country"] for e in body["schedule"]["events"]] == ["KR", "US"]
-    assert all(len(u["closes"]) == 5 for u in body["overnight"]["us"])
-    assert body["overnight"]["macro"]["regime"] == "risk_off"
-    otc = body["open_to_close"]
-    assert otc["day"] == "2026-10-12" and not otc["previous"]
-    for symbol in otc["symbols"]:
-        [inputs] = [i for i in symbol["inputs"] if i["algorithm"] == "cox"]  # #698's in shadow beside it
-        assert inputs["bias"] is not None
-
-
-@ON_THE_SHARED_DEMO
-async def test_the_demo_has_its_morning_s_flows(demo: TestClient[Any, Any]) -> None:
-    """#306. Output: each symbol's program trading and member firms through the morning, nothing
-    during the halt, the REST stand-ins from 10:00 to 10:10, two estimate slots, and the 8th's
-    totals at 10:30."""
-    body = await get_json(demo, "/v1/symbols/000660/flow")
-
-    check("flow", body)
-    assert (body["day"], body["recorded"]) == ("2026-10-12", True)
-    minutes = {m["at"][11:16]: m for m in body["minutes"]}
-    assert minutes["09:00"]["program_source"] == "ws" and minutes["09:00"]["program_net_value"] is not None
-    assert minutes["09:20"]["program_net_value"] is None, "the circuit breaker's halt"
-    assert (minutes["10:05"]["program_source"], minutes["10:05"]["member_source"]) == ("rest", "rest")
-    assert minutes["11:00"]["program_net_value"] is None, "the clock stays at 10:30"
-    assert [e["slot"] for e in body["estimates"]] == ["1", "2"]
-    assert len(body["members"]["sell"]) == 5 and any(m["foreign"] for m in body["members"]["buy"])
-    assert body["previous_day_same_time"]["at"] == "2026-10-08T10:30:00+09:00"
-    assert body["previous_day_same_time"]["program_net_value"] is not None
-    assert [w["kind"] for w in body["special"]] == ["circuit_breaker", "vi"]
-
-
+# Run first, it builds the shared demo: about 9 s on a laptop, near the 30 s default
+# (``pyproject.toml``) on a loaded CI runner (#327).
+@pytest.mark.timeout(120)
 @ON_THE_SHARED_DEMO
 async def test_the_demo_has_a_cost_map(demo: TestClient[Any, Any]) -> None:
     """#307. Output: each symbol's card at its mid-point at 10:30, a row each kind with a
-    direction (the range has none), every row's breakeven but the daily kind's, and the made-up
-    base rates of the four periods."""
+    direction (the range has none), and every row's breakeven but the daily kind's."""
     body = await get_json(demo, "/v1/cost-map?period=20d")
 
     check("cost_map", body)
@@ -365,44 +323,6 @@ async def test_the_demo_has_a_cost_map(demo: TestClient[Any, Any]) -> None:
     assert all(r["breakeven"] is not None for k, r in rows.items() if not k.startswith("open_to_close"))
     assert rows["direction"]["consensus"]["algorithm"] == "consensus-final"
     assert rows["open_to_close"]["unit"] == "bp" and rows["open_to_close"]["bar_closes"] > 0
-    regimes = body["regimes"]
-    assert len(regimes["rows"]) == 12, "three symbols, four periods"
-
-
-# Run first, it builds the shared demo: about 9 s on a laptop, near the 30 s default
-# (``pyproject.toml``) on a loaded CI runner (#327).
-@pytest.mark.timeout(120)
-@ON_THE_SHARED_DEMO
-async def test_the_demo_has_its_closing_flow(demo: TestClient[Any, Any]) -> None:
-    """#305. Output: the morning's demand at 10:30 by the engine's price, its products named, one
-    without its net assets, the others' KIS's; the 20 days before on KRX's net assets, the last 8
-    with their stored 15:20 demand, the others from the bars, a VI day, the first five with KRX's
-    closing bar's value in place of a recorded one, and 009150 without demand."""
-    today = await get_json(demo, "/v1/symbols/000660/closing-flow")
-    days = await get_json(demo, "/v1/symbols/000660/closing-flow/days")
-    control = await get_json(demo, "/v1/symbols/009150/closing-flow")
-
-    check("closing_flow", today)
-    check("closing_flow_days", days)
-    assert (today["day"], today["at"], today["source"]) == ("2026-10-12", "2026-10-12T10:30:00+09:00", "live")
-    assert today["demand"] is not None and today["ratio"] is not None
-    assert today["denominator_days"] == 20
-    assert today["denominator_sources"] == {"recorded": 15, "krx_bar": 5, "integrated_bar": 0}
-    assert today["missing"] == ["0198D0"]
-    assert {p["net_assets_source"] for p in today["products"] if p["net_assets"]} == {"kis"}
-    assert all(p["name"] for p in today["products"]) and len(today["products"]) == 8
-    rows = days["days"]
-    assert len(rows) == 20 and rows[-1]["date"] == "2026-10-08"
-    assert [r["demand_source"] for r in rows].count("live") == 8
-    assert {r["demand_source"] for r in rows[:-8]} == {"bars"}
-    assert rows[-1]["auction_value_source"] == "recorded" and rows[-1]["next_gap_bp"] is None
-    assert [r["auction_value_source"] for r in rows[:5]] == ["krx_bar"] * 5
-    assert rows[0]["denominator_days"] == 1 and rows[-1]["denominator_days"] == 20
-    assert rows[-1]["denominator_sources"] == {"recorded": 14, "krx_bar": 6, "integrated_bar": 0}
-    assert {r["net_assets_source"] for r in rows} == {"krx"}, "the screen shows 한국거래소 통계정보"
-    assert [r["date"] for r in rows if r["special"]] == ["2026-09-24"]
-    assert len(days["summary"]["tertiles"]) == 3
-    assert (control["demand"], control["reason"]) == (None, "no_products")
 
 
 # A second demo built beside the shared one, both when this runs first: about 13 s on a laptop. It
@@ -421,10 +341,6 @@ async def test_the_demo_is_the_same_every_time(demo: TestClient[Any, Any], tmp_p
             "/v1/symbols/005930/candles?period=day",
             "/v1/symbols/005930/supply",
             "/v1/symbols/005930/kinds/open_to_close/predictions?limit=21",
-            "/v1/briefing",
-            "/v1/symbols/000660/flow",
-            "/v1/symbols/000660/closing-flow",
-            "/v1/symbols/005930/closing-flow/days",
             "/v1/cost-map?period=20d",
         ):
             assert await get_json(demo, path) == await get_json(b, path)

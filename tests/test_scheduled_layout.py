@@ -100,7 +100,8 @@ RETIRED = {
 # commands stay". ``probe-candles`` ran by hand only (#111). The research commands #505 kept for a run
 # by hand (#658): their issues all closed and none ran by hand in the 14 days before 2026-11-09; the
 # user decided on 2026-11-09. The commands of the jobs whose issues the user closed on 2026-11-10
-# (#689: #206, #447, #449, #455).
+# (#689: #206, #447, #449, #455). The closing flow's probes, gone with it (#693, the user's decision of
+# 2026-11-12 to slim the app).
 REMOVED = (
     "probe-candles",
     "probe-close",
@@ -127,9 +128,11 @@ REMOVED = (
     "error-holdout",
     "climate-gate",
     "neyman-variants",
+    "probe-nav",
+    "probe-krx-etf",
 )
 # The concluded experiments', probes' and research commands' modules, removed with their commands
-# (#559, #529, #644, #658, #689).
+# (#559, #529, #644, #658, #689), and the closing flow's probes (#693).
 REMOVED_MODULES = (
     "krx_quant.trader.passive",
     "krx_quant.cost_map_audit",
@@ -149,6 +152,8 @@ REMOVED_MODULES = (
     "krx_quant.climate_gate",
     "krx_quant.neyman_variants",
     "krx_quant.neyman_backfill",
+    "krx_quant.nav_probe",
+    "krx_quant.krx_etf_probe",
 )
 
 
@@ -207,5 +212,6 @@ def test_the_removed_probes_are_no_command_and_no_job_runs_one() -> None:
 
 
 def test_the_concluded_experiments_modules_are_gone() -> None:
-    """#559, #529, #644, #658, #689: removed with their commands (``REMOVED``), nothing is left to import."""
+    """#559, #529, #644, #658, #689, #693: removed with their commands (``REMOVED``), nothing is left to
+    import."""
     assert [m for m in REMOVED_MODULES if importlib.util.find_spec(m) is not None] == []

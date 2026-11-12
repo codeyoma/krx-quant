@@ -8,8 +8,8 @@ simulation, ``krx-quant replay``). The mode decides the rest, and only that:
 
 - ``LIVE`` (the collector): the server's gates (pre-validations, refusals, revisions, read from
   ``state/``), the daily kinds, and what only the live engine has: the loop watch, the garbage
-  collection after each bar close, the commit it runs and the signal settings it serves. Its
-  alerts are given once the collector has its HTTP session (``engine.notify``, ``engine.signals``).
+  collection after each bar close and the commit it runs. Its alerts are given once the collector
+  has its HTTP session (``engine.notify``).
 - ``REPLAY`` (a recorded day): every algorithm given runs unless gates are given, no daily kinds,
   nothing live.
 - ``DEMO`` (the demo's morning): as ``REPLAY``, with the daily kinds; its gates are the demo's own.
@@ -57,7 +57,6 @@ from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import PredictionStore
 from krx_quant.ranking import WalkForwardOf
-from krx_quant.signals import SignalRule
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import read_held
 
@@ -97,7 +96,6 @@ class EngineOptions(TypedDict):
     refused: Refused | None
     revisions: RevisionGate | None
     commit: str
-    signal_rule: SignalRule | None
     review_rules: Rules
     target_version: int
     climate: Model | None
@@ -120,7 +118,7 @@ GATES = frozenset({"admits", "refused", "revisions", "walk_forward"})
 DAILY = frozenset({"daily", "daily_algorithms", "daily_features", "daily_feature_names"})
 TRADER = frozenset({"held"})  # the trader's positions (#676), live and in the demo
 RANKING = frozenset({"ranks"})  # the nightly ranking (#697), live and in the demo
-LIVE_ONLY = frozenset({"commit", "signal_rule", "watch_loop", "garbage"})
+LIVE_ONLY = frozenset({"commit", "watch_loop", "garbage"})
 MODE_OPTIONS = GATES | DAILY | TRADER | RANKING | LIVE_ONLY
 
 
@@ -172,7 +170,6 @@ def engine_options(
         refused=gates.refused,
         revisions=gates.revisions,
         commit=settings.commit if live else "unknown",
-        signal_rule=settings.signal_thresholds if live else None,  # served by the status (#617)
         review_rules=Rules.of(settings),
         target_version=settings.target_version,  # the target learned and forecast (#169)
         climate=climate,

@@ -1,4 +1,4 @@
-"""The probes' commands (#578): what an outside source's data means (KIS, Toss, the KRX Open API,
+"""The probes' commands (#578): what an outside source's data means (KIS, Toss,
 the recordings), measured before the engine uses it (CODING_STANDARDS.md "External data is probed
 before it is used"). The trader's probes are the trader's (``cli.trader``)."""
 
@@ -17,21 +17,6 @@ async def _probe_supply() -> int:
 
     calls, failed = await probe_supply(Settings.from_env(), datetime.now(KST).date())
     return 1 if failed == calls else 0  # nothing answered
-
-
-async def _probe_nav() -> int:
-    from krx_quant.nav_probe import probe_nav
-
-    calls, failed = await probe_nav(Settings.from_env(), datetime.now(KST))
-    return 1 if failed == calls else 0  # nothing answered
-
-
-async def _probe_krx_etf() -> int:
-    from krx_quant.krx_etf_probe import probe_krx_etf
-
-    # The KIS keys are not required: without them the KRX part runs and the KIS comparison is skipped.
-    calls, with_rows = await probe_krx_etf(Settings.from_env(require_kis=False), datetime.now(KST))
-    return 0 if with_rows else 1  # no day answered with rows
 
 
 async def _probe_night(day: date | None) -> int:
@@ -96,16 +81,6 @@ def add(sub: Commands) -> None:
         "probe-supply",
         help="ask where KIS gives the daily supply indicators (#226), read-only; prints no market value",
     ).set_defaults(run=lambda args: asyncio.run(_probe_supply()))
-    sub.add_parser(
-        "probe-nav",
-        help="ask where KIS gives the single-stock leveraged and inverse ETFs' net assets (#305),"
-        " read-only; prints no market value",
-    ).set_defaults(run=lambda args: asyncio.run(_probe_nav()))
-    sub.add_parser(
-        "probe-krx-etf",
-        help="ask what the KRX Open API's ETF daily trading service gives for the single-stock ETFs"
-        " (#305), against KIS, read-only; prints no market value",
-    ).set_defaults(run=lambda args: asyncio.run(_probe_krx_etf()))
     night_cmd = sub.add_parser(
         "probe-night",
         help="summarize a recorded KOSPI200 night session (#264), read-only; prints no market value",
