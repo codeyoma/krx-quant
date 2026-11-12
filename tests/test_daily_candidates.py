@@ -322,3 +322,18 @@ def test_a_candidate_that_moves_with_one_its_kind_runs_is_refused_as_a_clone(tmp
     assert again.correlations == {}, (
         "refused on its code, on probation (a daily one runs only while admitted)"
     )
+
+
+@pytest.mark.timeout(240)  # three walk-forwards of 1,300 made-up days
+def test_a_retired_algorithm_is_not_walked_beside_even_with_a_passing_report(tmp_path: Path) -> None:
+    """Cox passed its pre-validation, then was retired: the engine no longer runs it, so a
+    candidate that moves with it is not refused for that (#703 review)."""
+    s = settings(tmp_path, 1_300, signal=0.6)
+    both: list[DailyAlgorithm] = [Cox(), Friedman()]
+    passed = prevalidate_daily(s, "cox", algorithms=[Cox()])
+    assert passed.passed, passed.checks
+    assert set(prevalidate_daily(s, "friedman", algorithms=both).correlations) == {"cox"}, "passed: beside"
+    store = PredictionStore(s.state_dir / DB_NAME)
+    store.add_status("cox", NOW, None, Status.RETIRED, "test")
+    store.close()
+    assert prevalidate_daily(s, "friedman", algorithms=both).correlations == {}, "retired: not beside"
