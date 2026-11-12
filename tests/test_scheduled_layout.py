@@ -25,8 +25,6 @@ FIRST = (
     "probe-sample-keys-565-again",
     "trader-report",
     "recording-quality-570",
-    "night-book-bytes-605",
-    "night-book-verdict-605",
     "trader-report-1111-691",
     "bar-close-times-589",
     "session-memory-623",

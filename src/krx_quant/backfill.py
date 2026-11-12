@@ -41,7 +41,6 @@ from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.market_calendar import CalendarStore, MarketCalendar, calendar_store
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.reference import Bar
-from krx_quant.toss import TossClient
 
 log = logging.getLogger(__name__)
 
@@ -447,11 +446,10 @@ async def keep_history(
     client: RestClient,
     store: CalendarStore,
     now: Callable[[], datetime],
-    toss: Callable[[], TossClient] | None = None,
 ) -> None:
     """The collector's history task: at start, then daily once the day's bars are final,
     refresh the calendar, fill missing one-minute bars, add the new day candles (``candles``)
-    and the daily supply data (``supply``, from KIS and, given ``toss``, Toss), and, with the
+    and the daily supply data (``supply``, from KIS), and, with the
     macro reads on (``KRX_MACRO_AT``), the US daily closes the daily kinds learn from
     (``us_daily``, #264). Each run then keeps the KRX auctions' prices of the days not kept yet
     (``auctions``, #264), and so does a run of that alone at ``auctions.CLOSE_AT`` (15:40), so the
@@ -469,7 +467,7 @@ async def keep_history(
 
     backfiller = backfiller_for(settings, client, store)
     candles = CandleKeeper(client, store.calendar, settings.data_dir, settings.symbols, backfiller.pace)
-    supply = SupplyKeeper(client, store.calendar, settings.state_dir, settings.symbols, backfiller.pace, toss)
+    supply = SupplyKeeper(client, store.calendar, settings.state_dir, settings.symbols, backfiller.pace)
     us = UsDailyKeeper(settings) if settings.macro_at is not None else None
     auctions = AuctionKeeper(client, store.calendar, settings.data_dir, settings.symbols, backfiller.pace)
     whole = True  # the whole run: at start and at 20:30; at 15:40 the auction prices alone

@@ -1,9 +1,9 @@
 usage: krx-quant [-h]
-                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,night-book-bytes,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
     replay              replay a recorded day through the engine into its own
                         database (no KIS needed)
@@ -94,11 +94,6 @@ positional arguments:
                         not parsed, the REST polls' failures, the night
                         futures' recording against the nights before; read-
                         only, prints no market value
-    night-book-bytes    measure the bytes a night of the KOSPI200 night
-                        futures' book takes (#605), raw and parsed as the
-                        merged files hold them, over its complete nights from
-                        2026-11-06's evening; reads the recordings, writes
-                        only its state file, prints no market value
     macro               read today's macro indicators and decide the regime,
                         once
     probe-supply        ask where KIS gives the daily supply indicators

@@ -25,7 +25,7 @@ from krx_quant.names import STOCK_MASTERS, fill_names, logo_url, parse_stock_mas
 from tests.api_schema import check
 from tests.fake_toss import fake_toss
 from tests.replay_events import at, run
-from tests.test_toss_probe import with_toss
+from tests.test_toss import with_toss
 
 KOSPI_TAIL, KOSDAQ_TAIL = (tail for _, tail in STOCK_MASTERS)
 
@@ -55,10 +55,6 @@ def settings_for(kis: FakeKis, tmp_path: Path, symbols: tuple[str, ...]) -> Sett
 
 def now() -> datetime:
     return datetime.now().astimezone()
-
-
-def no_records(symbol: str, name: str) -> list[dict[str, str]]:
-    return []
 
 
 def test_a_stock_master_names_the_wanted_codes_only() -> None:
@@ -122,7 +118,7 @@ async def test_one_master_unread_does_not_keep_the_other_from_naming(
 
 async def test_toss_names_first_and_the_masters_name_the_rest(kis: FakeKis, tmp_path: Path) -> None:
     kis.masters = masters({"005930": "삼성전자(마스터)", "009150": "삼성전기"}, {})
-    async with fake_toss(no_records) as toss:
+    async with fake_toss() as toss:
         toss.names = {"005930": "삼성전자"}
         settings = replace(settings_for(kis, tmp_path, ("005930", "009150")), **with_toss(toss))
 
@@ -137,7 +133,7 @@ async def test_toss_names_first_and_the_masters_name_the_rest(kis: FakeKis, tmp_
 async def test_when_toss_names_every_symbol_the_masters_are_not_read(
     kis: FakeKis, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    async with fake_toss(no_records) as toss:
+    async with fake_toss() as toss:
         toss.names = {"005930": "삼성전자"}
         settings = replace(settings_for(kis, tmp_path, ("005930",)), **with_toss(toss))
 
@@ -153,7 +149,7 @@ async def test_a_refusing_toss_falls_back_to_the_masters(
     kis: FakeKis, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     kis.masters = masters({"005930": "삼성전자"}, {})
-    async with fake_toss(no_records) as toss:
+    async with fake_toss() as toss:
         toss.names = {"005930": "토스의 이름"}
         toss.api_ip_allowed = False
         settings = replace(settings_for(kis, tmp_path, ("005930",)), **with_toss(toss))

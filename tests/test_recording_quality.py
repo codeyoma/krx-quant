@@ -33,7 +33,6 @@ from krx_quant.feeds import (
     KRX_TRADE,
     MEMBER,
     NIGHT_FUTURES,
-    NIGHT_FUTURES_BOOK,
     RAW_SCHEMA,
     TRADE,
     WS_FEEDS,
@@ -227,9 +226,13 @@ def ack(day: date, tr_id: str, key: str) -> tuple[date, str, str, str, str]:
     return (day, "_system", key, "07:20:00", message)
 
 
+# The night book, recorded until #694: an old night's raw may still hold its frames (38 fields).
+OLD_NIGHT_BOOK = "H0MFASP0"
+
+
 def night_frame(feed: str) -> str:
     """A night feed's one-record frame in its layout (its fields' values do not matter here)."""
-    width = len(WS_FEEDS[feed].columns)
+    width = 38 if feed == OLD_NIGHT_BOOK else len(WS_FEEDS[feed].columns)
     return f"0|{feed}|001|" + "^".join(["A01612", *["0"] * (width - 1)])
 
 
@@ -246,12 +249,12 @@ def night_frames(evening: date, feed: str, records: int) -> list[tuple[date, str
 
 
 def record_the_nights(data: Path) -> None:
-    """Two earlier nights of 10 and 12 trade records and 40 book records, then the night after
-    11-04: two trade records (one of them normalized) and no book."""
+    """Two earlier nights of 10 and 12 trade records and 40 book records (recorded before #694), then
+    the night after 11-04: two trade records (one of them normalized)."""
     rows = [ack(d, NIGHT_FUTURES.tr_id, "A01612") for d in (*BEFORE, LAST)]
     for evening, trades in zip(BEFORE, (10, 12), strict=True):
         rows += night_frames(evening, NIGHT_FUTURES.tr_id, trades)
-        rows += night_frames(evening, NIGHT_FUTURES_BOOK.tr_id, 40)
+        rows += night_frames(evening, OLD_NIGHT_BOOK, 40)
     rows += night_frames(LAST, NIGHT_FUTURES.tr_id, 2)
     rows += [
         (DAY, NIGHT_FUTURES.tr_id, "A01612", "19:00:00", night_frame(NIGHT_FUTURES.tr_id))
@@ -521,14 +524,11 @@ def test_the_night_s_records_are_set_against_the_nights_before(recorded: Path) -
         "H0MFCNT0 체결: 프레임 2 · 레코드 2 · events 1(정규화하지 못한 레코드 1) · 앞선 밤 2개 중앙값의 18%"
         in night
     )
-    assert (
-        "H0MFASP0 호가: 프레임 0 · 레코드 0 · events 0(정규화하지 못한 레코드 0) · 앞선 밤 2개 중앙값의 0%"
-        in night
-    )
-    assert "2026-11-02 체결 10 · 호가 40 / 2026-11-03 체결 12 · 호가 40" in night
+    # The night book is not recorded since #694: an old night's book frames are not read.
+    assert "H0MFASP0" not in text and "호가" not in night
+    assert "2026-11-02 체결 10 / 2026-11-03 체결 12" in night
     found = reasons(text)
     assert "야간 체결(H0MFCNT0) 레코드가 앞선 밤 중앙값의 18%(기준 25% 미만)" in found
-    assert "야간 호가(H0MFASP0) 기록 없음(2026-11-04 밤. KRX가 쉰 밤(긴 연휴 전날)이면 그대로 둔다)" in found
     assert "야간 체결(H0MFCNT0) 정규화하지 못한 레코드 1개" in found
 
 
@@ -536,7 +536,6 @@ def test_a_night_like_the_ones_before_calls_no_agent(tmp_path: Path) -> None:
     rows = [ack(d, NIGHT_FUTURES.tr_id, "A01612") for d in (*BEFORE, LAST)]
     for evening in (*BEFORE, LAST):
         rows += night_frames(evening, NIGHT_FUTURES.tr_id, 10)
-        rows += night_frames(evening, NIGHT_FUTURES_BOOK.tr_id, 30)
     record_raw(tmp_path, rows)
 
     text = report(tmp_path, CALENDAR, DAY, [], POLLS)
@@ -558,16 +557,13 @@ def test_a_clean_day_s_report_calls_no_agent(tmp_path: Path) -> None:
     write_bars(tmp_path, STOCK, "UN", {"10:00:00": (low, VOLUMES[0])})
     rows = [ack(d, NIGHT_FUTURES.tr_id, "A01612") for d in (*BEFORE, LAST)]
     for evening in (*BEFORE, LAST):
-        rows += night_frames(evening, NIGHT_FUTURES.tr_id, 4) + night_frames(
-            evening, NIGHT_FUTURES_BOOK.tr_id, 4
-        )
+        rows += night_frames(evening, NIGHT_FUTURES.tr_id, 4)
     record_raw(tmp_path, rows)
     writer = recorder(tmp_path)
     for i in range(4):
         received = at("22:00:00", LAST) + timedelta(seconds=i)
-        for feed in (NIGHT_FUTURES, NIGHT_FUTURES_BOOK):
-            row = {"symbol": "A01612", "event_time": received, "received_at": received}
-            writer.record("events", LAST, feed.tr_id, "A01612", row, feed.schema)
+        row = {"symbol": "A01612", "event_time": received, "received_at": received}
+        writer.record("events", LAST, NIGHT_FUTURES.tr_id, "A01612", row, NIGHT_FUTURES.schema)
     writer.close()
 
     text = report(tmp_path, CALENDAR, DAY, [STOCK], Polls(started_at=at("07:20:01")))

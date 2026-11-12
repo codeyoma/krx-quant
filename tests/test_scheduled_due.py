@@ -19,7 +19,7 @@ from typing import Any
 
 from krx_quant.scheduled import JOBS, Job, Night, PrevalidationFacts
 from krx_quant.scheduled.prevalidations import read_prevalidation_facts
-from krx_quant.scheduled.probes import read_last_restart, read_night_book_nights
+from krx_quant.scheduled.probes import read_last_restart
 from krx_quant.scheduled.research import (
     read_hit_rate_nights,
     read_smt_holdout_days,
@@ -43,7 +43,6 @@ OWN: dict[Any, Callable[[Mapping[str, Any]], Any]] = {
     read_prevalidation_facts: _prevalidation,
     read_hit_rate_nights: lambda f: f.get("hit_rate_nights", 0),
     read_smt_holdout_days: lambda f: f.get("smt_holdout_days", 0),
-    read_night_book_nights: lambda f: f.get("night_book_nights", 0),
     read_last_restart: lambda f: f.get("close_restart_day"),
     read_fill_notice_apart: lambda f: f.get("fill_notice_apart", 0),
     read_live_kis: lambda f: f.get("trader_live_kis", False),

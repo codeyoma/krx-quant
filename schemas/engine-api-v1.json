@@ -455,7 +455,7 @@
       }
     },
     "supply_day": {
-      "description": "A day's supply data (#226): the short-sale volume, the net buys of individuals, institutions and foreigners (negative: net sold), the foreign holdings and their ratio to the listed shares (%), the stock lending balance and the credit (margin loan) balance.",
+      "description": "A day's supply data (#226): the short-sale volume, the net buys of individuals, institutions and foreigners (negative: net sold), the foreign holdings and their ratio to the listed shares (%; both always null since #694, which dropped their one source, Toss), the stock lending balance and the credit (margin loan) balance.",
       "type": "object",
       "required": ["date", "short_volume", "individual_net", "institution_net", "foreign_net", "foreign_holding", "foreign_ratio", "lending_balance", "credit_balance"],
       "additionalProperties": false,
