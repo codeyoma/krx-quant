@@ -472,6 +472,17 @@ TOUCH_JOIN = (
 # A prediction ``p`` the engine did not make only for the evidence (#696, ``lifecycle.SHADOW``): what
 # the reviews read and a probation's first day counts.
 NOT_SHADOW = f"p.lifecycle IS NOT '{SHADOW}'"
+
+
+def not_shadow_in(db: sqlite3.Connection, table: str, alias: str = "p") -> str:
+    """`` AND <NOT_SHADOW>`` on ``table`` read as ``alias``, for a reader of the engine database that
+    must not take a shadow row (#696: the trader's replay, the verdict replay); empty for a table
+    without ``lifecycle``, a database copied before #696 and read as it is (``read_only``), whose rows
+    are no shadow's."""
+    columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+    return f" AND {alias}.lifecycle IS NOT '{SHADOW}'" if "lifecycle" in columns else ""
+
+
 # A prediction scored (#170): made, its four minutes over (outcomes ``o``), and its bar close's
 # touch label (``t``, ``TOUCH_JOIN``) known.
 SCORED = "p.status = 'ok' AND o.scored_at IS NOT NULL AND t.class IS NOT NULL"

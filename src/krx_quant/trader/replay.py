@@ -121,7 +121,7 @@ from krx_quant.health import Unread, read_gaps
 from krx_quant.kinds import DIRECTION
 from krx_quant.macro import read_partition
 from krx_quant.market_calendar import Session
-from krx_quant.predictions import KIND_ANSWER_JOIN, TOUCH_JOIN
+from krx_quant.predictions import KIND_ANSWER_JOIN, TOUCH_JOIN, not_shadow_in
 from krx_quant.special import Window, touching
 from krx_quant.stats import Interval, day_mean
 from krx_quant.trader import SYMBOL, buyable, review
@@ -313,7 +313,8 @@ _MODELS = "LEFT JOIN model_targets m ON m.algorithm = p.algorithm AND m.version 
 
 def day_reads(db: sqlite3.Connection, cell: Cell, role: str, day: date, target_version: int) -> list[Read]:
     """``cell``'s predictions of 005930 with bar closes on ``day``, as the trader reads them
-    (``cells.py``), on the engine database's indexes."""
+    (``cells.py``), on the engine database's indexes. Not its shadow rows (#696): made while it was
+    not enrolled, they were never the trader's to read, even once it is active."""
     kind = traded_kind(cell.kind)
     start = datetime.combine(day, time(), KST)
     span = (start.isoformat(), (start + timedelta(days=1)).isoformat())
@@ -322,7 +323,7 @@ def day_reads(db: sqlite3.Connection, cell: Cell, role: str, day: date, target_v
         rows = db.execute(
             f"SELECT {DIRECTION_COLUMNS}, m.target_version AS model_target FROM {DIRECTION_FROM} {_MODELS}"
             " WHERE p.algorithm = ? AND p.symbol = ? AND p.bar_close >= ? AND p.bar_close < ?"
-            " ORDER BY p.bar_close, p.id",
+            f"{not_shadow_in(db, 'predictions')} ORDER BY p.bar_close, p.id",
             (cell.predictor, SYMBOL, *span),
         )
         made = direction_signal
@@ -330,7 +331,7 @@ def day_reads(db: sqlite3.Connection, cell: Cell, role: str, day: date, target_v
         rows = db.execute(
             f"SELECT {KIND_COLUMNS}, m.target_version AS model_target FROM kind_predictions p {_MODELS}"
             " WHERE p.kind = ? AND p.symbol = ? AND p.algorithm = ? AND p.bar_close >= ? AND p.bar_close < ?"
-            " ORDER BY p.bar_close, p.id",
+            f"{not_shadow_in(db, 'kind_predictions')} ORDER BY p.bar_close, p.id",
             (kind.name, SYMBOL, cell.predictor, *span),
         )
         made = kind_signal

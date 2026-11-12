@@ -49,6 +49,7 @@ from krx_quant.consensus import FINAL
 from krx_quant.feeds import BOOK
 from krx_quant.feeds.base import KST
 from krx_quant.kinds import Answer
+from krx_quant.lifecycle import SHADOW
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import NewKindPrediction, PredictionStore
 from krx_quant.special import Kind as SpecialKind
@@ -140,6 +141,7 @@ def barrier(
     special: bool = False,
     horizon: int = 4,
     day: tuple[int, int, int] = DAY,
+    lifecycle: str | None = None,
 ) -> None:
     """A barrier prediction of ``close`` (``HH:MM``) and its answer: ``label``, the barrier first
     ``reached`` at that time (``HH:MM:SS``); w 5 around 70,050."""
@@ -150,7 +152,18 @@ def barrier(
         cell.kind,
         [
             NewKindPrediction(
-                SYMBOL, cell.predictor, version, t, t + timedelta(seconds=2), output, "ok", 2, w, anchor, tick
+                SYMBOL,
+                cell.predictor,
+                version,
+                t,
+                t + timedelta(seconds=2),
+                output,
+                "ok",
+                2,
+                w,
+                anchor,
+                tick,
+                lifecycle=lifecycle,
             )
         ],
     )
@@ -649,6 +662,25 @@ def test_a_baseline_s_predictions_are_all_read_whatever_their_model(tmp_path: Pa
     assert [(r.signal.bar_close, r.on_target) for r in baseline] == [(at("10:20:00"), True)]
     assert [r.on_target for r in top] == [False], "an algorithm's, by a model of the old target"
     assert [r.on_target for r in as_baseline] == [True]
+
+
+def test_an_algorithm_s_shadow_predictions_are_never_read(tmp_path: Path) -> None:
+    """#696: made while it waited for its pre-validation, they were never the trader's to read, even
+    once it is active."""
+    store = engine(tmp_path)
+    try:
+        barrier(store, "10:20", (0.7, 0.2, 0.1), UP_FIRST, reached="10:21:00", lifecycle=SHADOW)
+        barrier(store, "10:30", (0.7, 0.2, 0.1), UP_FIRST, reached="10:31:00", lifecycle="active")
+    finally:
+        store.close()
+
+    db = open_engine_db(tmp_path / ENGINE_DB)
+    try:
+        top = day_reads(db, BREIMAN, "top", date(*DAY), TARGET_VERSION)
+    finally:
+        db.close()
+
+    assert [r.signal.bar_close for r in top] == [at("10:30:00")]
 
 
 # The same input, the same policy; champion, then challengers.

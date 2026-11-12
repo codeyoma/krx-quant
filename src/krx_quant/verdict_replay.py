@@ -92,9 +92,8 @@ from krx_quant.footprint import DayUsage, Meter, give_back
 from krx_quant.inverse_replay import probed_day
 from krx_quant.kind_registry import KINDS
 from krx_quant.kinds import Kind
-from krx_quant.lifecycle import SHADOW
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
-from krx_quant.predictions import DB_NAME, read_only
+from krx_quant.predictions import DB_NAME, not_shadow_in, read_only
 from krx_quant.prevalidation import PREVALIDATION_DAYS, _WalkForward
 from krx_quant.sample_store import night_reads
 from krx_quant.stats import day_mean
@@ -296,17 +295,13 @@ class Stored:
     verdicts: Counter[tuple[int, str]] = field(default_factory=Counter)
 
 
-def _not_shadow(db: sqlite3.Connection, table: str) -> str:
-    """The condition that leaves out ``table``'s shadow rows (#696, ``lifecycle.SHADOW``); none for a
-    table without ``lifecycle``: a database copied before #696, read as it is (``read_only``), whose
-    rows are no shadow's."""
-    columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
-    return f" AND lifecycle IS NOT '{SHADOW}'" if "lifecycle" in columns else ""
-
-
 def stored_day(db: sqlite3.Connection, day: date, kinds: Sequence[Kind], names: Sequence[str]) -> Stored:
     """``day``'s ``Stored`` of the traded symbol."""
-    direction, of_kinds = _not_shadow(db, "predictions"), _not_shadow(db, "kind_predictions")
+    # Not the shadow rows (#696): no verdict took them, nor waited for them.
+    direction, of_kinds = (
+        not_shadow_in(db, "predictions", "predictions"),
+        not_shadow_in(db, "kind_predictions", "kind_predictions"),
+    )
     start = datetime.combine(day, time(), KST)
     span = (SYMBOL, start.isoformat(), (start + timedelta(days=1)).isoformat())
     found = Stored()
