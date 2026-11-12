@@ -274,8 +274,8 @@ async def test_the_demo_has_the_five_session_kind_s_windows(demo: TestClient[Any
     baselines = {"otc5-flat", "otc5-climate", "otc5-persist"}
     assert latest["bar_close"] == "2026-10-12T08:50:00+09:00"
     lifecycle = {p["algorithm"]: p["lifecycle"] for p in latest["predictions"]}
-    waiting = {"hurst-5d", "lorenz-5d", "friedman-5d"}  # #698's, waiting for their pre-validation
-    assert lifecycle == {**dict.fromkeys(baselines), **dict.fromkeys({"cox-5d", *waiting}, SHADOW)}, (
+    candidates = {"hurst-5d", "lorenz-5d", "friedman-5d"}  # #698's, waiting for their pre-validation
+    assert lifecycle == {**dict.fromkeys(baselines), **dict.fromkeys({"cox-5d", *candidates}, SHADOW)}, (
         "cox-5d was refused and the candidates wait: in shadow (#696)"
     )
     assert all(p["target_at"] == "2026-10-16T15:30:00+09:00" for p in latest["predictions"])
