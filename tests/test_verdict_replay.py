@@ -421,3 +421,32 @@ def test_the_live_members_leave_out_shadow_rows_and_a_database_from_before_them_
         found = stored_day(conn, TODAY, [BARRIER], ["breiman", "other"])
     assert sorted(found.forecasts[bar_close][BARRIER.name]) == ["breiman", "other"]
     assert found.displayed[bar_close] == later
+
+
+def test_version_2_live_members_take_the_rankings_shadow_members(tmp_path: Path) -> None:
+    """#697 (Codex review): the v2 engine runs a ranked shadow member before the verdict, so the v2
+    replay's live members take its stored rows and wait for their display; an unranked shadow row stays
+    out, and v1 (no ``voting``) reads none."""
+    bar_close = datetime(2026, 10, 14, 9, 30, tzinfo=KST)
+    shown, later, latest = (bar_close + timedelta(seconds=s) for s in (1, 3, 5))
+    db = tmp_path / "engine.sqlite3"
+    store = PredictionStore(db)
+    store.add_kind_predictions(
+        BARRIER.name,
+        [
+            _stored("active", bar_close, shown),
+            replace(_stored(SHADOW, bar_close, later), algorithm="voter"),
+            replace(_stored(SHADOW, bar_close, latest), algorithm="other"),
+        ],
+    )
+    store.close()
+
+    with sqlite3.connect(db) as conn:
+        v2 = stored_day(
+            conn, TODAY, [BARRIER], ["breiman", "voter", "other"], {BARRIER.name: frozenset({"voter"})}
+        )
+        v1 = stored_day(conn, TODAY, [BARRIER], ["breiman", "voter", "other"])
+
+    assert sorted(v2.forecasts[bar_close][BARRIER.name]) == ["breiman", "voter"]
+    assert v2.displayed[bar_close] == later
+    assert list(v1.forecasts[bar_close][BARRIER.name]) == ["breiman"] and v1.displayed[bar_close] == shown

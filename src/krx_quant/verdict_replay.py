@@ -98,6 +98,7 @@ from krx_quant.footprint import DayUsage, Meter, give_back
 from krx_quant.inverse_replay import probed_day
 from krx_quant.kind_registry import KINDS
 from krx_quant.kinds import Kind
+from krx_quant.lifecycle import SHADOW
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 from krx_quant.predictions import DB_NAME, not_shadow_in, read_only
 from krx_quant.prevalidation import PREVALIDATION_DAYS, _WalkForward
@@ -304,27 +305,43 @@ class Stored:
     verdicts: Counter[tuple[int, str]] = field(default_factory=Counter)
 
 
-def stored_day(db: sqlite3.Connection, day: date, kinds: Sequence[Kind], names: Sequence[str]) -> Stored:
-    """``day``'s ``Stored`` of the traded symbol."""
-    # Not the shadow rows (#696): no verdict took them, nor waited for them.
+def stored_day(
+    db: sqlite3.Connection,
+    day: date,
+    kinds: Sequence[Kind],
+    names: Sequence[str],
+    voting: Mapping[str, frozenset[str]] | None = None,
+) -> Stored:
+    """``day``'s ``Stored`` of the traded symbol; with ``voting`` (#697, version 2: by kind, the shadow
+    members of the day's ranking) their shadow rows too, as the v2 engine runs them before the verdict."""
+    # Not the shadow rows (#696): no verdict took them, nor waited for them; but a ranked one's (#697).
     direction, of_kinds = (
         not_shadow_in(db, "predictions", "predictions"),
         not_shadow_in(db, "kind_predictions", "kind_predictions"),
     )
+    voters = {(kind, name) for kind, members in (voting or {}).items() for name in members}
+    lifecycle = "lifecycle" if of_kinds else "NULL"
     start = datetime.combine(day, time(), KST)
     span = (SYMBOL, start.isoformat(), (start + timedelta(days=1)).isoformat())
     found = Stored()
     named = {k.name: k for k in kinds}
     marks = ",".join("?" * len(named))
+    shadow_shown: dict[datetime, datetime] = {}
     if named:
         rows = db.execute(
-            "SELECT kind, algorithm, bar_close, output FROM kind_predictions WHERE symbol = ?"
-            " AND bar_close >= ? AND bar_close < ? AND status = 'ok' AND output IS NOT NULL"
-            f"{of_kinds} AND kind IN ({marks})",
+            f"SELECT kind, algorithm, bar_close, output, displayed_at, {lifecycle} FROM kind_predictions"
+            " WHERE symbol = ? AND bar_close >= ? AND bar_close < ? AND status = 'ok' AND output IS NOT NULL"
+            f" AND kind IN ({marks})",
             (*span, *named),
         ).fetchall()
         wanted = set(names)
-        for kind_name, name, bar_close, output in rows:
+        for kind_name, name, bar_close, output, shown, stage in rows:
+            at = datetime.fromisoformat(bar_close)
+            if stage == SHADOW:
+                if (kind_name, name) not in voters:
+                    continue
+                when = datetime.fromisoformat(shown)
+                shadow_shown[at] = max(shadow_shown.get(at, when), when)
             if name not in wanted:
                 continue
             kind = named[kind_name]
@@ -333,7 +350,6 @@ def stored_day(db: sqlite3.Connection, day: date, kinds: Sequence[Kind], names: 
                 p = tuple(float(values[f"p_{c}"]) for c in kind.classes)
             except (ValueError, KeyError, TypeError):
                 continue
-            at = datetime.fromisoformat(bar_close)
             found.forecasts.setdefault(at, {}).setdefault(kind_name, {})[name] = (p[0], p[1], p[2])
     for bar_close, shown in db.execute(
         "SELECT bar_close, MAX(displayed_at) FROM (SELECT bar_close, displayed_at FROM predictions"
@@ -343,6 +359,8 @@ def stored_day(db: sqlite3.Connection, day: date, kinds: Sequence[Kind], names: 
         (*span, *span),
     ).fetchall():
         found.displayed[datetime.fromisoformat(bar_close)] = datetime.fromisoformat(shown)
+    for at, shown in shadow_shown.items():  # a ranked shadow member is waited for too (#697)
+        found.displayed[at] = max(found.displayed.get(at, shown), shown)
     try:
         for version, action, n in db.execute(
             "SELECT version, verdict, COUNT(*) FROM verdicts WHERE symbol = ? AND bar_close >= ?"
@@ -614,7 +632,13 @@ def replay(
                 before = {s.kind: s for s in made}
                 ranked = {s.kind: s.members for s in made}
             start = datetime.combine(day, time(), KST)
-            stored = Stored() if db is None else stored_day(db, day, horizons, [a.name for a in members])
+            stored = (
+                Stored()
+                if db is None
+                else stored_day(
+                    db, day, horizons, [a.name for a in members], ranked if rules.ranked else None
+                )
+            )
             run.stored.update(stored.verdicts)
             windows = [] if db is None else special_windows(db, SYMBOL, start)
             fills = Fills(read_recording(settings.data_dir, day), windows, book)

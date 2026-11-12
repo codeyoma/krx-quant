@@ -2957,7 +2957,7 @@
     },
     "ranking_kind": {
       "type": "object",
-      "required": ["kind", "night", "version", "made_at", "through", "rules", "members", "rows"],
+      "required": ["kind", "night", "version", "made_at", "through", "rules", "settled", "members", "rows"],
       "additionalProperties": false,
       "properties": {
         "kind": {"type": "string"},
@@ -2977,6 +2977,7 @@
             "min_calls": {"type": "integer", "minimum": 0}
           }
         },
+        "settled": {"type": "boolean", "description": "the kind has ranked an algorithm on this night or one before: every ranking from then on carries the members through the three-night rule"},
         "members": {"type": "array", "items": {"type": "string"}, "description": "the algorithms the verdict pools at this horizon; empty: it waits"},
         "rows": {"type": "array", "items": {"$ref": "#/$defs/ranking_row"}}
       }

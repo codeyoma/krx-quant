@@ -394,6 +394,9 @@ class Snapshot:
     version: int = RANKING_VERSION
     window: Window = BAR_CLOSE
     nights: int = NIGHTS
+    # Whether this kind ever ranked an algorithm (this snapshot or one before): from then on every
+    # ranking carries its states (module doc, the hysteresis), a night none could be ranked included.
+    settled: bool = False
 
     @property
     def members(self) -> frozenset[str]:
@@ -416,6 +419,7 @@ class Snapshot:
                 "min_days": self.window.min_days,
                 "min_calls": self.window.min_calls,
             },
+            "settled": self.settled,
             "members": sorted(self.members),
             "rows": [p.as_json() for p in self.rows],
         }
@@ -434,6 +438,7 @@ class Snapshot:
                 rules.get("window_days"), int(rules.get("min_days", 0)), int(rules.get("min_calls", 0))
             ),
             nights=int(rules.get("nights", NIGHTS)),
+            settled=bool(d.get("settled", any(r.get("ranked") for r in d.get("rows", ())))),
         )
 
 
@@ -449,7 +454,7 @@ def rank(
     """``kind``'s ranking of ``night`` (module doc): each algorithm of ``evidence`` (its chosen evidence,
     or None) with its lifecycle (``statuses``), carried from the kind's last snapshot (``before``)."""
     carried = {} if before is None else before.carried()
-    first = before is None or not any(p.ranked for p in before.rows)
+    first = before is None or not before.settled
     placed = [
         place(name, statuses.get(name), found, window, kind.overlap, carried.get(name), first)
         for name, found in evidence.items()
@@ -463,7 +468,8 @@ def rank(
         *sorted((p for p in placed if not p.ranked), key=lambda p: p.algorithm),
     ]
     through = max((d.day for e in evidence.values() if e is not None for d in e.days), default=None)
-    return Snapshot(kind.name, night, made_at, through, tuple(rows), window=window)
+    settled = (before is not None and before.settled) or any(p.ranked for p in placed)
+    return Snapshot(kind.name, night, made_at, through, tuple(rows), window=window, settled=settled)
 
 
 def _ranked_as(p: Placed, rank_: int) -> Placed:

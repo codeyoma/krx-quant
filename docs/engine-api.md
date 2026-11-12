@@ -1082,7 +1082,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
     "kind": "barrier_15m", "night": "2026-11-13", "version": 1,
     "made_at": "2026-11-13T15:40:02+09:00", "through": "2026-11-13",
     "rules": {"level": 0.95, "nights": 3, "window_days": 20, "min_days": 10, "min_calls": 30},
-    "members": ["breiman-15m"],
+    "settled": true, "members": ["breiman-15m"],
     "rows": [{"rank": 1, "algorithm": "breiman-15m", "status": "shadow", "source": "walk_forward",
       "days": 20, "n": 7400, "skill": 0.012, "skill_low": 0.004, "skill_high": 0.02,
       "precision": 0.58, "calls": 900, "call_rate": 0.12, "longs": 450, "net_ticks": 0.3,
@@ -1093,7 +1093,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 (값은 지어낸 것이다.)
 
-- `version`(맨 위): 지금 엔진의 순위 규칙 판. `kinds`의 항목마다: `kind`, `night`, `version`, `made_at`, `through`(증거가 세는 마지막 날), `rules`(`level` 기술 구간의 양쪽 신뢰수준, `nights` 멤버가 바뀌는 연속 밤 수, `window_days` 실시간으로 세는 최근 날 수(`null`: 모든 날, 하루 한 번 종류), `min_days`·`min_calls` 최소 증거), `members`(판정이 그 지평에서 합치는 알고리즘, 비면 그 지평은 대기), `rows`.
+- `version`(맨 위): 지금 엔진의 순위 규칙 판. `kinds`의 항목마다: `kind`, `night`, `version`, `made_at`, `through`(증거가 세는 마지막 날), `rules`(`level` 기술 구간의 양쪽 신뢰수준, `nights` 멤버가 바뀌는 연속 밤 수, `window_days` 실시간으로 세는 최근 날 수(`null`: 모든 날, 하루 한 번 종류), `min_days`·`min_calls` 최소 증거), `settled`(그 밤이나 그 전에 알고리즘을 하나라도 매겼는지: 그 뒤로는 아무도 못 매긴 밤에도 세 밤 규칙을 지킨다), `members`(판정이 그 지평에서 합치는 알고리즘, 비면 그 지평은 대기), `rows`.
 - `rows`는 순위 순서(기술 하한이 높은 것부터)이고 순위 밖은 이름 순으로 뒤에 온다. `rank`(순위 밖이면 `null`), `algorithm`, `status`(그 밤의 상태, 등록되지 않았으면 `shadow`), `source`(`live` 기록된 예측, `walk_forward` 사전 검증의 전진 학습, 증거가 없으면 `null`), `days`, `n`(기후와 짝지은 예측 수), `skill`·`skill_low`·`skill_high`(날마다 기후의 로그 손실 − 자기 로그 손실의 평균과 95% 구간, 순위 밖이면 `null`), `precision`(상승·하락 호출이 맞은 비율), `calls`, `call_rate`, `longs`·`net_ticks`(장벽 종류의 매수 호출 중 손익이 있는 것과 그 비용 뒤 평균 순손익, 틱), `ranked`, `why`(순위 밖의 까닭: `few_days`, `few_calls`, `no_evidence`), `qualifies`(그 밤 하한 > 0), `member`, `nights`(그 멤버 상태로 지난 순위 수), `pending`(반대 결과가 이어진 순위 수, 셋이면 바뀐다).
 
 ### `GET /v1/algorithms/{name}/stats?symbol=&period=&special=`

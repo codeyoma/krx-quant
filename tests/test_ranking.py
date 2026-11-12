@@ -239,3 +239,19 @@ def test_the_first_ranking_with_evidence_takes_its_results_as_they_are() -> None
     later = ranked({"good": live(GOOD)}, empty, NIGHT + timedelta(days=1))
 
     assert empty.members == frozenset() and later.members == {"good"}
+
+
+def test_once_settled_a_night_without_a_ranked_algorithm_keeps_the_hysteresis() -> None:
+    """Input (Codex review): ``good`` a member, then two nights it cannot be ranked (no evidence), then its
+    evidence back. Output: it stays a member through the first unranked night (pending 1), leaves only on
+    the third night running not above 0, and is not taken back at once when its evidence returns."""
+    first = ranked({"good": live(GOOD)})
+    states = []
+    before = first
+    for i, found in enumerate([None, None, None, live(GOOD)]):
+        before = ranked({"good": found}, before, NIGHT + timedelta(days=i + 1))
+        assert before.settled
+        p = row(before, "good")
+        states.append((p["member"], p["pending"]))
+
+    assert states == [(True, 1), (True, 2), (False, 0), (False, 1)]
