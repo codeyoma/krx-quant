@@ -56,7 +56,7 @@ Every registered algorithm is trained, one step after another, each step's days 
 and the memory it freed handed back to the system (below): one its pre-validation refused too, as
 the engine runs it in shadow (#696).
 
-> **바뀜** (2026-11-12, #NNN): an algorithm the engine did not run because its latest pre-validation
+> **바뀜** (2026-11-12, #702): an algorithm the engine did not run because its latest pre-validation
 > refused the code, target and inputs it had (#544, ``prevalidation.left_out``) was not trained, and
 > the night's list named it (``refused``) → every one is trained. 이유: the engine runs it in shadow,
 > on the model the night trains (#696). A list from before keeps its ``refused`` and its summary

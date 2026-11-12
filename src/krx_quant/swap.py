@@ -10,7 +10,7 @@ publishes what it runs (``live.json`` and the models), the champions of the next
 line names the models it installed. The line is logged; the morning's readiness line tells whether
 the night's list was applied and how many models changed (#614, ``MorningSwap``, ``readiness.py``).
 
-> **바뀜** (2026-11-12, #NNN): the line left out the models of the algorithms the engine did not run
+> **바뀜** (2026-11-12, #702): the line left out the models of the algorithms the engine did not run
 > because their pre-validation refused the code they had (#544, ``not_run``) → it names every model
 > installed. 이유: the engine runs those in shadow on the model installed (#696).
 
