@@ -1,12 +1,11 @@
 """The live entry points load no probe (#552): the collector, the engine and the trader import no
 ``*_probe`` module, so a probe can be changed or deleted without breaking them. What a probe shares
-with live code lives in the live module, and the probe imports it from there (``health.read_gaps``,
-``net_assets.PRICE``, ``krx_net_assets.PATH``).
+with live code lives in the live module, and the probe imports it from there (``health.read_gaps``).
 
 And no live module imports a probe, a check or an experiment (#650): each is a leaf that only the
 commands (``cli/``) and the scheduled jobs (``scheduled/``) that run it import, besides other leaves.
-What one shares with live code lives in its owner (``base_rates.day_prices``,
-``recording_quality.group_line``) and the leaf imports it from there.
+What one shares with live code lives in its owner (``recording_quality.group_line``) and the leaf
+imports it from there.
 
 Input: a fresh interpreter importing one module; the syntax trees of the package's modules. Output:
 the probe modules it loaded; the imports of a leaf by a module that is not one.
@@ -47,7 +46,7 @@ def test_a_live_entry_point_loads_no_probe_module(entry: str) -> None:
 
 def test_the_check_sees_a_probe_once_one_is_imported() -> None:
     # The same check finds a probe where one is imported: its pattern still names them.
-    assert "krx_quant.nav_probe" in probes_loaded_by("krx_quant.nav_probe")
+    assert "krx_quant.night_probe" in probes_loaded_by("krx_quant.night_probe")
 
 
 # The leaves: every probe (``*_probe``), check (``*_check``) and experiment (``*_experiment`` and the
@@ -57,9 +56,7 @@ LEAVES = frozenset(
     {
         # Probes: what a source's fields mean, asked once (CODING_STANDARDS.md).
         "gaps_probe",
-        "krx_etf_probe",
         "live_probe",
-        "nav_probe",
         "night_probe",
         "order_probe",
         "sample_keys_probe",
@@ -138,14 +135,14 @@ def test_every_module_named_as_a_probe_a_check_or_an_experiment_is_listed() -> N
 def test_the_rule_sees_a_live_module_that_imports_a_leaf() -> None:
     # The same check finds an import of a leaf, at the top or in a function, in either form.
     found = {
-        "base_rates": ast.parse("from krx_quant.holdout import judge"),
+        "stats": ast.parse("from krx_quant.holdout import judge"),
         "collector": ast.parse("def f():\n    from krx_quant import gaps_probe"),
         "engine": ast.parse("import krx_quant.smt_experiment"),
         "cli.probes": ast.parse("from krx_quant.gaps_probe import probe_gaps"),
         "smt_experiment": ast.parse("from krx_quant.holdout import judge"),
     }
     assert leaves_imported_by_live_modules(found) == [
-        "base_rates -> holdout",
         "collector -> gaps_probe",
         "engine -> smt_experiment",
+        "stats -> holdout",
     ]

@@ -625,8 +625,6 @@ def cost_map(rows: Sequence[dict[str, Any]], symbol: str = SYMBOL, period: str =
         "spread_ticks": 1,
         "symbols": [],
         "rows": list(rows),
-        "regimes": None,
-        "regimes_missing": "not computed yet",
     }
 
 

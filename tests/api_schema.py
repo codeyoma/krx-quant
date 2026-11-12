@@ -22,9 +22,6 @@ ROUTES = {
     "/v1/symbols/{symbol}/special": "special",  # #236
     "/v1/symbols/{symbol}/smt": "smt",  # #521
     "/v1/symbols/{symbol}/supply": "supply",  # #226
-    "/v1/symbols/{symbol}/flow": "flow",  # #306
-    "/v1/symbols/{symbol}/closing-flow": "closing_flow",  # #305
-    "/v1/symbols/{symbol}/closing-flow/days": "closing_flow_days",
     "/v1/algorithms": "algorithms",
     "/v1/algorithms/{name}": "algorithm_detail",
     "/v1/algorithms/{name}/stats": "algorithm_stats",
@@ -34,8 +31,6 @@ ROUTES = {
     "/v1/consensus": "consensus",
     "/v1/verdict": "verdict",  # #676
     "/v1/macro": "macro",
-    "/v1/calendar": "calendar",
-    "/v1/briefing": "briefing",  # #304
     # The kinds besides the direction (#179).
     "/v1/kinds": "kinds",
     "/v1/symbols/{symbol}/kinds/{kind}/latest": "kind_latest",

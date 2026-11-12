@@ -43,7 +43,6 @@ CALENDAR = MarketCalendar()
 LEFT_TO_DEFAULTS = {
     "feature_store": "a fresh one per engine",
     "notify": "the collector's alerts, given once it has its HTTP session",
-    "signals": "likewise",
     "consensus_timing": "no setting",
     "daily_kinds": "every daily kind; none run without the KRX days (``daily``)",
 }
@@ -137,11 +136,11 @@ def test_only_the_live_engine_has_the_live_parts_and_the_replay_no_daily_kinds(t
     live, replayed, demo = (options(settings, m) for m in (Mode.LIVE, Mode.REPLAY, Mode.DEMO))
 
     assert live["watch_loop"] and live["garbage"] is not None
-    assert live["commit"] == "abc1234" and live["signal_rule"] == settings.signal_thresholds
+    assert live["commit"] == "abc1234"
     assert live["admits"] is not None and live["refused"] is not None and live["revisions"] is not None
     for other in (replayed, demo):
         assert not other["watch_loop"] and other["garbage"] is None
-        assert other["commit"] == "unknown" and other["signal_rule"] is None
+        assert other["commit"] == "unknown"
         assert other["admits"] is None and other["refused"] is None and other["revisions"] is None
     assert replayed["daily"] is None and not replayed["daily_algorithms"]
     assert demo["daily"] is not None and demo["daily_algorithms"] == live["daily_algorithms"]

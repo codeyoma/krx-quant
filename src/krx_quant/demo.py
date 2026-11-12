@@ -23,8 +23,7 @@ before the engine judged them (#520), so the API makes that day again from its b
 Each symbol also has two years of made-up day candles up to the 8th (``candles/``), for the
 chart's day view (#111), and the finished week, month and year candles made of them (#112), and
 made-up daily supply data on the same days (``state/supply/``, #226): the 12th's is not out yet,
-as on the server that morning. The cost map's period base rates (``state/base_rates.json``, #307)
-are made up too, each symbol's four periods.
+as on the server that morning.
 
 The daily kind ``open_to_close`` (#264) has KRX day candles of its own (``krx.parquet``, the
 same days, an open a tick off the integrated one's) and, for its last 20 days up to the 8th,
@@ -103,20 +102,8 @@ from krx_quant.backfill import (
     bars_key,
     stock_bars_path,
 )
-from krx_quant.base_rates import PERIODS as BASE_RATE_PERIODS
-from krx_quant.base_rates import DayPrices, write_base_rates
-from krx_quant.candles import EX_CODE, PERIODS, period_start, read_candles, write_candles, write_krx_days
+from krx_quant.candles import EX_CODE, PERIODS, period_start, write_candles, write_krx_days
 from krx_quant.clock import FakeClock
-from krx_quant.closing_flow import (
-    DAYS_VERSION,
-    KRX_BAR,
-    RECORDED,
-    DayInput,
-    day_rows,
-    demand_row,
-    write_days,
-    write_demand,
-)
 from krx_quant.config import Settings
 from krx_quant.contracts import KOSPI200
 from krx_quant.daily import ANSWER_FROM, NO_EX_CODE, DailyAlgorithm, StoredDays
@@ -126,16 +113,10 @@ from krx_quant.feeds import (
     FOREIGN_ESTIMATE,
     INDEX,
     KOSPI200_FUTURES,
-    MEMBER,
-    MEMBER_REST,
-    NIGHT_FUTURES,
-    PROGRAM,
-    PROGRAM_REST,
     TRADE,
     USD_FUTURES,
     VI_STATUS,
     Feed,
-    RestFeed,
 )
 from krx_quant.feeds.base import KST, Row, kst_day
 from krx_quant.lifecycle import Status
@@ -150,15 +131,11 @@ from krx_quant.macro import (
 )
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
-from krx_quant.net_assets import KIS as NET_ASSETS_KIS
-from krx_quant.net_assets import KRX as NET_ASSETS_KRX
-from krx_quant.net_assets import net_assets_for, write_net_assets
 from krx_quant.nightly import Night
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D
 from krx_quant.predictions import DB_NAME, PredictionStore, iso
 from krx_quant.prevalidation import Refusal, judging
-from krx_quant.products import PRODUCTS
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
 from krx_quant.replay import replay_into
@@ -178,7 +155,6 @@ from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import Entry as TraderEntry
 from krx_quant.trader.store import Exit as TraderExit
 from krx_quant.trader.store import Placed as TraderPlaced
-from krx_quant.us_daily import write_us_daily
 
 DEMO_DAY = date(2026, 10, 12)
 DEMO_SYMBOLS = ("005930", "000660", "009150")
@@ -480,51 +456,6 @@ def write_demo_supply(state_dir: Path) -> None:
                 }
             )
         write_supply(state_dir, symbol, KIS, kis)
-
-
-# Each demo symbol's made-up flat share and median k in the four base-rate periods (#307), in
-# the order of ``base_rates.PERIODS``, and the trading days with bars in each.
-_BASE_RATES = {
-    "005930": ((0.893, 0.742, 0.615, 0.503), (2, 2, 2, 2)),
-    "000660": ((0.709, 0.481, 0.312, 0.172), (5, 5, 1, 1)),
-    "009150": ((0.621, 0.552, 0.474, 0.398), (3, 3, 4, 4)),
-}
-_BASE_RATE_DAYS = (238, 45, 31, 20)
-
-
-def write_demo_base_rates(state_dir: Path) -> None:
-    """Made-up period base rates (#307), kept as the collector keeps them (``base_rates.py``):
-    each symbol's four periods, computed after the backfill of the evening before the morning.
-    The up and down labels split the rest about evenly."""
-    rows = []
-    for symbol, (flats, ks) in _BASE_RATES.items():
-        periods = zip(BASE_RATE_PERIODS, flats, ks, _BASE_RATE_DAYS, strict=True)
-        for (name, first, end), flat, k, days in periods:
-            windows = days * 375  # 09:01–15:15 a day
-            up = round((1 - flat) * 0.52, 3)
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "period": name,
-                    "from": None if first is None else first.isoformat(),
-                    "to": None if end is None else (end - timedelta(days=1)).isoformat(),
-                    "days": days,
-                    "windows": windows,
-                    "up": up,
-                    "flat": flat,
-                    "down": round(1 - flat - up, 3),
-                    "k": k,
-                    "persist": round(min(0.95, flat + 0.04), 3),
-                    "persist_windows": windows - 4 * days,  # a day's first four windows have none
-                }
-            )
-    body = {
-        "computed_at": "2026-10-11T20:30:41+09:00",
-        "first_day": "2025-10-13",
-        "last_day": "2026-10-08",
-        "rows": rows,
-    }
-    write_base_rates(state_dir, body)
 
 
 # The trader's made-up trades on 005930 (#398), for the chart's buys and sells: each entry's time
@@ -1003,7 +934,6 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
     shutil.rmtree(data_dir / "bars", ignore_errors=True)
     write_demo_candles(data_dir)
     write_demo_supply(data_dir / "state")  # before the daily kind's days: Cox reads the flows
-    write_demo_base_rates(data_dir / "state")  # the cost map's (#307)
     # The trader's trades (#398) on the quotes of the days before and of the morning.
     write_demo_trader(data_dir / "state", [e for day in PAST_DAYS for e in past_events(day)] + demo_events())
     barriers = demo_barrier_models()  # the verdict's members (#676)
@@ -1039,9 +969,6 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         gates=gates,  # as the server's pre-validations (#310, #561)
     )
     await replay_into(engine, clock, events, until=_at(_END if pace is None else _PACED_FROM))
-    write_demo_briefing(data_dir)  # after the morning: Cox's 08:50 inputs stay as they were
-    write_demo_flow(data_dir)  # into the events the briefing's writer began (#306)
-    write_demo_closing_flow(data_dir)  # from the day candles (#305)
     night = Night(date(2026, 10, 9), "2026-10-09T21:31:40+09:00", {}, demo_reports())
     engine.training = NightStatus(night, True, "applied").as_dict()
     engine.night_reports = reports_by_algorithm(night)
@@ -1052,300 +979,12 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         live_status=lambda: demo_kis(engine.clock.now()),
         data_dir=data_dir,
         shelf=shelf,
-        names={**DEMO_NAMES, **DEMO_PRODUCT_NAMES},
+        names=DEMO_NAMES,
         state_dir=data_dir / "state",
     )
     if pace is not None:
         app.cleanup_ctx.append(partial(_paced, engine, events, pace))
     return app
-
-
-def write_demo_briefing(data_dir: Path) -> None:
-    """What the pre-open briefing (#304) reads of the morning beyond the replay, as the collector
-    records it (``events/``, replaced): the KOSPI200 night session begun on the 8th (to 06:00 on
-    the 9th), NXT's pre-market trades and the opening auction's expected prices on the 12th, and
-    the 12th's economic calendar (``calendar/latest.json``) and two weeks of US closes
-    (``us_daily/``, Friday the 9th's included: New York traded). Written after the morning is
-    replayed, so the engine's 08:50 predictions read none of it: Cox's ``premarket_gap`` and
-    ``night_futures`` show as missing. The 8th's bars end at 15:20, so there is no after-hours
-    price."""
-    shutil.rmtree(data_dir / "events", ignore_errors=True)
-    recorder = ParquetRecorder(data_dir, flush_rows=10_000, flush_seconds=3600)
-
-    def record(feed: Feed, day: date, symbol: str, row: Row) -> None:
-        full = dict.fromkeys(feed.schema.names) | row | {"symbol": symbol}
-        recorder.record("events", day, feed.tr_id, symbol, full, feed.schema)
-
-    evening = PAST_DAYS[-1]
-    start = datetime.combine(evening, time(18, 0), KST)
-    price, volume = 380.0, 0
-    for n in range(12 * 6):  # every 10 minutes, 18:00 to 05:50
-        at = start + timedelta(minutes=10 * n)
-        price = round(price + (0.35 if n % 5 < 3 else -0.4), 2)
-        volume += 150 + 10 * (n % 7)
-        change = round((price / 380 - 1) * 100, 2)
-        night = {"event_time": at, "received_at": at, "price": price, "change_pct": change}
-        record(NIGHT_FUTURES, kst_day(at), "A01612", night | {"qty": 10, "cum_volume": volume})
-    for i, symbol in enumerate(DEMO_SYMBOLS):
-        mid, tick = _OPENS[symbol]
-        for t, ticks in ((time(8, 5), -2), (time(8, 20), -1), (time(8, 42), 1 + i), (time(8, 48), 2 + i)):
-            at = _at(t)
-            trade = {"event_time": at, "received_at": at, "venue": "UN", "price": mid + ticks * tick}
-            record(TRADE, DEMO_DAY, symbol, trade | {"qty": 30})
-        for t, ticks in ((time(8, 31), 0), (time(8, 45), 1), (time(8, 59, 50), 2)):
-            at = _at(t)
-            book = {"event_time": at, "received_at": at, "expected_px": mid + ticks * tick}
-            record(BOOK, DEMO_DAY, symbol, book | {"expected_qty": 4_000 + 500 * i, "expected_exch_cls": "1"})
-    recorder.close()
-    for name, last, step in (
-        ("sox", 6_120.0, -40.0),
-        ("nvda", 182.5, -1.1),
-        ("mu", 168.0, -1.5),
-        ("vix", 18.4, 0.6),
-    ):
-        closes = [
-            Observation(evening - timedelta(days=d), round(last - step * d, 2)) for d in range(9, -1, -1)
-        ]
-        write_us_daily(
-            data_dir,
-            name,
-            [c for c in closes if c.day.weekday() < 5] + [Observation(date(2026, 10, 9), last + step)],
-        )
-    events = [
-        ("demo-kr-gdp", time(8, 0), "KR", "GDP Growth Rate QoQ Adv", "high"),
-        ("demo-us-retail", time(21, 30), "US", "Retail Sales MoM", "high"),
-    ]
-    body = {
-        "fetched_at": _at(time(7, 45)).isoformat(),
-        "countries": ["KR", "US"],
-        "events": [
-            {
-                "id": ident,
-                "at": _at(t).isoformat(),
-                "country": country,
-                "title": title,
-                "indicator": None,
-                "category": None,
-                "period": None,
-                "actual": None,
-                "forecast": None,
-                "previous": None,
-                "unit": "%",
-                "scale": None,
-                "currency": None,
-                "importance": importance,
-                "source": None,
-                "source_url": None,
-            }
-            for ident, t, country, title, importance in events
-        ],
-    }
-    path = data_dir / "calendar" / "latest.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(body, ensure_ascii=False))
-
-
-def write_demo_flow(data_dir: Path) -> None:
-    """The flow screen's recordings (#306), as the collector writes them: each symbol's program
-    trading and member firms through the morning (09:00–10:30 on the 12th, nothing during the
-    circuit breaker's halt; 10:00–10:10 by the REST stand-ins, as when the feeds are cut), the
-    investor estimates of the 09:30 slot, and the whole of the 8th for the same-time comparison.
-    Written after the morning is replayed: the algorithms read none of it."""
-    recorder = ParquetRecorder(data_dir, flush_rows=10_000, flush_seconds=3600)
-    rng = random.Random(306)
-
-    def record(feed: Feed | RestFeed, schema_feed: Feed | RestFeed, day: date, symbol: str, row: Row) -> None:
-        full = dict.fromkeys(schema_feed.schema.names) | row | {"symbol": symbol}
-        recorder.record(
-            "events",
-            day,
-            feed.tr_id if isinstance(feed, Feed) else feed.events_feed,
-            symbol,
-            full,
-            schema_feed.schema,
-        )
-
-    days = ((PAST_DAYS[-1], time(9, 0), time(15, 30)), (DEMO_DAY, time(9, 0), _END))
-    for i, symbol in enumerate(DEMO_SYMBOLS):
-        mid, _ = _OPENS[symbol]
-        for day, start, end in days:
-            buy = sell = foreign = 0
-            at = datetime.combine(day, start, KST)
-            while at <= datetime.combine(day, end, KST):
-                local = at.time()
-                if day == DEMO_DAY and HALT[0] <= local < HALT[1]:
-                    at += timedelta(minutes=1)
-                    continue  # the market halted: nothing traded
-                rest = day == DEMO_DAY and time(10, 0) <= local < time(10, 10)
-                buy += rng.randint(200, 900) * mid // 100
-                sell += rng.randint(200, 900 - 120 * i) * mid // 100
-                program = {
-                    "event_time": at,
-                    "received_at": at + timedelta(seconds=1),
-                    "buy_value": buy,
-                    "sell_value": sell,
-                    "net_value": buy - sell,
-                    "buy_qty": buy // mid,
-                    "sell_qty": sell // mid,
-                    "net_qty": (buy - sell) // mid,
-                }
-                if not rest:
-                    program |= {"sell_order_qty": 0, "buy_order_qty": 0, "whole_net_qty": 0}
-                record(PROGRAM_REST if rest else PROGRAM, PROGRAM, day, symbol, program)
-                foreign += rng.randint(-400, 600) - 100 * i
-                member = {
-                    "received_at": at + timedelta(seconds=2),
-                    "foreign_net_qty": foreign,
-                    "foreign_buy_qty": max(foreign, 0) + 5_000,
-                    "foreign_sell_qty": max(-foreign, 0) + 5_000,
-                }
-                for side, names in (("sell", _SELLERS), ("buy", _BUYERS)):
-                    for k, (no, name, glob) in enumerate(names, start=1):
-                        member |= {
-                            f"{side}_member_{k}_no": no,
-                            f"{side}_member_{k}_name": name,
-                            f"{side}_member_{k}_qty": (6 - k) * 1_000 + rng.randint(0, 500),
-                            f"{side}_member_{k}_foreign": glob,
-                        }
-                record(MEMBER_REST if rest else MEMBER, MEMBER, day, symbol, member)
-                at += timedelta(minutes=1)
-            for t, foreign_net, institution_net in (
-                (time(9, 31), 12_000 - 9_000 * i, None),
-                (time(10, 2), 15_000 - 9_000 * i, -4_000 + 2_000 * i),
-            ):
-                if datetime.combine(day, t, KST) > datetime.combine(day, end, KST):
-                    continue
-                received = datetime.combine(day, t, KST)
-                # Each poll gives every slot so far: the 09:30 slot's foreign figure, then the 10:00 slot's
-                # institutional one too.
-                slots = [("1", foreign_net, None)] + (
-                    [("2", None, institution_net)] if institution_net else []
-                )
-                for slot, f, inst in slots:
-                    record(
-                        FOREIGN_ESTIMATE,
-                        FOREIGN_ESTIMATE,
-                        day,
-                        symbol,
-                        {
-                            "received_at": received,
-                            "slot": slot,
-                            "foreign_net_qty": f,
-                            "institution_net_qty": inst,
-                            "total_net_qty": None,
-                        },
-                    )
-    recorder.close()
-
-
-# The top five member firms of the demo's flows (#306): number, name, foreign.
-_SELLERS = (
-    ("005", "미래에셋", False),
-    ("044", "모건스탠리", True),
-    ("036", "한국투자", False),
-    ("029", "골드만삭스", True),
-    ("030", "NH투자", False),
-)
-_BUYERS = (
-    ("003", "삼성", False),
-    ("040", "JP모간", True),
-    ("002", "키움", False),
-    ("042", "메릴린치", True),
-    ("004", "KB증권", False),
-)
-
-
-# The closing flow's days shown (#305), up to the 8th, the last of them with a stored 15:20
-# demand; the product without net assets on the 8th; the day of a VI.
-_CLOSING_DAYS = 21
-_CLOSING_LIVE = 8
-_CLOSING_UNRECORDED = 6  # the first days without a recorded closing print: KRX's bar's value
-_CLOSING_MISSING = "0198D0"
-_CLOSING_VI = ("000660", date(2026, 9, 24))
-# The products' made-up names: the collector reads the real ones from the masters (#250).
-DEMO_PRODUCT_NAMES = {
-    p.code: f"{DEMO_NAMES[p.underlying]} {'인버스 ' if p.inverse else ''}2X 데모 {p.code}" for p in PRODUCTS
-}
-
-
-def write_demo_closing_flow(data_dir: Path) -> None:
-    """The closing flow's state (#305), made up as the collector keeps it: the 16 products' net
-    assets on the ``_CLOSING_DAYS`` trading days up to the 8th (but one product's on the 8th), KRX's
-    (``krx``, with units and NAV) but for the 8th's, KIS's (KRX's not in by 10:30 that day), the
-    15:20 demand stored on the last ``_CLOSING_LIVE`` of them, and the days computed from the day
-    candles (``closing_flow.day_rows``: each day's last price before the auction a few ticks off its
-    close, its recorded closing auction's volume made up, on the first ``_CLOSING_UNRECORDED`` KRX's
-    closing bar's instead). The morning's demand is the engine's at 10:30, read when asked."""
-    state = data_dir / "state"
-    shutil.rmtree(state / "closing_flow", ignore_errors=True)
-    rng = random.Random(305)
-    days: list[date] = []
-    day = DEMO_DAY
-    while len(days) < _CLOSING_DAYS:
-        day = _CALENDAR.previous_trading_day(day)
-        days.append(day)
-    days.reverse()
-    fetched_on = dict(zip(days, [*days[1:], DEMO_DAY], strict=True))
-    base = {p.code: rng.randint(500, 6_000) * 100_000_000 for p in PRODUCTS}
-    nav = {p.code: rng.randint(80, 240) * 100 + 0.37 for p in PRODUCTS}
-    assets = [
-        {
-            "code": p.code,
-            "date": d,
-            "source": NET_ASSETS_KIS if d == days[-1] else NET_ASSETS_KRX,
-            "net_assets": round(base[p.code] * (1 + 0.004 * i)),
-            # Fetched the next trading day's morning (the last at the demo morning's start).
-            "fetched_at": _at_on(fetched_on[d], time(7, 40) if d == days[-1] else time(8, 5)),
-            "shares": None if d == days[-1] else round(base[p.code] * (1 + 0.004 * i) / nav[p.code]),
-            "nav": None if d == days[-1] else nav[p.code],
-        }
-        for i, d in enumerate(days)
-        for p in PRODUCTS
-        if (p.code, d) != (_CLOSING_MISSING, days[-1])
-    ]
-    write_net_assets(state, assets)
-    demands: list[Row] = []
-    computed: dict[str, Any] = {
-        "version": DAYS_VERSION,
-        "computed_at": "2026-10-12T06:01:30+09:00",
-        "symbols": {},
-    }
-    for symbol in DEMO_SYMBOLS:
-        mid, tick = _OPENS[symbol]
-        candles = {r["date"]: r for r in read_candles(data_dir, "day", symbol)}
-        inputs = []
-        for d in days:
-            candle = candles[d]
-            close = int(candle["close"])
-            pre_close = close - tick * rng.choice((-4, -2, -1, 0, 1, 2, 3))
-            volume = rng.randint(400_000, 1_200_000) * 81_250 // mid
-            prices = DayPrices(
-                d, float(candle["open"]), float(candle["open"]), float(pre_close), float(close), volume
-            )
-            recorded = d >= days[_CLOSING_UNRECORDED]  # the earlier ones' prints were not recorded
-            special = ("vi",) if (symbol, d) == _CLOSING_VI else ()
-            # The value either way: the bars measured equal to the recorded prints (#305).
-            inputs.append(DayInput(prices, float(volume * close), RECORDED if recorded else KRX_BAR, special))
-        for before, now in zip(inputs, inputs[1:], strict=False):
-            if now.prices.day not in days[-_CLOSING_LIVE:]:
-                continue
-            held = net_assets_for(assets, _CALENDAR, now.prices.day)
-            price = now.prices.pre_close + tick * rng.choice((-1, 0, 1)) / 2  # the mid-point, about
-            row = demand_row(
-                symbol, now.prices.day, _at_on(now.prices.day, time(15, 20)), price, before.prices.close, held
-            )
-            if row is not None:
-                demands.append(row)
-        computed["symbols"][symbol] = {
-            "days": day_rows(symbol, inputs, _CALENDAR, assets, demands),
-            "auction_values": {
-                i.prices.day.isoformat(): {"value": i.auction_value, "source": i.auction_value_source}
-                for i in inputs
-                if i.auction_value is not None
-            },
-        }
-    write_demand(state, demands)
-    write_days(state, computed)
 
 
 # The daily kind's days shown answered (#264), up to the 8th.

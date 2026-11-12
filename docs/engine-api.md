@@ -181,7 +181,7 @@
   - 왕복 비용(봉 마감 중간가 × (매도세 0.20% + 수수료율 × 2), 기본 0.23%)을 틱으로 바꿔 뺀다. 틱은 봉 마감 중간가의 호가단위(`touch.tick`)다. 하락 예측도 매도세를 내므로 주식 공매도로 친 값이다(대차 수수료는 넣지 않았다).
   - **인버스(`pnl_inverse`, #267)**: 하락 예측을 그 종목의 단일종목 인버스 상품으로 거래한 것으로 친다. 가격과 체결 규칙은 위와 같고(같은 노출, 주식의 호가로 잰다), 비용은 상품 금액의 수수료 × 2뿐이다: −2배 상품이라 주식 한 주의 노출에 드는 금액이 주가의 절반이므로 봉 마감 중간가 × 수수료율 × 2 ÷ 2(기본 0.015%)다. ETF 매도에는 증권거래세가 없다(증권거래세법 제2조는 주권·지분에만 과세). 상승 예측은 `pnl`과 같다. 인버스 상품은 `products.INVERSE_PRODUCTS`다(단일종목 ETF 목록 `products.PRODUCTS`의 −2배 상품, 종목마다 하나. 상장일과 배율, [design.md](design.md#42-종목)): 005930(PLUS 삼성전자선물단일종목인버스2X)과 000660(SOL SK하이닉스선물단일종목인버스2X), 2026-05-27 상장, −2배. 009150에는 없어서 그 하락 예측은 거래에 넣지 않는다. 상장일 전의 하락 예측도 넣지 않는다(사전 검증이 그 전 날을 재생할 때). ETF 자체의 스프레드, 괴리, 2배 일일 재조정, 개별주식선물 베이시스는 넣지 않았다(호가가 없다). 매매차익에 붙는 배당소득세(15.4%, 이익에만)도 넣지 않았다. 예(손계산, `tests/test_stats.py`): 81,250원에서 아래 목표에 닿은 하락은 `pnl` 1.5 − 1.86875틱, `pnl_inverse` 1.5 − 0.121875틱이다.
   - 1호가에 전부 체결된다고 본다. 대기열, 잔량, 지연은 넣지 않았다(#78의 매매 계약 spec 몫).
-  - 방향(상승·하락)을 낸 모든 예측을 매분 한 번씩 거래한 것으로 친다. 손익을 계산한 거래 집합은 텔레그램 신호 알림의 집합과 다르다.
+  - 방향(상승·하락)을 낸 모든 예측을 매분 한 번씩 거래한 것으로 친다. **삭제됨** (2026-11-12, #701): "손익을 계산한 거래 집합은 텔레그램 신호 알림의 집합과 다르다." 이유: 텔레그램 신호 알림을 지웠다(아래 "텔레그램 신호 알림").
   - 핵심 지표는 맞힘률과 lift다. 이 열은 "맞혔는데 손해"가 왜 생기는지 보이려는 연구용이다. 정답 문턱 k는 매도세와 수수료만 덮는다. 위 목표에 닿아 팔아도 버는 것은 k틱 − 스프레드의 절반이라 비용에 못 미친다. 예(손계산, `tests/test_stats.py`): 81,250원(매수 81,200, 매도 81,300, k = 2)에서 위 목표 81,450에 닿은 상승은 1.5 − 1.86875 = −0.36875틱이다.
   - 종목별 봉 마감 스프레드 실측(2026-10-12·13, `krx-quant diagnose`, #90): 봉 마감마다 그 전 1분 안에 받은 마지막 통합 호가(`H0UNASP0`)의 스프레드다. 종목마다 이틀 동안 봉 마감 752번(하루 376번)이다. 005930과 000660은 늘 1틱이었다. 009150은 p90까지 1틱, p99와 최대가 2틱이었다.
 
@@ -224,7 +224,7 @@
 | `outcomes` | `prediction_id`, `target_at`(t + 4분), `mid_close`(A), `mid_display`(B), `mid_target`, `flat_ticks`(k), `class_a`, `class_b`(`up`/`flat`/`down`), `special`, `unscorable`, `scored_at`(채점 전에는 비어 있음). #170부터 `special`과 `scored_at`(4분이 지났는지)만 읽고, 옛 기준의 값(`class_a`, `class_b`, `mid_target`, `unscorable`)은 쓰기만 한다. 옛 엔진으로 되돌려도 돌게 하려고다 |
 | `model_targets` | `algorithm`, `version`, `target_version`(1, 2 또는 3. 다른 종류의 알고리즘은 그 종류의 정답 버전. 기본 모델과 기록되기 전 모델은 비어 있음): 엔진이 돌린 모델마다 그 모델을 학습한 정답 버전(#170). 엔진이 시작할 때와 모델을 바꿀 때 쓴다. 상태 판정, 합의 가중치, 순위표와 통계가 예측의 `model_version`을 이것으로 거른다. 따로 둔 표다 |
 | `touches` | `symbol`, `bar_close`, `target_version`(지금 3. 2는 #187 전에 쓴 행으로 남는다), `class`(`up`/`flat`/`down`, 채점할 수 없으면 비어 있음), `unscorable`(`missing mid`, `rest quotes`, `silent quotes`, `restarted`, `not recorded`), `path`(JSON: 아래 `touch`의 경로 필드), `scored_at`. 봉 마감의 도달 정답(#160, #167). 예측이 아니라 (종목, 봉 마감)마다 하나고, 예측하지 않은 봉 마감(VI 등)에도 있다. `blocks`처럼 따로 둔 표라 옛 엔진도 DB를 연다. 엔진은 이미 있는 봉 마감을 덮어쓰지 않는다. 지난 예측의 빠진 행은 엔진이 시작할 때 녹화로 채우고(`scored_at`은 그 4분이 끝난 시각), 다른 값으로 바꾸는 것은 `rescore`뿐이다(아래 "지난 예측의 도달 정답", #168) |
-| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `loop_held`: 봉 마감이 이벤트 루프를 1초 넘게 쥠(#589. `at`은 그 봉 마감, `detail`은 JSON: `seconds`(차례 없이 간 가장 긴 초), `parts`(그동안 돈 단계와 그 초, `other` 포함), `gc`(그동안 돈 GC의 `seconds`와 가장 오래된 `generation`, 돌지 않았으면 `null`. #621부터, 그 전 행에는 없다). 장중 엔진의 `held the event loop` WARNING과 같은 때 남는다, #538), `memory_rest`: 장이 끝난 뒤 엔진이 쉼(#623. `detail`은 JSON: `after`(`the session`이나 `the review`), `let_go`와 `kept`(놓은 것과 남긴 것의 개수), `rss_before_mb`, `rss_mb`, `swapped_mb`, `python_blocks`, `malloc_mb`, `malloc_free_mb`, `arrow_mb`, `seconds`. `memory handed back` INFO 줄과 같은 값이다), `close_restart`: 장 마감 뒤 다시 시작으로 엔진이 멈춤(#687. `detail`은 JSON: `why`, `rss_mb`, `swapped_mb`. `stopping for the restart after the close` INFO 줄과 같은 값이다), `start_memory`: 엔진이 시작해 API가 열린 때의 메모리(#687. `detail`은 JSON: `rss_mb`, `swapped_mb`, 다시 시작 바로 뒤의 시작이면 `after_restart`: `true`), `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `prevalidation_refused`: 사전 검증 거부 알림(`detail`은 거부한 리포트의 열쇠 JSON: `prevalidated_at`, `code`, `target_version`, `inputs`. 그 열쇠마다 한 번 보낸다, #369), `revision_refused`: 바뀐 코드의 사전 검증 거부 알림(`detail`은 `revisions.id`. 리비전마다 한 번 보낸다, #454), `revision_review`: 바뀐 코드의 사전 검증을 기다리는 수습의 판정일(`detail`은 JSON: `revision`, `boundary`, `stint`, `days`, `passed`, `reason`. 사전 검증이 통과하면 마지막 것이 통과였을 때 정식이 된다, #454), `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`), `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85), `signal_sent`: 보낸 텔레그램 신호, `signal_blocked`: 막힌 텔레그램 신호(둘 다 판정할 때마다 하나씩, `detail`은 JSON, 아래 "텔레그램 신호 알림", #80), `touch_fill`: 엔진이 시작할 때 지난 예측의 도달 정답을 채움(한 행이라도 썼을 때), `rescore`: `krx-quant rescore`를 돌림(둘 다 `detail`은 날마다 `day`, `source`(녹화를 읽은 곳), `labeled`(녹화로 낸 창 수), `written`(쓴 행 수), `not_recorded`, `failed`(읽지 못한 이유)의 JSON 목록, #168), `kind_fill`: 엔진이 시작할 때 다른 종류의 지난 정답을 채움(한 행이라도 썼을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 답한 창 수, `not_recorded`는 녹화가 없는 예측된 봉 마감 수다, #180), `target`: 상태가 도달 정답으로 다시 시작됨(`detail` `2`. 엔진이 이 DB를 처음 열 때 한 번, #170), `special_fill`: 엔진이 시작할 때 지난날의 특수 상황 구간을 채움(한 날이라도 판정했을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 판정한 구간 수, `written`은 쓴 행 수, `source`가 `null`이면 그날 녹화가 어디에도 없었다, #236)), `at`, `algorithm`, `detail` |
+| `runs` | `id`, `kind`(`cpu_budget`: CPU 예산으로 건너뜀, `loop_held`: 봉 마감이 이벤트 루프를 1초 넘게 쥠(#589. `at`은 그 봉 마감, `detail`은 JSON: `seconds`(차례 없이 간 가장 긴 초), `parts`(그동안 돈 단계와 그 초, `other` 포함), `gc`(그동안 돈 GC의 `seconds`와 가장 오래된 `generation`, 돌지 않았으면 `null`. #621부터, 그 전 행에는 없다). 장중 엔진의 `held the event loop` WARNING과 같은 때 남는다, #538), `memory_rest`: 장이 끝난 뒤 엔진이 쉼(#623. `detail`은 JSON: `after`(`the session`이나 `the review`), `let_go`와 `kept`(놓은 것과 남긴 것의 개수), `rss_before_mb`, `rss_mb`, `swapped_mb`, `python_blocks`, `malloc_mb`, `malloc_free_mb`, `arrow_mb`, `seconds`. `memory handed back` INFO 줄과 같은 값이다), `close_restart`: 장 마감 뒤 다시 시작으로 엔진이 멈춤(#687. `detail`은 JSON: `why`, `rss_mb`, `swapped_mb`. `stopping for the restart after the close` INFO 줄과 같은 값이다), `start_memory`: 엔진이 시작해 API가 열린 때의 메모리(#687. `detail`은 JSON: `rss_mb`, `swapped_mb`, 다시 시작 바로 뒤의 시작이면 `after_restart`: `true`), `review`: 일일 상태 점검, `retire_candidate`: 은퇴 후보 알림, `prevalidation_refused`: 사전 검증 거부 알림(`detail`은 거부한 리포트의 열쇠 JSON: `prevalidated_at`, `code`, `target_version`, `inputs`. 그 열쇠마다 한 번 보낸다, #369), `revision_refused`: 바뀐 코드의 사전 검증 거부 알림(`detail`은 `revisions.id`. 리비전마다 한 번 보낸다, #454), `revision_review`: 바뀐 코드의 사전 검증을 기다리는 수습의 판정일(`detail`은 JSON: `revision`, `boundary`, `stint`, `days`, `passed`, `reason`. 사전 검증이 통과하면 마지막 것이 통과였을 때 정식이 된다, #454), `budget_report`: 그날 예산 때문에 빠진 예측을 알림(#71), `no_regime`: 그날 매크로 국면이 없거나 엔진이 모르는 이름이어서 기본 전이행렬로 돈 날, 첫 봉 마감에 하루 한 번(`detail`에 `(unknown: <이름>)`), `start`: 수집기가 엔진을 시작함(`detail`은 JSON: `commit`, `fee_rate`, `algorithm_seconds`, `cpu_budget_seconds`. 성적을 코드와 설정별로 가르는 근거, #85. **삭제됨** (2026-11-12, #701): `signal_rule`(`min_probability`, `min_agree`, 끄면 `null`). 이유: 텔레그램 신호 알림을 지웠다. 그 전의 행에는 남아 있다), `signal_sent`, `signal_blocked`: 보낸·막힌 텔레그램 신호(#80. **삭제됨** (2026-11-12, #701): 더는 남지 않는다. 이유: 텔레그램 신호 알림을 지웠다. 그 전의 행은 남는다), `touch_fill`: 엔진이 시작할 때 지난 예측의 도달 정답을 채움(한 행이라도 썼을 때), `rescore`: `krx-quant rescore`를 돌림(둘 다 `detail`은 날마다 `day`, `source`(녹화를 읽은 곳), `labeled`(녹화로 낸 창 수), `written`(쓴 행 수), `not_recorded`, `failed`(읽지 못한 이유)의 JSON 목록, #168), `kind_fill`: 엔진이 시작할 때 다른 종류의 지난 정답을 채움(한 행이라도 썼을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 답한 창 수, `not_recorded`는 녹화가 없는 예측된 봉 마감 수다, #180), `target`: 상태가 도달 정답으로 다시 시작됨(`detail` `2`. 엔진이 이 DB를 처음 열 때 한 번, #170), `special_fill`: 엔진이 시작할 때 지난날의 특수 상황 구간을 채움(한 날이라도 판정했을 때. `detail`은 `touch_fill`과 같은 JSON 목록이고, `labeled`는 판정한 구간 수, `written`은 쓴 행 수, `source`가 `null`이면 그날 녹화가 어디에도 없었다, #236)), `at`, `algorithm`, `detail` |
 | `statuses` | `id`, `algorithm`, `at`, `previous`, `status`, `reason`, `simulated`(그 판정이 시뮬레이션 날을 셌으면 1, #298): 알고리즘 상태 이력(#17) |
 | `revisions` | `id`, `algorithm`, `code`(`prevalidation.code_digest`), `target_version`(그때 돈 정답 버전. 다른 종류는 그 종류의 정답 버전), `inputs`(JSON: 입력의 버전. 4분 종류는 `{}`), `seen_at`(엔진이 그 코드를 처음 돌린 시각), `boundary`(그 리비전이 시작된 시각: `seen_at`, 대응표로 같은 리비전이 된 코드는 원래 리비전의 것), `state`(`first`: 처음 기록할 때 돌던 그대로, `changed`: 코드가 바뀌어 수습으로 돌아감), `mapped_from`(대응표로 같은 리비전이 된 코드면 옛 digest, 아니면 비어 있음), `verdict`(`changed`의 사전 검증 판정 `passed`·`refused`. 아직이면 비어 있음), `judged_at`, `detail`(거부의 통과하지 못한 검사, 대응표의 증거): 돌고 있는 4분(봉 마감) 알고리즘이 돌린 코드, 오래된 것부터(#454, 아래 "상태 관리"의 "코드가 바뀌는 날"). 알고리즘마다 마지막 행이 지금 리비전이다. 따로 둔 표다 |
 | `simulation_runs` | `id`, `made_at`, `cadence`(`daily`: 날마다 다시 학습, `bar_close`: 첫날 전까지로 한 번 학습, `walk_forward`: 새 4분 알고리즘을 정식으로 올린 사전 검증의 재생, #681), `days`(JSON: 재생한 날, 오래된 것부터): 수습 시뮬레이션의 재생 한 번(#298, 위 "상태 관리"). 따로 둔 표다 |
@@ -256,7 +256,8 @@
 
 ### 계약 (JSON 스키마, #19)
 
-- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `smt`(날은 `smt_day`, 사건은 `smt_event`, #521), `supply`(항목은 `supply_day`, #226), `algorithms`(항목은 `algorithm`, 상태는 `algorithm_state`, #561), `algorithm_detail`, `leaderboard`, `leaderboard_days`(예측자는 `day_series`, #561), `algorithm_stats`, `consensus`, `macro`, `calendar`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_decisions`(장부는 `trader_decision_book`, 합계는 `trader_decision_totals`, 결정은 `trader_decision`, #584), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. 도전 정책 묶음은 `trader_cohort`, 그 판정은 `trader_cohort_verdict`, #473. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+- `schemas/engine-api-v1.json`이 모든 `/v1` 응답의 형식이다(JSON Schema 2020-12). 엔드포인트마다 `$defs`에 정의가 하나씩 있다: `status`, `symbols`, `latest`, `predictions`, `bars`, `candles`, `special`(항목은 `special_window`, #236), `smt`(날은 `smt_day`, 사건은 `smt_event`, #521), `supply`(항목은 `supply_day`, #226), `algorithms`(항목은 `algorithm`, 상태는 `algorithm_state`, #561), `algorithm_detail`, `leaderboard`, `leaderboard_days`(예측자는 `day_series`, #561), `algorithm_stats`, `consensus`, `macro`, `kinds`, `kind_latest`, `kind_predictions`, `trader_trades`(항목은 `trader_trade`, #394), `trader_marks`(항목은 `trader_mark`, #398), `trader_decisions`(장부는 `trader_decision_book`, 합계는 `trader_decision_totals`, 결정은 `trader_decision`, #584), `trader_policies`(항목은 `trader_policy`, #399), `trader`(한도는 `trader_limit`, 요청은 `trader_control`, #396. 정책의 모의 기록은 `trader_paper`, 실전 관문은 `trader_gate`(판정점은 `trader_checkpoint`, #408), 도전 정책의 승격 판정은 `trader_promotion`, #400. 도전 정책 묶음은 `trader_cohort`, 그 판정은 `trader_cohort_verdict`, #473. live 모드는 `trader_live`, 그 점검은 `trader_live_check`, #408), `trader_days`(항목은 `trader_day`), `POST /v1/trader/pause`의 응답 `trader_pause`, 오류는 `error`. 스트림의 메시지는 `event`(종류마다 `prediction_event` 등)다.
+  > **삭제됨** (2026-11-12, #701): 정의 `calendar`, `briefing`, `flow`, `closing_flow`, `closing_flow_days`와 그것만 쓰던 정의(`base_rates`, `closing_flow_day`, `closing_flow_product`, `closing_flow_stats`, `closing_flow_denominator_sources`, `flow_member`, `flow_totals_fields`), `status`의 `signal_rule`, `cost_map`의 `regimes`·`regimes_missing`. 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 없다. 그 경로는 404다.
 - 다른 종류 항목의 `output`, 정답의 `path`, 통계의 `extra`는 종류마다 형식이 다르다. 변동폭의 것은 `range_output`, `range_path`, `range_stats`다(#180, 아래 "변동폭"). 장벽의 것은 `barrier_output`, `barrier_path`, `barrier_stats`다(#183, 아래 "장벽").
 - `leaderboard`와 `algorithm_stats`는 둘 중 하나다(#179): 방향의 것(`direction_leaderboard`, `direction_algorithm_stats`, 이전과 같은 형식)과 다른 종류의 것(`kind_leaderboard`, `kind_algorithm_stats`, 맨 위에 `kind`가 있다).
 
@@ -287,7 +288,7 @@
 |---|---|
 | `cpu` | CPU 예산(#19). `budget_seconds`(`KRX_CPU_BUDGET_SECONDS`), `algorithm_seconds`(알고리즘 하나의 시간 예산, `KRX_ALGORITHM_SECONDS`), `algorithms`(은퇴하지 않은 알고리즘마다 봉 마감 한 번에 걸릴 것으로 보는 초. 한 번이라도 돈 것만), `expected_seconds`(그 합), `usage`(합 ÷ 예산. 예산이 0이면 `null`. 1을 넘으면 다음 봉 마감에 늦게 등록된 것부터 건너뛴다), `skipped_today`(오늘 CPU 예산으로 건너뛴 횟수) |
 | `usd_futures` | 달러선물 최근월물의 오늘 마지막 체결(#70). `price`, `at`(체결 시각), `previous_close`(그날 장 시작 전 마지막 매크로 읽기(보통 07:30)의 `usdf` 값, 곧 전 거래일 종가. 장 시작 뒤 `krx-quant macro`를 다시 돌려도 바뀌지 않는다. 국면과 같다), `change_pct`(전일 종가 대비 %). 오늘 매크로 읽기가 없거나, 그 읽기에 전 거래일의 달러선물 종가가 없으면(백필이 빠져 더 오래된 종가뿐이면) `previous_close`와 `change_pct`가 `null`이다. 오늘 체결이 아직 없으면(장 전, 휴장일) 통째로 `null`이다. 재생·데모 엔진도 같다 |
-| `signal_rule` | 신호 규칙(#617): 최종 합의의 신호를 판정하는 `min_probability`(`KRX_SIGNAL_MIN_PROBABILITY`, 기본 0.7)와 `min_agree`(`KRX_SIGNAL_MIN_AGREE`, 기본 2). 텔레그램 신호 알림(`KRX_SIGNAL_ALERT`)이 꺼져 있어도 있다(아래 "텔레그램 신호 알림"의 1, 2). 모든 모드에 있고, 데모·재생 엔진은 기본값이다. 앱의 신호 알림과 대시보드의 신호는 사용자가 앱에서 직접 정한 값이 없으면 이 규칙을 따른다(`fincept/custom/README.md` "신호 알림"). 이 규칙으로 잰 맞힘률은 내지 않는다: 그것은 `signal-review`(#206, [operations.md](operations.md#신호-기준-검토-206))가 저장된 최종 합의로 다시 재는 값이고, 요청마다 잴 값이 아니다 |
+| `signal_rule` | **삭제됨** (2026-11-12, #701): 신호 규칙(#617): 최종 합의의 신호를 판정하는 `min_probability`(`KRX_SIGNAL_MIN_PROBABILITY`, 기본 0.7)와 `min_agree`(`KRX_SIGNAL_MIN_AGREE`, 기본 2). 앱의 신호 알림과 대시보드의 신호가 사용자가 정한 값이 없을 때 따랐다. 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 없다. 앱은 이 필드가 없으면 자기 기본값(0.7, 2)을 쓴다 |
 | `kis` | 실시간 모드와 데모 엔진(가상 값)에만 있고, 둘에서는 늘 있다(없으면 엔진 API가 시작하지 않는다). `connected`(KIS가 현재 연결에서 구독에 답했는지. 연결이 끊기거나 침묵 감시가 닫으면 `false`, 다음 연결에서 KIS가 답하면 다시 `true`), `last_frame_at`(KIS WebSocket에서 마지막으로 받은 프레임의 시각. 데이터, PINGPONG, 구독 응답 모두 센다. 아직 없으면 `null`, #308), `seconds_since_frame`(그 뒤로 지난 초. 엔진 시계 기준, 없으면 `null`. 건강한 연결은 쉴 때도 PINGPONG이 약 10.8초마다 와서 11초쯤을 넘지 않는다. 60초(`KRX_WS_SILENCE_SECONDS`)를 넘으면 수집기가 그 연결을 닫는다), `feeds`(구독·조회별 `feed`, `key`, `last_received_at`, `seconds_since`, 열린 결측 구간의 `gap`: `stale` 또는 `disconnected: <이유>`, `short_frames`: 오늘(KST) 그 피드·키에서 필드가 레코드 수 × 칸 수보다 모자라 raw에만 남긴 프레임 수. 엔진이 시작한 뒤의 수이고 날이 바뀌면 0부터 센다. 08:00의 회원사(`H0UNMBC0`) 프레임에 드물게 있다, #381, [kis-feeds.md](kis-feeds.md#피드별-메모)), `polls`(REST로 조회하는 피드·키마다의 호출과 장애, #441. 엔진이 시작한 뒤 한 번이라도 부른 키만 있다. 장애는 실패한 호출에서 시작해 다음 성공에서 끝난다. `feed`, `key`, `attempts`: 오늘(KST) 부른 수(답을 받았든 실패했든), `failures`: 그중 실패한 수, `errors`: 오늘의 실패를 종류별로 센 객체. 종류는 KIS의 오류 코드(`msg_cd`, 예: `OPSQ1002`, `EGW00316`), 코드가 없으면 `HTTP <상태>`, KIS가 답하지 않았으면 오류의 종류(`ServerDisconnectedError`, `TimeoutError`)다. 응답의 글은 남기지 않는다, `outages`: 오늘 한때라도 이어진 장애 수, `consecutive_failures`: 마지막 성공 뒤로 잇달아 실패한 수(성공하면 0), `max_consecutive_failures`: 오늘 가장 길게 잇달아 실패한 수, `outage_since`: 지금 이어지는 장애의 첫 실패 시각(없으면 `null`), `last_success_at`: 마지막 성공 시각(없으면 `null`), `last_recovery_seconds`: 끝난 마지막 장애가 첫 실패부터 그것을 끝낸 성공까지 걸린 초(없으면 `null`). 오늘의 수는 날이 바뀌면 0부터 세고, 그때 이어지던 장애는 새 날에도 한 번으로 센다. 데모 엔진은 세 종목의 외국인·기관 추정 가집계(`HHPTJ04160200`)에 짧은 장애를 주고, 000660은 지금 실패 중이다. 알림은 [operations.md](operations.md#6-장애-대응)의 `[장애] KIS REST 조회 …`). 야간선물(`H0MFCNT0`, `H0MFASP0`, #264)은 18:00–06:00에만 와서 낮에는 `seconds_since`가 크다. `gap`은 `stale`이 되지 않는다 |
 | `loki` | 실시간 모드(수집기)에만 있고, 거기서는 늘 있다(#358). 수집기의 로그 줄을 Grafana Cloud Loki로 보내는 상태([operations.md](operations.md#grafana-cloud-loki로-보내는-로그-358)): `enabled`(보내는지), `reason`(보내지 않는 이유. 보내면 `null`. 예: `KRX_LOKI_TOKEN is not set: all three are needed`), `sent`(Loki가 받은 줄. 엔진이 띄운 밤 학습과 예약 작업의 줄도 센다), `dropped`(버린 줄: 버퍼가 넘쳤거나 Loki가 거절한 묶음), `buffered`(보내기를 기다리는 줄), `last_success_at`, `last_error`(마지막 실패의 종류: `HTTP 503`, `URLError(ConnectionRefusedError)`. 오류의 글은 싣지 않는다), `last_error_at`. 수는 엔진이 시작한 뒤의 것이다. 꺼져 있으면 수는 0, 시각과 `last_error`는 `null`이다 |
 
@@ -466,138 +467,15 @@
 
 ### `GET /v1/symbols/{symbol}/flow?day=YYYY-MM-DD` (#306)
 
-한 종목의 그날 장중 수급 흐름이다. 수급 흐름 화면이 1분 가격 위에 겹쳐 그린다. 엔진이 녹화하는 피드 셋을 읽는다(`flow.py`, [events.md](events.md)): 프로그램매매(`H0UNPGM0`, REST 대체도 같은 피드에 쓴다), 회원사(`H0UNMBC0`와 REST 스냅샷 `FHKST01010600`), 외국인·기관 추정 가집계(`HHPTJ04160200`, 5분마다). 예측 신호가 아니라 관찰용이다.
-
-```json
-{
-  "symbol": "005930", "day": "2026-10-16", "as_of": "2026-10-19T08:00:00+09:00", "recorded": true,
-  "open": "2026-10-16T09:00:00+09:00", "close": "2026-10-16T15:30:00+09:00",
-  "minutes": [
-    {"at": "2026-10-16T09:00:00+09:00", "price": 81000, "program_net_value": 700, "program_buy_value": 1700, "program_sell_value": 1000, "program_net_qty": 7, "program_source": "ws", "member_foreign_net_qty": -30, "member_source": "ws"},
-    {"at": "2026-10-16T09:01:00+09:00", "price": 81100, "program_net_value": null, "program_buy_value": null, "program_sell_value": null, "program_net_qty": null, "program_source": null, "member_foreign_net_qty": -50, "member_source": "rest"}
-  ],
-  "estimates": [{"slot": "1", "received_at": "2026-10-16T09:31:00+09:00", "foreign_net_qty": 1500, "institution_net_qty": null}],
-  "members": {"received_at": "2026-10-16T15:00:00+09:00", "source": "ws",
-              "sell": [{"no": "005", "name": "미래에셋", "qty": 5015, "foreign": false}],
-              "buy": [{"no": "040", "name": "JP모간", "qty": 4435, "foreign": true}]},
-  "totals": {"program_net_value": 4000, "member_foreign_net_qty": 80, "estimate_foreign_net_qty": 1500, "estimate_institution_net_qty": -300},
-  "previous_day_same_time": {"day": "2026-10-15", "at": "2026-10-15T15:30:00+09:00", "program_net_value": 2000, "member_foreign_net_qty": null, "estimate_foreign_net_qty": null, "estimate_institution_net_qty": null},
-  "final": {"foreign_net": 1800, "institution_net": null},
-  "special": []
-}
-```
-
-- `day`: `YYYY-MM-DD`. 빼면 엔진 시계의 오늘이 거래일이면 오늘, 아니면 지난 거래일이다. 날짜가 아니면 400, 거래일이 아니면 404, 모르는 종목은 404다.
-- `recorded`: 서버의 로컬 녹화(`data/events/`)에 그날 세 피드 가운데 하나라도 있는지. Object Store는 읽지 않는다. 없으면 `false`이고 흐름 값은 모두 `null`이다.
-- **`minutes[]`**: 그날 장 시각(`open`부터 `close`까지, 종가 단일가 체결의 분 포함)의 1분마다다.
-  - `price`: 그 분 1분봉의 종가. 오늘은 엔진 메모리의 봉(20:30 백필이 하루를 저장하기 전), 지난날은 백필 `bars`다(`/bars`와 같은 출처).
-  - `program_*`: 그 분(체결 시각)의 마지막 프로그램매매 행의 하루 누적 순매수·매수·매도 금액과 순매수 수량. 값과 단위는 KIS가 주는 그대로다. `program_source`는 WebSocket(`ws`)이나 REST 대체(`rest`, 호가 잔량이 없는 행)다.
-  - `member_foreign_net_qty`: 그 분(받은 시각)의 마지막 회원사 행의 외국계 회원사 하루 누적 순매수(주). `member_source`는 `ws`(`H0UNMBC0`)나 `rest`(`FHKST01010600`)다.
-  - 그 분에 행이 없으면 그 칸은 `null`이다. 앞 분의 값을 끌어오지 않는다. 피드가 끊긴 동안이 평평한 흐름처럼 보이지 않게 하려는 것이다.
-- **`estimates[]`**: 추정 가집계의 구간(`slot`, KIS의 `bsop_hour_gb` 원문)마다, 처음 값이 들어온 때(`received_at`)와 투자자마다 가장 늦게 받은 값(주, 아직 입력 전이면 `null`)이다. 값이 들어온 순서다. 가집계는 증권사가 입력한 추정치라 일별 확정값과 다르다.
-- **`members`**: 그날 마지막 회원사 행의 매도·매수 상위 5개 창구(번호, 이름, 누적 수량, 외국계 여부). 다섯이 안 되면 그만큼만 있다. 행이 없으면 `null`이다.
-- **`totals`**: 각 흐름의 그날 합(마지막 값). 오늘은 지금까지, 지난날은 장 마감까지다.
-- **`previous_day_same_time`**: 전 거래일의 같은 시계 시각(오늘이면 지금, 지난날이면 장 마감)까지의 같은 합이다. 오늘 흐름이 평소보다 센지 견준다.
-- **`final`**: 그날 확정 일별 수급(KIS, 외국인·기관 순매수, 주). 20:30 이력 작업 전이나 없으면 `null`이다. 가집계와 견준다.
-- **`special`**: 그날 특수 상황 구간(`/special`의 항목과 같다).
-- 오늘의 답은 많아야 30초마다, 지난날은 10분마다, 또는 예측 저장소가 바뀌면 다시 만든다. 새 스트림 메시지는 없다. 화면이 읽어 간다.
-- 데모 엔진에는 그 아침(09:00–10:30)과 8일 하루의 세 피드가 있다. 서킷브레이커 동안은 비고, 10:00–10:10은 REST 대체로 쓴 행이다.
+> **삭제됨** (2026-11-12, #701): 한 종목의 그날 장중 수급 흐름(`flow.py`): 1분 가격 위에 겹친 프로그램매매(`H0UNPGM0`), 회원사(`H0UNMBC0`와 REST 스냅샷), 외국인·기관 추정 가집계, 전 거래일 같은 시각의 합계, 그날의 특수 상황. 수급 흐름 화면이 읽었다. 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 없다. 그 피드들은 알고리즘의 입력이라 그대로 녹화한다([events.md](events.md)). 경로는 404다.
 
 ### `GET /v1/symbols/{symbol}/closing-flow` (#305)
 
-KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`closing_flow.py`). 단일종목 ±2배 ETF(`products.PRODUCTS`, [design.md](design.md#42-종목))는 장 마감에 노출을 순자산의 L배로 맞추려고 정해진 양을 사고판다. 엔진은 그 양을 공식으로 계산한다. 실제 집행이 아니다(금융위원회가 2026-07-28 리밸런싱을 앞당겨 나누라고 요청한 뒤의 집행 시각은 모른다). 홍콩 상품과 ETN은 넣지 않아 실제 수요는 더 클 수 있다.
-
-**수요.** 상품 k의 수요 d_k = A_k × (L_k² − L_k) × r. 2배는 2·A·r, −2배(인버스)는 6·A·r이고, 둘 다 r과 같은 부호다(+ 매수, − 매도, 원).
-- A_k: 그 상품의 전 거래일 순자산(원, `state/closing_flow/net_assets.parquet`). 그날 t의 수요는 t의 전 거래일 행을 쓴다. 상품마다 KRX Open API의 순자산총액(`krx`, [krx-openapi.md](krx-openapi.md)의 "엔진이 받는 것")을 먼저 쓰고, 그 행이 없으면 KIS의 순자산 총액(`kis`, [kis-feeds.md](kis-feeds.md#etf-순자산-305))을 쓴다. KRX 값은 거래일 08:05부터 들어온다(늦으면 15:20까지 5분마다 다시 묻는다). 행이 없는 상품은 `demand`가 `null`이고 `missing`에 들며 합에서 빠진다.
-
-  > **바뀜** (2026-10-24, #368): A는 KIS의 순자산 총액뿐이었다 → KRX Open API의 것이 먼저, 없으면 KIS의 것. 이유: 2026-10-23 밤 `probe-krx-etf-305`의 실측으로 KRX 수집을 더했다(#305).
-- r: 그 종목의 기준가(통합 중간가, 위 "기준가") ÷ 전 거래일 KRX 종가 − 1. KRX 종가는 종가 단일가 가격이다(`auctions.days_of`, 장전 브리핑의 `previous_close`와 같다).
-- 연속매매 동안에는 물을 때의 분(초를 버린 시각) 직전 기준가로 계산한다. 화면이 1분마다 읽으면 1분마다 다시 계산된다. 종가 단일가 시작(15:20)부터는 15:20 직전 기준가로 계산한 값이다. 수집기가 15:20:05에 종목마다 하루 한 행으로 저장한다(`state/closing_flow/demand.parquet`, [events.md](events.md#closing_flow-마감-수요와-지난날-305)). 장 전에는 계산하지 않는다(`reason: before_open`).
-- **구조별 합.** `spot_futures`(현물+선물형)와 `futures`(선물형)의 합, 그리고 둘의 합 `demand`. 선물형은 개별주식선물(15:45까지)로 집행하므로 단일가 비율의 분자에 넣지 않는다. 현물+선물형은 현물에 선물을 더하는 구조라 단일가와 선물의 나눔을 모른다. 그래서 그 합 전부를 분자로 쓴다: `ratio`는 상한이다.
-- **비율.** `ratio` = `spot_futures` ÷ `denominator`, `ratio_total` = `demand` ÷ `denominator`. `denominator`는 그날 전 20거래일의 종가 단일가 체결대금의 중앙값(원)이고, `denominator_days`는 그 20일 가운데 값이 있던 날 수, `denominator_sources`는 그 날들의 체결대금이 어디서 왔는지의 날 수(`recorded`, `krx_bar`, `integrated_bar`)다. 날마다의 체결대금은 아래 `/closing-flow/days`의 `auction_value`다(녹화한 체결, 없으면 KRX 1분봉의 단일가 봉, 그것도 없으면 통합 1분봉의 단일가 봉). 값이 있는 날이 없으면 `denominator`와 비율이 `null`이고 `denominator_reason`이 `no_auction_value`다. 지난날 표를 아직 계산하지 않았으면 `not_computed`다.
-
-  > **바뀜** (2026-10-24, #368): 분모는 녹화한 종가 단일가 체결대금으로만 쟀고, 값이 없으면 `denominator_reason`이 `no_recorded_auction`이었다(녹화를 시작한 2026-10-12 전의 날) → 녹화가 없는 날은 1분봉의 단일가 봉으로 재고, 이유 이름은 `no_auction_value`, 날 수는 `denominator_sources`에 있다. 이유: `check-closing-flow-305`(2026-10-23 밤)가 녹화가 있는 9일(2026-10-12–10-23) 모두 세 종목의 통합(`UN`)·KRX(`J`) 단일가 봉의 거래량 × 종가가 녹화한 체결대금과 같다고 쟀다(비율 1.000).
-
-```json
-{
-  "symbol": "005930", "day": "2026-10-12", "as_of": "2026-10-12T10:30:00+09:00",
-  "at": "2026-10-12T10:30:00+09:00", "source": "live",
-  "price": 81000.0, "previous_close": 80000.0, "r": 0.0125,
-  "demand": 11250000000, "spot_futures": 3750000000, "futures": 7500000000,
-  "ratio": 0.357, "ratio_total": 1.071, "denominator": 10500000000.0, "denominator_days": 20,
-  "denominator_sources": {"recorded": 15, "krx_bar": 5, "integrated_bar": 0}, "denominator_reason": null,
-  "products": [
-    {"code": "0193W0", "name": "…", "leverage": 2, "structure": "spot_futures", "coefficient": 2,
-     "net_assets": 10000000000, "net_assets_date": "2026-10-08", "net_assets_source": "krx", "demand": 250000000},
-    {"code": "0198B0", "name": "…", "leverage": 2, "structure": "futures", "coefficient": 2,
-     "net_assets": null, "net_assets_date": null, "net_assets_source": null, "demand": null}
-  ],
-  "missing": ["0198B0"],
-  "reason": null
-}
-```
-
-- `day`: 엔진 시계의 오늘이 거래일이면 오늘, 아니면 지난 거래일이다. 모르는 종목은 404다.
-- `at`: 수요를 계산한 시각(그 직전 기준가). 장 전이면 `null`이다. `source`: `live`(엔진의 기준가로 지금 계산), `stored`(15:20부터: 저장한 15:20 행의 가격과 전일 종가), 계산하지 못했으면 `null`.
-- `products[]`: 그 종목의 상품마다 코드, 이름(KIS 종목 마스터나 토스에서 수집기가 시작할 때 읽는다. 없으면 `null`), 배율 L, 구조, 계수 L² − L, 순자산과 그 날·출처(`net_assets_source`: `krx` KRX Open API, `kis` KIS, 없으면 `null`), 수요. 순서는 `PRODUCTS`의 순서다. 화면은 `kis`가 아닌 출처에 "한국거래소 통계정보"를 보인다(KRX 약관).
-- `reason`: `demand`가 `null`인 이유. `no_products`(상품이 없는 종목: 009150), `before_open`, `no_price`(그 시각 기준가가 없다. 15:20 행이 저장되지 않았고 엔진에도 그때 호가가 없다), `no_previous_close`, `no_net_assets`(순자산이 있는 상품이 없다). 009150도 `denominator`와 `r`은 준다.
-- 데모 엔진: 10:30의 엔진 기준가로 계산한다. 10-08의 순자산(KIS의 것, 0198D0 하나는 없다)과 지난 20거래일 표가 있다(그 가운데 처음 5일은 녹화한 종가 단일가가 없어 KRX 1분봉의 값이다: `denominator_sources`가 `recorded` 15, `krx_bar` 5). 상품 이름은 지어낸 것이다.
+> **삭제됨** (2026-11-12, #701): 그날의 마감 리밸런싱 수요(`closing_flow.py`): 종목의 단일종목 ±2배 ETF(`products.PRODUCTS`)마다 A·(L² − L)·r(A는 전 거래일 순자산, KRX Open API의 것이 먼저, 없으면 KIS의 것), 그 합과 20거래일 종가 단일가 체결대금 중앙값에 대한 비율, 상품마다의 줄. 15:20 행은 수집기가 `state/closing_flow/demand.parquet`에 남겼다. KRX 마감 흐름 화면이 읽었다. 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 없다. 경로는 404이고, 서버에 남은 `state/closing_flow/`는 아무도 읽지 않는다. `products.py`는 인버스 상품(`INVERSE_PRODUCTS`) 때문에 남는다.
 
 ### `GET /v1/symbols/{symbol}/closing-flow/days?from=YYYY-MM-DD&to=YYYY-MM-DD` (#305)
 
-지난날마다의 15:20 수요와 그 뒤의 종가 단일가·다음날이다. `from`부터 `to`까지(KST, 둘 다 포함, 기본은 오늘까지 1년, 많아야 4,000일)의 날이 오래된 날부터 오고, 그 날들로 계산한 요약이 붙는다. 날짜가 아니거나 `from`이 `to`보다 늦거나 범위가 넘치면 400, 모르는 종목은 404다.
-
-- **계산.** 수집기가 시작할 때와 매일 20:30 이력 작업(1분봉 백필, 단일가 가격) 뒤에, 그리고 KRX Open API의 순자산이 들어온 뒤에 계산해 `state/closing_flow/days.json`에 둔다(한 번에 하나씩). 읽을 때는 그것을 준다(`computed_at`, 계산 전이면 `null`). 그래서 그날의 줄은 그날 20:30 뒤에, 다음날 칸은 다음날 20:30 뒤에 채워진다. 이 배포 전의 모양으로 남은 파일(`version`이 2가 아니다)은 읽지 않는다: 배포 뒤 첫 계산까지 `computed_at`이 `null`이다.
-- **날.** 백필 1분봉(`bars`)이 있는 날 가운데 전 거래일에도 1분봉이 있는 날이다. 정의는 구조 실측(#270, `structure-check` 2절)과 같고, 같은 함수를 부른다(`base_rates.auction_days`, `day_prices`, `period_of`, `same_share`, `opposite_share`). 그래서 같은 데이터에서 요약의 숫자가 `structure-check`의 숫자와 같았다(그 명령은 #667에서 지웠다).
-
-  > **바뀜** (2026-11-09, #663): 이 함수들은 `structure_check.py`에 있었다 → `base_rates.py`에 있다. 정의와 숫자는 그대로다. 이유: 실전 모듈이 검사 모듈을 가져오지 않게 하려고(#650).
-
-  - `auction_bp`: 종가 단일가 움직임 = 종가 ÷ 15:20 직전가 − 1(bp). `auction_ticks`: 같은 움직임의 틱 수. `flow_bp`: 그날 15:20까지의 흐름 = 15:20 직전가 ÷ 전 거래일 종가 − 1. `next_gap_bp`: 다음날 시가 ÷ 종가 − 1. `next_close_bp`: 다음날 종가 ÷ 종가 − 1(다음날이 아직 없으면 `null`). 가격은 1분봉(통합)의 것이다.
-  - `demand`, `spot_futures`, `futures`: 그날의 15:20 수요. `demand_source`가 `live`면 그날 저장한 15:20 행이고, `bars`면 저장한 행이 없는 날을 그날 쓸 순자산과 1분봉의 `flow_bp`(r 대신)로 계산한 값이다. KRX Open API의 순자산이 상장일(2026-05-27)부터 있으므로 그다음 거래일(2026-05-28)부터 수요가 있다. 순자산이 없는 날(상장 전, `KRX_OPENAPI_KEY`가 없는 서버의 2026-10-21 전)과 009150은 `null`이다.
-
-    > **바뀜** (2026-10-24, #368): "순자산이 없는 날(배포 전, 그리고 KRX Open API로 채우기 전)" → 2026-05-28부터 수요가 있다. 이유: KRX Open API로 상장일부터 순자산을 채운다(#305).
-  - `net_assets_source`: 그날의 수요가 읽은 순자산의 출처다. `krx`(KRX Open API), `kis`(KIS), 상품마다 달랐으면 `krx+kis`, 수요가 없으면 `null`이다. `live` 날은 저장한 15:20 행에 남긴 출처다. 이 필드를 남기기 전에 저장한 행은 `kis`다(그때는 KIS뿐이었다). 화면은 `kis`가 아니면 "한국거래소 통계정보"를 보인다.
-
-    > **바뀜** (2026-10-24, #368): 날 줄에는 순자산 출처가 없었다 → `net_assets_source`를 더했다(필드를 더했을 뿐 다른 필드는 그대로다). 이유: KRX로 지난날을 채우면 화면이 KRX 표시를 해야 한다(KRX 약관, codeyoma/FinceptTerminal#103은 이 이름을 읽는다).
-  - `ratio`, `ratio_total`, `denominator`, `denominator_days`, `denominator_sources`, `denominator_reason`: 위와 같다(그날 전 20거래일의 중앙값).
-  - `auction_value`: 그날 종가 단일가 체결대금(원). 다음 가운데 처음 있는 것이다(`auction_value_source`).
-    - `recorded`: 녹화한 KRX 체결(`H0STCNT0`)의 종가 단일가 시작부터 장 마감 1분 뒤까지 가격 × 수량의 합(2026-10-12부터, 15:30 무렵 연결이 끊긴 날 #344은 없다).
-    - `krx_bar`: KRX(`J`) 1분봉의 종가 단일가 봉(장 마감부터 10분 안의 첫 봉)의 거래량 × 종가. `auctions.py`가 날마다 받아 두는 봉이다(`auctions.parquet`의 `close_volume`, [events.md](events.md#auctions-단일가-가격-rest-264)). 최근 1년이다.
-    - `integrated_bar`: 백필 통합(`UN`) 1분봉의 종가 단일가 봉의 거래량 × 종가. KRX 봉을 받아 두지 못한 날이다.
-    - 셋 다 없으면 `null`이다. 백필 1분봉이 있는 날(2025-10-13부터)은 모두 값이 있으므로, 비율은 그 첫날 뒤로 모두 있다.
-    - 실측(`check-closing-flow-305`, 2026-10-23 밤): 녹화가 있는 9일(2026-10-12–10-23) 모두, 세 종목(005930, 000660, 009150)의 통합·KRX 단일가 봉의 거래량 × 종가가 녹화한 체결대금과 같았고(1% 안, 비율 1.000–1.000), 두 봉의 종가가 녹화한 종가 단일가와 같았다. KRX 봉을 먼저 쓰는 것은 단일가가 KRX의 것이고 `open_to_close`도 그 봉의 종가를 읽기 때문이다(#317).
-
-    > **바뀜** (2026-10-24, #368): "#305가 정한 대체(1분봉의 단일가 봉, 거래량 × 종가)는 아직 쓰지 않는다. … 같은 봉이 있으면 그 봉으로 녹화 전의 날도 채운다 ⚠" → KRX 봉, 없으면 통합 봉으로 채운다(`krx_bar`, `integrated_bar`). 이유: 위 실측.
-  - `agree`: 단일가가 수요의 방향으로 움직였는지(sign(수요) = sign(단일가 움직임)). 수요가 없는 날은 그날 흐름과 견준다(`compared_with: flow`, #270과 같은 비교). 둘 중 하나가 움직이지 않았으면 `null`이다.
-  - `special`: 그날 시작한 특수 상황 구간의 종류(`vi`, `circuit_breaker`, `sidecar`, 엔진이 남긴 `special_windows`). 녹화를 시작하기 전의 날은 늘 빈 목록이다.
-- **요약(`summary`).** 고른 날로 계산한다.
-  - `periods[]`: 구조 실측의 기간(상장 전, 상장 뒤 05-27~07-30, 규제 뒤 07-31~09-13, 애프터마켓 뒤 09-14~)마다, 날이 있는 기간만. `all`과 `without_special`(특수 상황이 있던 날을 뺀 것) 둘 다 준다.
-  - `tertiles[]`: `ratio`가 있는 날을 `|ratio|`의 크기로 세 묶음(앞 묶음부터 하나씩 더 많게)으로 나눈 것. `ratio_from`·`ratio_to`가 그 묶음의 `|ratio|` 범위다. 3일 미만이면 빈 목록이다.
-  - 칸마다: `days`, `auction_bp_median`(|단일가 움직임|의 중앙값, bp), `agree`와 `agree_n`(둘 다 움직인 날 가운데 같은 방향 비율과 그 날 수), `next_gap_opposite`·`next_gap_n`과 `next_close_opposite`·`next_close_n`(다음날 갭, 다음날 종가가 단일가와 반대인 비율과 날 수). 화면은 표본이 적은 칸(예: 20일 미만)을 흐리게 보인다.
-
-```json
-{
-  "symbol": "005930", "from": "2025-10-23", "to": "2026-10-22", "computed_at": "2026-10-21T20:41:12+09:00",
-  "days": [
-    {"date": "2026-10-20", "period": "애프터마켓 뒤(09-14~)", "demand": 160163959925, "spot_futures": 77742474211,
-     "futures": 82421485714, "demand_source": "live", "net_assets_source": "krx", "ratio": 1.016, "ratio_total": 2.094,
-     "denominator": 76494829950.0, "denominator_days": 20,
-     "denominator_sources": {"recorded": 7, "krx_bar": 13, "integrated_bar": 0}, "denominator_reason": null,
-     "auction_value": 95017832000.0, "auction_value_source": "recorded", "auction_bp": 12.3, "auction_ticks": 1.0, "flow_bp": 173.2,
-     "compared_with": "demand", "agree": true, "next_gap_bp": -36.5, "next_close_bp": -121.6, "special": []}
-  ],
-  "summary": {
-    "periods": [{"period": "애프터마켓 뒤(09-14~)", "from": "2026-09-14", "to": null,
-                 "all": {"days": 26, "auction_bp_median": 12.4, "agree": 0.47, "agree_n": 15,
-                         "next_gap_opposite": 0.43, "next_gap_n": 14, "next_close_opposite": 0.43, "next_close_n": 14},
-                 "without_special": {"…": "같은 필드"}}],
-    "tertiles": [{"tertile": 1, "ratio_from": 0.04, "ratio_to": 0.40, "all": {"…": "같은 필드"}, "without_special": {"…": "같은 필드"}}]
-  }
-}
-```
-
-- 상태 디렉터리가 없는 재생 엔진은 빈 목록과 빈 요약을 준다. 데모 엔진에는 10-08까지 20거래일이 있다: 마지막 8일은 저장한 15:20 수요, 그 앞은 순자산과 1분봉으로 계산한 수요다. 순자산은 KRX의 것이다(`net_assets_source: krx`). 000660의 09-24에 VI가 있고, 처음 5일은 녹화한 종가 단일가가 없어 KRX 1분봉의 체결대금이다(`krx_bar`). 일봉에서 지어낸 값이다.
-- 새 스트림 메시지는 없다. 화면이 읽어 간다.
+> **삭제됨** (2026-11-12, #701): 마감 흐름의 지난날(`state/closing_flow/days.json`): 날마다 15:20 수요와 비율, 종가 단일가의 움직임, 수요의 방향과 맞았는지, 다음날 갭과 종가, 기간·비율 3분위별 요약. 수집기가 시작할 때와 20:30 이력 작업 뒤, KRX 순자산이 들어온 뒤 계산했다. 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 없다. 경로는 404다.
 
 ### `GET /v1/symbols/{symbol}/special?from=YYYY-MM-DD&to=YYYY-MM-DD` (#236)
 
@@ -1090,7 +968,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 ### `GET /v1/cost-map?symbol=&period=&special=` (#307)
 
-비용 지도다. 상승·하락 신호가 왕복 비용을 갚으려면 얼마나 맞혀야 하는지를, 엔진이 예측하는 지평마다 실제 맞힘률 옆에 놓는다(`cost_map.py`). 지평·비용 화면이 읽는다. 자동 매매 trader도 시작할 때와 매일 08:30에 `?symbol=005930&period=20d&special=exclude`로 읽는다(#395, 설계 [14장](design.md#14-자동-매매-393) "칸"): 방향과 4·15·30분 장벽 줄의 세 예측자의 이름과 수치. 밤 정책 맞추기는 그 이름이 있는 칸 모두를 녹화로 재생해 실행 손익의 하한으로 고르고(#472), trader는 챔피언 정책의 칸을 판정과 상관없이 산다. **바뀜** (2026-11-03, #480): trader는 `verdict.market`이 `pass`인 칸만 매매했다 → 판정은 진단이다. 이유: spec #468 3절 "진입". 리서치의 결론(`research/reports/`)이 바탕이다: 대칭 목표 ±W틱, 왕복 비용 C틱이면 P(상승|신호) − P(하락|신호) ≥ C/W여야 본전이고, 맞힘률로 말하면 p* = (W + C) ÷ 2W를 넘어야 한다. W < C면 다 맞혀도 손해다.
+비용 지도다. 상승·하락 신호가 왕복 비용을 갚으려면 얼마나 맞혀야 하는지를, 엔진이 예측하는 지평마다 실제 맞힘률 옆에 놓는다(`cost_map.py`). 자동 매매 trader가 시작할 때와 매일 08:30에 `?symbol=005930&period=20d&special=exclude`로 읽는다(#395, 설계 [14장](design.md#14-자동-매매-393) "칸"): 방향과 4·15·30분 장벽 줄의 세 예측자의 이름과 수치. **바뀜** (2026-11-12, #701): 지평·비용 화면도 읽었다 → trader만 읽는다. 이유: 그 화면을 지웠다(#695). trader가 매매할 칸을 이 답으로 고르므로 엔드포인트는 남는다(#693). 밤 정책 맞추기는 그 이름이 있는 칸 모두를 녹화로 재생해 실행 손익의 하한으로 고르고(#472), trader는 챔피언 정책의 칸을 판정과 상관없이 산다. **바뀜** (2026-11-03, #480): trader는 `verdict.market`이 `pass`인 칸만 매매했다 → 판정은 진단이다. 이유: spec #468 3절 "진입". 리서치의 결론(`research/reports/`)이 바탕이다: 대칭 목표 ±W틱, 왕복 비용 C틱이면 P(상승|신호) − P(하락|신호) ≥ C/W여야 본전이고, 맞힘률로 말하면 p* = (W + C) ÷ 2W를 넘어야 한다. W < C면 다 맞혀도 손해다.
 
 질의 값은 순위표와 같다(`symbol`, `period`, `special`. `kind`는 받지 않는다. `basis`는 순위표처럼 400이다). 잘못된 값은 400이다. `symbol`을 빼면(`all`) 모든 종목이다. **바뀜** (2026-11-06, #595): `basis`가 `a`, `b`면 받고 쓰지 않았다 → 400. 이유: 순위표의 `basis`를 없앴다.
 
@@ -1122,11 +1000,7 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
                   "edge": 0.08, "long": {"calls": 120, "precision": {"value": 0.30, "low": 0.23, "high": 0.39, "n": 120}}, "pnl": {"trades": 217, "per_trade": {"value": -4.8, "low": -6.9, "high": -2.6, "n": 217}},
                   "pnl_inverse": {"trades": 217, "per_trade": {"value": -4.5, "low": -6.6, "high": -2.4, "n": 217}},
                   "verdict": {"limit": "fail", "market": "fail"}}}
-  ],
-  "regimes": {"computed_at": "2026-10-11T20:30:41+09:00", "first_day": "2025-10-13", "last_day": "2026-10-08",
-              "rows": [{"symbol": "005930", "period": "애프터마켓 뒤(09-14~)", "from": "2026-09-14", "to": null, "days": 20, "windows": 7500,
-                        "up": 0.259, "flat": 0.503, "down": 0.238, "k": 2, "persist": 0.543, "persist_windows": 7420}]},
-  "regimes_missing": null
+  ]
 }
 ```
 
@@ -1169,16 +1043,11 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
   - `verdict`: 비용마다 `pass`(맞힘률의 신뢰구간 하한 > p*), `fail`(아니면), `few`(신호 수가 순위표의 최소 표본 `min_sample`보다 적다). 맞힘률 자체가 아니라 하한으로 판정해 우연히 넘은 줄을 넘음으로 보지 않는다. p*가 없으면 `null`이다.
 - 통계는 순위표처럼 작업 스레드에서 계산하고 예측 저장소가 바뀔 때까지 둔다(종류마다 따로).
 
-**기간 기준율 `regimes`.** 4분 도달 정답의 기간별 기준율이다(`base_rates.py`). `structure-check`의 3절(#270, 그 명령은 #667에서 지웠다)과 같은 기간(`base_rates.PERIODS`: 상장 전 ~05-26, 상장 뒤 05-27~07-30, 규제 뒤 07-31~09-13, 애프터마켓 뒤 09-14~), 같은 정답(1분봉 규칙 `touch.bar_touch`, 엔진이 예측하는 모든 봉 마감), 같은 함수(`base_rates.label_shares`)다.
+**기간 기준율 `regimes`.**
 
-> **바뀜** (2026-11-09, #663): 기간과 함수는 `structure_check.py`에 있었다 → `base_rates.py`에 있다. 기간과 숫자는 그대로다. 이유: 실전 모듈이 검사 모듈을 가져오지 않게 하려고(#650).
+> **삭제됨** (2026-11-12, #701): `regimes`·`regimes_missing`: 4분 도달 정답의 기간별(상장 전, 상장 뒤, 규제 뒤, 애프터마켓 뒤) 클래스 비율, 중앙 k, 직전 창 정답이 맞은 비율(`base_rates.py`). 수집기의 이력 작업이 시작할 때와 매일 20:30에 저장된 모든 1분봉으로 계산해 `state/base_rates.json`에 두었다. 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). trader는 `rows`만 읽는다(`trader/selection.py`). 대신: 없다. 서버에 남은 `state/base_rates.json`은 아무도 읽지 않는다.
 
-- `computed_at`, `first_day`, `last_day`: 계산한 때와 읽은 1분봉의 첫날·마지막 날.
-- `rows[]`: 종목·기간마다 `days`(1분봉 날 수), `windows`(창 수), `up`·`flat`·`down`(클래스 비율. 늘 보합의 맞힘률은 `flat`이다), `k`(중앙값, 둘이면 아래 것), `persist`(직전 창 정답이 맞은 비율, 직전 창이 있는 창 `persist_windows` 가운데. 없으면 `null`). 창이 없는 기간은 빠진다. `symbol`을 고르면 그 종목 줄만 온다.
-- 수집기의 이력 작업이 시작할 때와 매일 20:30 백필 뒤에 저장된 모든 1분봉으로 계산해 `state/base_rates.json`에 둔다([operations.md](operations.md)). 엔드포인트는 그 파일을 읽기만 한다. 아직 없으면 `regimes`가 `null`이고 `regimes_missing`에 이유가 온다(읽지 못한 파일이면 그 이유).
-- 비율과 수, k만 있다. 가격은 없다.
-
-새 스트림 메시지는 없다. 화면이 읽어 간다. 데모 엔진은 그 아침의 예측·정답으로 줄을 채우고, 기간 기준율은 지어낸 값(세 종목 × 네 기간)이다.
+새 스트림 메시지는 없다. 데모 엔진은 그 아침의 예측·정답으로 줄을 채운다.
 
 ### `GET /v1/macro`
 
@@ -1207,97 +1076,11 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 ### `GET /v1/calendar` (#150)
 
-경제 캘린더다. 수집기가 TradingView에서 마지막으로 읽은 것 가운데, 엔진 시계의 오늘 0시(KST)부터의 일정을 시각 순으로 보인다([design.md](design.md#45-매크로-지표)의 "경제 캘린더").
-
-```json
-{
-  "fetched_at": "2026-10-13T09:15:00+09:00",
-  "source": "tradingview",
-  "countries": ["US", "KR", "CN", "JP", "EU", "DE", "GB"],
-  "events": [
-    {"id": "421602", "at": "2026-10-14T21:30:00+09:00", "country": "US", "title": "Inflation Rate YoY", "indicator": "Inflation Rate", "category": "prce", "period": "Sep", "actual": null, "forecast": 3.7, "previous": 3.4, "unit": "%", "scale": null, "currency": "USD", "importance": "high", "source": "Bureau of Labour Statistics", "source_url": "https://www.bls.gov"}
-  ]
-}
-```
-
-- `limit`: 일정 수(기본 100, 1–1000). 범위 밖이면 400이다.
-- `fetched_at`은 수집기가 마지막으로 읽은 시각이다. 읽기에 실패하는 동안은 앞의 답이 그대로라서 늦어진다. 한 번도 읽지 않았으면(재생·데모 엔진 포함) `null`이고 목록은 비어 있다.
-- 값(`actual`, `forecast`, `previous`)은 숫자이고, 모르면 `null`이다. 값은 `<숫자><scale>`이고 단위는 `unit`이다. `scale`은 `K`(천), `M`(백만), `B`(십억), `T`(조) 또는 `null`이라서, `previous: 23.75, scale: "K"`는 23,750이다. `unit`은 `%`, 통화(`$`, `€`, `£`, `CNY` 등) 또는 `null`이다. 실제 값은 발표 뒤 수집기가 처음 읽을 때(기본 15분 안에) 찬다.
-- 엔진은 수집기가 남긴 파일을 그대로 넘기지 않고 한 번 읽어 다시 쓴다. 그래서 파일이 망가지거나 손으로 고쳐져도 답은 이 형식을 지키고, 읽을 수 없는 일정은 빠진다.
-- 엔진은 수집기가 쓴 파일을 많아야 30초마다 다시 읽는다.
+> **삭제됨** (2026-11-12, #701): 경제 캘린더: 수집기가 TradingView에서 15분마다(`KRX_CALENDAR_EVERY`) 읽은 나라들(`KRX_CALENDAR_COUNTRIES`)의 일정 가운데 오늘 0시부터의 것(`econ_calendar.py`, `data/calendar/`). 장전 브리핑과 대시보드가 읽었다. 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 없다. 수집기는 더 읽지 않고, 경로는 404다.
 
 ### `GET /v1/briefing` (#304)
 
-장전 브리핑 화면이 읽는 그날의 재료다. 그날 시가를 가늠하는 것을 한 답에 모은다. 값마다 엔진이 남긴 파일에서 읽고, 08:50 `open_to_close` 예측의 입력과 같은 규칙으로 만든다(`briefing.py`, `daily_features.py`). 그래서 화면과 모델이 다른 숫자를 말하지 않는다.
-
-```json
-{
-  "day": "2026-10-19",
-  "as_of": "2026-10-19T08:51:00+09:00",
-  "phase": "opening_auction",
-  "trading_day": true,
-  "session": {"open": "2026-10-19T09:00:00+09:00", "close": "2026-10-19T15:30:00+09:00", "special": null},
-  "previous_day": "2026-10-16",
-  "overnight": {
-    "macro": {"day": "2026-10-19", "decided_at": "2026-10-19T07:30:00+09:00", "regime": "risk_off", "reasons": ["SOX -1.4% (-1% 이하)"], "readings": [], "failed": {}, "skipped": []},
-    "us": [{"indicator": "sox", "closes": [{"day": "2026-10-16", "close": 6080.0, "change_pct": -0.65}]}]
-  },
-  "night_futures": {"evening": "2026-10-16", "from": "2026-10-16T18:00:00+09:00", "to": "2026-10-17T06:00:00+09:00", "recorded": true, "contract": "A01612", "last": 393.0, "change_pct": 0.77, "high": 395.5, "low": 391.0, "volume": 1500, "last_trade_at": "2026-10-17T05:59:00+09:00", "minutes": [{"at": "2026-10-16T18:00:00+09:00", "price": 391.0}]},
-  "symbols": [
-    {
-      "symbol": "005930",
-      "previous_close": 81200,
-      "after_hours": {"price": 81800, "at": "2026-10-16T19:59:00+09:00", "change_pct": 0.74},
-      "premarket": {"price": 81500.0, "at": "2026-10-19T08:45:00+09:00", "window": "08:40-08:50", "change_pct": 0.37},
-      "expected_open": {"price": 81600, "qty": 5000, "venue_code": "1", "at": "2026-10-19T08:59:50+09:00", "change_pct": 0.49, "final": false},
-      "supply": {"day": "2026-10-16", "foreign_net": 129496, "institution_net": -138926, "days": 5, "foreign_net_sum": -255135.0, "institution_net_sum": -1260915.0}
-    }
-  ],
-  "open_to_close": {
-    "kind": "open_to_close", "day": "2026-10-19", "predicted_at": "2026-10-19T08:50:00+09:00", "previous": false,
-    "symbols": [
-      {
-        "symbol": "005930",
-        "predictions": [{"algorithm": "cox", "model_version": "cox-20261016-3fa9c1", "bar_close": "2026-10-19T08:50:00+09:00", "…": "…"}],
-        "inputs": [{"algorithm": "cox", "model_version": "cox-20261016-3fa9c1", "bias": {"up": -0.003, "down": -0.025}, "inputs": [{"name": "gap_1", "value": -0.35, "z": -1.05, "scores": {"up": 0.022, "down": -0.011}}]}]
-      }
-    ]
-  },
-  "schedule": {"events": [], "option_expiry": false, "futures_expiry": false, "month_end": false, "month_start": false}
-}
-```
-
-- `day`: `YYYY-MM-DD`. 빼면 엔진 시계의 오늘이 거래일이면 오늘, 아니면 다음 거래일이다. 날짜가 아니면 400이다. 거래일이 아닌 날을 물으면 `trading_day`가 `false`이고 `session`이 `null`이다.
-- `phase`는 지금(엔진 시계) 장 단계다. `session.special`은 늦게 여는 날(`exam_day` 수능일, `first_day` 연초 첫 거래일)이다. `previous_day`는 그날 전 거래일이다.
-- **`overnight`**
-  - `macro`는 그날 아침 매크로 읽기다(`/v1/macro`와 같은 모양). 그날이나 그 전 10일 안에 정한 가장 최근 날이고, 그 날짜가 `macro.day`다. 없으면 `/v1/macro`처럼 `null`이다.
-  - `us`는 SOX, NVDA, MU, VIX마다 그날 전의 마지막 종가 5개다(`data/us_daily/`). `change_pct`는 앞 종가 대비(%)이고, 첫 줄은 그 앞 종가가 있을 때만 있다. NQ는 일봉 이력이 없어 `macro.readings`에만 있다.
-- **`night_futures`**는 전 거래일 저녁에 시작한 KOSPI200 야간선물(18:00–다음 날 06:00, `H0MFCNT0` 녹화)이다. 받은 시각으로 거른다.
-  - `contract`는 녹화한 월물 코드다. `last`, `high`, `low`는 그 밤의 체결가다. `change_pct`는 마지막 체결의 KIS 전일 대비(%)다. `volume`은 마지막 체결의 누적 거래량이다.
-  - `minutes`는 분마다 마지막 체결가다.
-  - 녹화가 없으면 `recorded`가 `false`이고 값은 `null`, `minutes`는 빈 목록이다.
-- **`symbols[]`**(엔진 종목마다)
-  - `previous_close`: 전 거래일 KRX 종가 단일가(시가→종가 정답과 같은 출처, `auctions.days_of`). 그 가격이 없으면 `null`이다.
-
-    > **바뀜** (2026-10-20, #317): 시장 `J` 일봉의 종가 → 종가 단일가. 이유: 2026-09-14부터 일봉 종가는 애프터마켓의 마지막 가격으로 보이고, `cox`의 `premarket_gap`은 종가 단일가로 읽는다(#264). 애프터마켓의 가격은 `after_hours`가 보인다.
-  - `after_hours`: 전 거래일 장 마감부터 20:00 전까지의 마지막 통합 1분봉(백필 `bars`). NXT와 KRX 애프터마켓의 가격이다. 그 시간의 봉이 없으면 `null`이다. 애프터마켓은 예측이나 특수 상황에는 쓰지 않는다.
-  - `premarket`: NXT 프리마켓의 마지막 체결. `cox`의 `premarket_gap`과 같은 규칙이다(`daily_features.premarket_window`): 08:40–08:50 구간, 없으면 08:00–08:30 구간에서 체결 시각이 가장 늦은 통합 체결(`H0UNCNT0` 녹화). 08:50 전에 받은 것만 친다. 08:30–08:40은 KRX 장전 시간외 체결(전일 종가)이라 넣지 않는다. `window`가 쓴 구간이다. `cox`는 이 가격을 `ln(가격 ÷ 전일 종가) ÷ σ̂`로 읽는다.
-  - `expected_open`: 시가 단일가(개장 30분 전부터 개장 전까지)에 받은 KRX의 마지막 예상 체결(통합 호가의 `expected_px` 가운데 거래소 구분 코드 `expected_exch_cls`가 `1`인 것, #304, #314, [events.md](events.md) "호가"). `qty`는 예상 체결량, `venue_code`는 예상 체결의 거래소 구분 코드(원문, 늘 `1`)다. 개장 시각이 지나면 `final`이 `true`다(단일가가 끝났다). 그 구간에 KRX 예상가가 없거나 #304 전 녹화뿐이면 `null`이다.
-    - KRX 예상가는 08:50부터 온다. 2026-10-12 – 10-21의 8거래일, 세 종목 모두 08:50:00–08:59:59였다(첫 예상가가 1초 늦은 날이 몇 번 있었다). 그래서 08:30–08:50에는 `null`이다.
-    - **참고 값이다.** 마지막 KRX 예상가(08:59:59)는 실제 시가(KRX 시가 단일가 체결)와 2026-10-12 – 10-21의 8거래일에 005930·000660은 3일, 009150은 2일 같았다. 나머지 날은 005930·000660이 1–5틱, 009150이 2–5틱(5일)과 6틱 이상(1일) 달랐다(`probe-expected-open-krx-314`, [kis-feeds.md](kis-feeds.md) "피드별 메모"). 사용자는 이 값을 참고로 남기기로 했다(2026-10-21, #314). 화면은 "KRX 예상 시가(참고)"로 보이고 툴팁에 이 차이를 적는다.
-
-      > **바뀜** (2026-10-22, #346): "005930·000660 모두 7일 중 2일만 같았고(10-12 – 10-20), 009150의 수는 거르지 않은 값이라 다시 잰다" → 위 8거래일의 KRX 것. 이유: 2026-10-21 밤 `probe-expected-open-krx-314`(#314).
-    - `2`(NXT의 예상가로 본다)는 쓰지 않는다. 009150은 08:30 전과 이 구간에도 `2`가 왔다.
-
-    > **바뀜** (2026-10-21, #341): 구간에서 받은 마지막 예상가(거래소 구분 코드와 상관없이) → 거래소 구분 코드 `1`(KRX)의 마지막 예상가. 이유: `probe-expected-open-314`에서 `1`은 시가·종가 단일가의 시간 구분(`B`, `A`)과 같은 수로 왔고, `2`는 연속매매와 장 마감 뒤에 왔으며, 009150은 이 구간에도 `2`(NXT)가 있었다(#314). 사용자가 KRX 것만 쓰고 참고로 보이기로 정했다(2026-10-21).
-  - `supply`: 전 거래일의 외국인·기관 순매수(주, KIS 일별 수급)와, 그날까지 저장된 마지막 5거래일(`days`)의 합. KIS가 값이 없어 0으로 준 날은 값 없음이라 합에서 빠지고, 그날 값이면 `null`이다(#295).
-  - `change_pct`는 모두 전일 KRX 종가 대비(%)다. 종가가 없으면 `null`이다.
-- **`open_to_close`**: 엔진이 이 종류를 예측하지 않으면 `null`이다.
-  - 그날 08:50 예측(`predictions`, `/v1/symbols/{symbol}/kinds/open_to_close/predictions`의 항목과 같다)이다. 그날 것이 아직 없으면(08:50 전, 그날 예측하지 못함) 그 전 가장 최근 날의 것이고, 그때 `previous`가 `true`다. `day`와 `predicted_at`이 보이는 예측의 날과 시각이다.
-  - `inputs`: 하루 한 번 종류의 알고리즘마다 그 예측에 쓴 입력(`kind_predictions.inputs`). `inputs[]`는 선언한 피처 순서로 `name`, `value`(그 시각의 값, 없으면 `null`), `z`(모델이 읽은 표준화 값, ±5에서 자름. 값이 없거나 모델이 읽지 않는 피처, 요일은 `null`), `scores`(클래스마다 보합 대비 점수에 더한 몫)다. `bias`는 클래스마다 절편이다. 상승 확률은 softmax(`bias.up` + Σ`scores.up`, 0, `bias.down` + Σ`scores.down`)의 첫째다. 알고리즘이 스스로 설명하지 못하면(기본 모델) `bias`와 `scores`가 `null`이다. 기준 예측은 입력이 없어 목록에 없다. #304 전에 쓴 예측도 없다.
-- **`schedule`**: 그날(KST 0시–24시)의 경제 캘린더 일정(`/v1/calendar`의 항목과 같다)과 표시. `option_expiry`는 KOSPI200 옵션의 최종거래일(매월 둘째 목요일, 휴장이면 앞 거래일), `futures_expiry`는 그중 분기월(선물 만기)이다. `month_end`, `month_start`는 `cox`의 월말·월초와 같다(달의 마지막 거래일, 첫 3거래일).
-- 오늘의 답은 많아야 20초마다, 또는 예측 저장소가 바뀌면 다시 만든다. 새 스트림 메시지는 없다. 화면이 읽어 간다.
-- 데모 엔진에는 그 아침의 야간선물, 프리마켓 체결, 예상 시가, 그날 일정, 미국 종가가 있다. 데모는 그 파일을 아침 재생 뒤에 써서, 데모의 08:50 `cox` 입력에는 프리마켓과 야간선물이 없다.
+> **삭제됨** (2026-11-12, #701): 장전 브리핑(`briefing.py`): 그날 시가를 가늠하는 재료를 한 답에 모았다. 밤사이(매크로 읽기와 미국 종가), 야간 선물, 종목마다 전 거래일 KRX 종가·20:00 통합 가격·NXT 장전 체결·시가 단일가 예상가·전 거래일 순매수, 그날 08:50 `open_to_close` 예측과 그 입력, 그날의 경제 캘린더 일정과 표시(옵션·선물 만기, 월말·월초). 장전 브리핑 화면이 읽었다. 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 없다. 그 재료는 알고리즘의 입력이라 그대로 녹화하고, `open_to_close` 예측의 입력은 `kind_predictions`의 `inputs`에 그대로 남는다. 경로는 404다.
 
 ### `GET /v1/kinds` (#179)
 
@@ -1505,29 +1288,18 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 
 ### 텔레그램 신호 알림 (#19)
 
-선택 기능이고 기본은 끈다(`KRX_SIGNAL_ALERT=on`으로 켠다, `signals.py`). 봉 마감마다 최종 합의가 나오면 종목마다 본다.
+> **삭제됨** (2026-11-12, #701): 텔레그램 신호 알림(`signals.py`, `KRX_SIGNAL_ALERT`, 기본은 꺼짐. 2026-11-03부터 서버에서도 꺼져 있었다). 봉 마감마다 최종 합의의 상승(하락) 확률이 `KRX_SIGNAL_MIN_PROBABILITY`(기본 0.7) 이상이고 그 합의의 정식 알고리즘 `KRX_SIGNAL_MIN_AGREE`(기본 2)개 이상이 같은 방향이면 `[신호]` 메시지를 보냈다. 같은 종목·방향은 4분 안에 다시 보내지 않았고(재시작하면 `runs`의 `signal_sent`로 되살렸다), 막을 이유가 있으면 보내지 않고 `signal_blocked`로 남겼다. `GET /v1/status`의 `signal_rule`이 그 규칙을 냈다(#617). 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 매수·매도 신호는 종합 판단(`GET /v1/verdict`, #676)이다. 장애 알림(`notify.py`)과 trader의 `[buy]`·`[sell]`은 그대로다.
 
-1. 최종 합의의 상승 확률이 `KRX_SIGNAL_MIN_PROBABILITY`(기본 0.7) 이상이면 상승, 아니면 하락 확률이 그 이상일 때 하락이다. 둘 다 아니면 신호가 없다.
+막을 이유는 최종 합의 예측마다 정해, 예측과 함께 저장하고 예측 조회와 스트림의 `blocked`로 낸다(`special`, `no_reference`, `expired`, 없으면 `null`. 다른 예측은 늘 `null`, #88). trader의 장부도 이것을 읽는다. 그때까지 엔진이 안 것으로 정한다.
 
-   > **바뀜** (2026-11-03, #483): 기본 0.6 → 0.70. 이유: 7일(newton·turing이 구성원이었다면)의 상승 신호 적중률이 0.60에서 58.1%, 0.70에서 67.0% [57.7–75.1%]였다(바탕 상승 비율 29.8%). 하한이 0.60의 점추정보다 낮아 잠정값이고, 2026-11-04부터 20거래일로 다시 잰다([operations.md](operations.md#신호-기준-검토-206)).
-2. 그 합의에 들어간 정식 알고리즘 가운데 `KRX_SIGNAL_MIN_AGREE`(기본 2)개 이상이 같은 방향을 예측해야 한다. 알고리즘의 예측 방향은 세 확률 중 가장 큰 쪽이다(동률이면 보합, 그다음 상승. 통계와 같다).
-   엔진은 1과 2의 값을 알림이 꺼져 있어도 `GET /v1/status`의 `signal_rule`로 낸다(#617). 앱의 신호 알림은 사용자가 직접 정한 값이 없으면 그 값을 따른다.
-3. 같은 종목·같은 방향의 신호는 앞 신호의 채점 시각(4분 뒤)까지 다시 보내지 않는다. 매분 같은 신호가 쌓이지 않게 하려는 것이다. 엔진이 다시 시작하면 첫 최종 합의 때 오늘 보낸 신호 기록(`runs`의 `signal_sent`)으로 이 상태를 되살린다.
-4. 보내기 직전에, 그때까지 엔진이 안 것으로 막을 이유를 본다. 이유가 있으면 보내지 않는다(막힌 신호). 막힌 신호는 3의 반복 억제를 시작하지 않는다. 다음 분에 이유가 없어지면 그 신호는 나간다.
-   - `special`: 그때까지 받은 VI나 서킷브레이커 창이 그 종목의 봉 마감 ~ 목표 시각에 닿는다. 예측의 특수 상황(`special`)보다 좁다. 봉 마감 뒤 최종 합의 전에 받은 VI 상태도 막는다(VI 상태는 5초마다 조회한다). 사이드카는 프로그램매매만 멈추므로 막지 않는다.
-   - `no_reference`: 봉 마감 기준가(중간가)가 없다. 호가가 60초 넘게 오지 않았다.
-   - `expired`: 지금이 이미 목표 시각이다. 엔진이 밀려 뒤늦게 최종 합의를 낸 경우다.
-   - 여러 이유에 걸리면 위 순서의 첫 이유를 남긴다.
-
-막을 이유는 신호와 상관없이 최종 합의 예측마다 정해, 예측과 함께 저장하고 예측 조회와 스트림의 `blocked`로 낸다(`special`, `no_reference`, `expired`, 없으면 `null`. 다른 예측은 늘 `null`, #88). 텔레그램 신호가 꺼져 있어도 같다. 화면의 신호 알림도 이것을 따른다.
+- `special`: 그때까지 받은 VI나 서킷브레이커, 시장 정지(#625) 창이 그 종목의 봉 마감 ~ 목표 시각에 닿는다. 예측의 특수 상황(`special`)보다 좁다. 봉 마감 뒤 최종 합의 전에 받은 VI 상태도 막는다(VI 상태는 5초마다 조회한다). 사이드카는 프로그램매매만 멈추므로 막지 않는다.
+- `no_reference`: 봉 마감 기준가(중간가)가 없다. 호가가 60초 넘게 오지 않았다.
+- `expired`: 지금이 이미 목표 시각이다. 엔진이 밀려 뒤늦게 최종 합의를 낸 경우다.
+- 여러 이유에 걸리면 위 순서의 첫 이유를 남긴다.
 
   > **바뀜** (2026-10-13, #124): 막을 이유는 텔레그램 신호를 보낼 때만 엔진 안에서 정했다 → 최종 합의 예측마다 정해 저장하고 API와 스트림으로 낸다. 이유: 화면의 데스크톱 알림도 같은 판정을 따르게 하려고. 판정 규칙은 엔진 한 곳에만 둔다(#78, #88).
 
-보낸 신호와 막힌 신호는 `runs` 테이블에 `signal_sent`, `signal_blocked`로 남는다. `detail`은 JSON이다: `symbol`, `direction`(`up`, `down`), `probability`, `agree`(같은 방향인 정식 알고리즘 수), `members`(합의에 들어간 정식 알고리즘 수), `bar_close`, `target_at`, `rule`(`min_probability`, `min_agree`, 그때의 신호 규칙), `blocked`(막힌 이유, 보낸 신호는 `null`). 3에서 반복이라 건너뛴 신호는 남지 않는다. 막힌 신호는 로그에도 `signal blocked (<이유>)`로 남는다.
-
-> **바뀜** (2026-10-12, #116): 최종 합의가 확률·동의 조건만 맞으면 보냈고, 반복 억제 상태는 메모리에만 있었다 → 보내기 직전에 막을 이유(`special`, `no_reference`, `expired`)를 보고, 보낸·막힌 신호를 `runs`에 남기며, 재시작하면 오늘 보낸 신호로 반복 억제를 되살린다. 이유: VI는 봉 마감 시점에만 확인해서 봉 마감 직후에 걸린 VI가 신호를 막지 못했고, 기준가가 없는 종목에도 신호가 나갔고, 엔진이 재시작하면 같은 신호가 목표 시각 전에 다시 나갈 수 있었다(#78, #80).
-
-메시지는 `[신호] 005930 상승 64% · 정식 3개 중 2개 같은 방향 · 09:31 봉 마감, 09:35까지`다. 정식 알고리즘이 없으면 합의가 비어서 신호도 없다. 주문은 하지 않는다(엔진에 주문 코드는 없다).
+  > **바뀜** (2026-11-12, #701): 막을 이유의 이름은 `signals.Blocked`였다 → `engine.Blocked`. 값은 그대로다. 이유: `signals.py`를 지웠다.
 
 ### `GET /v1/trader/trades?before=T&limit=N` (#394)
 
@@ -2081,7 +1853,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 - **이름.** 종류의 이름과 기준 예측의 이름은 한 묶음이다(`register_daily_kinds`): 봉 마감 종류와 그 기준 예측, 먼저 등록된 하루 한 번 종류와 그 기준 예측의 이름 어느 것과도 겹치지 않는다(종류가 기준 예측의 이름을 쓰거나 그 반대도 거부한다). 종류와 클래스의 이름은 봉 마감 종류처럼 소문자 영어다.
 - **예측(`daily.DailyRunner`).** 거래일마다 그 종류의 시각(`DailyKind.predict_at`, `open_to_close`는 08:50 KST)에 종목마다 그 종류의 기준 예측(`daily_baselines`)과 돌기 시작한 알고리즘(아래)을 한 번에 돌려 저장한다.
   - 입력은 그 시각까지 알던 것뿐이다. 기준 예측은 그 종목의 그 전 날들의 정답(그 종류의 정답 규칙으로 KRX 일봉에서 다시 만든 것, `DailyInputs.past`), 그날의 보합 폭, 달력의 전 거래일을 받는다.
-  - 예측의 `bar_close`는 그 예측 시각(그날 08:50)이고, `displayed_at`은 저장한 순간이다. `flat_ticks`, `width_ticks`, `anchor`, `tick`은 비어 있다. 대신 그날의 보합 폭을 함께 저장한다(`band`, 그날 전의 날로 정한 값, 아래 "시가→종가"). 보합 폭을 정할 날이 모자라면 비어 있다. 알고리즘의 예측은 그 입력도 함께 저장한다(`inputs`, #304, 위 "저장"의 `kind_predictions`, `GET /v1/briefing`).
+  - 예측의 `bar_close`는 그 예측 시각(그날 08:50)이고, `displayed_at`은 저장한 순간이다. `flat_ticks`, `width_ticks`, `anchor`, `tick`은 비어 있다. 대신 그날의 보합 폭을 함께 저장한다(`band`, 그날 전의 날로 정한 값, 아래 "시가→종가"). 보합 폭을 정할 날이 모자라면 비어 있다. 알고리즘의 예측은 그 입력도 함께 저장한다(`inputs`, #304, 위 "저장"의 `kind_predictions`. 장전 브리핑 `GET /v1/briefing`이 읽었다: 그 경로는 지웠다, #693).
   - 기준 예측이 낼 수 없는 종목은 `no_previous`다(다른 종류와 같다).
   - 엔진이 그 시각 뒤에 시작하면 그날은 예측하지 않는다. 늦게 내면 그 시각에 알던 것만 쓴 예측이 아니기 때문이다. 06:00 배포와 07:20 재시작은 08:50 전이다. 휴장일에는 예측하지 않는다.
   - KRX 일봉을 읽을 곳(`daily=StoredDays(KRX_DATA_DIR)`)을 받은 엔진만 이 종류를 돌린다. 수집기의 엔진은 받는다. `krx-quant replay`, 데모 전의 재생, 사전 검증의 재생, 테스트의 엔진은 받지 않아 돌리지 않는다.
@@ -3165,7 +2937,7 @@ docker compose run --rm --no-deps engine neyman-variants --backfill --until 2026
 - **파라미터.** `lambda`, `samples`, `b.up`, `b.down`, 열마다 `mean.<열>`, `scale.<열>`, `w.up.<열>`, `w.down.<열>`. 뜻은 `/v1/algorithms`의 `param_meanings`(엔진 API PR 뒤)와 `algorithms/cox/__init__.py`의 `param_meanings`에 있다.
 - **사전 검증.** 위 "사전 검증"의 "하루 한 번 예측 종류의 알고리즘": KRX 일봉 10년의 walk-forward다. 통과하면 다음 08:50부터 수습이다. 2026-10-19 밤 정답 버전 1로 통과했고(1,701일, 86 fold, 가장 약한 lift 0.0355, 거래일 단위 하한 0.0155), 2026-10-20 06:00부터 수습이었다. 정답 버전 2(#317) 배포 뒤에는 수습이라 다시 판정받을 때까지 돌지 않고, 그 밤 `prevalidate-cox`가 고친 정답으로 다시 돈다. 같은 날들의 두 번째 실행이라 거래일 단위 하한은 97.5%다(#262).
 
-- **입력별 기여(#304).** `cox`는 예측마다 입력이 그 확률을 어떻게 만들었는지 낸다(`explain`, 하루 한 번 알고리즘 규약의 선택 기능 `daily.Explains`). 엔진이 예측과 함께 저장하고(`kind_predictions.inputs`) `/v1/briefing`이 보인다. 피처마다 그 열들(값과 빠짐 표시, 요일은 넷)이 상승·하락 점수에 더한 몫(가중치 × 표준화 값의 합)이고, 표준화 값은 모델이 읽은 것(학습 평균과 표준편차, ±5에서 자름)이다. 학습에서 빠진 열(늘 빠지거나 움직이지 않음)은 몫이 0이다. 절편과 모든 몫을 더하면 예측의 로짓이 된다(테스트로 확인). 기본 모델은 설명이 없다.
+- **입력별 기여(#304).** `cox`는 예측마다 입력이 그 확률을 어떻게 만들었는지 낸다(`explain`, 하루 한 번 알고리즘 규약의 선택 기능 `daily.Explains`). 엔진이 예측과 함께 저장한다(`kind_predictions.inputs`). **바뀜** (2026-11-12, #701): `/v1/briefing`이 보였다 → API로는 내지 않고 DB에만 남는다. 이유: 장전 브리핑 화면을 지웠다(#693). 피처마다 그 열들(값과 빠짐 표시, 요일은 넷)이 상승·하락 점수에 더한 몫(가중치 × 표준화 값의 합)이고, 표준화 값은 모델이 읽은 것(학습 평균과 표준편차, ±5에서 자름)이다. 학습에서 빠진 열(늘 빠지거나 움직이지 않음)은 몫이 0이다. 절편과 모든 몫을 더하면 예측의 로짓이 된다(테스트로 확인). 기본 모델은 설명이 없다.
 
 ### Cox-5d (5거래일 시가→종가, #310)
 

@@ -26,7 +26,6 @@ from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.demo import demo_app
 from krx_quant.fake_kis import FakeKis
-from krx_quant.signals import SignalRule
 from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import KIND_ROUTES, ROUTES, SCHEMA, STREAM, WRITES, check
 from tests.collector_doubles import settings_for
@@ -82,13 +81,6 @@ async def walk(get: Get) -> dict[str, int]:
         await ask(f"/v1/symbols/{symbol}/smt?from=2026-10-01&to=2026-10-12", "smt")
         await ask(f"/v1/symbols/{symbol}/supply", "supply")  # #226
         await ask(f"/v1/symbols/{symbol}/supply?from=2026-10-01&to=2026-10-12", "supply")
-        await ask(f"/v1/symbols/{symbol}/flow", "flow")  # #306
-        await ask(f"/v1/symbols/{symbol}/flow?day=2026-10-08", "flow")
-        await ask(f"/v1/symbols/{symbol}/closing-flow", "closing_flow")  # #305
-        await ask(f"/v1/symbols/{symbol}/closing-flow/days", "closing_flow_days")
-        await ask(
-            f"/v1/symbols/{symbol}/closing-flow/days?from=2026-09-01&to=2026-10-12", "closing_flow_days"
-        )
     for query in ("", "?period=5d&special=include", f"?symbol={symbols[0]}&period=20d"):
         await ask(f"/v1/leaderboard{query}", "leaderboard")
     for query in ("", "?period=5d&special=include", f"?symbol={symbols[0]}&period=20d"):
@@ -105,10 +97,6 @@ async def walk(get: Get) -> dict[str, int]:
     await ask(f"/v1/verdict?symbol={symbols[0]}", "verdict")
     await ask(f"/v1/verdict?symbol={symbols[0]}&bar_close=2026-10-12T09:31:00%2B09:00", "verdict")
     await ask("/v1/macro", "macro")
-    await ask("/v1/calendar", "calendar")
-    await ask("/v1/calendar?limit=5", "calendar")
-    await ask("/v1/briefing", "briefing")  # #304
-    await ask("/v1/briefing?day=2026-10-12", "briefing")
     listed = (await ask("/v1/kinds", "kinds"))["kinds"]
     kinds = [k["name"] for k in listed]
     assert kinds[0] == "direction"
@@ -189,16 +177,6 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/cost-map?symbol=999999", 400),
         ("/v1/algorithms/nobody/stats", 404),
         ("/v1/algorithms/nobody", 404),
-        ("/v1/calendar?limit=0", 400),
-        ("/v1/briefing?day=2026-10-1", 400),
-        ("/v1/symbols/999999/flow", 404),
-        ("/v1/symbols/005930/flow?day=2026-10-1", 400),
-        ("/v1/symbols/005930/flow?day=2026-10-11", 404),  # a Sunday
-        ("/v1/symbols/999999/closing-flow", 404),
-        ("/v1/symbols/999999/closing-flow/days", 404),
-        ("/v1/symbols/005930/closing-flow/days?from=2026-10-1", 400),
-        ("/v1/symbols/005930/closing-flow/days?from=2026-10-12&to=2026-10-11", 400),
-        ("/v1/symbols/005930/closing-flow/days?from=2015-01-01&to=2026-10-12", 400),
         ("/v1/trader/trades?limit=0", 400),
         ("/v1/trader/trades?before=10:00", 400),
         ("/v1/trader/trades?policy=0", 400),  # #400
@@ -250,16 +228,25 @@ async def test_the_status_names_the_commit_running_and_when_the_engine_started(t
     assert deployed["started_at"] == "2026-10-12T00:00:00+09:00", "the replay's clock when it was made"
 
 
-async def test_the_status_serves_the_signal_rule_the_screen_follows(tmp_path: Path) -> None:
+# The routes the slimmed app no longer reads (#693).
+GONE = (
+    "/v1/briefing",
+    "/v1/calendar",
+    "/v1/symbols/005930/flow",
+    "/v1/symbols/005930/closing-flow",
+    "/v1/symbols/005930/closing-flow/days",
+)
+
+
+async def test_the_screens_dropped_have_no_routes_nor_status_rule(tmp_path: Path) -> None:
     engine = await run(tmp_path / "engine.db", [], until=at("09:00:00"))
     async with TestClient(TestServer(create_app(engine))) as client:
-        default = await (await client.get("/v1/status")).json()
-        engine.signal_rule = SignalRule(0.65, 3)
-        configured = await (await client.get("/v1/status")).json()
+        gone = {path: (await client.get(path)).status for path in GONE}
+        status = await (await client.get("/v1/status")).json()
 
-    check("status", configured)
-    assert default["signal_rule"] == {"min_probability": 0.7, "min_agree": 2}, "the engine's defaults (#483)"
-    assert configured["signal_rule"] == {"min_probability": 0.65, "min_agree": 3}
+    assert gone == dict.fromkeys(GONE, 404)
+    check("status", status)
+    assert "signal_rule" not in status, "the signal alerts are gone (#693)"
 
 
 async def test_live_and_demo_need_their_kis_status(tmp_path: Path) -> None:
@@ -465,9 +452,7 @@ async def test_the_demo_engine_keeps_the_contract(tmp_path: Path) -> None:
 
 async def test_the_live_engine_keeps_the_contract(kis: FakeKis, tmp_path: Path) -> None:
     port = free_port()
-    # The signal settings, with the Telegram alerts off: the status serves them all the same (#617).
-    settings = replace(settings_for(kis, tmp_path), api_port=port, signal_thresholds=SignalRule(0.65, 3))
-    assert settings.signal_rule is None
+    settings = replace(settings_for(kis, tmp_path), api_port=port)
     clock = FakeClock(at("09:30:10"))
     kis.script[("H0UNASP0", "005930")] = [
         book_frame({"MKSC_SHRN_ISCD": "005930", "BSOP_HOUR": "093010", "BIDP1": "81200", "ASKP1": "81300"})
@@ -504,6 +489,6 @@ async def test_the_live_engine_keeps_the_contract(kis: FakeKis, tmp_path: Path) 
         await asyncio.wait_for(task, 5)
 
     assert checked["status"] == 1
-    assert status["signal_rule"] == {"min_probability": 0.65, "min_agree": 3}
+    assert "signal_rule" not in status
     assert events[0]["type"] == "health", "the KIS status first, on connecting"
     assert {e["type"] for e in events} >= {"prediction", "consensus"}

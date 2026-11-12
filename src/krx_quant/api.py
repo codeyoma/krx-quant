@@ -21,13 +21,6 @@ Endpoints (all under ``/v1``):
   today, at most 4,000 days), oldest first: the short-sale volume, the net buys of
   individuals, institutions and foreigners, the foreign holdings and ratio, the stock lending
   and credit balances;
-- ``GET /symbols/{symbol}/closing-flow``: the day's closing rebalancing demand of the symbol's
-  single-stock ±2x ETFs (#305, ``closing_flow``): A·(L² − L)·r at the minute (the 15:20 one from
-  the closing auction on), by structure and in all, its ratio to the 20-day median closing auction
-  value, each product's row; ``GET /symbols/{symbol}/closing-flow/days?from=D&to=D``: the days
-  kept (default the year to today, at most 4,000 days), each with its 15:20 demand and ratio, the
-  closing auction's move, whether it went the demand's way, the next day's gap and close, and
-  their summary by period and by tertile of the ratio;
 - ``GET /symbols/{symbol}/special?from=D&to=D``: the special situations' windows kept (#236)
   that start on the days ``from`` to ``to`` (KST dates, both included; default the last five
   trading days to today, at most 60 days): the symbol's VIs and the whole market's circuit
@@ -57,15 +50,13 @@ Endpoints (all under ``/v1``):
   symbol, 30-minute slot and model version, with its calibration curve;
 - ``GET /cost-map?symbol=&period=&special=``: each symbol's round-trip costs, and each kind
   with a direction's breakeven hit rate beside the leaderboard's hit rates (#307,
-  ``cost_map.py``), with the period base rates (``base_rates.py``);
+  ``cost_map.py``): the trader's cells and their figures (``trader/selection.py``);
 - ``GET /consensus``: the consensus members now and the weights last fitted;
 - ``GET /verdict?symbol=S&bar_close=T`` (#676, ``verdict.py``): each symbol's verdict at its latest
   bar close with one (BUY, SELL or WAIT, its horizon, target, stop and deadline, each barrier
   horizon's pool and expected net, every member with its lean, the direction and range beside it),
   or ``symbol``'s alone, or at ``bar_close``; as the engine stored it at the bar close;
 - ``GET /macro``: the latest day's market regime and macro readings (``macro.py``);
-- ``GET /calendar?limit=``: the economic calendar from the start of today, as the collector
-  last read it (``econ_calendar.py``);
 - ``GET /stream``: a WebSocket of predictions, consensus, outcomes, the KIS status and
   status changes as they happen (``stream.py``);
 - ``GET /kinds``: the kinds predicted (#179, ``kinds.py``): the direction and the others,
@@ -116,6 +107,10 @@ scored on its bar close's touch label (#170). ``basis``, which a screen from bef
 sent, is refused (#592): it was echoed back for one release, so that screen, which asked
 again until the answer's ``basis`` was its own, was answered once; an answer has none.
 
+Gone in #701 (#693, the slimmed app shows none of them): ``/briefing``, ``/calendar``,
+``/symbols/{symbol}/flow``, ``/symbols/{symbol}/closing-flow`` and its ``/days``, the cost map's
+``regimes`` and ``regimes_missing``, and the status's ``signal_rule``.
+
 Times are ISO 8601 in KST. On the server, compose publishes it on the Tailscale address only;
 it has no authentication, so the trader's pause is its one write.
 """
@@ -151,25 +146,18 @@ from krx_quant.algorithm_days import (
     status_at,
 )
 from krx_quant.algorithms import Algorithm, KindAlgorithm
-from krx_quant.backfill import MINUTE_BARS_TR, read_bars, stock_bars_path, stored_bars
-from krx_quant.base_rates import read_base_rates
-from krx_quant.briefing import Sources as BriefingSources
-from krx_quant.briefing import briefing, day_predictions, default_day
+from krx_quant.backfill import stock_bars_path, stored_bars
 from krx_quant.candles import PERIODS as CANDLE_PERIODS
 from krx_quant.candles import stored_candles
-from krx_quant.closing_flow import days_answer, demand_moment, read_days, read_demand, today_answer
 from krx_quant.consensus import NAMES, slot
 from krx_quant.consensus import cards as consensus_cards
 from krx_quant.contracts import USD
 from krx_quant.cost_map import SPREAD_TICKS, cost_card, direction_row, kind_row
-from krx_quant.daily import DailyAlgorithm, DailyKind, StoredDays
+from krx_quant.daily import DailyAlgorithm
 from krx_quant.daily_features import DAILY_FEATURES
-from krx_quant.econ_calendar import calendar_answer, read_latest
 from krx_quant.engine import PredictionEngine
 from krx_quant.features import FEATURE_MEANINGS
 from krx_quant.feeds.base import KST, Row, kst_day
-from krx_quant.flow import Window as FlowWindow
-from krx_quant.flow import flow as flow_answer
 from krx_quant.kind_stats import KindEntry, scored_of_kind
 from krx_quant.kind_stats import entry as kind_entry
 from krx_quant.kind_stats import entry_json as kind_entry_json
@@ -182,8 +170,6 @@ from krx_quant.macro import latest_macro, macro_json, reading_before
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.names import logo_url
-from krx_quant.net_assets import read_net_assets
-from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import Excluded, SimulationRecord, iso
 from krx_quant.prevalidation import REGISTERED_BEFORE, Refusal
@@ -237,21 +223,6 @@ SHELF_KEY: web.AppKey[Shelf | None] = web.AppKey("shelf")
 MACRO_SECONDS = 30.0
 MACRO_CACHE_KEY = web.AppKey("macro_cache", dict)
 USD_CLOSE_CACHE_KEY = web.AppKey("usd_close_cache", dict)
-# /v1/calendar's kept answer is read again at most this often: the collector rewrites it every
-# few minutes.
-CALENDAR_SECONDS = 30.0
-CALENDAR_CACHE_KEY = web.AppKey("calendar_cache", dict)
-CALENDAR_LIMIT = 100  # events by default
-MAX_CALENDAR_LIMIT = 1000
-# /v1/symbols/{symbol}/flow (#306): today's answer is read again at most this often (the feeds'
-# files are written every 30 s), a past day's this often; at most this many are kept.
-FLOW_SECONDS = 30.0
-FLOW_PAST_SECONDS = 600.0
-FLOW_CACHE_KEY = web.AppKey("flow_cache", dict)
-# /v1/briefing (#304) is read again at most this often, or once the store changes: its files
-# change with the pre-market's trades and book.
-BRIEFING_SECONDS = 20.0
-BRIEFING_CACHE_KEY = web.AppKey("briefing_cache", dict)
 STATS_CACHE_KEY = web.AppKey("stats_cache", dict)
 PERIODS = {"today": 1, "5d": 5, "20d": 20}  # days with predictions
 # Results kept per question until the store changes (the screen asks the same often).
@@ -280,15 +251,9 @@ SMT_CACHED_DAYS = 32
 # years kept, ``supply.HISTORY_YEARS``, and more: a year view asks for all of it).
 DEFAULT_SUPPLY_DAYS = 365
 MAX_SUPPLY_DAYS = 4000
-# The closing flow's days (#305): the days asked for by default, and the most one question spans.
-DEFAULT_CLOSING_DAYS = 365
-MAX_CLOSING_DAYS = 4000
 # The trader's days (#396): the days asked for by default, and the most one question spans.
 DEFAULT_TRADER_DAYS = 365
 MAX_TRADER_DAYS = 4000
-# The KRX days (``auctions.days_of``) the closing flow's previous close is read from, re-read
-# when their files change.
-KRX_DAYS_KEY: web.AppKey[StoredDays | None] = web.AppKey("krx_days")
 
 
 class MadeAgain:
@@ -348,10 +313,6 @@ def create_app(
     app[SHELF_KEY] = shelf
     app[MACRO_CACHE_KEY] = {}
     app[USD_CLOSE_CACHE_KEY] = {}
-    app[CALENDAR_CACHE_KEY] = {}
-    app[BRIEFING_CACHE_KEY] = {}
-    app[FLOW_CACHE_KEY] = {}
-    app[KRX_DAYS_KEY] = None if data_dir is None else StoredDays(data_dir)
     app[SMT_KEY] = MadeAgain(SMT_CACHED_DAYS)
     app[DAYS_KEY] = Kept()
     app[NAMES_KEY] = {} if names is None else names
@@ -383,9 +344,6 @@ def create_app(
     app.router.add_get("/v1/symbols/{symbol}/special", _special)
     app.router.add_get("/v1/symbols/{symbol}/smt", _smt)
     app.router.add_get("/v1/symbols/{symbol}/supply", _supply)
-    app.router.add_get("/v1/symbols/{symbol}/flow", _flow)
-    app.router.add_get("/v1/symbols/{symbol}/closing-flow", _closing_flow)
-    app.router.add_get("/v1/symbols/{symbol}/closing-flow/days", _closing_flow_days)
     app.router.add_get("/v1/algorithms", _algorithms)
     app.router.add_get("/v1/algorithms/{name}", _algorithm)
     app.router.add_get("/v1/leaderboard", _leaderboard)
@@ -395,8 +353,6 @@ def create_app(
     app.router.add_get("/v1/consensus", _consensus)
     app.router.add_get("/v1/verdict", _verdict)
     app.router.add_get("/v1/macro", _macro)
-    app.router.add_get("/v1/calendar", _calendar)
-    app.router.add_get("/v1/briefing", _briefing)
     app.router.add_get("/v1/stream", stream.handle)
     app.router.add_get("/v1/kinds", _kinds)
     app.router.add_get("/v1/symbols/{symbol}/kinds/{kind}/latest", _kind_latest)
@@ -447,9 +403,6 @@ async def _status(request: web.Request) -> web.Response:
         "skipped_today": cpu.skipped_today,
     }
     body["usd_futures"] = await _usd_futures(request)
-    # The rule a signal follows, whether the Telegram alerts are on or off: the screen's default (#617).
-    rule = engine.signal_rule
-    body["signal_rule"] = {"min_probability": rule.min_probability, "min_agree": rule.min_agree}
     live_status = request.app.get(LIVE_STATUS_KEY)
     if live_status is not None:
         body["kis"] = live_status()
@@ -690,87 +643,6 @@ def _smt_json(e: SmtEvent) -> dict[str, Any]:
         "version": e.version,
         "source": e.source,
     }
-
-
-async def _flow(request: web.Request) -> web.Response:
-    """A symbol's intraday flows of a day (#306, ``flow.flow``); by default today's, or the last
-    trading day's on a closed day. 404 for a day KRX did not trade."""
-    engine, symbol = _engine_and_symbol(request)
-    now = engine.clock.now()
-    today = kst_day(now)
-    day = _day_query(request, "day")
-    if day is None:
-        day = today if engine.calendar.is_trading_day(today) else engine.calendar.previous_trading_day(today)
-    session = engine.calendar.session(day)
-    if session is None:
-        raise _error(web.HTTPNotFound, f"{day} is not a trading day")
-    cache: dict[tuple[str, date], tuple[float, int, dict[str, Any]]] = request.app[FLOW_CACHE_KEY]
-    kept = cache.get((symbol, day))
-    ttl = FLOW_SECONDS if day >= today else FLOW_PAST_SECONDS
-    if kept is not None and monotonic() - kept[0] < ttl and kept[1] == engine.store.version:
-        return _json(kept[2])
-    data_dir = request.app[DATA_DIR_KEY]
-    previous_day = engine.calendar.previous_trading_day(day)
-    before = engine.calendar.session(previous_day)
-    start = datetime.combine(day, time(), KST)
-    rows = engine.store.special_windows(symbol, start, start + timedelta(days=1))  # on the store's thread
-    special = [{f: r[f] for f in ("kind", "symbol", "start", "end", "detail")} for r in rows]
-    stored = data_dir is not None and stock_bars_path(data_dir, day, symbol).exists()
-    memory = [(b.start, b.close) for b in engine.bars(symbol)] if day == today and not stored else []
-
-    def answer() -> dict[str, Any]:
-        prices = memory
-        if not prices and data_dir is not None:
-            prices = [(b.start, b.close) for b in read_bars(data_dir, day, MINUTE_BARS_TR, symbol) or []]
-        window = FlowWindow(day, session.open, session.close)
-        previous = None if before is None else FlowWindow(previous_day, before.open, before.close)
-        state_dir = request.app[STATE_DIR_KEY]
-        return flow_answer(data_dir, state_dir, symbol, window, previous, prices, now, special)
-
-    version = engine.store.version
-    body = await asyncio.to_thread(answer)
-    if len(cache) >= _CACHED_QUESTIONS:
-        cache.clear()
-    cache[(symbol, day)] = (monotonic(), version, body)
-    return _json(body)
-
-
-async def _closing_flow(request: web.Request) -> web.Response:
-    """The day's closing rebalancing demand of the symbol's single-stock ETFs (#305,
-    ``closing_flow.today_answer``): the minute's in continuous trading, else the 15:20 one."""
-    engine, symbol = _engine_and_symbol(request)
-    now = engine.clock.now()
-    day, at = demand_moment(engine.calendar, now)
-    price = None if at is None else engine.mid_at(symbol, at)  # the engine's quotes: on its thread
-    state_dir, krx_days = request.app[STATE_DIR_KEY], request.app[KRX_DAYS_KEY]
-    names = request.app[NAMES_KEY]
-
-    def answer() -> dict[str, Any]:
-        days = [] if krx_days is None else krx_days.days(symbol)
-        net = [] if state_dir is None else read_net_assets(state_dir)
-        demands = [] if state_dir is None else read_demand(state_dir)
-        kept = None if state_dir is None else read_days(state_dir)
-        return today_answer(symbol, day, at, price, now, engine.calendar, days, net, demands, kept, names)
-
-    return _json(await asyncio.to_thread(answer))
-
-
-async def _closing_flow_days(request: web.Request) -> web.Response:
-    """The closing flow's days kept (#305, ``closing_flow.days_answer``) from ``from`` to ``to``,
-    with their summary."""
-    engine, symbol = _engine_and_symbol(request)
-    to = _day_query(request, "to") or kst_day(engine.clock.now())
-    since = _day_query(request, "from") or to - timedelta(days=DEFAULT_CLOSING_DAYS - 1)
-    if since > to:
-        raise _error(web.HTTPBadRequest, f"from must not be after to, got {since} and {to}")
-    if (span := (to - since).days + 1) > MAX_CLOSING_DAYS:
-        raise _error(web.HTTPBadRequest, f"from and to span at most {MAX_CLOSING_DAYS} days, got {span}")
-    state_dir = request.app[STATE_DIR_KEY]
-
-    def answer() -> dict[str, Any]:
-        return days_answer(symbol, None if state_dir is None else read_days(state_dir), since, to)
-
-    return _json(await asyncio.to_thread(answer))
 
 
 async def _supply(request: web.Request) -> web.Response:
@@ -1176,46 +1048,6 @@ async def _macro_now(request: web.Request) -> dict[str, Any]:
         cache.clear()
         cached = cache[today] = (monotonic(), macro_json(latest))
     return cached[1]
-
-
-async def _calendar(request: web.Request) -> web.Response:
-    limit = _limit_query(request, CALENDAR_LIMIT, MAX_CALENDAR_LIMIT)
-    engine = request.app[ENGINE_KEY]
-    cache: dict[str, tuple[float, dict[str, Any] | None]] = request.app[CALENDAR_CACHE_KEY]
-    cached = cache.get("kept")
-    if cached is None or monotonic() - cached[0] >= CALENDAR_SECONDS:
-        data_dir = request.app[DATA_DIR_KEY]
-        kept = None if data_dir is None else await asyncio.to_thread(read_latest, data_dir)
-        cached = cache["kept"] = (monotonic(), kept)
-    return _json(calendar_answer(cached[1], engine.clock.now(), limit))
-
-
-async def _briefing(request: web.Request) -> web.Response:
-    """The pre-open briefing of ``day`` (#304, ``briefing.briefing``); by default today's, or the
-    next trading day's on a closed day."""
-    engine = request.app[ENGINE_KEY]
-    now = engine.clock.now()
-    day = _day_query(request, "day") or default_day(engine.calendar, now)
-    cache: dict[date, tuple[float, int, dict[str, Any]]] = request.app[BRIEFING_CACHE_KEY]
-    cached = cache.get(day)
-    if cached is None or monotonic() - cached[0] >= BRIEFING_SECONDS or cached[1] != engine.store.version:
-        kind = engine.kind_named(OPEN_TO_CLOSE.name)
-        sources = BriefingSources(
-            data_dir=request.app[DATA_DIR_KEY],
-            state_dir=request.app[STATE_DIR_KEY],
-            store=engine.store,
-            calendar=engine.calendar,
-            symbols=tuple(engine.symbols),
-            open_to_close=kind if isinstance(kind, DailyKind) else None,
-            now=now,
-        )
-        version = engine.store.version
-        predictions = day_predictions(sources, day)  # the store is read on its own thread
-        body = await asyncio.to_thread(briefing, sources, day, predictions)
-        if len(cache) >= _CACHED_QUESTIONS:
-            cache.clear()
-        cached = cache[day] = (monotonic(), version, body)
-    return _json(cached[2])
 
 
 async def _usd_futures(request: web.Request) -> dict[str, Any] | None:
@@ -1761,8 +1593,7 @@ async def _kind_algorithm_stats(request: web.Request, name: str, kind: Predictio
 async def _cost_map(request: web.Request) -> web.Response:
     """``/v1/cost-map`` (#307, ``cost_map.py``): the symbols' cost cards, a row each kind with
     a direction, from its leaderboard's statistics for the query (each kind's days its own,
-    computed and kept as the leaderboard's) and the algorithms' statuses (#594), and the period
-    base rates kept (``base_rates.py``)."""
+    computed and kept as the leaderboard's) and the algorithms' statuses (#594)."""
     engine = request.app[ENGINE_KEY]
     query = _query(request, engine)
     min_sample = request.app[MIN_SAMPLE_KEY]
@@ -1818,9 +1649,6 @@ async def _cost_map(request: web.Request) -> web.Response:
                 "costs": None if price is None else cost_card(symbol, price, fee),
             }
         )
-    regimes, missing = await asyncio.to_thread(read_base_rates, request.app[STATE_DIR_KEY])
-    if regimes is not None and query.symbol is not None:
-        regimes = {**regimes, "rows": [r for r in regimes["rows"] if r["symbol"] == query.symbol]}
     described = query.describe()
     return _json(
         {
@@ -1833,8 +1661,6 @@ async def _cost_map(request: web.Request) -> web.Response:
             "spread_ticks": SPREAD_TICKS,
             "symbols": symbols,
             "rows": rows,
-            "regimes": regimes,
-            "regimes_missing": missing,
         }
     )
 

@@ -13,7 +13,6 @@ from pathlib import Path
 
 from krx_quant.fake_kis import FakeKis
 from krx_quant.predictions import DB_NAME, PredictionStore
-from krx_quant.signals import SignalRule
 from tests.collector_doubles import FIXED_NOW, KST, collect, read, settings_for
 from tests.kis_frames import KRX_BOOK_COLUMNS, book_frame, krx_book_frame, trade_frame
 
@@ -56,7 +55,6 @@ async def test_an_engine_start_is_recorded_with_its_commit_and_settings(kis: Fak
         settings_for(kis, tmp_path),
         commit="0123456789abcdef",
         fee_rate=0.0002,
-        signal_rule=SignalRule(0.65, 3),
     )
 
     await collect(kis, settings)
@@ -68,7 +66,6 @@ async def test_an_engine_start_is_recorded_with_its_commit_and_settings(kis: Fak
     assert json.loads(run.detail) == {
         "commit": "0123456789abcdef",
         "fee_rate": 0.0002,
-        "signal_rule": {"min_probability": 0.65, "min_agree": 3},
         "algorithm_seconds": 10.0,
         "cpu_budget_seconds": 30.0,
     }

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from functools import partial
@@ -38,7 +38,6 @@ from krx_quant.contracts import KOSPI200, USD, Product, front_month
 from krx_quant.features import SLOT_RETURN_DAYS, day_slot_ranges, day_slot_returns
 from krx_quant.feeds.base import EVENT_TIME, KST, Row, kst, kst_day, to_float, to_int
 from krx_quant.kis import KisError, RestClient, rest_session
-from krx_quant.loki import TEMPLATE_ONLY
 from krx_quant.market_calendar import CalendarStore, MarketCalendar, calendar_store
 from krx_quant.ratelimit import RateLimiter
 from krx_quant.reference import Bar
@@ -447,20 +446,21 @@ async def keep_history(
     client: RestClient,
     store: CalendarStore,
     now: Callable[[], datetime],
-    after: Callable[[datetime], Awaitable[None]] | None = None,
 ) -> None:
     """The collector's history task: at start, then daily once the day's bars are final,
     refresh the calendar, fill missing one-minute bars, add the new day candles (``candles``)
     and the daily supply data (``supply``, from KIS), and, with the
     macro reads on (``KRX_MACRO_AT``), the US daily closes the daily kinds learn from
-    (``us_daily``, #264), then computes the period base rates of every stored day's one-minute
-    bars (``base_rates``, #307). Each run then keeps the KRX auctions' prices of the days not kept
-    yet (``auctions``, #264), and so does a run of that alone at ``auctions.CLOSE_AT`` (15:40), so
-    the day is answered from 15:45. A whole run ends with ``after`` (the closing flow's days, #305),
-    after the auctions: its denominator reads their closing bars. Runs until cancelled.
+    (``us_daily``, #264). Each run then keeps the KRX auctions' prices of the days not kept yet
+    (``auctions``, #264), and so does a run of that alone at ``auctions.CLOSE_AT`` (15:40), so the
+    day is answered from 15:45. Runs until cancelled.
+
+    > **삭제됨** (2026-11-12, #701): the period base rates of every stored day's one-minute bars
+    > (``base_rates``, #307) after the whole run, and its last step ``after`` (the closing flow's
+    > days, #305). 이유: the slimmed app shows neither the cost map's base rates nor the closing flow
+    > (#693). 대신: none.
     """
     from krx_quant.auctions import CLOSE_AT, AuctionKeeper
-    from krx_quant.base_rates import keep_base_rates  # it reads the bars this module stores
     from krx_quant.candles import CandleKeeper  # it builds on this module's markets
     from krx_quant.supply import SupplyKeeper
     from krx_quant.us_daily import UsDailyKeeper
@@ -483,27 +483,10 @@ async def keep_history(
                     await us.run(started)
             except Exception:
                 log.exception("calendar refresh, backfill, candles, supply or US daily closes failed")
-            try:  # a year of bars read: off the event loop
-                await asyncio.to_thread(
-                    keep_base_rates,
-                    settings.data_dir,
-                    settings.state_dir,
-                    store.calendar,
-                    settings.symbols,
-                    settings.fee_rate,
-                    now(),
-                )
-            except Exception:
-                log.exception("the period base rates failed")
         try:
             await auctions.run(started)
         except Exception:
             log.exception("the auction prices failed")
-        if whole and after is not None:
-            try:
-                await after(now())
-            except Exception:  # it reads KRX's net assets: the traceback stays on the server (#305)
-                log.exception("the history task's last step failed", extra=TEMPLATE_ONLY)
         # The next final time after this run began: a run that started just before 20:30
         # and ended after it goes again at once for the day it could not take yet.
         final, close = _next(BARS_FINAL_AT, started), _next(CLOSE_AT, started)
