@@ -290,11 +290,12 @@ def test_a_twin_learns_its_kind_s_answers() -> None:
     assert model.version.startswith("hurst-5d-") and model.target_version == OPEN_TO_CLOSE_5D.answer_version
 
 
-@pytest.mark.timeout(240)  # five walk-forwards of 1,300 made-up days
+@pytest.mark.timeout(420)  # eight walk-forwards of 1,300 made-up days
 def test_a_candidate_that_moves_with_one_its_kind_runs_is_refused_as_a_clone(tmp_path: Path) -> None:
     """On a planted lean every model of the kind learns, Friedman's walk-forward moves with Cox's.
-    Cox waiting for its own verdict is not walked beside it; once the engine runs Cox (on
-    probation), Friedman is refused as its clone; once Cox's pre-validation refused the code it has
+    Cox waiting for its own verdict is not walked beside it, nor on probation without a report that
+    stands; once the engine runs Cox (on probation, passed on its code), Friedman is refused as its
+    clone; once Cox's pre-validation refused the code it has
     (and so the engine does not run it), it is left out again."""
     s = settings(tmp_path, 1_300, signal=0.6)
     both: list[DailyAlgorithm] = [Cox(), Friedman()]
@@ -306,6 +307,17 @@ def test_a_candidate_that_moves_with_one_its_kind_runs_is_refused_as_a_clone(tmp
     store = PredictionStore(s.state_dir / DB_NAME)
     store.add_status("cox", NOW, None, Status.PROBATION, "registered")
     store.close()
+    assert prevalidate_daily(s, "friedman", algorithms=both).correlations == {}, (
+        "on probation without a standing report: the engine does not run it (#703 review)"
+    )
+    assert prevalidate_daily(s, "cox", algorithms=[Cox()]).passed
+    cox_report = report_path(s.state_dir, "cox")
+    passing = json.loads(cox_report.read_text())
+    cox_report.write_text(json.dumps({**passing, "code": "0" * 16}))
+    assert prevalidate_daily(s, "friedman", algorithms=both).correlations == {}, (
+        "on probation, its pass of another code: not admitted, not beside"
+    )
+    cox_report.write_text(json.dumps(passing))
     result = prevalidate_daily(s, "friedman", algorithms=both)
     checks = {c.name: c for c in result.checks}
     assert set(result.correlations) == {"cox"} and result.correlations["cox"] > 0.9

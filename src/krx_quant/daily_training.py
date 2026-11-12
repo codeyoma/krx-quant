@@ -27,13 +27,14 @@ special (circuit breakers and sidecars are not kept before 2026-10-12): the few 
 in.
 
 **Correlation** (#698, once a kind has several algorithms). The other algorithms of the kind the
-engine runs or would start are walked forward the same way beside it: enrolled (never a retired
-one, whatever its report says), or passed on the code, answers and inputs they have
-(``prevalidation.admits``), and not left out for a refusal of the code they have
-(``prevalidation.left_out``, #544: ``cox-5d``). One still waiting for its own verdict is not: a
-candidate never refuses one already judged, and of two candidates the night pre-validates in turn,
-the second is measured against the first once it passed. Its lean (the first class's probability
-less the third's) is correlated with each one's on the (symbol, day) both predicted out of sample
+engine runs or would start are walked forward the same way beside it: active or on the bench (and
+not left out for a refusal of the code they have, ``prevalidation.left_out``, #544), or, on
+probation or not enrolled, passed on the code, answers and inputs they have now
+(``prevalidation.admits``, as the engine admits a daily one); never a retired one, whatever its
+report says, nor ``cox-5d`` (refused). One still waiting for its own verdict is not: a candidate
+never refuses one already judged, and of two candidates the night pre-validates in turn, the second
+is measured against the first once it passed. Its lean (the first class's probability less the
+third's) is correlated with each one's on the (symbol, day) both predicted out of sample
 (``lifecycle.correlated``); above the clone threshold (``CLONE_CORRELATION``, 0.9) with any, it is
 refused, as a bar-close algorithm is. Each one walked beside it costs its own walk-forward's time
 (seconds to a minute or two on the server).
@@ -549,7 +550,10 @@ def correlations_beside(
         standing = statuses.get(a.name)
         if standing is not None and standing.status is Status.RETIRED:
             return False  # the engine no longer runs it, whatever its report says
-        return out(a) is None and (standing is not None or admitted(a))
+        if standing is None or standing.status is Status.PROBATION:
+            # On probation a daily one runs only while its report stands (``engine._admit``).
+            return admitted(a)
+        return out(a) is None  # active or on the bench: judged live, it runs whatever its report says
 
     beside = [a for a in algorithms if a.kind == kind.name and a.name != candidate.name and runs(a)]
     if not beside:
