@@ -99,8 +99,7 @@ class Pin:
 # The pinned raw days. An agent adds one in a PR when an open issue needs a day older than
 # ``RAW_KEEP_DAYS`` on the server's own disk (a reader of raw needs none: ``raw_days.RawDays`` reads a
 # pruned day back from the store), and the PR that closes the issue takes it out. None now: the
-# sample-key probes (#565) read the latest stored day's partitions and no raw ones as inputs, and the
-# night book's measure (#605) reads the nights before its 2026-11-20 verdict, within 30 days.
+# sample-key probes (#565) read the latest stored day's partitions and no raw ones as inputs.
 RAW_PINS: tuple[Pin, ...] = ()
 
 

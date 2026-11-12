@@ -52,7 +52,6 @@ from krx_quant.feeds import (
     KST,
     MEMBER,
     NIGHT_FUTURES,
-    NIGHT_FUTURES_BOOK,
     NXT_TRADE,
     OPTION,
     PROGRAM,
@@ -97,7 +96,6 @@ from krx_quant.special import REOPENED, Window
 from krx_quant.state_backup import keep_backed_up
 from krx_quant.state_lock import in_use
 from krx_quant.stream import LiveStatus
-from krx_quant.supply import toss_client_maker
 from krx_quant.swap import NightTraining, TrainingWatch, keep_models, keep_training, show_night
 from krx_quant.trader import SYMBOL as TRADED_SYMBOL
 from krx_quant.trader.quotes import QuoteFeed
@@ -165,9 +163,9 @@ SHORT_FRAMES_EXPECTED = frozenset({MEMBER.tr_id})
 
 
 # The symbols whose inverse ETF's KRX book is registered (#606): the traded symbol's, 0193L0, for a
-# replay of down calls through it (``inverse_replay.py``). It takes the last of KIS's 41 slots with the
-# server's three symbols (they use 40), so a smaller limit cuts it first; it has no REST fallback.
-# 000660's 0197X0 joins once another slot is free (#606).
+# replay of down calls through it (``inverse_replay.py``). It is the last of the server's 40 registrations
+# of KIS's 41 slots, so a smaller limit cuts it first; it has no REST fallback. The night futures' book
+# took the 41st until #694: that slot is free, and 000660's 0197X0 can take it (#606) in a PR of its own.
 INVERSE_BOOKS = (TRADED_SYMBOL,)
 
 # Feeds whose events are recorded and nothing live takes: the inverse ETF's best quotes (#606) are for
@@ -182,15 +180,16 @@ def subscription_plan(
 
     Market-wide context comes first so it survives however many symbols are added,
     then each stock's trades, book and program trading, then the tier-2 feeds. ``night`` is
-    the KOSPI200 night futures contract (#264): registered all day like the rest, it
-    delivers from 18:00 to 06:00 only, and has no REST fallback. Last, the inverse ETF's KRX
+    the KOSPI200 night futures contract (#264): its trades, registered all day like the rest,
+    deliver from 18:00 to 06:00 only, and have no REST fallback (its book is not registered
+    since #694). Last, the inverse ETF's KRX
     book (``INVERSE_BOOKS``, #606), whose best quotes are recorded for the replay alone.
     """
     plan: list[tuple[Feed | RawFeed, str]] = []
     if fronts is not None:
         plan += [(KOSPI200_FUTURES, fronts.kospi200_futures), (USD_FUTURES, fronts.usd_futures)]
     if night is not None:
-        plan += [(NIGHT_FUTURES, night), (NIGHT_FUTURES_BOOK, night)]
+        plan += [(NIGHT_FUTURES, night)]
     plan += [(US_TRADE, us_daytime_key(t)) for t in settings.us_symbols]
     plan += [(feed, sym) for sym in settings.symbols for feed in (TRADE, BOOK, PROGRAM)]
     plan += [(MEMBER, sym) for sym in settings.symbols]
@@ -431,15 +430,12 @@ async def _collect(settings: Settings, *, stop: asyncio.Event, clock: Clock | Se
                 asyncio.create_task(
                     _every(settings.health_check_seconds, stream.check_stale, "health check")
                 ),
-                # The daily supply's Toss part (#226) reads the token's expiry by the real time,
-                # as the names do.
                 asyncio.create_task(
                     keep_history(
                         settings,
                         client,
                         calendar,
                         now,
-                        toss_client_maker(session, settings, lambda: datetime.now().astimezone()),
                         closing_days,  # from the bars just filled and the auctions just kept
                     )
                 ),

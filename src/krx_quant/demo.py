@@ -161,7 +161,7 @@ from krx_quant.products import PRODUCTS
 from krx_quant.recorder import ParquetRecorder
 from krx_quant.regime import RegimeRules
 from krx_quant.replay import replay_into
-from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, TOSS, write_supply
+from krx_quant.supply import KIS, NET_MARKET, NXT_OPENED, write_supply
 from krx_quant.swap import NightStatus, reports_by_algorithm
 from krx_quant.touch import TARGET_VERSION
 from krx_quant.trader import CAPITAL, PAPER, THRESHOLD, cohort, review
@@ -435,19 +435,19 @@ def write_demo_candles(data_dir: Path) -> None:
 _EX_CODES = {("005930", date(2026, 9, 29)): "05"}
 
 
-# Each demo symbol's made-up listed shares, foreign holdings at the first day and lending and
-# credit balances around which its supply wanders (#226).
+# Each demo symbol's made-up listed shares and lending and credit balances around which its supply
+# wanders (#226). Its foreign holdings were Toss's, until #694.
 _SUPPLY = {
-    "005930": (4_000_000_000, 2_000_000_000, 90_000_000, 12_000_000),
-    "000660": (700_000_000, 380_000_000, 20_000_000, 3_000_000),
-    "009150": (75_000_000, 26_000_000, 4_000_000, 1_500_000),
+    "005930": (4_000_000_000, 90_000_000, 12_000_000),
+    "000660": (700_000_000, 20_000_000, 3_000_000),
+    "009150": (75_000_000, 4_000_000, 1_500_000),
 }
 
 
 def write_demo_supply(state_dir: Path) -> None:
     """Each demo symbol's made-up daily supply data on the demo candles' days (up to the 8th),
-    stored as the collector stores it (``supply.py``): KIS's fields in its file, the foreign
-    holdings and ratio in Toss's. Made up: no Toss data is in the repository."""
+    stored as the collector stores it (``supply.py``): KIS's fields in its file (the foreign
+    holdings and ratio none, since #694)."""
     shutil.rmtree(state_dir / "supply", ignore_errors=True)
     days: list[date] = []
     day = DEMO_DAY
@@ -457,14 +457,13 @@ def write_demo_supply(state_dir: Path) -> None:
     days.reverse()
     for n, symbol in enumerate(DEMO_SYMBOLS):
         rng = random.Random(200 + n)
-        listed, holding, lending, credit = _SUPPLY[symbol]
+        listed, lending, credit = _SUPPLY[symbol]
         scale = listed // 4000  # a day's typical net buy
-        kis, toss = [], []
+        kis = []
         for day in days:
             foreign = round(rng.gauss(0, 1) * scale)
             institution = round(rng.gauss(0, 0.8) * scale)
             individual = -foreign - institution + round(rng.gauss(0, 0.1) * scale)
-            holding = min(listed, max(0, holding + foreign))
             lending = max(0, lending + round(rng.gauss(0, 0.02) * lending))
             credit = max(0, credit + round(rng.gauss(0, 0.015) * credit))
             kis.append(
@@ -479,11 +478,7 @@ def write_demo_supply(state_dir: Path) -> None:
                     NET_MARKET: "J" if day < NXT_OPENED else "UN",  # as the keeper splits them
                 }
             )
-            toss.append(
-                {"date": day, "foreign_holding": holding, "foreign_ratio": round(holding / listed * 100, 2)}
-            )
         write_supply(state_dir, symbol, KIS, kis)
-        write_supply(state_dir, symbol, TOSS, toss)
 
 
 # Each demo symbol's made-up flat share and median k in the four base-rate periods (#307), in

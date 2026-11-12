@@ -52,8 +52,10 @@ async def test_registers_every_feed_in_priority_order(kis: FakeKis, tmp_path: Pa
             # Market-wide context first, so it survives however many symbols are added.
             ("H0IFCNT0", "A01612"),  # KOSPI200 futures, nearest month from the master file
             ("H0CFCNT0", "A75610"),  # USD futures, nearest month from the master file
-            ("H0MFCNT0", "A01612"),  # KOSPI200 night futures (#264), the night's month by the rules
-            ("H0MFASP0", "A01612"),  # and their book
+            (
+                "H0MFCNT0",
+                "A01612",
+            ),  # KOSPI200 night futures (#264), the night's month by the rules; no book (#694)
             ("HDFSCNT0", "RBAQNVDA"),  # US daytime session
             ("HDFSCNT0", "RBAQMU"),
             ("HDFSCNT0", "RBAQAMD"),
@@ -70,7 +72,8 @@ async def test_registers_every_feed_in_priority_order(kis: FakeKis, tmp_path: Pa
             ("H0STASP0", "0193L0"),  # 005930's inverse ETF's KRX book (#606), last
         ]
     )
-    assert len(sent) == 41, "KIS's session limit: the inverse ETF's book takes the last slot"
+    # KIS's session limit is 41: the night futures' book took the 41st until #694, and that one is free.
+    assert len(sent) == 40, "the inverse ETF's book is the last registration"
 
 
 @pytest.mark.parametrize(
@@ -174,7 +177,7 @@ async def test_a_cap_below_the_plan_cuts_the_inverse_etf_s_book_first(kis: FakeK
     serve_masters(kis)
     kis.script[("H0NXCNT0", "009150")] = []
 
-    await collect(kis, replace(full_settings(kis, tmp_path), ws_max_subscriptions=40))
+    await collect(kis, replace(full_settings(kis, tmp_path), ws_max_subscriptions=39))
 
     registered = kis.subscribed_keys()
     assert ("H0NXCNT0", "009150") in registered, "the feed before it keeps its slot"

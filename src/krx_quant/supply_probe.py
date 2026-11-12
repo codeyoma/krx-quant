@@ -14,8 +14,8 @@ lending and credit balances), the KIS queries the survey found (docs/kis-feeds.m
   header (``tr_cont``) where it sends one;
 - whether the sources agree on the days they share (counts of equal values only).
 
-Then the Toss Securities Open API, the secondary source (#235, ``toss_probe.py``), is asked
-the same way and compared with these answers, when its client is set.
+The Toss Securities Open API, the secondary source then (#235), was asked the same way after
+these until #694 took the daily supply's Toss part away.
 
 It prints no market value: the report goes on a public issue (the scheduled job
 ``probe-supply-226``). Calls are spaced ``PACE`` seconds apart, under the REST limit the
@@ -27,7 +27,7 @@ whole probe ends well inside the job's time limit.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -39,7 +39,6 @@ from krx_quant.config import Settings
 from krx_quant.kis import KisError, RestClient, rest_session
 from krx_quant.probe_calls import CALL_ERRORS, REQUEST_TIMEOUT, Calls, kis_error
 from krx_quant.probe_fields import MISSING, day_of, describe, flags, order_of, present, same
-from krx_quant.toss_probe import probe_toss
 
 PACE = 0.5  # seconds between calls
 KIS_BUDGET = timedelta(minutes=15)  # the KIS part asks nothing more after this
@@ -506,14 +505,8 @@ class _Prober:
                 self._out(f"  {PRICE.tr} {market}: {ownership_check(answer)}")
 
 
-def kis_rows(first: Mapping[tuple[str, str], Answer]) -> dict[tuple[str, str], list[dict[str, Any]]]:
-    """The first stock's latest KIS rows by (TR, market), for the Toss part's cross-checks."""
-    return {key: answer.rows for key, answer in first.items() if answer.error is None}
-
-
 async def probe_supply(settings: Settings, today: date, out: Out = print) -> tuple[int, int]:
-    """Ask each source, KIS then Toss, and print the report; the calls made, and how many
-    failed (both parts)."""
+    """Ask each source and print the report; the calls made, and how many failed."""
     stocks = settings.symbols[:MAX_SYMBOLS]
     etf = next((s for s in settings.etf_symbols if s not in settings.symbols), None)
     # The cached token while it is valid: no early refresh beside the running collector.
@@ -545,11 +538,7 @@ async def probe_supply(settings: Settings, today: date, out: Out = print) -> tup
             prober.cross_checks(stocks[0])
         out("")
         out(f"KIS: {prober.calls.made} calls, {prober.calls.failed} failed")
-        out("")
-        toss_calls, toss_failed = await probe_toss(
-            session, settings, [*stocks, *([etf] if etf else [])], today, kis_rows(prober.first), out
-        )
-    calls, failed = prober.calls.made + toss_calls, prober.calls.failed + toss_failed
+    calls, failed = prober.calls.made, prober.calls.failed
     out("")
     out(f"{calls} calls, {failed} failed")
     return calls, failed

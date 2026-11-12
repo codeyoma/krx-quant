@@ -39,8 +39,9 @@ the day's files and the engine's own status, in five sections:
    only while the engine's day is it: after midnight they are the next day's, and said unknown.
 5. **The night's recording** (``night_window``: the evening of the trading day before, 18:00
    to 06:00 and its ten late minutes): whether KIS took the night trades' registration by 18:00, the
-   night trades' and book's records (the frames' header counts) and events, against the median of
-   the nights subscribed for in the week before it (``subscribed_nights``).
+   night trades' records (the frames' header counts) and events, against the median of the nights
+   subscribed for in the week before it (``subscribed_nights``). The night book (``H0MFASP0``) is not
+   recorded since #694, so the report no longer expects it.
 
 **When it calls an agent.** The report's second line is #402's ``에이전트 차례:`` line
 (``trader.report.AGENT``), and the job labels the issue only on a night whose line names a reason
@@ -88,7 +89,7 @@ from krx_quant.collector import SHORT_FRAMES_EXPECTED
 from krx_quant.config import Settings
 from krx_quant.contracts import NIGHT_END, NIGHT_OPEN
 from krx_quant.doctor import Status, api_candidates, fetch_status
-from krx_quant.feeds import KRX_TRADE, NIGHT_FUTURES, NIGHT_FUTURES_BOOK, RAW_SCHEMA, TRADE, WS_FEEDS, Feed
+from krx_quant.feeds import KRX_TRADE, NIGHT_FUTURES, RAW_SCHEMA, TRADE, WS_FEEDS, Feed
 from krx_quant.feeds.base import KST
 from krx_quant.footprint import PEAK_START, Meter, give_back
 from krx_quant.health import Gap, GapKind, Unread, read_batches, read_gaps
@@ -1070,11 +1071,11 @@ def polls_section(found: Found, polls: Polls) -> list[str]:
 
 
 # The night after a trading day's session, and KIS's answers to its feeds' registrations
-# (``night_probe`` reads them too, #264).
+# (``night_probe`` reads them too, #264). The night's feeds are its trades alone: the book left with #694.
 # Records received this long after 06:00 still count as the night's (a closing record).
 LATE = timedelta(minutes=10)
 LOOK_BACK_DAYS = 7  # the nights looked for before the one read
-NIGHT_FEEDS = (NIGHT_FUTURES, NIGHT_FUTURES_BOOK)
+NIGHT_FEEDS = (NIGHT_FUTURES,)
 NIGHT_TR_IDS = frozenset(f.tr_id for f in NIGHT_FEEDS)
 
 
@@ -1226,7 +1227,7 @@ def night_section(
         for d in before
     }
     for feed in NIGHT_FEEDS:
-        name = "체결" if feed is NIGHT_FUTURES else "호가"
+        name = "체결"
         seen = read_night(data_dir, raw, last, feed, unread, events=True, budget=found.budget)
         lost = seen.records - seen.events
         counts = [earlier[d][feed.tr_id].records for d in before if earlier[d][feed.tr_id].records]
@@ -1252,14 +1253,7 @@ def night_section(
     shown = before[-NIGHT_BASELINE:]
     lines.append(
         f"앞선 밤({NIGHT_OPEN:%H:%M} 전에 구독한 밤, 앞 7일): "
-        + (
-            " / ".join(
-                f"{d} 체결 {earlier[d][NIGHT_FUTURES.tr_id].records:,} · 호가 "
-                + f"{earlier[d][NIGHT_FEEDS[1].tr_id].records:,}"
-                for d in shown
-            )
-            or "없음"
-        )
+        + (" / ".join(f"{d} 체결 {earlier[d][NIGHT_FUTURES.tr_id].records:,}" for d in shown) or "없음")
     )
     return heading, lines
 

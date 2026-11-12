@@ -1,12 +1,14 @@
 # 토스증권 Open API 레퍼런스
 
-일별 수급 지표(#226)의 보조 출처이자 외국인 보유수량·지분율의 주 출처, 그리고 화면 종목 패널의 회사 이름(#250)의 주 출처인 토스증권 Open API를 정리한다. 2026-10-15에 공식 문서(스펙 `https://openapi.tossinvest.com/openapi-docs/latest/openapi.json` 1.2.24, [소개](https://openapi.tossinvest.com/openapi-docs/overview.md), [FAQ](https://openapi.tossinvest.com/openapi-docs/faq.md))를 읽어 적었고, 2026-10-16 밤 서버의 예약 작업 `probe-supply-226`이 `krx-quant probe-supply`로 잰 결과(#226 댓글, 종목 005930·000660·009150과 ETF 133690, 95번 조회 모두 성공. [operations.md](operations.md#일별-수급-출처-확인-226))로 고쳤다. 재지 않은 것만 ⚠다.
+화면 종목 패널의 회사 이름(#250)의 주 출처인 토스증권 Open API를 정리한다. 일별 수급 지표(#226)의 보조 출처이자 외국인 보유수량·지분율의 주 출처였다(#694까지, 아래 "출처 결정"). 2026-10-15에 공식 문서(스펙 `https://openapi.tossinvest.com/openapi-docs/latest/openapi.json` 1.2.24, [소개](https://openapi.tossinvest.com/openapi-docs/overview.md), [FAQ](https://openapi.tossinvest.com/openapi-docs/faq.md))를 읽어 적었고, 2026-10-16 밤 서버의 예약 작업 `probe-supply-226`이 `krx-quant probe-supply`로 잰 결과(#226 댓글, 종목 005930·000660·009150과 ETF 133690, 95번 조회 모두 성공. [operations.md](operations.md#일별-수급-출처-확인-226))로 고쳤다. 재지 않은 것만 ⚠다.
 
 > **바뀜** (2026-10-17, #258): "서버에서는 아직 부르지 않았다. 문서에 없는 것은 ⚠다" → 서버에서 잰 결과. 이유: probe 출력이 나왔다(#226).
 
 시세 데이터만 읽는다. 같은 클라이언트로 주문도 낼 수 있지만, 주문·조건주문 엔드포인트는 저장소에 둘 수 없다(`scripts/check_forbidden.py`가 막는다, #235).
 
 ## 출처 결정 (#226, 2026-10-15)
+
+> **삭제됨** (2026-11-12, #700): 일별 수급의 토스 출처(엔진의 수집 `supply.py`의 토스 부분, `state/supply/symbol=<종목>/toss.parquet`, `probe-supply`의 토스 절 `toss_probe.py`). 이유: 토스 값은 차트 하단 수급 칸만 읽었고 화면이 그 칸을 뺀다. 사용자가 2026-11-12에 정했다(#694). `cox`는 KIS 순매수를 읽는다. 대신: 일별 수급은 KIS에서만 받고, 외국인 보유수량·지분율은 늘 `null`이다. 토스 클라이언트(`TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`, `toss.py`)는 회사 이름(#250)에 남는다. 아래 표와 "일별 수급 엔드포인트"는 그때의 결정과 실측이다.
 
 - KRX OPEN API, KRX 정보데이터시스템, 공공데이터포털, KOFIA FreeSIS로는 8종을 받을 수 없다(#226 댓글). **기관·개인 보유수량은 어느 출처에도 없어, 지표를 `일별 외국인 보유수량`으로 줄였다.**
 - **KIS가 주 출처, 토스가 보조다.** 외국인 보유수량·지분율만 토스가 주 출처다(KIS는 그날 한 값과 30거래일 소진율뿐이다, [kis-feeds.md](kis-feeds.md#일별-수급-226)).
@@ -42,6 +44,8 @@
 - 이름과 로고는 저장소와 디스크에 두지 않는다(아래 데이터 이용 정책). 화면은 실행 중 메모리에만 둔다.
 
 ## 일별 수급 엔드포인트
+
+> **삭제됨** (2026-11-12, #700): 엔진은 이 엔드포인트를 더 부르지 않는다(위 "출처 결정"의 노트, #694). 아래는 2026-10-16의 실측 기록이다.
 
 `GET /api/v1/stocks/{symbol}/<이름>`. 국내 종목만 된다(다른 시장은 400 `unsupported-market`, 없는 종목은 404 `stock-not-found`). 모두 `STOCK_TRADING_TREND` 그룹으로 초당 10회다. `probe-supply`는 초당 5회(0.2초 간격)로 부른다.
 
