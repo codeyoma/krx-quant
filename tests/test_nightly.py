@@ -46,7 +46,6 @@ from krx_quant.object_store import LocalObjectStore
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D
 from krx_quant.predictions import PredictionStore
-from krx_quant.prevalidation import left_out
 from krx_quant.pricing import Direction
 from krx_quant.ranges import CLASSES as RANGE_CLASSES
 from krx_quant.ranges import CLIMATE as RANGE_CLIMATE
@@ -430,46 +429,39 @@ def test_a_night_cut_short_resumes_after_the_algorithms_it_finished(store_root: 
     assert len(learner.fitted_on) == 1
 
 
-def test_a_refused_algorithm_is_neither_trained_nor_promoted_until_its_code_changes(
+def test_a_refused_algorithm_is_trained_as_the_others_for_the_engine_runs_it_in_shadow(
     store_root: Path, tmp_path: Path
 ) -> None:
-    # #544: its latest pre-validation refused the code it has, and the engine does not run it.
+    # #696: its latest pre-validation refused the code it has; the engine runs it in shadow, on the
+    # model the night trains (#544 left it out).
     learner, refused = FrequencyAlgorithm("learner", "velocity"), FrequencyAlgorithm("refused", "volatility")
-    state = tmp_path / "state"
-    refuse(state, refused)
-    store = LocalObjectStore(store_root)
+    refuse(tmp_path / "state", refused)
 
-    def train(day: date) -> Night:
-        return train_night(
-            store,
-            tmp_path / "cache",
-            symbols=("005930",),
-            fee_rate=FEE,
-            algorithms=[learner, refused],
-            now=lambda: datetime.combine(day, time(21, 40), KST),
-            day=day,
-            kinds=(DIRECTION_KIND,),
-            left_out=left_out(state, {}),
-        )
+    found = train_night(
+        LocalObjectStore(store_root),
+        tmp_path / "cache",
+        symbols=("005930",),
+        fee_rate=FEE,
+        algorithms=[learner, refused],
+        now=lambda: datetime.combine(NIGHT, time(21, 40), KST),
+        day=NIGHT,
+        kinds=(DIRECTION_KIND,),
+    )
 
-    first = train(DAYS[-2])
-
-    assert [r["algorithm"] for r in first.reports] == ["learner", CLIMATE] and refused.fitted_on == []
-    assert list(first.promoted) == ["learner", CLIMATE], "never promoted, so never swapped in"
-    assert first.refused == {"refused": "stats: weakest lift -0.0100"}
-    assert read(store_root, f"promotions/{DAYS[-2]}.json")["refused"] == first.refused
-    assert not (store_root / f"reports/{DAYS[-2]}/refused.json").exists()
-    summary = first.summary().splitlines()
-    assert summary[-1] == "사전 검증 거부로 학습하지 않음: refused"
-    assert not any(line.startswith("- refused") for line in summary)
-    refuse(state, refused, code="0123456789abcdef")  # its code changed since
-
-    second = train(NIGHT)
-
-    assert [r["algorithm"] for r in second.reports] == ["learner", "refused", CLIMATE]
+    assert [r["algorithm"] for r in found.reports] == ["learner", "refused", CLIMATE]
     assert len(refused.fitted_on) == 1
-    assert second.refused == {} and "refused" not in read(store_root, f"promotions/{NIGHT}.json")
-    assert "사전 검증 거부" not in second.summary()
+    assert found.refused == {} and "refused" not in read(store_root, f"promotions/{NIGHT}.json")
+    assert "사전 검증 거부" not in found.summary()
+
+
+def test_a_list_from_before_keeps_the_algorithms_it_left_out_for_their_refusal() -> None:
+    # #544 to #696: a list named those it did not train; read again, it still does.
+    old = Night(NIGHT, "2026-11-11T21:40:00+09:00", {}, [], {"refused": "stats: weakest lift -0.0100"})
+
+    again = Night.from_dict(old.as_dict())
+
+    assert again.refused == {"refused": "stats: weakest lift -0.0100"}
+    assert again.summary().splitlines()[-1] == "사전 검증 거부로 학습하지 않음: refused"
 
 
 # Every registered algorithm trained on eight days: about 10 s on a laptop, near the 30 s default

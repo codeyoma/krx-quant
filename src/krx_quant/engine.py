@@ -37,17 +37,26 @@ met (the direction's ``touch.TARGET_VERSION``, or a kind's answer version past i
 probation counts from the first trading day it predicted with a model of that version
 since: the day the morning swap installed it, nothing before, nothing while it waits.
 
-Live, a new algorithm runs only once ``admits`` lets it (its pre-validation passed,
-``prevalidation.py``): from the next bar close it starts on probation. Until then it is
-not run, listed or reviewed; the first review it waits at tells it once for the code, target and
-inputs it waits on (``runs``: ``prevalidation_waiting``, #508), saying that the night's scheduled
-jobs pre-validate it by themselves: no restart tells it again until one of them changes. One
-whose latest report refused the code and target it runs now (``refused``) is not waiting: the
-first review after the refusal tells it once (``runs``: ``prevalidation_refused``), and no
-restart tells it again until its code or target changes and it waits again (#310).
+Live, a new algorithm is enrolled only once ``admits`` lets it (its pre-validation passed,
+``prevalidation.py``): from the next bar close it starts on probation. Until then it is not listed
+or reviewed, and predicts in shadow alone (below); the first review it waits at tells it once for
+the code, target and inputs it waits on (``runs``: ``prevalidation_waiting``, #508), saying that the
+night's scheduled jobs pre-validate it by themselves: no restart tells it again until one of them
+changes. One whose latest report refused the code and target it runs now (``refused``) is not
+waiting: the first review after the refusal tells it once (``runs``: ``prevalidation_refused``), and
+no restart tells it again until its code or target changes and it waits again (#310).
 An algorithm the engine has already enrolled always runs, but for a daily kind's on probation
 (#264): it runs only while ``admits`` lets it, so a new answer version, code or inputs have its
-walk-forward run again before it predicts again.
+walk-forward run again before it predicts again (for its probation: in shadow it goes on).
+
+Every registered algorithm but the retired predicts (#696): one the engine does not enroll for its
+pre-validation (waiting, refused, a daily one kept out or held) predicts in shadow, its rows marked
+``shadow`` (``lifecycle.SHADOW``) where an enrolled one's carry its status
+(``predictions.lifecycle``). At a bar close the shadow ones start once the verdicts are made, so
+nothing the consensus, the signals and the verdicts wait for waits on them, and the CPU budget skips
+them first; a daily kind's run after its enrolled ones. Each has its time limit, as any algorithm.
+No review, stage or probation counts a shadow row (``predictions.NOT_SHADOW``); the leaderboard and
+the statistics show them. Only a daily kind not run yet (``DailyKind.awaiting``) predicts nothing.
 
 Live, a running bar-close algorithm whose code changed is judged again (#454, ``revisions.py``):
 at each start the engine records the code each one runs (``revisions``); one whose code is not
@@ -227,6 +236,7 @@ from krx_quant.lifecycle import (
     CODE_PASSED,
     CODE_REFUSED,
     REGISTERED,
+    SHADOW,
     Review,
     Rules,
     Simulated,
@@ -590,7 +600,10 @@ class PredictionEngine:
         self._revision_of: dict[str, Revision] = {}  # each one's latest revision, as stored
         self.algorithms: tuple[Algorithm, ...] = ()  # the registered ones that run, in order
         self.kind_algorithms: tuple[KindAlgorithm, ...] = ()  # likewise, of the other kinds
-        self._feature_names: list[str] = []
+        # Every registered bar-close algorithm's features: those run only in shadow are run too (#696).
+        self._feature_names = sorted({f for a in self._bar_close() for f in a.features})
+        # What each algorithm's rows carry (#696, ``predictions.lifecycle``): its status, or shadow.
+        self._lifecycle: dict[str, str] = {}
         self._told_held: set[str] = set()  # held for their review days, already alerted (#310)
         self._budget = budget or Budget()
         self._features = feature_store or FeatureStore()
@@ -685,6 +698,7 @@ class PredictionEngine:
                 running=self._running_daily,
                 features=daily_features,
                 seconds=self._budget.per_algorithm,
+                lifecycle=self._lifecycle.get,
             )
         self._restart_on_target()
         self._check_revisions()
@@ -934,7 +948,6 @@ class PredictionEngine:
         self.algorithms = tuple(admitted)
         self.kind_algorithms = tuple(kind_admitted)
         self.daily_algorithms = tuple(daily_admitted)
-        self._feature_names = sorted({f for a in running for f in a.features})
 
     def _tell_admitted(self, algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> None:
         if self._admits is not None:  # let in by the gate: told once, for Loki (#456)
@@ -1026,11 +1039,42 @@ class PredictionEngine:
         return next((k for k in self.daily_kinds if k.name == name), None)
 
     def _running_daily(self) -> list[tuple[DailyAlgorithm, Model]]:
-        """The daily algorithms that predict now: admitted (``_admit``), not retired, each with
-        its model."""
+        """The daily algorithms that predict now, each with its model: those admitted (``_admit``)
+        and not retired, then the others of a kind that runs, retired ones aside, in shadow (#696)."""
         self._admit()
-        retired = _with_status(self.store.statuses(), Status.RETIRED)
-        return [(a, self.models[a.name]) for a in self.daily_algorithms if a.name not in retired]
+        standings = self.store.statuses()
+        retired = _with_status(standings, Status.RETIRED)
+        running = [a for a in self.daily_algorithms if a.name not in retired]
+        shadow = [
+            a
+            for a in self.daily_registered
+            if a not in running and a.name not in retired and self._kind_runs(a)
+        ]
+        self._mark(standings, running, shadow)
+        return [(a, self.models[a.name]) for a in [*running, *shadow]]
+
+    def _in_shadow(self, retired: Collection[str]) -> tuple[list[Algorithm], list[KindAlgorithm]]:
+        """The bar-close algorithms run only in shadow (#696), in registration order: registered, not
+        enrolled (waiting for their pre-validation, or refused by it), and not retired (a retired one
+        stays stopped)."""
+        return (
+            [a for a in self.registered if a not in self.algorithms and a.name not in retired],
+            [a for a in self.kind_registered if a not in self.kind_algorithms and a.name not in retired],
+        )
+
+    def _mark(
+        self,
+        standings: Mapping[str, Standing],
+        running: Iterable[Algorithm | KindAlgorithm | DailyAlgorithm],
+        shadow: Iterable[Algorithm | KindAlgorithm | DailyAlgorithm],
+    ) -> None:
+        """Keep what the rows of ``running`` and ``shadow`` carry (#696): each one run its status (a
+        new one starts on probation), each one in shadow ``SHADOW``."""
+        for a in running:
+            standing = standings.get(a.name)
+            self._lifecycle[a.name] = (Status.PROBATION if standing is None else standing.status).value
+        for a in shadow:
+            self._lifecycle[a.name] = SHADOW
 
     def _tell_daily(self, stored: DailyStored) -> None:
         """The daily runner's predictions and answers, told as the other kinds' are (#264)."""
@@ -1223,11 +1267,8 @@ class PredictionEngine:
 
     def cpu_use(self) -> CpuUse:
         """The CPU budget now: the algorithms that run, as timed so far, and today's skips."""
-        retired = _with_status(self.store.statuses(), Status.RETIRED)
-        running: list[Algorithm | KindAlgorithm] = [*self.algorithms, *self.kind_algorithms]
-        expected = {
-            a.name: self._cost[a.name] for a in running if a.name in self._cost and a.name not in retired
-        }
+        # Every bar-close algorithm: those in shadow run too (#696).
+        expected = {a.name: self._cost[a.name] for a in self._bar_close() if a.name in self._cost}
         midnight = _start_of(self.clock.now().astimezone(KST).date())
         return CpuUse(self._budget, expected, self.store.count_runs("cpu_budget", midnight))
 
@@ -1396,8 +1437,8 @@ class PredictionEngine:
             if self.store.last_detail(REFUSED_RUN, name) == refusal.judged:
                 continue
             text = (
-                f"사전 검증 거부: {name} ({refusal.why}). 돌지 않고, 같은 코드와 정답으로는 다시 "
-                f"검증하지 않습니다. 리포트는 서버의 state/prevalidations/{name}.json"
+                f"사전 검증 거부: {name} ({refusal.why}). 수습에 들지 않고 그림자로만 예측하며, 같은 "
+                f"코드와 정답으로는 다시 검증하지 않습니다. 리포트는 서버의 state/prevalidations/{name}.json"
             )
             if await self._deliver(text):  # else told at the next review
                 self.store.add_run(REFUSED_RUN, at, name, refusal.judged)
@@ -1656,6 +1697,10 @@ class PredictionEngine:
                 if session is not None and bar_close + k.horizon > session.closing_auction
             }
             kind_running = [a for a in self.kind_algorithms if a.name not in retired and a.kind not in late]
+            # The others in shadow (#696): after the verdicts, the first the CPU budget skips.
+            shadow, kind_shadow = self._in_shadow(retired)
+            kind_shadow = [a for a in kind_shadow if a.kind not in late]
+            self._mark(standings, [*running, *kind_running], [*shadow, *kind_shadow])
             members = [a.name for a in running if a.name in active]
             known = self._special.known(before=bar_close)
             regime = self._regime(bar_close)
@@ -1666,7 +1711,7 @@ class PredictionEngine:
             )
             not_made = HALT_STATUS if halted else "vi"
             if stopped:
-                self._record_not_predicted(bar_close, stopped, not_made, running)
+                self._record_not_predicted(bar_close, stopped, not_made, [*running, *shadow])
             made_by: dict[tuple[str, str, str], dict[str, Forecast | None]] = {}
             for symbol in self.symbols:
                 if symbol in stopped:
@@ -1703,11 +1748,15 @@ class PredictionEngine:
         # this bar close's scoring and take milliseconds, while beside the algorithms' threads each
         # of their store calls waited for the GIL, which those threads hold as they compute.
         with self._step(KIND_BASELINES):
-            self._predict_kinds(bar_close, at_close, stopped, kind_running, late, not_made)
+            self._predict_kinds(bar_close, at_close, stopped, [*kind_running, *kind_shadow], late, not_made)
         if not at_close:
             return
-        # The kinds' algorithms after the direction's: the budget skips them first (#179).
-        chosen = {a.name for a in self._within_cpu_budget(bar_close, [*running, *kind_running])}
+        # The kinds' algorithms after the direction's: the budget skips them first (#179), and those
+        # in shadow before them (#696).
+        chosen = {
+            a.name
+            for a in self._within_cpu_budget(bar_close, [*running, *kind_running, *shadow, *kind_shadow])
+        }
         runs = {
             a.name: asyncio.ensure_future(self._run(a, bar_close, at_close))
             for a in running
@@ -1739,6 +1788,22 @@ class PredictionEngine:
         direction = [r.result() for r in runs.values() if not r.cancelled() and r.exception() is None]
         kinds = [r.result() for r in kind_runs if not r.cancelled() and r.exception() is None]
         await self._judge(bar_close, at_close, standings, direction, kinds, final, late)
+        # Those in shadow once the verdicts are made (#696): nothing the consensus, the signals and the
+        # verdicts wait for waits on them, nor shares the CPU with them.
+        shadows = [
+            *(asyncio.ensure_future(self._run(a, bar_close, at_close)) for a in shadow if a.name in chosen),
+            *(
+                asyncio.ensure_future(self._run_kind(a, bar_close, at_close))
+                for a in kind_shadow
+                if a.name in chosen
+            ),
+        ]
+        try:
+            await asyncio.gather(*shadows, return_exceptions=True)
+        except BaseException:
+            for task in shadows:  # shutting down: none may write after the store closes
+                task.cancel()
+            raise
 
     async def _judge(
         self,
@@ -1972,6 +2037,7 @@ class PredictionEngine:
                 width_ticks=None if (width := widths[symbol]) is None else width.ticks,
                 anchor=mids[symbol],
                 tick=None if (mid := mids[symbol]) is None else tick_size(mid),
+                lifecycle=self._lifecycle.get(name),
             )
             for name, version, forecasts, status in made
             for symbol, forecast in forecasts.items()
@@ -2229,6 +2295,7 @@ class PredictionEngine:
                         else None,
                         votes=(votes or {}).get(symbol) if forecast is not None else None,
                         pooled=(pooled or {}).get(symbol) if forecast is not None else None,
+                        lifecycle=self._lifecycle.get(name),
                     )
                 )
         added = self.store.add_all(predictions)
@@ -2381,7 +2448,8 @@ def _waiting_text(
     if any(a in daily for a in waiting):
         when.append("하루 한 번 예측 알고리즘은 그 입력과 정답이 다 들어온 첫 밤에 예약 작업이 검증합니다")
     return (
-        f"사전 검증 대기: {', '.join(a.name for a in waiting)}. 검증을 통과해야 돌기 시작합니다. "
+        f"사전 검증 대기: {', '.join(a.name for a in waiting)}. "
+        "검증을 통과해야 수습을 시작합니다(그때까지는 그림자로 예측만 남깁니다). "
         + "".join(f"{w}. " for w in when)
         + f"결과는 #{PREVALIDATION_ISSUE}에 댓글로 올라옵니다. 손으로 돌릴 것은 없습니다."
     )

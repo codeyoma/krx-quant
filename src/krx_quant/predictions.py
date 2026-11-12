@@ -55,6 +55,13 @@ never rewritten. A table of its own, as ``touches`` (``_SMT_SCHEMA``). ``smt_eve
 ``b_extreme`` (#521), when each side set the extreme it was judged against, are columns added as
 ``kind_predictions.band`` was: a row kept before them has none.
 
+``predictions.lifecycle`` and ``kind_predictions.lifecycle`` (#696) keep where the algorithm stood
+when it predicted: its lifecycle status (``probation``, ``active``, ``bench``, ``clone``), or
+``shadow`` for one the engine runs only for the evidence (not enrolled, or a daily one it keeps
+out: ``lifecycle.SHADOW``); null for a baseline, a consensus and a row stored before #696. Columns
+added as ``kind_predictions.band`` was. The reviews and the first day a probation counts read no
+shadow row (``NOT_SHADOW``).
+
 ``verdicts`` (#676, ``verdict.py``) keeps each symbol's verdict at each bar close it was made at, by
 the verdict's version: BUY, SELL or WAIT and the whole answer as ``GET /v1/verdict`` serves it
 (JSON), written once and never rewritten. A table of its own, as ``touches`` (``_VERDICT_SCHEMA``).
@@ -79,7 +86,7 @@ from krx_quant.baselines import Forecast
 from krx_quant.consensus import Weights
 from krx_quant.feeds.base import KST
 from krx_quant.kinds import DIRECTION, Answer
-from krx_quant.lifecycle import CODE_CHANGED, Simulated, Standing, Status, starts_simulation
+from krx_quant.lifecycle import CODE_CHANGED, SHADOW, Simulated, Standing, Status, starts_simulation
 from krx_quant.pricing import Direction
 from krx_quant.smt import SmtEvent
 from krx_quant.special import RULES, Window
@@ -108,6 +115,8 @@ CREATE TABLE IF NOT EXISTS {name} (
     status TEXT NOT NULL,             -- ok, timed_out, error, vi (in a VI), no_book (declined),
                                       -- no_members, none_finished (consensus),
                                       -- no_previous (baseline-persist, touch target, #169)
+    lifecycle TEXT,                   -- the algorithm's status when it predicted, or shadow (#696);
+                                      -- null for a baseline, a consensus and rows stored before #696
     UNIQUE (symbol, algorithm, bar_close)
 );
 """
@@ -225,6 +234,7 @@ CREATE TABLE IF NOT EXISTS kind_predictions (  -- a prediction of a kind besides
                                       -- null for the bar-close kinds and without one
     inputs TEXT,                      -- JSON (#304): a daily algorithm's inputs at its time and how
                                       -- they moved its forecast; null for the others and before #304
+    lifecycle TEXT,                   -- as predictions.lifecycle (#696)
     UNIQUE (kind, symbol, algorithm, bar_close)
 );
 CREATE INDEX IF NOT EXISTS kind_predictions_by_close ON kind_predictions (kind, bar_close);
@@ -401,6 +411,8 @@ _ADDED_COLUMNS = (
     ("kind_predictions", "tick", "INTEGER"),
     ("kind_predictions", "band", "REAL"),
     ("kind_predictions", "inputs", "TEXT"),
+    ("predictions", "lifecycle", "TEXT"),
+    ("kind_predictions", "lifecycle", "TEXT"),
     ("statuses", "simulated", "INTEGER NOT NULL DEFAULT 0"),
     ("smt_events", "a_extreme", "TEXT"),
     ("smt_events", "b_extreme", "TEXT"),
@@ -409,10 +421,13 @@ _ADDED_COLUMNS = (
 )
 
 
-def _added_columns(db: sqlite3.Connection) -> str:
-    """The statements adding ``_ADDED_COLUMNS`` a table already in ``db`` lacks."""
+def _added_columns(db: sqlite3.Connection, rebuilt: Collection[str] = ()) -> str:
+    """The statements adding ``_ADDED_COLUMNS`` a table already in ``db`` lacks; none to a table
+    ``rebuilt`` (made again with them, ``_FROM_V1``)."""
     script = ""
     for table, column, declared in _ADDED_COLUMNS:
+        if table in rebuilt:
+            continue
         have = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
         if have and column not in have:  # none: the table is not there yet, and is made with it
             script += f"ALTER TABLE {table} ADD COLUMN {column} {declared};"
@@ -433,11 +448,16 @@ KIND_ANSWER_JOIN = (
 # A kind's prediction scored: made, and its bar close's answer has a class.
 KIND_SCORED = "p.status = 'ok' AND a.class IS NOT NULL"
 
-# Version 1 (#9) required probabilities; rebuild the table without that.
+# Version 1 (#9) required probabilities; rebuild the table without that. Its columns by name: the
+# table now has more (``lifecycle``, #696).
+_V1_COLUMNS = (
+    "id, symbol, algorithm, model_version, bar_close, displayed_at, p_up, p_flat, p_down,"
+    " expected_ticks, status"
+)
 _FROM_V1 = (
     _PREDICTIONS.format(name="predictions_v2")
-    + """
-INSERT INTO predictions_v2 SELECT * FROM predictions;
+    + f"""
+INSERT INTO predictions_v2 ({_V1_COLUMNS}) SELECT {_V1_COLUMNS} FROM predictions;
 DROP TABLE predictions;
 ALTER TABLE predictions_v2 RENAME TO predictions;
 """
@@ -449,6 +469,20 @@ TOUCH_JOIN = (
     "LEFT JOIN touches t ON t.symbol = p.symbol AND t.bar_close = p.bar_close"
     f" AND t.target_version = {TARGET_VERSION}"
 )
+# A prediction ``p`` the engine did not make only for the evidence (#696, ``lifecycle.SHADOW``): what
+# the reviews read and a probation's first day counts.
+NOT_SHADOW = f"p.lifecycle IS NOT '{SHADOW}'"
+
+
+def not_shadow_in(db: sqlite3.Connection, table: str, alias: str = "p") -> str:
+    """`` AND <NOT_SHADOW>`` on ``table`` read as ``alias``, for a reader of the engine database that
+    must not take a shadow row (#696: the trader's replay, the verdict replay); empty for a table
+    without ``lifecycle``, a database copied before #696 and read as it is (``read_only``), whose rows
+    are no shadow's."""
+    columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+    return f" AND {alias}.lifecycle IS NOT '{SHADOW}'" if "lifecycle" in columns else ""
+
+
 # A prediction scored (#170): made, its four minutes over (outcomes ``o``), and its bar close's
 # touch label (``t``, ``TOUCH_JOIN``) known.
 SCORED = "p.status = 'ok' AND o.scored_at IS NOT NULL AND t.class IS NOT NULL"
@@ -602,7 +636,7 @@ def reviewed_rows(
     if not days or (algorithms is not None and not algorithms):
         return []
     on, params = _made_on(days, None)
-    where = f"WHERE {on} AND {SCORED}"
+    where = f"WHERE {on} AND {SCORED} AND {NOT_SHADOW}"
     if not include_special:
         where += " AND o.special = 0"
     cursor = db.cursor()
@@ -692,7 +726,7 @@ def kind_reviewed_rows(
     if not days:
         return []
     on, params = _made_on(days, None)
-    where = f"WHERE p.kind = ? AND {on} AND {KIND_SCORED}"
+    where = f"WHERE p.kind = ? AND {on} AND {KIND_SCORED} AND {NOT_SHADOW}"
     if not include_special:
         where += " AND a.special = 0"
     cursor = db.cursor()
@@ -785,6 +819,7 @@ class NewPrediction:
     flat_ticks: int | None
     status: str = "ok"
     special: bool = False  # a special situation known to touch its window when it was made
+    lifecycle: str | None = None  # its algorithm's status then, or shadow (#696); None for the others
     blocked: str | None = None  # a final consensus's reason not to be acted on (#88)
     votes: tuple[int, int, int] | None = None  # a consensus's members by direction: up, flat, down (#106)
     pooled: tuple[str, ...] | None = None  # a consensus's members, in registration order (#107)
@@ -808,6 +843,7 @@ class NewKindPrediction:
     band: float | None = None  # a daily kind's flat band of the day (#264); None for the others
     # A daily algorithm's inputs and their effects (#304, ``daily.inputs_json``); None for the others.
     inputs: Mapping[str, Any] | None = None
+    lifecycle: str | None = None  # its algorithm's status then, or shadow (#696); None for the others
 
 
 @dataclass(frozen=True)
@@ -1039,7 +1075,7 @@ class PredictionStore:
             + _REVISION_SCHEMA
             + _SMT_SCHEMA
             + _VERDICT_SCHEMA
-            + _added_columns(self._db)
+            + _added_columns(self._db, ("predictions",) if version == 1 else ())
             + f"PRAGMA user_version={_VERSION};"
         )
         self._db.executescript(f"BEGIN;{script}COMMIT;")
@@ -1116,7 +1152,8 @@ class PredictionStore:
                 f = p.forecast
                 cursor = self._db.execute(
                     "INSERT INTO predictions (symbol, algorithm, model_version, bar_close, displayed_at,"
-                    " p_up, p_flat, p_down, expected_ticks, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " p_up, p_flat, p_down, expected_ticks, status, lifecycle)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         p.symbol,
                         p.algorithm,
@@ -1128,6 +1165,7 @@ class PredictionStore:
                         f and f.p_down,
                         f and f.expected_ticks,
                         p.status,
+                        p.lifecycle,
                     ),
                 )
                 assert cursor.lastrowid is not None
@@ -1314,7 +1352,7 @@ class PredictionStore:
         row = self._db.execute(
             "SELECT p.bar_close FROM predictions p JOIN model_targets m"
             " ON m.algorithm = p.algorithm AND m.version = p.model_version"
-            " WHERE p.algorithm = ? AND p.bar_close >= ? AND m.target_version = ?"
+            f" WHERE p.algorithm = ? AND p.bar_close >= ? AND m.target_version = ? AND {NOT_SHADOW}"
             " ORDER BY p.bar_close LIMIT 1",
             (algorithm, iso(since), target_version),
         ).fetchone()
@@ -1927,8 +1965,8 @@ class PredictionStore:
             for p in predictions:
                 cursor = self._db.execute(
                     "INSERT INTO kind_predictions (kind, symbol, algorithm, model_version, bar_close,"
-                    " displayed_at, status, output, flat_ticks, width_ticks, anchor, tick, band, inputs)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " displayed_at, status, output, flat_ticks, width_ticks, anchor, tick, band, inputs,"
+                    " lifecycle) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         kind,
                         p.symbol,
@@ -1944,6 +1982,7 @@ class PredictionStore:
                         p.tick,
                         p.band,
                         None if p.inputs is None else json.dumps(dict(p.inputs), separators=(",", ":")),
+                        p.lifecycle,
                     ),
                 )
                 assert cursor.lastrowid is not None
@@ -2062,7 +2101,7 @@ class PredictionStore:
         row = self._db.execute(
             "SELECT p.bar_close FROM kind_predictions p JOIN model_targets m"
             " ON m.algorithm = p.algorithm AND m.version = p.model_version"
-            " WHERE p.algorithm = ? AND p.bar_close >= ? AND m.target_version = ?"
+            f" WHERE p.algorithm = ? AND p.bar_close >= ? AND m.target_version = ? AND {NOT_SHADOW}"
             " ORDER BY p.bar_close LIMIT 1",
             (algorithm, iso(since), answer_version),
         ).fetchone()

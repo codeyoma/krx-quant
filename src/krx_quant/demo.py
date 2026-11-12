@@ -33,11 +33,12 @@ the days before them. The morning's 08:50 predictions are in too, waiting for th
 The five-session kind ``open_to_close_5d`` (#310) has its three baselines' predictions of the
 windows begun on those 20 days and the answers of those ended by the 8th, each at its end day's
 20:35; the four begun on the 5th to the 8th and the morning's wait for their end. Its algorithm
-``cox-5d`` makes none: its pre-validation was refused on the server, so neither engine runs it, and
-the API shows it refused, with a made-up report (#561). The 60-minute barrier's Breiman waits for its
-pre-validation, as on the server: no engine runs it either.
-The verdict (#676): each bar close's BUY, SELL or WAIT from the barrier's Breimans that run (the 4-,
-15- and 30-minute; the 60-minute waits), each with a made-up model (``demo_barrier_models``): trees
+``cox-5d`` was refused by its pre-validation on the server, and the API shows it refused, with a
+made-up report (#561): it predicts the morning in shadow alone (#696, ``lifecycle.SHADOW``), on its
+defaults. The 60-minute barrier's Breiman waits for its pre-validation, as on the server, and predicts
+in shadow too.
+The verdict (#676): each bar close's BUY, SELL or WAIT from the barrier's Breimans enrolled (the 4-,
+15- and 30-minute; the 60-minute waits, in shadow), each with a made-up model (``demo_barrier_models``): trees
 fitted on made-up samples whose up first leans with the price's velocity and, a little, with the time
 of day, a phase a horizon, so the members lean apart and the verdict changes over the morning. The
 trader's position on the morning reads as held.
@@ -200,12 +201,12 @@ HALT = (time(9, 6), time(9, 36))
 _PACED_FROM = time(10, 0)  # a paced demo opens here and goes on a minute at a time…
 _STEPS = 6  # …in steps of 10 seconds
 _FEE = 0.00015
-# The algorithms the server's pre-validation refused, which the engine does not run: cox-5d
+# The algorithms the server's pre-validation refused, which the engine does not enroll: cox-5d
 # (2026-10-23, #310; kept refused by the user's decision of 2026-10-24), with a made-up report's
-# failed check (#561). The demo runs every other but those waiting for their pre-validation (#561): the
-# 60-minute barrier's Breiman, as on the server since before 2026-10-23, and the daily kinds'
-# candidates of #698, as on the server the morning after their deploy. Neither the earlier
-# afternoons' engines nor the morning's run them, so none has a status.
+# failed check (#561). The demo enrolls every other but those waiting for their pre-validation (#561):
+# the 60-minute barrier's Breiman, as on the server since before 2026-10-23, and the daily kinds'
+# candidates of #698, as on the server the morning after their deploy. None has a status: the engines
+# predict with them in shadow alone (#696).
 _REFUSED = {
     "cox-5d": (
         "2026-10-23T23:41:07+09:00",

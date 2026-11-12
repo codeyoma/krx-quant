@@ -11,7 +11,9 @@ report's lines and the scheduled job. Every price is made up.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -27,6 +29,7 @@ from krx_quant.feeds import BOOK
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import kind_named
 from krx_quant.kinds import Kind, KindForecast
+from krx_quant.lifecycle import SHADOW
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME, NewKindPrediction, PredictionStore
 from krx_quant.scheduled import FAILED, JOBS, OK, JobRecord, Night
@@ -47,6 +50,7 @@ from krx_quant.verdict_replay import (
     Day,
     Replayed,
     drawdown,
+    stored_day,
     verdict_replay,
 )
 from tests.algorithm_doubles import stand_in_card, stand_in_meanings
@@ -359,3 +363,36 @@ def test_the_job_runs_once_the_first_night_and_again_after_a_failure_on_other_co
 
 def test_the_rules_are_the_verdict_s_version() -> None:
     assert RULES.version == 1
+
+
+def _stored(lifecycle: str | None, at: datetime, shown: datetime) -> NewKindPrediction:
+    output = {"p_up_first": 0.5, "p_timeout": 0.3, "p_down_first": 0.2}
+    return NewKindPrediction(SYMBOL, "breiman", "breiman-1", at, shown, output, lifecycle=lifecycle)
+
+
+def test_the_live_members_leave_out_shadow_rows_and_a_database_from_before_them_is_read(
+    tmp_path: Path,
+) -> None:
+    """#696: a shadow row is neither a live member nor the bar close's last display. A database copied
+    before the ``lifecycle`` columns, read as it is (``read_only``), has no shadow row."""
+    bar_close = datetime(2026, 10, 14, 9, 30, tzinfo=KST)
+    shown, later = bar_close + timedelta(seconds=1), bar_close + timedelta(seconds=3)
+    db = tmp_path / "engine.sqlite3"
+    store = PredictionStore(db)
+    store.add_kind_predictions(
+        BARRIER.name,
+        [_stored("active", bar_close, shown), replace(_stored(SHADOW, bar_close, later), algorithm="other")],
+    )
+    store.close()
+
+    with sqlite3.connect(db) as conn:
+        found = stored_day(conn, TODAY, [BARRIER], ["breiman", "other"])
+    assert list(found.forecasts[bar_close][BARRIER.name]) == ["breiman"]
+    assert found.displayed[bar_close] == shown
+
+    with sqlite3.connect(db) as conn:  # as an engine from before #696 left it
+        for table in ("predictions", "kind_predictions"):
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN lifecycle")
+        found = stored_day(conn, TODAY, [BARRIER], ["breiman", "other"])
+    assert sorted(found.forecasts[bar_close][BARRIER.name]) == ["breiman", "other"]
+    assert found.displayed[bar_close] == later
