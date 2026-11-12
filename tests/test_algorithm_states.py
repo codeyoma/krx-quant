@@ -77,7 +77,7 @@ async def test_the_list_holds_every_algorithm_waiting_refused_and_retired_among_
         "kind": "direction",
         "target_version": TARGET_VERSION,
         "predicting": ["newton"],
-        "shadow": ["beta", "first", "second", "turned"],  # #696
+        "shadow": ["first", "second", "turned"],  # #696: not the retired
         "states": {
             "probation": ["newton"],
             "retired": ["beta"],

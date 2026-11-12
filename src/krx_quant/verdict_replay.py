@@ -296,8 +296,17 @@ class Stored:
     verdicts: Counter[tuple[int, str]] = field(default_factory=Counter)
 
 
+def _not_shadow(db: sqlite3.Connection, table: str) -> str:
+    """The condition that leaves out ``table``'s shadow rows (#696, ``lifecycle.SHADOW``); none for a
+    table without ``lifecycle``: a database copied before #696, read as it is (``read_only``), whose
+    rows are no shadow's."""
+    columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+    return f" AND lifecycle IS NOT '{SHADOW}'" if "lifecycle" in columns else ""
+
+
 def stored_day(db: sqlite3.Connection, day: date, kinds: Sequence[Kind], names: Sequence[str]) -> Stored:
     """``day``'s ``Stored`` of the traded symbol."""
+    direction, of_kinds = _not_shadow(db, "predictions"), _not_shadow(db, "kind_predictions")
     start = datetime.combine(day, time(), KST)
     span = (SYMBOL, start.isoformat(), (start + timedelta(days=1)).isoformat())
     found = Stored()
@@ -307,8 +316,7 @@ def stored_day(db: sqlite3.Connection, day: date, kinds: Sequence[Kind], names: 
         rows = db.execute(
             "SELECT kind, algorithm, bar_close, output FROM kind_predictions WHERE symbol = ?"
             " AND bar_close >= ? AND bar_close < ? AND status = 'ok' AND output IS NOT NULL"
-            f" AND lifecycle IS NOT '{SHADOW}'"
-            f" AND kind IN ({marks})",
+            f"{of_kinds} AND kind IN ({marks})",
             (*span, *named),
         ).fetchall()
         wanted = set(names)
@@ -325,9 +333,9 @@ def stored_day(db: sqlite3.Connection, day: date, kinds: Sequence[Kind], names: 
             found.forecasts.setdefault(at, {}).setdefault(kind_name, {})[name] = (p[0], p[1], p[2])
     for bar_close, shown in db.execute(
         "SELECT bar_close, MAX(displayed_at) FROM (SELECT bar_close, displayed_at FROM predictions"
-        f" WHERE symbol = ? AND bar_close >= ? AND bar_close < ? AND lifecycle IS NOT '{SHADOW}'"
+        f" WHERE symbol = ? AND bar_close >= ? AND bar_close < ?{direction}"
         " UNION ALL SELECT bar_close, displayed_at FROM kind_predictions WHERE symbol = ? AND bar_close >= ?"
-        f" AND bar_close < ? AND lifecycle IS NOT '{SHADOW}') GROUP BY bar_close",
+        f" AND bar_close < ?{of_kinds}) GROUP BY bar_close",
         (*span, *span),
     ).fetchall():
         found.displayed[datetime.fromisoformat(bar_close)] = datetime.fromisoformat(shown)

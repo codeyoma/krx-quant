@@ -25,7 +25,6 @@ from krx_quant.lifecycle import (
     CODE_PASSED,
     CODE_REFUSED,
     REGISTERED,
-    SHADOW,
     AtOnce,
     Change,
     Status,
@@ -493,8 +492,7 @@ async def test_a_refusal_retires_it_as_soon_as_the_engine_reads_it_told_once(tmp
     assert history(db, "alpha")[-1]["at"] == at("08:00:00").isoformat(), "as it starts, before any bar close"
     with stored(db) as store:
         assert store.revisions()["alpha"].verdict == REVISION_REFUSED
-        on_day = [p for p in store.recent("005930", 1000, "alpha") if p["bar_close"] >= str(DAY)]
-        assert {p["lifecycle"] for p in on_day} == {SHADOW}, "in shadow alone on DAY (#696)"
+        assert all(p["bar_close"] < str(DAY) for p in store.recent("005930", 1000, "alpha")), "nothing on DAY"
     refusals = [t for t in told if t.startswith("코드 변경 사전 검증 거부: alpha")]
     assert len(refusals) == 1, told
     assert "stats: weakest lift -0.0100" in refusals[0]

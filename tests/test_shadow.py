@@ -1,6 +1,6 @@
-"""Every registered algorithm predicts live (#696): the ones the engine does not enroll predict in
-shadow, their rows marked so, and nothing that decides (the consensus, the verdicts, the reviews, the
-CPU budget's order) takes them.
+"""Every registered algorithm but the retired predicts live (#696): the ones the engine does not
+enroll predict in shadow, their rows marked so, and nothing that decides (the consensus, the
+verdicts, the reviews, the CPU budget's order) takes them.
 
 Input: a morning replayed with stand-in algorithms: one exempt from pre-validation and active, one
 waiting for its pre-validation, one its report refused, one retired by command; the engine's gate
@@ -34,7 +34,7 @@ BETA = FixedAlgorithm("beta", features=("acceleration",), unique=("acceleration"
 FIRST = FixedAlgorithm("first", features=("vwap_z",), unique=("vwap_z",))
 TURNED = FixedAlgorithm("turned", features=("relative_volume",), unique=("relative_volume",))
 REGISTRY = [NEWTON, BETA, FIRST, TURNED]
-SHADOWED = {"beta", "first", "turned"}
+SHADOWED = {"first", "turned"}
 
 
 async def _morning(tmp_path: Path) -> PredictionEngine:
@@ -84,9 +84,9 @@ async def test_every_algorithm_predicts_each_bar_close_its_rows_carrying_where_i
         assert sorted(r["bar_close"] for r in made) == closes, f"{name} at every bar close"
         assert {r["status"] for r in made} == {"ok"}
     lifecycle = {r["algorithm"]: r["lifecycle"] for r in rows}
+    assert not [r for r in rows if r["algorithm"] == "beta"], "a retired one stays stopped"
     assert {n: lifecycle[n] for n in ("newton", *SHADOWED)} == {
         "newton": "active",
-        "beta": SHADOW,
         "first": SHADOW,
         "turned": SHADOW,
     }
@@ -126,7 +126,7 @@ async def test_the_consensus_and_the_verdicts_never_take_one_in_shadow_nor_wait_
             )
         ]
     named = {s["name"] for b in bodies for s in b.get("side", [])}
-    assert "newton" in named and not named & SHADOWED
+    assert "newton" in named and not named & {"beta", *SHADOWED}
 
 
 async def test_no_review_reads_a_shadow_row(tmp_path: Path) -> None:
@@ -167,6 +167,6 @@ async def test_the_cpu_budget_skips_those_in_shadow_first(tmp_path: Path, fixed_
         newton = conn.execute(
             "SELECT COUNT(DISTINCT bar_close) FROM predictions WHERE algorithm = 'newton'"
         ).fetchone()
-    assert skipped and skipped <= SHADOWED
+    assert skipped and skipped <= {"beta", *SHADOWED}, "beta waits here: in shadow too"
     assert "turned" in skipped, "the last registered first"
     assert newton[0] >= 3

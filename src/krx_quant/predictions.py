@@ -57,7 +57,7 @@ never rewritten. A table of its own, as ``touches`` (``_SMT_SCHEMA``). ``smt_eve
 
 ``predictions.lifecycle`` and ``kind_predictions.lifecycle`` (#696) keep where the algorithm stood
 when it predicted: its lifecycle status (``probation``, ``active``, ``bench``, ``clone``), or
-``shadow`` for one the engine runs only for the evidence (not enrolled, retired, a daily one it keeps
+``shadow`` for one the engine runs only for the evidence (not enrolled, or a daily one it keeps
 out: ``lifecycle.SHADOW``); null for a baseline, a consensus and a row stored before #696. Columns
 added as ``kind_predictions.band`` was. The reviews and the first day a probation counts read no
 shadow row (``NOT_SHADOW``).

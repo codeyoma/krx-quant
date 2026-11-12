@@ -24,7 +24,7 @@ algorithms done 2 seconds after they started, the final one once they are all do
 
 After each day's close (+10 minutes) the algorithms' statuses are reviewed by the
 lifecycle rules (``lifecycle.py``), the day's predictions lost to the time and CPU budgets
-are told once, a retired algorithm is no longer judged (it runs on in shadow, below), and the
+are told once, a retired algorithm is no longer run, and the
 consensus weights are refitted. Where each algorithm on probation or on the bench stands
 toward its next review (``stages``, #165) is worked out by the same rules, as of that review.
 
@@ -49,8 +49,8 @@ An algorithm the engine has already enrolled always runs, but for a daily kind's
 (#264): it runs only while ``admits`` lets it, so a new answer version, code or inputs have its
 walk-forward run again before it predicts again (for its probation: in shadow it goes on).
 
-Every registered algorithm predicts (#696): one the engine does not run by its pre-validation or its
-status (waiting, refused, retired, a daily one kept out or held) predicts in shadow, its rows marked
+Every registered algorithm but the retired predicts (#696): one the engine does not enroll for its
+pre-validation (waiting, refused, a daily one kept out or held) predicts in shadow, its rows marked
 ``shadow`` (``lifecycle.SHADOW``) where an enrolled one's carry its status
 (``predictions.lifecycle``). At a bar close the shadow ones start once the verdicts are made, so
 nothing the consensus, the signals and the verdicts wait for waits on them, and the CPU budget skips
@@ -1040,21 +1040,26 @@ class PredictionEngine:
 
     def _running_daily(self) -> list[tuple[DailyAlgorithm, Model]]:
         """The daily algorithms that predict now, each with its model: those admitted (``_admit``)
-        and not retired, then the others of a kind that runs, in shadow (#696)."""
+        and not retired, then the others of a kind that runs, retired ones aside, in shadow (#696)."""
         self._admit()
         standings = self.store.statuses()
         retired = _with_status(standings, Status.RETIRED)
         running = [a for a in self.daily_algorithms if a.name not in retired]
-        shadow = [a for a in self.daily_registered if a not in running and self._kind_runs(a)]
+        shadow = [
+            a
+            for a in self.daily_registered
+            if a not in running and a.name not in retired and self._kind_runs(a)
+        ]
         self._mark(standings, running, shadow)
         return [(a, self.models[a.name]) for a in [*running, *shadow]]
 
     def _in_shadow(self, retired: Collection[str]) -> tuple[list[Algorithm], list[KindAlgorithm]]:
-        """The bar-close algorithms run only in shadow (#696), in registration order: registered, and
-        not run by their pre-validation (waiting, refused) or by their status (retired)."""
+        """The bar-close algorithms run only in shadow (#696), in registration order: registered, not
+        enrolled (waiting for their pre-validation, or refused by it), and not retired (a retired one
+        stays stopped)."""
         return (
-            [a for a in self.registered if a not in self.algorithms or a.name in retired],
-            [a for a in self.kind_registered if a not in self.kind_algorithms or a.name in retired],
+            [a for a in self.registered if a not in self.algorithms and a.name not in retired],
+            [a for a in self.kind_registered if a not in self.kind_algorithms and a.name not in retired],
         )
 
     def _mark(
