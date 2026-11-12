@@ -50,7 +50,7 @@ async def run_until(kis: FakeKis, settings: Any, condition: Callable[[], bool]) 
 async def test_subscriptions_rejected_for_the_limit_fall_back_to_rest_polling(
     kis: FakeKis, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    kis.max_subscriptions = 4  # the night futures (#264), then 005930's trades and book
+    kis.max_subscriptions = 3  # the night trades (#264), then 005930's trades and book
     serve_snapshots(kis)
     settings = replace(settings_for(kis, tmp_path, symbols=("005930", "000660")), fallback_poll_seconds=0.1)
 
@@ -75,7 +75,7 @@ async def test_a_book_snapshot_records_the_auction_s_expected_fill_when_its_answ
     kis: FakeKis, tmp_path: Path
 ) -> None:
     # #304: KIS's "호가/예상체결" answer may carry the auction's expected price and volume.
-    kis.max_subscriptions = 4
+    kis.max_subscriptions = 3
     serve_snapshots(kis, antc_cnpr="190600", antc_vol="5200")
     settings = replace(settings_for(kis, tmp_path, symbols=("005930", "000660")), fallback_poll_seconds=0.1)
 
