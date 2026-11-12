@@ -103,8 +103,9 @@ TRADER_REPORT = Job(
 # verdict horizon read as the practice cell, no lower bound nor p*) after the re-fit had run, so the
 # day's report was never posted. On the first night after the deploy that brings the fix, trading or
 # not, once (again on other code if it fails): ``trader-report --day 2026-11-11`` prints it read-only
-# from the store, re-fitting nothing. Right after the night's own report. Its output is the report's:
-# no price, account, order number nor key.
+# from the store, re-fitting nothing. After the night's own report and the jobs that must follow it
+# at once (``recording-quality-570``, the night book's). Its output is the report's: no price,
+# account, order number nor key.
 REPORT_AGAIN = Job(
     name="trader-report-1111-691",
     due=again_on_new_code,
