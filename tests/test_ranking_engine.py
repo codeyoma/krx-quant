@@ -12,6 +12,7 @@ import pytest
 from krx_quant.barriers import BARRIER, CLIMATE, DOWN_FIRST, UP_FIRST
 from krx_quant.feeds.base import KST
 from krx_quant.kinds import Answer
+from krx_quant.lifecycle import Status
 from krx_quant.predictions import NewKindPrediction, PredictionStore
 from krx_quant.ranking import LIVE, RANKING_VERSION
 from krx_quant.trader import SYMBOL
@@ -59,17 +60,22 @@ async def test_the_daily_review_ranks_each_horizon_from_its_stored_rows(
 ) -> None:
     """Input: twelve earlier days of ``lean-4``'s shadow forecasts beating the climate, then a morning
     and the day's review (15:40), ``lean-4`` waiting for its pre-validation (shadow), ``lean-15`` with
-    no day before. Output: the night's barrier ranking makes ``lean-4`` a member (the kind's first
-    ranking), its status shadow, ranked on its live days; ``lean-15`` unranked (no evidence: its
-    forecasts, of its defaults, are not on the target); kept once, one log line a kind;
+    no day before, ``lean-30`` retired. Output: the night's barrier ranking makes ``lean-4`` a member
+    (the kind's first ranking), its status shadow, ranked on its live days; ``lean-15`` unranked (no
+    evidence: its forecasts, of its defaults, are not on the target); ``lean-30`` not ranked; kept once,
+    one log line a kind;
     ``GET /v1/ranking`` serves them within the contract; that morning's verdicts waited (no ranking
     before)."""
     caplog.set_level("INFO", logger="krx_quant.engine")
     db = tmp_path / "engine.db"
     seed_history(db, "lean-4")
+    store = PredictionStore(db)
+    store.add_status("lean-30", at("08:00:00"), None, Status.RETIRED, "retired by hand")
+    store.close()
     members = [
         Leaning("lean-4", "barrier", "velocity", DOWN),
         Leaning("lean-15", "barrier_15m", "velocity", DOWN),
+        Leaning("lean-30", "barrier_30m", "velocity", DOWN),
     ]
     engine = await run(
         db,
@@ -96,6 +102,7 @@ async def test_the_daily_review_ranks_each_horizon_from_its_stored_rows(
     assert row["days"] == 12 and row["skill_low"] > 0
     fifteen = kept["barrier_15m"]
     assert fifteen["members"] == [] and fifteen["rows"][0]["why"] == "no_evidence"
+    assert kept["barrier_30m"]["rows"] == [], "a retired one is not ranked"
     lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("ranking barrier ")]
     assert lines == [
         f"ranking barrier {DAY}: members lean-4 | ranked 1. lean-4 {row['skill_low']:+.4f} "

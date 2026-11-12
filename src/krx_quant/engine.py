@@ -2017,8 +2017,11 @@ class PredictionEngine:
             for _, _, algorithms in self._ranked_kinds():
                 for a in algorithms:
                     standing = standings.get(a.name)
-                    statuses[a.name] = standing.status.value if a.name in enrolled and standing else SHADOW
-            todo = [
+                    if standing is not None and (a.name in enrolled or standing.status is Status.RETIRED):
+                        statuses[a.name] = standing.status.value
+                    else:
+                        statuses[a.name] = SHADOW
+            todo = [  # a retired one predicts no more (#696): not ranked
                 (kind, window, [a for a in algorithms if statuses.get(a.name) != Status.RETIRED.value])
                 for kind, window, algorithms in self._ranked_kinds()
                 if kind.name not in kept
