@@ -226,9 +226,10 @@ class Special:
 @dataclass(frozen=True)
 class Said:
     """The engine's verdict of 005930 at a bar close (#676), made by ``verdict.verdict`` from one horizon
-    of ``minutes`` with one member saying ``p`` (up first, timeout, down first), its width ``w`` ticks
-    about the mid-point ``anchor`` (tick 100), the best quote ``bid`` / ``ask`` then and the trader's
-    position ``held``; kept ``shown`` seconds after the bar close, as the engine keeps it."""
+    of ``minutes`` with one member, its ranking's (#697), saying ``p`` (up first, timeout, down first),
+    its width ``w`` ticks about the mid-point ``anchor`` (tick 100), the best quote ``bid`` / ``ask``
+    then and the trader's position ``held``; kept ``shown`` seconds after the bar close, as the engine
+    keeps it."""
 
     bar_close: str
     p: tuple[float, float, float] = (0.7, 0.2, 0.1)
@@ -244,7 +245,8 @@ class Said:
     def made(self) -> dict[str, Any]:
         """The verdict as ``GET /v1/verdict`` serves it."""
         kind = "barrier" if self.minutes == 4 else f"barrier_{self.minutes}m"
-        horizon = Horizon(kind, self.minutes, self.w, [Member("breiman", kind, "probation", 40, self.p)])
+        member = Member("breiman", kind, "probation", 40, self.p)
+        horizon = Horizon(kind, self.minutes, self.w, [member], frozenset({"breiman"}))
         market = Market(self.anchor, self.bid, self.ask, FEE)
         return verdict(SYMBOL, at(self.bar_close), [horizon], market, self.held).as_json()
 

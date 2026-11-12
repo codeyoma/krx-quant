@@ -66,6 +66,10 @@ shadow row (``NOT_SHADOW``).
 the verdict's version: BUY, SELL or WAIT and the whole answer as ``GET /v1/verdict`` serves it
 (JSON), written once and never rewritten. A table of its own, as ``touches`` (``_VERDICT_SCHEMA``).
 
+``rankings`` (#697, ``ranking.py``) keeps each night's ranking of each verdict horizon (kind), by the
+ranking's version: when it was made, the latest day its evidence counts and the whole snapshot (JSON),
+written once and never rewritten (``_RANKING_SCHEMA``).
+
 Times are ISO 8601 strings in KST, which sort in time order.
 """
 
@@ -394,6 +398,18 @@ CREATE TABLE IF NOT EXISTS verdicts (  -- a symbol's verdict at a bar close (#67
 CREATE INDEX IF NOT EXISTS verdicts_by_close ON verdicts (bar_close);
 """
 
+_RANKING_SCHEMA = """
+CREATE TABLE IF NOT EXISTS rankings (  -- a night's ranking of a kind (#697): never rewritten
+    night TEXT NOT NULL,              -- the trading day it was made after, YYYY-MM-DD
+    kind TEXT NOT NULL,
+    version INTEGER NOT NULL,         -- ranking.RANKING_VERSION: its rules'
+    made_at TEXT NOT NULL,
+    through TEXT,                     -- the latest day its evidence counts; null without any
+    body TEXT NOT NULL,               -- JSON: the snapshot as GET /v1/ranking serves it
+    PRIMARY KEY (night, kind, version)
+);
+"""
+
 # How a revision began (#454): as the engine found it when it first recorded one (the first start
 # of #454, a new algorithm, one with no revision yet), or a change of code that put it back on
 # probation (``lifecycle.CODE_CHANGED``).
@@ -719,14 +735,19 @@ def kind_reviewed_rows(
     answer_version: int,
     days: Sequence[date],
     include_special: bool,
+    *,
+    shadow: bool = False,
 ) -> list[dict[str, Any]]:
     """``kind_scored_rows`` of every symbol as a review reads them (``reviewed_rows``, #487): the
     ``KIND_REVIEWED`` fields of each, in the same order, the output and the answer's path parsed; a
-    bar close's path parsed once for all its predictors' rows."""
+    bar close's path parsed once for all its predictors' rows. The shadow rows (#696) only with
+    ``shadow`` (the ranking's evidence, #697)."""
     if not days:
         return []
     on, params = _made_on(days, None)
-    where = f"WHERE p.kind = ? AND {on} AND {KIND_SCORED} AND {NOT_SHADOW}"
+    where = f"WHERE p.kind = ? AND {on} AND {KIND_SCORED}"
+    if not shadow:
+        where += f" AND {NOT_SHADOW}"
     if not include_special:
         where += " AND a.special = 0"
     cursor = db.cursor()
@@ -1075,6 +1096,7 @@ class PredictionStore:
             + _REVISION_SCHEMA
             + _SMT_SCHEMA
             + _VERDICT_SCHEMA
+            + _RANKING_SCHEMA
             + _added_columns(self._db, ("predictions",) if version == 1 else ())
             + f"PRAGMA user_version={_VERSION};"
         )
@@ -1801,6 +1823,39 @@ class PredictionStore:
             if row is not None:
                 found.append(json.loads(row[0]))
         return found
+
+    def add_rankings(
+        self, rankings: Sequence[tuple[date, str, int, datetime, date | None, Mapping[str, Any]]]
+    ) -> int:
+        """Keep a night's rankings (#697): (night, kind, version, made at, through, body) entries. One
+        kept already (the same night, kind and version) stays as it was. The rows written."""
+        with self._writing():
+            cursor = self._db.executemany(
+                "INSERT OR IGNORE INTO rankings (night, kind, version, made_at, through, body)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        night.isoformat(),
+                        kind,
+                        version,
+                        iso(made_at),
+                        None if through is None else through.isoformat(),
+                        json.dumps(body, separators=(",", ":")),
+                    )
+                    for night, kind, version, made_at, through, body in rankings
+                ],
+            )
+        return cursor.rowcount
+
+    def rankings(self, version: int, night: date | None = None) -> list[dict[str, Any]]:
+        """Each kind's latest ranking of ``version`` (#697), of ``night`` or the latest night up to it
+        (None: the latest), as stored, by kind."""
+        rows = self._db.execute(
+            "SELECT r.body FROM rankings r WHERE r.version = ? AND r.night = (SELECT MAX(o.night) FROM"
+            " rankings o WHERE o.kind = r.kind AND o.version = r.version AND o.night <= ?) ORDER BY r.kind",
+            (version, "9999" if night is None else night.isoformat()),
+        ).fetchall()
+        return [json.loads(r[0]) for r in rows]
 
     def kind_evidence(self, kind: str, answer_version: int, algorithms: Collection[str]) -> dict[str, int]:
         """How many of each of ``algorithms``' predictions of ``kind`` were answered with a class of
@@ -2739,6 +2794,11 @@ class PredictionStore:
         """A read-only connection of its own: a worker thread can read while the engine
         keeps writing (WAL lets them work at once)."""
         return contextlib.closing(sqlite3.connect(self._path.resolve().as_uri() + "?mode=ro", uri=True))
+
+    def reading(self) -> contextlib.closing[sqlite3.Connection]:
+        """``_reading`` for a reader outside the store (#697: the ranking's evidence, ``ranking.scores_of``,
+        read in a worker thread)."""
+        return self._reading()
 
     def last_reference(self, symbol: str) -> tuple[float, datetime] | None:
         """The mid-point at the symbol's latest bar close with one (its touch path's ``anchor``)

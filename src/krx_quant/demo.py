@@ -193,6 +193,93 @@ _REFUSED = {
 _WAITING = frozenset({"breiman-60m", "hurst", "lorenz", "friedman", "hurst-5d", "lorenz-5d", "friedman-5d"})
 
 
+# The demo's rankings (#697), made up and kept as the night before the morning's: each verdict horizon's
+# members, so its verdicts pool them (BUY, SELL and WAIT all come) and the day and the week are filled. The
+# 60-minute Breiman waits for its pre-validation: a shadow member, run before the verdict. Of each kind one
+# algorithm stays out, unranked or below the climate, so the screen shows both.
+_RANKED: dict[str, tuple[tuple[str, float | None], ...]] = {
+    "barrier": (("breiman", 0.0042),),
+    "barrier_15m": (("breiman-15m", 0.0061),),
+    "barrier_30m": (("breiman-30m", 0.0035),),
+    "barrier_60m": (("breiman-60m", 0.0028),),
+    "open_to_close": (("cox", 0.0110), ("hurst", 0.0034), ("lorenz", -0.0021), ("friedman", None)),
+    "open_to_close_5d": (
+        ("hurst-5d", 0.0052),
+        ("lorenz-5d", 0.0017),
+        ("cox-5d", -0.0040),
+        ("friedman-5d", None),
+    ),
+}
+
+
+def write_demo_rankings(db: Path, night: date) -> None:
+    """Keep the demo's rankings of ``night`` (``_RANKED``): a lower bound above 0 a member, below 0 ranked
+    and not, None unranked (too few days)."""
+    from krx_quant.ranking import BAR_CLOSE, DAILY, FEW_DAYS, LIVE, WALK_FORWARD, Placed, Snapshot
+
+    made = datetime.combine(night, time(15, 40), KST)
+    store = PredictionStore(db)
+    snapshots = []
+    for kind, rows in _RANKED.items():
+        daily = kind.startswith("open_to_close")
+        window, source, days = (DAILY, WALK_FORWARD, 1700) if daily else (BAR_CLOSE, LIVE, 20)
+        placed = []
+        for name, low in rows:
+            if low is None:
+                placed.append(
+                    Placed(
+                        name,
+                        "shadow",
+                        LIVE,
+                        3,
+                        9,
+                        None,
+                        None,
+                        None,
+                        2,
+                        0.5,
+                        0.22,
+                        0,
+                        None,
+                        FEW_DAYS,
+                        False,
+                        False,
+                        1,
+                        0,
+                    )
+                )
+                continue
+            n, calls = (days * 3, days) if daily else (days * 1100, days * 130)
+            placed.append(
+                Placed(
+                    name,
+                    "active" if low > 0 else "probation",
+                    source,
+                    days,
+                    n,
+                    low + 0.004,
+                    low,
+                    low + 0.008,
+                    calls,
+                    0.55 if low > 0 else 0.48,
+                    calls / n,
+                    0 if daily else calls // 2,
+                    None if daily else (0.4 if low > 0 else -0.2),
+                    None,
+                    low > 0,
+                    low > 0,
+                    4,
+                    0,
+                )
+            )
+        ranked = sorted((p for p in placed if p.ranked), key=lambda p: -(p.low or 0.0))
+        rows_ = [Placed(**{**p.__dict__, "rank": i + 1}) for i, p in enumerate(ranked)]
+        rows_ += [p for p in placed if not p.ranked]
+        snapshots.append(Snapshot(kind, night, made, night, tuple(rows_), window=window, settled=True))
+    store.add_rankings([(s.night, s.kind, s.version, s.made_at, s.through, s.as_json()) for s in snapshots])
+    store.close()
+
+
 def _admitted(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> bool:
     return algorithm.name not in _REFUSED and algorithm.name not in _WAITING
 
@@ -954,6 +1041,7 @@ async def demo_app(db: Path, pace: float | None = None) -> web.Application:
         )  # no macro read those mornings: no regime
         await replay_into(engine, clock, past, until=datetime.combine(day, time(15, 30), KST))
         engine.store.close()
+    write_demo_rankings(db, PAST_DAYS[-1])  # the verdict's members of the morning (#697)
     forget_smt(db, PAST_DAYS[0])  # the API makes the 7th again from its backfilled bars (#521)
     cox = write_demo_daily(db, data_dir)  # the daily kind's last 20 days (#264)
     write_demo_windows(db, data_dir)  # the five-session kind's last 20 windows (#310)

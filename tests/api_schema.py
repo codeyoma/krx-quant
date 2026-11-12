@@ -30,6 +30,7 @@ ROUTES = {
     "/v1/cost-map": "cost_map",  # #307
     "/v1/consensus": "consensus",
     "/v1/verdict": "verdict",  # #676
+    "/v1/ranking": "ranking",  # #697
     "/v1/macro": "macro",
     # The kinds besides the direction (#179).
     "/v1/kinds": "kinds",

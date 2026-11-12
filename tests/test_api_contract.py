@@ -96,6 +96,8 @@ async def walk(get: Get) -> dict[str, int]:
     await ask("/v1/verdict", "verdict")  # #676
     await ask(f"/v1/verdict?symbol={symbols[0]}", "verdict")
     await ask(f"/v1/verdict?symbol={symbols[0]}&bar_close=2026-10-12T09:31:00%2B09:00", "verdict")
+    await ask("/v1/ranking", "ranking")  # #697
+    await ask("/v1/ranking?night=2026-10-12", "ranking")
     await ask("/v1/macro", "macro")
     listed = (await ask("/v1/kinds", "kinds"))["kinds"]
     kinds = [k["name"] for k in listed]
@@ -150,6 +152,7 @@ async def walk(get: Get) -> dict[str, int]:
         ("/v1/symbols/999999/latest", 404),
         ("/v1/verdict?symbol=999999", 404),  # #676
         ("/v1/verdict?bar_close=10:00", 400),
+        ("/v1/ranking?night=12-10-2026", 400),  # #697
         ("/v1/symbols/005930/predictions?limit=0", 400),
         ("/v1/symbols/005930/predictions?before=10:00", 400),
         ("/v1/symbols/005930/bars?limit=0", 400),

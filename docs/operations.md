@@ -1413,7 +1413,12 @@ docker compose run --rm engine inverse-replay --day 2026-11-10 # 그날까지
 ```bash
 docker compose run --rm engine verdict-replay                            # 장이 끝난 가장 최근 거래일까지 20거래일
 docker compose run --rm engine verdict-replay --day 2026-11-10 --days 5  # 그날까지 5거래일
+docker compose run --rm engine verdict-replay --version 1                # 판정 버전 1(모든 예측을 합친다)
 ```
+
+- **판정 버전 (#697).** 기본은 엔진이 지금 내는 버전 2다: 재생한 날마다 그날 전의 증거(엔진 DB의 기록된 예측, 모자라면 사전 검증의 전진 학습)로 같은 코드(`ranking.rank_kinds`)가 낸 순위의 멤버만 지평마다 합친다. 세 밤 규칙은 재생한 날들을 따라간다(첫날은 결과 그대로). 출력 머리에 날마다 지평별 멤버(`<날> 멤버: 4분 … · 15분 …`)가 붙는다. `--version 1`은 #676의 규칙(그 봉 마감에 예측한 모두를 합친다)이다.
+
+  > **바뀜** (2026-11-12, #704): 판정 버전 1 하나로 재생했다 → 기본 버전 2, `--version 1`로 버전 1. 이유: 엔진이 버전 2를 낸다(#697).
 
 - **날.** 장이 끝난 가장 최근 거래일(또는 `--day`)까지 기록된 최근 20거래일(`--days`). 사전 검증이 고르는 날과 같다.
 - **구성원, 두 가지.** 거래하는 종목(005930)의 봉 마감마다 판정을 따로 낸다.
@@ -1430,6 +1435,23 @@ docker compose run --rm engine verdict-replay --day 2026-11-10 --days 5  # 그�
 **예약 작업이 돌린다** (#215, 3장 "예약 작업 (#215)"). 이 작업을 담은 엔진(#685)이 배포된 뒤 첫 밤(거래일이 아니어도, 밤 학습 뒤, `inverse-replay-606` 다음, 시뮬레이션과 사전 검증보다 먼저) `verdict-replay-679`가 한 번 돌려 출력 전체를 #679에 남기고 `ready-for-agent`를 붙인다. 실패하면 다른 코드가 배포된 뒤 다시 돈다. 제한 시간은 1시간이다.
 
 **에이전트가 할 일.** `gh issue view 679 --comments`로 마지막 댓글을 읽는다. 실패면 원인을 고치는 PR을 낸다. 결과면 두 구성원 방식의 매수 빈도, 체결, 청산의 나뉨, 하루 순손익의 95% 구간과 최대 낙폭을 #679에 요약하고 사용자에게 돌린다. 마진이나 계열을 이 결과로 고치지 않는다: 바꾸려면 새 판정 버전을 제안하고 모의 계좌(#677)에서 앞으로 판단한다.
+
+### 순위 (#697)
+
+엔진이 날마다 점검 뒤(15:40) 판정의 지평(장벽 4·15·30·60분, `open_to_close`, `open_to_close_5d`)마다 알고리즘을 기후 기준 예측 대비 로그 손실 기술의 하한으로 매기고, 하한 > 0이 세 밤 이어진 알고리즘을 멤버로 정한다(`ranking.py`, 규칙은 [design.md](design.md) 5장 "순위"). 다음 세션의 판정(버전 2)은 지평마다 그 멤버만 합친다. 저장된 행만 읽는다(모델을 학습하지 않는다). 사용자가 할 일은 없다.
+
+- **보기.** `curl -s http://krx-quant:8080/v1/ranking | jq '.kinds[] | {kind, night, members}'`. 지난 밤의 것은 `?night=YYYY-MM-DD`. 알고리즘마다의 기술·구간·정밀도·호출·멤버 여부·밤 수는 `rows`다([engine-api.md](engine-api.md) "GET /v1/ranking").
+- **Loki에서 읽기.** 종류마다 한 줄, 그리고 걸린 시간 한 줄이다(로거 `krx_quant.engine`, INFO):
+
+  ```
+  ranking barrier_15m 2026-11-13: members breiman-15m | ranked 1. breiman-15m +0.0040 (walk_forward, 20d, 900 calls, member) | unranked …
+  rankings of 2026-11-13 made in 1.2 s
+  ```
+
+  Grafana의 Loki(`grafanacloud-logs`)에서 `{service="krx-quant", process="engine"} |= "ranking "`로 찾는다([agents/server-logs.md](agents/server-logs.md)). `members none (WAIT)`면 그 지평은 다음 세션 내내 대기다. 순위 밖은 `(<까닭>, <날 수>d)`로 붙는다: `few_days`(10일 미만, 하루 한 번 종류는 250일), `few_calls`(호출 30 미만, 하루 한 번 종류는 100), `no_evidence`(그 종류의 정답으로 학습한 모델의 예측도, 지금 코드의 전진 학습도 없다). `pending n`은 반대 결과가 n밤 이어졌다는 뜻이고, 셋이면 바뀐다. 실패하면 `rankings not made at <날>`(ERROR)이고 멤버는 그 전 그대로다.
+- **증거.** 실시간 날이 모자라면 사전 검증의 전진 학습을 쓴다: 봉 마감 알고리즘은 `state/prevalidation-<이름>.sqlite3`(그 리포트가 지금 코드의 것일 때), 하루 한 번 알고리즘은 `state/rankings/<이름>.json`. 뒤의 것은 하루 한 번 사전 검증이 쓰고, 없거나 낡은 것은 예약 작업 `ranking-evidence-697`이 채운다(아래 표). 손으로: `docker compose run --rm engine ranking-evidence`(상태, 리포트, 사전 검증 기록은 바꾸지 않는다).
+- **저장.** 엔진 DB `rankings`(밤과 종류마다 한 번, 고쳐 쓰지 않는다). 같은 밤에 점검이 다시 돌면 남은 것을 쓴다.
+- **첫 순위.** 배포 뒤 첫 점검(15:40) 전의 세션에는 순위가 없어 모든 판정이 `no_members` 대기다. 종류에서 알고리즘을 하나라도 매긴 첫 순위는 결과를 그대로 멤버로 받는다(세 밤을 기다리지 않는다). 하루 한 번 종류는 배포한 날 15:40에는 증거 파일이 없어(그 밤 `ranking-evidence-697`이 만든다) 다음 날 순위부터 매긴다.
 
 ### 시장 전체 매매 정지 확인 (#625)
 
@@ -2699,6 +2721,7 @@ docker compose run --rm engine recording-quality [--day YYYY-MM-DD]
 | `probe-inverse-book-606` | **삭제됨** (2026-11-09, #634): `JOBS`에서 뺐다. 2026-11-06 밤에 돌아 결과를 #606에 올렸다. 이유: 할 일을 마쳤다. `JOBS`에 남겨 두면 상태 파일(`state/scheduled.json`)을 잃었을 때 다시 돌아 같은 결과를 또 올린다. 대신: 손으로 `docker compose run --rm engine probe-inverse-book`(이 명령도 지웠다: **삭제됨** (2026-11-09, #653): 명령 `probe-inverse-book`과 그 모듈. 이유: 결과가 #606에 있고 그것을 쓴 #634가 머지됐다. 남은 일(녹화와 `inverse-replay`)은 이 probe가 필요하지 않다. 대신: #606의 댓글). 뺀 때의 조건: 이 작업을 담은 엔진(#615)이 배포된 뒤 첫 거래일 밤(밤 학습 뒤, `bar-close-times-589` 다음), 한 번. 실패하면(종료 코드 3: 그날 프레임이 없었다, 또는 오류) 다른 코드가 배포된 뒤 다시 돈다 | `probe-inverse-book` | 20분. 넉넉히 잡은 상한이다(그날 인버스 ETF 호가의 raw를 열두 번쯤 읽는다. 통합 호가 하루치인 약 10만 레코드면 1분 안이다) | #606: 출력 전체(개수, 비율, 초, 틱, 필드 이름, 코드. 시세 값 없음). 에이전트가 그 결과로 이벤트 기록과 재생 보고를 만든다(2장 "인버스 ETF 호가 확인 (#606)") |
 | `inverse-replay-606` | 거래일 밤마다 한 번(밤 학습 뒤, `session-memory-623` 다음). 실패하거나 끊겼으면 다음 거래일 밤에 다시 돈다 | `inverse-replay` | 15분. 넉넉히 잡은 상한이다(최근 20거래일을 하루씩 읽는다. 005930의 호가 하루치가 1초쯤, ETF 호가 4만 건과 그날 예측은 그보다 짧다). 시뮬레이션과 사전 검증보다 먼저 돈다 | #606: 출력 전체(개수, 비율, 틱, 원. 가격 없음). 밤마다의 댓글은 기록이고 라벨을 바꾸지 않는다. 실패한 밤과 기록된 날이 20거래일 이상인 첫 보고(`에이전트 차례:` 줄, 한 번, `state/inverse-replay.json`)에만 `ready-for-agent`를 붙인다. 그때 에이전트가 아래 호출을 인버스 ETF로 살지 안을 남기고 사용자가 정한다(2장 "인버스 ETF 재생 (#606)") |
 | `verdict-replay-679` | 이 작업을 담은 엔진(#685)이 배포된 뒤 첫 밤(거래일이 아니어도, 밤 학습 뒤, `inverse-replay-606` 다음), 한 번. 실패하면 다른 코드가 배포된 뒤 다시 돈다 | `verdict-replay` | 1시간. 15분쯤으로 본다(장벽 알고리즘 넷을 하나씩 20일 전진 학습: 서버의 대기열 선별에서 하나에 2.5분쯤, 300 MB쯤. 그다음 녹화 20일을 하루씩 읽는다). 시뮬레이션과 사전 검증보다 먼저 돈다 | #679: 출력 전체(개수, 비율, 틱, 원. 가격 없음). 에이전트가 요약해 사용자에게 돌린다. 마진과 계열은 이것으로 고르지 않는다(2장 "판정 재생 (#679)") |
+| `ranking-evidence-697` | 하루 한 번 알고리즘 하나라도 순위의 전진 학습 증거(`state/rankings/<이름>.json`)가 없거나 지금 코드·정답·입력의 것이 아닌 밤마다(밤 학습 뒤, `verdict-replay-679` 다음). 이 작업을 담은 엔진이 배포된 첫 밤에는 모두(8개)다. 실패하면 다른 코드가 배포된 뒤 다시 돈다 | `ranking-evidence` | 45분. 알고리즘 하나에 1–2분쯤(하루 한 번 사전 검증의 전진 학습과 같다), 하나씩 | #204: 알고리즘마다 점수 낸 날 수, 기간, 호출 수, 걸린 시간(가격 없음). 실패한 밤에만 `ready-for-agent`. 상태와 리포트는 바꾸지 않는다(2장 "순위 (#697)") |
 | `probe-market-halt-625` | **삭제됨** (2026-11-09, #653): `JOBS`에서 뺐고 명령 `probe-market-halt`도 그 모듈(`market_halt_probe.py`)과 함께 지웠다. 2026-11-07 밤에 한 번 돌아 결과를 #625에 올렸다. 이유: 할 일을 마쳤다(읽는 날이 2026-11-06으로 고정돼 다시 돌 일이 없고, 그 결과로 엔진이 정지를 피드에서 읽는다(#632, #636). #625는 2026-11-08에 닫혔다). 대신: 결과는 #625의 댓글과 [kis-feeds.md](kis-feeds.md#피드별-메모)의 실측에 있다. 상태 폴더에 쓴 파일은 없다. 뺀 때의 조건: 이 작업을 담은 엔진(#628)이 배포된 뒤 첫 밤(밤 학습 뒤, `inverse-replay-606` 다음), 한 번. 거래일이 아니어도 돈다(읽는 날은 이미 녹화돼 있다). 실패하면(종료 코드 3: 그 창에 받은 레코드가 없었다, 또는 오류) 다른 코드가 배포된 뒤 다시 돈다 | `probe-market-halt --day 2026-11-06 --from 09:00 --until 09:40` | 15분. 넉넉히 잡은 상한이다(그날 raw 파티션을 한 번 훑어 09:00–09:40에 받은 행만 읽는다) | #625: 출력 전체(필드 이름, 코드 값, 개수, 시각. 시세 값 없음). 2026-11-06 서킷브레이커 때 이미 구독 중인 피드의 어느 필드가 정지와 재개를 언제 알렸는지 본다. 에이전트가 그 결과를 #625에 적고 2·3단계를 설계한다(2장 "시장 전체 매매 정지 확인 (#625)") |
 | `check-mock-trades-405` | **삭제됨** (2026-11-04, #506): `JOBS`에서 뺐다. 2026-11-02 밤에 돌아 결과를 #405에 올렸다(결과는 `같다`). 이유: 할 일을 마쳤다. `JOBS`에 남겨 두면 상태 파일(`state/scheduled.json`)을 잃었을 때 다시 돌아 같은 결과를 또 올린다. 대신: 손으로 `docker compose run --rm engine check-mock-trades --day YYYY-MM-DD`. 뺀 때의 조건: trader가 mock 모드로 돈 거래일(그날 mock 장부가 있다, `Facts.mock_days`)의 밤, 한 번. 그날 장부에도 KIS에도 trader의 주문이 없었거나(종료 코드 3) 저장소나 KIS를 읽지 못했으면(4) 다음 mock 거래일 밤에 다시 돈다. 같거나(0) 다르면(5) 끝난다 | `check-mock-trades` | 5분. 넉넉히 잡은 상한이다(저장소 읽기와 KIS 조회 몇 번, 몇 초). `trader-report` 다음에 돈다 | #405: 출력 전체. 그날 챔피언의 mock 주문을 KIS 주문 체결 조회와 KIS 주문번호로 맞춰 주문마다 매수·매도, 주문 수량, 체결 수량, 체결가 차이(틱)를 보이고, KIS에 없는 장부의 주문과 장부에 없는 KIS의 주문을 적는다. 주문 프로브(#403)가 그날 돈 동안의 KIS 주문은 프로브의 것이라 세지 않는다(`state/scheduled.json`의 그 작업의 시작과 걸린 시간). 주문번호, 계좌번호, 키, 가격은 없다. `결과: 같다`면 에이전트가 #405를 닫는다(완료 조건 3). trader 자신의 모의 키(`KRX_TRADER_KIS_*`)로 모의투자 서버에만 묻는다 |
 | `probe-live-account-408` | 거래일 밤, 실전 키(`KRX_TRADER_LIVE_KIS_*`)가 서버 `.env`에 있을 때(`trader.read_live_kis`). 통과(종료 코드 0)할 때까지 거래일 밤마다 한 번. 키가 없으면 돌지 않는다 | `probe-live-account` | 5분. 넉넉히 잡은 상한이다(조회 넷, 몇 초) | #417(리포트 이슈. #408은 그 PR이 닫는다): 출력 전체. 실전 계좌를 조회만으로 읽는다(현재가, 잔고, 매수가능조회, 그날 주문 체결 조회. 주문 TR은 보내지 않는다). trader가 읽는 필드마다 실전의 답에 있는지와 그 꼴(정수, 숫자, 글자)을 보이고 결과를 trader 저장소(`live_probes`)에 남긴다. live 모드는 한 번 통과(`같다`)해야 주문한다(실행 점검 `live_probe`). `다르다`면 에이전트가 `kis_orders.py`의 읽기를 고치는 PR을 연다. 키, 계좌번호, 주문번호, 값은 없다(#408) |
@@ -3764,7 +3787,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `fill_notices.sqlite3`, `-wal`, `-shm` | mock trader의 체결 통보 기록(#484, 권한 600, 곁 파일도). trader가 쓰고(`trader/fill_notices.py`), 명령 `fill-notice-layout`이 읽기만 한다(**바뀜** (2026-11-06, #587): 밤 작업 `fill-notice-layout-403`이 읽었다 → 손으로 돌린 명령만. 이유: 그 작업이 `JOBS`를 떠났다). 표: `records`(레코드마다 칸 문자열 그대로, 받은 시각, 거래일, TR ID, 연결 번호, 프레임 번호, 머리의 레코드 수, 프레임 안의 순서), `odd_frames`(나누어떨어지지 않거나 풀지 못한 프레임), `connections`(연결마다 요청·구독·마지막으로 들은 때·끝난 때와 까닭), `drops`(상한을 넘어 버린 프레임과 레코드 수). 30일 지난 날의 행은 trader가 지운다. 계좌, HTS ID, 주문번호, 가격이 들어 있다: 서버 밖(S3, 저장소, 이슈, 로그, 텔레그램)으로 내보내지 않는다. 승인 키, key·iv, 구독 응답은 남기지 않는다 |
 | `trader_live_kis_token.json` | trader의 실전 키의 접근 토큰 캐시(권한 600, #408). 모의 키의 것(`trader_kis_token.json`)과 따로다. live 모드의 trader(`kis_orders.trader_live_broker`)가 실전 계좌에 처음 무언가를 물을 때 생긴다(관문 전의 live는 KIS를 부르지 않아 생기지 않는다) |
 | `market_calendar.json` | KIS 휴장일 조회 캐시 |
-| `engine.sqlite3`, `-wal`, `-shm` | 예측, 채점, 상태, 합의 가중치, 다른 종류의 예측과 정답(`kind_predictions`, `kind_answers`, #179), 특수 상황 구간(`special_windows`, `special_days`, #236), 수습 시뮬레이션의 재생과 예측(`simulation_runs`, `simulations`, `sim_predictions`, `sim_kind_predictions`, #298. 실시간 예측과 따로 둔다). 테이블은 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다. 스키마 버전은 `PRAGMA user_version`이다(#179, #236, #298의 새 표는 올리지 않았다) |
+| `engine.sqlite3`, `-wal`, `-shm` | 예측, 채점, 상태, 합의 가중치, 다른 종류의 예측과 정답(`kind_predictions`, `kind_answers`, #179), 특수 상황 구간(`special_windows`, `special_days`, #236), 수습 시뮬레이션의 재생과 예측(`simulation_runs`, `simulations`, `sim_predictions`, `sim_kind_predictions`, #298. 실시간 예측과 따로 둔다), 판정(`verdicts`, #676)과 밤마다의 순위(`rankings`, #697). 테이블은 [engine-api.md](engine-api.md#저장-stateenginesqlite3)에 있다. 스키마 버전은 `PRAGMA user_version`이다(#179, #236, #298의 새 표는 올리지 않았다) |
 | `trader.sqlite3`, `-wal`, `-shm` | 자동 매매 trader의 저장소(#394, #408의 `gate_checks`, `order_checks`, `ramp`도 여기): 시작마다(`runs`), 비용 지도로 칸을 고른 기록(`selections`, #395), 읽은 칸의 예측과 한 일(`decisions`), 매매(`trades`), 주문(`orders`), 체결(`fills`), 정책 버전(`policies`, #399)과 챔피언의 바뀜(`champions`), 정책마다 돈 거래일(`policy_days`, #400: 도전 정책의 승격과 실전 관문이 읽는 모의 기록), 정지·재개·다시 켜기 요청(`controls`, #396), 닿은 손실 한도(`halts`), mock 모드의 실패한 KIS 주문(`failures`, #405)과 하나도 체결되지 않은 매수(`unfilled_buys`, #405. #406부터 보내는 매수와 응답이 사라진 매수도), mock 시작마다의 계좌 맞추기(`reconciles`, #406: 장부 밖의 보유와 KIS 주문번호가 있다), 지금 상태(`snapshot`. #547부터 trader 프로세스의 상주 메모리 `rss_mb`도 실어 엔진 heartbeat가 읽는다), 날마다의 장부(`days`, #533부터 한도가 세지 않는 mock 연습 손익의 열 `practice`, `practice_trades`, `practice_cumulative`도). 매매 기록의 행에 모드(`paper`, `mock`), mock 주문에 KIS의 주문번호(`orders.broker_id`, `broker_branch`, #405), 결정과 매매에 정책 버전(챔피언과 도전 정책의 장부가 갈린다, #400). trader가 쓰고, 정책 표는 밤 정책 맞추기(예약 작업 `refit-policy-399`)가 쓴다. 엔진 API는 읽고 정지 요청만 쓰며, `krx-quant trade resume|rearm`이 재개와 다시 켜기를 쓴다([design.md](design.md#14-자동-매매-393) 14장) |
 
 > **바뀜** (2026-10-30, #414): `trader.sqlite3`는 trader만 썼다 → 정책 표(`policies`, `champions`)는 밤 정책 맞추기가 엔진 컨테이너에서 쓴다. 이유: 정책 버전은 spec #393대로 trader의 저장소에 두고, 밤 학습 뒤 예약 작업은 수집기의 컨테이너에서 돈다(#399).
@@ -3776,6 +3799,7 @@ LogQL 문법은 2026-10-23에 커넥터로 스택에 물어 확인했다(그때�
 | `replay-<날짜>.sqlite3` | `krx-quant replay`의 결과 |
 | `.engine.lock` | 도는 엔진이 잡는 잠금 파일(`flock`, #168). 잡혀 있으면 `rescore`가 거부한다. 엔진이 끝나면 풀린다. 파일은 남아도 된다 |
 | `prevalidation-<알고리즘>.sqlite3` | `krx-quant prevalidate`가 재생한 예측과 채점. 다시 돌리면 새로 만든다 |
+| `rankings/<알고리즘>.json` | 하루 한 번 알고리즘의 순위 증거(#697): KRX 일봉 walk-forward의 날마다 기후 대비 로그 손실 기술, 호출, 맞힌 수와 그것을 만든 코드·정답 버전·입력. 하루 한 번 사전 검증과 `krx-quant ranking-evidence`가 쓴다. 코드·정답·입력이 바뀌면 순위가 읽지 않고 다시 만든다 |
 | `simulation-daily.lock` | `krx-quant simulate daily`가 도는 동안 잡는 잠금 파일(`flock`, #298). 둘이 같은 수습을 두 번 시뮬레이션하지 않게 한다. 시뮬레이션의 예측은 `engine.sqlite3`의 따로 둔 표(`sim_kind_predictions` 등)에 남는다 |
 | `simulation-bar-close.sqlite3`, `simulation-bar-close.lock` | `krx-quant simulate bar-close`가 재생한 예측과 채점(실행마다 새로 만든다. 그 가운데 시뮬레이션한 알고리즘과 기준 예측의 것을 `engine.sqlite3`의 `sim_predictions`, `sim_kind_predictions`로 옮긴다)과, 도는 동안 잡는 잠금 파일(`flock`, #298) |
 | `prevalidations/<알고리즘>.history.jsonl` | 사전 검증 실행 기록(#262): 실행마다 한 줄(시각, 코드, 정답 버전, 통과, 재생한 날, 가장 약한 lift와 그 거래일 단위 하한). 리포트의 `earlier_runs`가 여기서 센다. 기록이 없고 리포트가 있으면 그 리포트로 첫 줄을 만든다(지우면 리포트의 실행 하나부터 다시 센다) |

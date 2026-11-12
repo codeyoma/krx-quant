@@ -56,7 +56,16 @@ pre-validation (waiting, refused, a daily one kept out or held) predicts in shad
 nothing the consensus, the signals and the verdicts wait for waits on them, and the CPU budget skips
 them first; a daily kind's run after its enrolled ones. Each has its time limit, as any algorithm.
 No review, stage or probation counts a shadow row (``predictions.NOT_SHADOW``); the leaderboard and
-the statistics show them. Only a daily kind not run yet (``DailyKind.awaiting``) predicts nothing.
+the statistics show them. One the latest ranking made a member of its barrier kind (#697) runs before
+the verdicts, with the enrolled, for the verdict pools it; its rows are still shadow's.
+
+Live and in the demo (``ranks``), each daily review ends with the night's ranking of each verdict
+horizon (#697, ``ranking.py``): the barrier kinds' and the daily kinds' algorithms ranked by their
+log-loss skill against the kind's climate, from the stored rows in a worker thread (the walk-forward
+evidence of the pre-validations, ``walk_forward``, where live days are too few), kept once a night
+(``rankings``) and logged a line a kind. The verdicts (version 2) pool each horizon's members from the
+next bar close; the day and the week beside them read the daily kinds' forecasts of the day, stored at
+08:50. Only a daily kind not run yet (``DailyKind.awaiting``) predicts nothing.
 
 Live, a running bar-close algorithm whose code changed is judged again (#454, ``revisions.py``):
 at each start the engine records the code each one runs (``revisions``); one whose code is not
@@ -273,13 +282,16 @@ from krx_quant.predictions import (
     Score,
 )
 from krx_quant.pricing import Direction, classify, flat_ticks, most_likely, tick_size
+from krx_quant.ranking import BAR_CLOSE, DAILY, RANKING_VERSION, Snapshot, WalkForwardOf, rank_kinds
+from krx_quant.ranking import Window as RankingWindow
+from krx_quant.ranking import text as ranking_text
 from krx_quant.reference import Bar
 from krx_quant.smt import LIVE as SMT_LIVE
 from krx_quant.smt import Detector as SmtDetector
 from krx_quant.special import HALT_STATUS, KOSPI, Kind, SpecialSituations, Window, in_halt, in_vi, touching
 from krx_quant.stats import DEFAULT_MIN_SAMPLE
 from krx_quant.touch import RESTARTED, TARGET_VERSION, WINDOW
-from krx_quant.verdict import VERDICT_VERSION, Held, Horizon, Market, Member, Side, verdict
+from krx_quant.verdict import VERDICT_VERSION, Advisory, Held, Horizon, Market, Member, Side, verdict
 
 if TYPE_CHECKING:  # the pre-validation replays through this module: its type only
     from krx_quant.prevalidation import Refusal
@@ -542,6 +554,8 @@ class PredictionEngine:
         watch_loop: bool = False,
         garbage: Garbage | None = None,
         held: HeldNow | None = None,
+        ranks: bool = False,
+        walk_forward: WalkForwardOf | None = None,
     ) -> None:
         self.store = store
         self.commit = commit  # the code it runs (the deploy's KRX_COMMIT)
@@ -634,6 +648,14 @@ class PredictionEngine:
         self.garbage = garbage
         # The trader's positions, for a verdict's SELL (#676); without: nothing held (replay, tests).
         self._held = held
+        # The nightly ranking (#697): made at each daily review when ``ranks`` (live, the demo), the
+        # walk-forward evidence from ``walk_forward`` (live); the verdict pools each kind's members, as
+        # the latest ranking stored made them (none: every horizon waits).
+        self._ranks = ranks
+        self._walk_forward = walk_forward
+        self._ranked: dict[str, frozenset[str]] = {
+            b["kind"]: frozenset(b.get("members", ())) for b in store.rankings(RANKING_VERSION)
+        }
         # Each barrier member's evidence (#676) by (kind, algorithm): counted at start and at each
         # daily review, never during the session (a few hundred milliseconds over 40 days).
         self._evidence: dict[tuple[str, str], int] = {}
@@ -1478,6 +1500,7 @@ class PredictionEngine:
         await self._report_budgets(at)
         await self._refit_weights(at)
         self._count_evidence()  # the verdicts' members' evidence, with the day's answers (#676)
+        await self._rank(at)  # the verdict's members of the next session (#697)
         # Last: a review that failed part way is run again after a restart.
         self.store.add_run("review", at, None, f"{len(changes)} status changes")
 
@@ -1702,7 +1725,11 @@ class PredictionEngine:
             # The others in shadow (#696): after the verdicts, the first the CPU budget skips.
             shadow, kind_shadow = self._in_shadow(retired)
             kind_shadow = [a for a in kind_shadow if a.kind not in late]
-            self._mark(standings, [*running, *kind_running], [*shadow, *kind_shadow])
+            # One in shadow that the ranking made a member of its kind (#697) runs with the enrolled:
+            # the verdict pools it. Its rows are still shadow's.
+            voting = [a for a in kind_shadow if a.name in self._ranked.get(a.kind, frozenset())]
+            kind_shadow = [a for a in kind_shadow if a not in voting]
+            self._mark(standings, [*running, *kind_running], [*shadow, *kind_shadow, *voting])
             members = [a.name for a in running if a.name in active]
             known = self._special.known(before=bar_close)
             regime = self._regime(bar_close)
@@ -1750,14 +1777,18 @@ class PredictionEngine:
         # this bar close's scoring and take milliseconds, while beside the algorithms' threads each
         # of their store calls waited for the GIL, which those threads hold as they compute.
         with self._step(KIND_BASELINES):
-            self._predict_kinds(bar_close, at_close, stopped, [*kind_running, *kind_shadow], late, not_made)
+            self._predict_kinds(
+                bar_close, at_close, stopped, [*kind_running, *voting, *kind_shadow], late, not_made
+            )
         if not at_close:
             return
         # The kinds' algorithms after the direction's: the budget skips them first (#179), and those
         # in shadow before them (#696).
         chosen = {
             a.name
-            for a in self._within_cpu_budget(bar_close, [*running, *kind_running, *shadow, *kind_shadow])
+            for a in self._within_cpu_budget(
+                bar_close, [*running, *kind_running, *voting, *shadow, *kind_shadow]
+            )
         }
         runs = {
             a.name: asyncio.ensure_future(self._run(a, bar_close, at_close))
@@ -1766,7 +1797,7 @@ class PredictionEngine:
         }
         kind_runs = [
             asyncio.ensure_future(self._run_kind(a, bar_close, at_close))
-            for a in kind_running
+            for a in [*kind_running, *voting]
             if a.name in chosen
         ]
         mine = [runs[m] for m in members if m in runs]
@@ -1866,12 +1897,13 @@ class PredictionEngine:
                                     Member(
                                         n,
                                         kind.name,
-                                        status.get(n),
+                                        self._lifecycle.get(n, status.get(n)),
                                         evidence.get((kind.name, n), 0),
                                         kf.probabilities,
                                     )
                                     for n, kf in made_here
                                 ],
+                                self._ranked.get(kind.name, frozenset()),
                             )
                         )
                     quote = self._latest_quote(symbol, bar_close)
@@ -1883,6 +1915,7 @@ class PredictionEngine:
                         Market(c.mid, bid, ask, self.fee_rate),
                         held.get(symbol),
                         side,
+                        advisory=self._advisory(symbol, bar_close, status),
                     )
                     rows.append((symbol, bar_close, VERDICT_VERSION, found.action, found.as_json()))
                 self.store.add_verdicts(rows, now)
@@ -1895,6 +1928,38 @@ class PredictionEngine:
             )
         except Exception:
             log.exception("verdicts not made at %s", bar_close)
+
+    def _advisory(self, symbol: str, bar_close: datetime, status: Mapping[str, str]) -> list[Advisory]:
+        """The day and the week beside ``symbol``'s verdict (#697, ``verdict.Advisory``): each daily kind
+        run, with its algorithms' forecasts of the day as stored at 08:50 (none before, or on a day it
+        did not predict) and its ranking's members."""
+        day = bar_close.astimezone(KST).date()
+        names = {a.name for a in self.daily_registered}
+        out = []
+        for kind in self.daily_kinds:
+            if not kind.runs:
+                continue
+            rows = self.store.kind_at_close(kind.name, kind.answer_version, symbol, kind.predicted_at(day))
+            out.append(
+                Advisory(
+                    kind.name,
+                    kind.overlap,
+                    kind.classes,
+                    [
+                        Member(
+                            r["algorithm"],
+                            kind.name,
+                            self._lifecycle.get(r["algorithm"], status.get(r["algorithm"])),
+                            0,
+                            kind.probabilities(r["output"]),
+                        )
+                        for r in rows
+                        if r["algorithm"] in names and r["status"] == "ok" and r["output"] is not None
+                    ],
+                    self._ranked.get(kind.name, frozenset()),
+                )
+            )
+        return out
 
     def _latest_quote(self, symbol: str, bar_close: datetime) -> tuple[float, float] | None:
         """``symbol``'s best quote (bid, ask) last received, crossed ones aside (#676: what an order now
@@ -1918,6 +1983,84 @@ class PredictionEngine:
             found = self.store.kind_evidence(kind.name, kind.answer_version, names)
             counted |= {(kind.name, name): n for name, n in found.items()}
         self._evidence = counted
+
+    def _ranked_kinds(
+        self,
+    ) -> list[tuple[PredictionKind, RankingWindow, list[KindAlgorithm | DailyAlgorithm]]]:
+        """The verdict's horizons the ranking ranks (#697): each barrier kind and each daily kind run,
+        with its window and its registered algorithms."""
+        out: list[tuple[PredictionKind, RankingWindow, list[KindAlgorithm | DailyAlgorithm]]] = [
+            (k, BAR_CLOSE, [a for a in self.kind_registered if a.kind == k.name])
+            for k in self.kinds
+            if k.classes == BARRIER_CLASSES
+        ]
+        out += [
+            (k, DAILY, [a for a in self.daily_registered if a.kind == k.name])
+            for k in self.daily_kinds
+            if k.runs
+        ]
+        return out
+
+    async def _rank(self, at: datetime) -> None:
+        """The night's ranking of each verdict horizon (#697, ``ranking.py``), after the review at ``at``:
+        a kind ranked already that night (a review run again) keeps its snapshot; the others are ranked
+        in a worker thread from the stored rows (and the walk-forward evidence), kept, and logged a line
+        each. The next session's verdicts pool the members. A failure is logged, and the members stay."""
+        if not self._ranks:
+            return
+        night = at.astimezone(KST).date()
+        try:
+            stored = {b["kind"]: Snapshot.of_json(b) for b in self.store.rankings(RANKING_VERSION, night)}
+            kept = {k: s for k, s in stored.items() if s.night == night}
+            before = {k: s for k, s in stored.items() if s.night < night}
+            standings = self.store.statuses()
+            enrolled = {a.name for a in self.kind_algorithms} | {a.name for a in self.daily_algorithms}
+            statuses: dict[str, str | None] = {}
+            for _, _, algorithms in self._ranked_kinds():
+                for a in algorithms:
+                    standing = standings.get(a.name)
+                    if standing is not None and (a.name in enrolled or standing.status is Status.RETIRED):
+                        statuses[a.name] = standing.status.value
+                    else:
+                        statuses[a.name] = SHADOW
+            todo = [  # a retired one predicts no more (#696): not ranked
+                (kind, window, [a for a in algorithms if statuses.get(a.name) != Status.RETIRED.value])
+                for kind, window, algorithms in self._ranked_kinds()
+                if kind.name not in kept
+            ]
+            if todo:
+                started = timer.perf_counter()
+                made = await asyncio.to_thread(self._make_rankings, todo, night, statuses, before)
+                self.store.add_rankings(
+                    [(s.night, s.kind, s.version, s.made_at, s.through, s.as_json()) for s in made]
+                )
+                for s in made:
+                    log.info("%s", ranking_text(s))
+                log.info("rankings of %s made in %.1f s", night, timer.perf_counter() - started)
+                kept |= {s.kind: s for s in made}
+            self._ranked |= {kind: s.members for kind, s in kept.items()}
+        except Exception:
+            log.exception("rankings not made at %s", night)
+
+    def _make_rankings(
+        self,
+        todo: Sequence[tuple[PredictionKind, RankingWindow, Sequence[KindAlgorithm | DailyAlgorithm]]],
+        night: date,
+        statuses: Mapping[str, str | None],
+        before: Mapping[str, Snapshot],
+    ) -> list[Snapshot]:
+        """``_rank``'s work, off the event loop (``ranking.rank_kinds``): the night's own answers count."""
+        with self.store.reading() as db:
+            return rank_kinds(
+                db,
+                todo,
+                night,
+                night + timedelta(days=1),
+                self.clock.now(),
+                statuses,
+                before,
+                self._walk_forward,
+            )
 
     def _judge_smt(self, frozen: BarsAtClose) -> None:
         """Keep the SMT episodes that begin at this bar close (#520). A failure is logged, and the

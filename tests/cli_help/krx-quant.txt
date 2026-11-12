@@ -1,9 +1,9 @@
 usage: krx-quant [-h]
-                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,ranking-evidence,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,ranking-evidence,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
     replay              replay a recorded day through the engine into its own
                         database (no KIS needed)
@@ -152,6 +152,11 @@ positional arguments:
                         engine ran and with every one walked forward (#679),
                         and replay its BUYs a share each by the paper trader's
                         rules; reads only, places no order, no price
+    ranking-evidence    walk forward each daily algorithm whose ranking
+                        evidence (#697, state/rankings/<name>.json) is missing
+                        or not of its code, answers and inputs, and write it:
+                        a day's log-loss skill against the kind's climate
+                        each; changes no status or report; no price
     test-alert          send a test message to the Telegram chat that receives
                         alerts
     doctor              print the server's state, masked (engine, KIS,

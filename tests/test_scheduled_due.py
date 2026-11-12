@@ -23,6 +23,7 @@ from krx_quant.scheduled.probes import read_last_restart
 from krx_quant.scheduled.research import (
     read_hit_rate_nights,
     read_smt_holdout_days,
+    read_stale_evidence,
 )
 from krx_quant.scheduled.trader import read_fill_notice_apart, read_live_kis
 from krx_quant.scheduled.upkeep import read_last_backup
@@ -47,6 +48,7 @@ OWN: dict[Any, Callable[[Mapping[str, Any]], Any]] = {
     read_fill_notice_apart: lambda f: f.get("fill_notice_apart", 0),
     read_live_kis: lambda f: f.get("trader_live_kis", False),
     read_last_backup: lambda f: f.get("state_backup"),
+    read_stale_evidence: lambda f: f.get("stale_evidence", 0),  # #697: none in the file's scenes
 }
 
 

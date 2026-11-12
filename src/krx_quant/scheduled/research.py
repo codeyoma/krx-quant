@@ -1,5 +1,6 @@
 """The research and review jobs (#500): the nightly swap's hit rates, the down calls replayed through
-the inverse ETF, the verdict replayed, and the experiment on the SMT, which runs last. ``JOBS``
+the inverse ETF, the verdict replayed, the ranking's walk-forward evidence of the daily kinds (#697), and
+the experiment on the SMT, which runs last. ``JOBS``
 (``krx_quant.scheduled``) lists them in the order they run.
 
 The diagnosis and the entry delay, the first two signal reviews, the structure check, the error
@@ -35,6 +36,7 @@ from krx_quant.scheduled.core import (
     Target,
     again_on_new_code,
 )
+from krx_quant.scheduled.prevalidations import PREVALIDATION_ISSUE
 from krx_quant.smt_experiment import AFTER as SMT_AFTER
 from krx_quant.smt_experiment import DAYS as SMT_DAYS
 from krx_quant.smt_experiment import days_in_holdout as smt_days_in_holdout
@@ -172,9 +174,62 @@ VERDICT_REPLAY = Job(
                 "알고리즘 모두를 날마다 그 전 날들로만 다시 학습한 것(사전 검증의 전진 학습). 매수는 "
                 "trader의 규칙으로 1주씩 재생했다: 결정 뒤 첫 매도 호가에 사고, 목표·손절·기한(한 번에 "
                 "하나일 때는 판정의 매도도)에 판다. 순손익은 수수료와 거래세를 뺀 원이다. 진단이지 조정이 "
-                "아니다: m과 가족은 #676에서 정했고 이 날들로 고르지 않는다. 다시 돌리기(읽기만): "
-                "`docker compose run --rm engine verdict-replay [--day <날>] [--days N]`. 출력에는 가격이 "
-                "없다(개수, 비율, 틱, 원만)."
+                "아니다: m과 가족은 #676에서 정했고 이 날들로 고르지 않는다. 판정 버전 2(#697)는 날마다 그날 "
+                "전의 증거로 낸 순위의 멤버만 합친다. 다시 돌리기(읽기만): "
+                "`docker compose run --rm engine verdict-replay [--day <날>] [--days N] [--version 1]`. "
+                "출력에는 가격이 없다(개수, 비율, 틱, 원만)."
+            ),
+        ),
+    ),
+)
+
+
+# The ranking's walk-forward evidence of the daily kinds (#697, ``ranking_evidence.py``): the nightly ranking
+# ranks a daily algorithm on its walk-forward over the KRX days while its live days are too few (a year),
+# kept in ``state/rankings/<name>.json`` with the code, answers and inputs it was made with. A daily
+# pre-validation writes it; this walks forward each daily algorithm whose file is missing or stale (those
+# pre-validated before #697: every one on the first night after the deploy that brings it; later, one whose
+# code, answers or inputs changed), one at a time, about a minute or two each on the server, and writes it.
+# It changes no status, report or pre-validation history. Every night while one is stale (counted from the
+# files and the code when the job is considered: a few milliseconds); after a failure, again only on other
+# code. Its output holds days, calls and dates, no price; only a failure calls an agent, on the
+# pre-validations' issue.
+async def read_stale_evidence(reads: Reads) -> int:
+    """How many daily algorithms lack current walk-forward evidence (``ranking_evidence.stale_daily``)."""
+    from krx_quant.ranking_evidence import stale_daily  # it reads the pre-validation's code digests
+
+    settings = reads.sources.settings
+    return len(await asyncio.to_thread(stale_daily, settings.state_dir, settings.target_version))
+
+
+def _evidence_stale(night: Night[int]) -> bool:
+    """While a daily algorithm's evidence is stale; after a failed run, only on other code."""
+    record = night.record
+    failed_here = record is not None and record.outcome == FAILED and record.commit == night.commit
+    return night.facts > 0 and not failed_here
+
+
+def evidence_failed(ran: Ran) -> bool:
+    return ran.exit_code != 0 or ran.timed_out
+
+
+RANKING_EVIDENCE = Job(
+    name="ranking-evidence-697",
+    due=_evidence_stale,
+    facts=read_stale_evidence,
+    command=("ranking-evidence",),
+    timeout=timedelta(minutes=45),
+    label_if=evidence_failed,
+    targets=(
+        Target(
+            PREVALIDATION_ISSUE,
+            note=(
+                "밤 순위(#697)가 하루 한 번 알고리즘을 실시간 날이 모자란 동안(1년) 매길 전진 학습 증거를 "
+                "만들었다: 증거 파일(`state/rankings/<이름>.json`)이 없거나 지금의 코드·정답·입력의 것이 "
+                "아닌 알고리즘마다 KRX 일봉으로 전진 학습해, 날마다 그 종류의 기후 대비 로그 손실 기술을 "
+                "남긴다. 상태, 사전 검증 리포트와 기록은 바꾸지 않는다. 실패한 밤에만 `ready-for-agent`를 "
+                "붙인다. 다시 돌리기: `docker compose run --rm engine ranking-evidence`. 출력에는 가격이 "
+                "없다(날 수, 호출 수, 날짜만)."
             ),
         ),
     ),

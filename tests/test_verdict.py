@@ -18,11 +18,13 @@ from krx_quant.verdict import (
     NO_EDGE,
     NO_MEMBERS,
     NONE,
+    RULES_V1,
     SELL,
     STRONG,
     UP,
     WAIT,
     WEAK,
+    Advisory,
     Held,
     Horizon,
     Market,
@@ -43,10 +45,17 @@ def member(name: str, p: tuple[float, float, float], kind: str = "barrier", stat
     return Member(name, kind, status, 120, p)
 
 
-def horizon(minutes: int, *members: Member, width: int | None = W) -> Horizon:
+def horizon(
+    minutes: int, *members: Member, width: int | None = W, ranked: frozenset[str] | None = None
+) -> Horizon:
+    """A horizon whose members the ranking all made members (#697), unless ``ranked`` says which."""
     kind = "barrier" if minutes == 4 else f"barrier_{minutes}m"
     return Horizon(
-        kind, minutes, width, [Member(m.name, kind, m.status, m.evidence, m.probabilities) for m in members]
+        kind,
+        minutes,
+        width,
+        [Member(m.name, kind, m.status, m.evidence, m.probabilities) for m in members],
+        frozenset(m.name for m in members) if ranked is None else ranked,
     )
 
 
@@ -281,6 +290,94 @@ def test_the_side_panel_and_the_rules_go_with_it() -> None:
             "output": {"p_up": 0.5, "p_flat": 0.3, "p_down": 0.2},
         }
     ]
-    assert body["version"] == body["rules"]["version"] == 1
+    assert body["version"] == body["rules"]["version"] == 2
+    assert body["rules"]["ranked"] is True
     assert body["rules"]["margin"] == 0.05
     assert body["rules"]["families"]["breiman-15m"] == "breiman"
+
+
+def test_version_2_pools_only_the_rankings_members() -> None:
+    """Input (#697): at 15 minutes ``a`` leaning up and ``b`` leaning down hard, the ranking's members
+    ``a`` alone; at 60 minutes ``c``, not a member. Output: the 15 minutes pools ``a`` alone (``b`` shown,
+    weight 0, not ranked), BUY there; the 60 minutes has no pool. Version 1's rules pool all three."""
+    horizons = [
+        horizon(15, member("a", (0.6, 0.3, 0.1)), member("b", (0.0, 0.1, 0.9)), ranked=frozenset({"a"})),
+        horizon(60, member("c", (0.1, 0.1, 0.8)), ranked=frozenset()),
+    ]
+
+    found = verdict("005930", T, horizons, MARKET)
+    old = verdict("005930", T, horizons, MARKET, rules=RULES_V1)
+
+    body = found.as_json()
+    pooled = by_minutes(found)
+    assert pooled[15]["probabilities"] == pytest.approx(
+        {"p_up_first": 0.6, "p_timeout": 0.3, "p_down_first": 0.1}
+    )
+    assert pooled[15]["members"] == 1 and pooled[60]["probabilities"] is None
+    shown = {m["name"]: m for m in body["members"]}
+    assert (shown["b"]["weight"], shown["b"]["counted"], shown["b"]["ranked"]) == (0.0, False, False)
+    assert shown["a"]["ranked"] is True
+    assert (body["verdict"], body["horizon"]["minutes"]) == (BUY, 15)
+    assert old.rules.version == 1 and by_minutes(old)[60]["members"] == 1
+    assert old.action == SELL  # the 60 minutes, pooled in v1, leans down most
+
+
+def test_no_ranked_member_anywhere_waits() -> None:
+    """Input: forecasts at every horizon, none of them a ranking member. Output: WAIT ``no_members``."""
+    found = verdict(
+        "005930", T, [horizon(m, member("a", (0.8, 0.1, 0.1)), ranked=frozenset()) for m in (4, 15)], MARKET
+    )
+
+    assert (found.action, found.reason) == (WAIT, NO_MEMBERS)
+
+
+def test_the_day_and_the_week_are_advisory() -> None:
+    """Input: no barrier member; the day's ranked ``cox`` and ``hurst`` (another family each) leaning up
+    together by 0.2, ``lorenz`` down but not ranked; the week with no ranked member. Output: still WAIT
+    (the advisory never trades); the day called up from the two ranked, ``lorenz`` shown with weight 0;
+    the week ``wait``."""
+    classes = ("up", "flat", "down")
+    day = Advisory(
+        "open_to_close",
+        1,
+        classes,
+        [
+            Member("cox", "open_to_close", "active", 0, (0.5, 0.3, 0.2)),
+            Member("hurst", "open_to_close", None, 0, (0.4, 0.4, 0.2)),
+            Member("lorenz", "open_to_close", None, 0, (0.1, 0.2, 0.7)),
+        ],
+        frozenset({"cox", "hurst"}),
+    )
+    week = Advisory(
+        "open_to_close_5d", 5, classes, [Member("cox-5d", "open_to_close_5d", None, 0, (0.6, 0.2, 0.2))]
+    )
+
+    found = verdict("005930", T, [horizon(4)], MARKET, advisory=[day, week])
+
+    body = found.as_json()
+    assert (body["verdict"], body["reason"]) == (WAIT, NO_MEMBERS)
+    advised = {a["kind"]: a for a in body["advisory"]}
+    today = advised["open_to_close"]
+    assert today["call"] == UP and today["members"] == 2 and today["families"] == 2
+    assert today["probabilities"] == pytest.approx({"p_up": 0.45, "p_flat": 0.35, "p_down": 0.2})
+    weights = {f["name"]: f["weight"] for f in today["forecasters"]}
+    assert weights == pytest.approx({"cox": 0.5, "hurst": 0.5, "lorenz": 0.0})
+    assert advised["open_to_close_5d"]["call"] == WAIT
+    assert (
+        advised["open_to_close_5d"]["probabilities"] is None and advised["open_to_close_5d"]["sessions"] == 5
+    )
+
+
+def test_an_advisory_between_the_margins_is_flat() -> None:
+    """Input: the day's one ranked member, up 0.03 over down (under the margin 0.05). Output: flat."""
+    day = Advisory(
+        "open_to_close",
+        1,
+        ("up", "flat", "down"),
+        [Member("cox", "open_to_close", None, 0, (0.33, 0.37, 0.30))],
+        frozenset({"cox"}),
+    )
+
+    found = verdict("005930", T, [horizon(4)], MARKET, advisory=[day])
+
+    assert found.as_json()["advisory"][0]["call"] == "flat"

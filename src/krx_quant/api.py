@@ -55,7 +55,11 @@ Endpoints (all under ``/v1``):
 - ``GET /verdict?symbol=S&bar_close=T`` (#676, ``verdict.py``): each symbol's verdict at its latest
   bar close with one (BUY, SELL or WAIT, its horizon, target, stop and deadline, each barrier
   horizon's pool and expected net, every member with its lean, the direction and range beside it),
-  or ``symbol``'s alone, or at ``bar_close``; as the engine stored it at the bar close;
+  or ``symbol``'s alone, or at ``bar_close``; as the engine stored it at the bar close. Version 2
+  (#697) pools only the ranking's members and adds the day and the week, advisory;
+- ``GET /ranking?night=D`` (#697, ``ranking.py``): each verdict horizon's latest ranking (of ``night``
+  or the latest night before it): each algorithm's rank, status, log-loss skill against the climate and
+  its bounds, precision, calls, member or not and the nights at that state; as the engine kept it;
 - ``GET /macro``: the latest day's market regime and macro readings (``macro.py``);
 - ``GET /stream``: a WebSocket of predictions, consensus, outcomes, the KIS status and
   status changes as they happen (``stream.py``);
@@ -174,6 +178,7 @@ from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import Excluded, SimulationRecord, iso
 from krx_quant.prevalidation import REGISTERED_BEFORE, Refusal
 from krx_quant.pricing import flat_ticks, tick_size
+from krx_quant.ranking import RANKING_VERSION
 from krx_quant.reference import BAR, Bar
 from krx_quant.skill import Skill, calls_by_day, day_kappa, skill
 from krx_quant.smt import BACKFILLED, LIVE, PAIRS, RECONSTRUCTED, Reconstruction, SmtEvent, reconstruct
@@ -352,6 +357,7 @@ def create_app(
     app.router.add_get("/v1/cost-map", _cost_map)
     app.router.add_get("/v1/consensus", _consensus)
     app.router.add_get("/v1/verdict", _verdict)
+    app.router.add_get("/v1/ranking", _ranking)
     app.router.add_get("/v1/macro", _macro)
     app.router.add_get("/v1/stream", stream.handle)
     app.router.add_get("/v1/kinds", _kinds)
@@ -1030,6 +1036,14 @@ async def _verdict(request: web.Request) -> web.Response:
     bar_close = _time_query(request, "bar_close")
     verdicts = engine.store.verdicts([symbol] if symbol is not None else engine.symbols, bar_close)
     return _json({"version": VERDICT_VERSION, "verdicts": verdicts})
+
+
+async def _ranking(request: web.Request) -> web.Response:
+    """Each verdict horizon's latest ranking as kept (#697): of ``night``, or the latest night before
+    it; a kind never ranked is left out."""
+    engine = request.app[ENGINE_KEY]
+    night = _day_query(request, "night")
+    return _json({"version": RANKING_VERSION, "kinds": engine.store.rankings(RANKING_VERSION, night)})
 
 
 async def _macro(request: web.Request) -> web.Response:
