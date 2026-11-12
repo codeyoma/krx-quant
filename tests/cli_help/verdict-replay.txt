@@ -1,7 +1,10 @@
 usage: krx-quant verdict-replay [-h] [--day DAY] [--days DAYS]
+                                [--version {1,2}]
 
 options:
-  -h, --help   show this help message and exit
-  --day DAY    the last day replayed, YYYY-MM-DD (default: the latest trading
-               day whose session is over)
-  --days DAYS  the recorded trading days replayed (default 20)
+  -h, --help       show this help message and exit
+  --day DAY        the last day replayed, YYYY-MM-DD (default: the latest
+                   trading day whose session is over)
+  --days DAYS      the recorded trading days replayed (default 20)
+  --version {1,2}  the verdict's version (#697): 2 pools each day's ranking
+                   members (default), 1 every forecast

@@ -52,6 +52,26 @@ the pool. The spread is in the prices alone (bought at the ask, sold at a bid), 
 The margin, the lean's grades, the family map and the consensus map are versioned constants of this
 module (``Rules``, ``VERDICT_VERSION``), stored with each verdict: changing one is a new version,
 never a silent edit.
+
+**Version 2** (#697, the user's decisions of 2026-11-12): the pool of a horizon counts only the
+algorithms the night's **ranking** made members of its kind (``ranking.py``: every algorithm whose
+log-loss skill against the kind's climate has its lower bound above 0, entering and leaving after three
+rankings running), whatever their status, a shadow one's too (#696: the engine runs a ranked one before
+the verdict). Every other forecast at the bar close is shown and not counted (``ranked`` false, weight
+0). A horizon without a ranked member has no pool: it says WAIT. The rules above are v1's, over those
+members: the expected net, the cost, BUY and SELL, the families and the consensus.
+
+Beside the barrier horizons it shows the **day and the week** (``open_to_close``, ``open_to_close_5d``:
+the daily kinds' forecasts of today, made at 08:50), **advisory** (``Advisory``): each pooled the same
+way from its ranked members, and called up when its up beats its down by the margin, down the other way,
+flat between, ``wait`` without a ranked member. They are shown, never acted on: BUY and SELL rest on the
+barrier horizons alone, whose shape the trader reads (#677) is v1's.
+
+> **바뀜** (2026-11-12, #PR): every algorithm with a forecast at the bar close took part, whatever its
+> status (v1) → only the ranking's members of each kind (v2), and the day and the week are shown beside
+> as advisory. 이유: the user's decision (#697): the raw hit rate rewards always saying timeout, and the
+> algorithms that showed skill against the baseline vote. v1 stays a version (``RULES_V1``) the replay
+> can run (#679).
 """
 
 from __future__ import annotations
@@ -66,11 +86,12 @@ from krx_quant.feeds.base import KST
 from krx_quant.pricing import tick_size
 from krx_quant.trader.money import net_of
 
-VERDICT_VERSION = 1
+VERDICT_VERSION = 2
 BUY, SELL, WAIT = "buy", "sell", "wait"
 EXIT, AVOID = "exit", "avoid"  # what a SELL means: held, or not
 NO_MEMBERS, NO_EDGE, HOLDING = "no_members", "no_edge", "holding"  # why a WAIT
 UP, DOWN, NONE = "up", "down", "none"  # a lean
+FLAT = "flat"  # an advisory horizon's call between up and down (#697)
 WEAK, MODERATE, STRONG = "weak", "moderate", "strong"  # its strength, beside NONE
 
 # Algorithms of one family (#676): the Breiman of each barrier horizon is one model of trees, its
@@ -95,6 +116,7 @@ class Rules:
     lean_floor: float = 0.02  # a member's lean below this margin is none
     moderate: float = 0.05  # a margin from here is moderate, below it weak
     strong: float = 0.15  # from here strong
+    ranked: bool = True  # v2 (#697): a horizon pools only its kind's ranking members
     families: Mapping[str, str] = field(default_factory=lambda: dict(FAMILIES))
     consensus: Mapping[str, frozenset[str]] = field(default_factory=lambda: dict(CONSENSUS))
 
@@ -120,12 +142,14 @@ class Rules:
             "lean_floor": self.lean_floor,
             "moderate": self.moderate,
             "strong": self.strong,
+            "ranked": self.ranked,
             "families": dict(sorted(self.families.items())),
             "consensus": {name: sorted(members) for name, members in sorted(self.consensus.items())},
         }
 
 
 RULES = Rules()
+RULES_V1 = Rules(version=1, ranked=False)  # every forecast at the bar close pooled (#676)
 
 
 @dataclass(frozen=True)
@@ -144,12 +168,27 @@ class Member:
 @dataclass(frozen=True)
 class Horizon:
     """A barrier kind at the bar close: its name, its time barrier in minutes, its width there (None
-    without a reference price) and its members' forecasts."""
+    without a reference price), its members' forecasts and its ranking's members (#697: v2 pools only
+    those)."""
 
     kind: str
     minutes: int
     width_ticks: int | None
     members: Sequence[Member]
+    ranked: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class Advisory:
+    """A daily kind beside the verdict (#697, module doc): its name, the sessions its window runs, its
+    classes (rise, middle, fall), today's forecasts (each in the kind's order) and its ranking's
+    members."""
+
+    kind: str
+    sessions: int
+    classes: tuple[str, str, str]
+    members: Sequence[Member]
+    ranked: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -186,6 +225,10 @@ class Side:
 def _probabilities_json(p: Sequence[float]) -> dict[str, float]:
     up, timeout, down = p
     return {"p_up_first": up, "p_timeout": timeout, "p_down_first": down}
+
+
+def _classes_json(classes: Sequence[str], p: Sequence[float]) -> dict[str, float]:
+    return {f"p_{c}": v for c, v in zip(classes, p, strict=True)}
 
 
 @dataclass(frozen=True)
@@ -242,6 +285,7 @@ class Verdict:
     members: Sequence[dict[str, Any]]
     side: Sequence[Side]
     rules: Rules
+    advisory: Sequence[dict[str, Any]] = ()  # the day and the week (#697), as served
 
     @property
     def strength(self) -> str:
@@ -282,19 +326,22 @@ class Verdict:
                 {"name": s.name, "kind": s.kind, "status": s.status, "output": dict(s.output)}
                 for s in self.side
             ],
+            "advisory": list(self.advisory),
             "rules": self.rules.as_json(),
         }
 
 
-def _weights(members: Sequence[Member], rules: Rules) -> dict[str, float]:
-    """Each member's weight in its horizon's pool (module doc): the families alike, a family's
-    members alike within it, a consensus 0 while one of its members takes part."""
-    present = {m.name for m in members}
-    counted = [m for m in members if not (rules.consensus.get(m.name, frozenset()) & present)]
+def _weights(members: Sequence[Member], rules: Rules, ranked: frozenset[str]) -> dict[str, float]:
+    """Each member's weight in its horizon's pool (module doc): v2 only the ranking's members (#697);
+    the families alike, a family's members alike within it, a consensus 0 while one of its members
+    takes part."""
+    weights = {m.name: 0.0 for m in members}
+    pooled = [m for m in members if not rules.ranked or m.name in ranked]
+    present = {m.name for m in pooled}
+    counted = [m for m in pooled if not (rules.consensus.get(m.name, frozenset()) & present)]
     by_family: dict[str, list[str]] = {}
     for m in counted:
         by_family.setdefault(rules.family(m.name), []).append(m.name)
-    weights = dict.fromkeys(present, 0.0)
     for names in by_family.values():
         for name in names:
             weights[name] = 1 / len(by_family) / len(names)
@@ -302,7 +349,7 @@ def _weights(members: Sequence[Member], rules: Rules) -> dict[str, float]:
 
 
 def _pool(horizon: Horizon, market: Market, rules: Rules) -> tuple[Pooled, list[dict[str, Any]]]:
-    weights = _weights(horizon.members, rules)
+    weights = _weights(horizon.members, rules, horizon.ranked)
     counted = [m for m in horizon.members if weights[m.name] > 0]
     probabilities: tuple[float, float, float] | None = None
     if counted:
@@ -344,9 +391,60 @@ def _pool(horizon: Horizon, market: Market, rules: Rules) -> tuple[Pooled, list[
                 "margin": margin,
                 "weight": weights[m.name],
                 "counted": weights[m.name] > 0,
+                "ranked": m.name in horizon.ranked,
             }
         )
     return pooled, shown
+
+
+def advise(advisory: Advisory, rules: Rules) -> dict[str, Any]:
+    """A daily kind beside the verdict, as served (module doc): its pool of its ranked members, its call
+    (up, flat, down; wait without a ranked member) and every forecast with its weight."""
+    weights = _weights(advisory.members, rules, advisory.ranked)
+    counted = [m for m in advisory.members if weights[m.name] > 0]
+    pooled: tuple[float, float, float] | None = None
+    if counted:
+        first, middle, third = (sum(weights[m.name] * m.probabilities[i] for m in counted) for i in range(3))
+        pooled = (first, middle, third)
+    margin = None if pooled is None else pooled[0] - pooled[2]
+    call = (
+        WAIT
+        if margin is None
+        else UP
+        if margin >= rules.margin
+        else DOWN
+        if margin <= -rules.margin
+        else FLAT
+    )
+    forecasters = []
+    for m in advisory.members:
+        own = m.probabilities[0] - m.probabilities[2]
+        forecasters.append(
+            {
+                "name": m.name,
+                "family": rules.family(m.name),
+                "status": m.status,
+                "probabilities": _classes_json(advisory.classes, m.probabilities),
+                "lean": rules.lean(own),
+                "strength": rules.strength(own),
+                "margin": own,
+                "weight": weights[m.name],
+                "counted": weights[m.name] > 0,
+                "ranked": m.name in advisory.ranked,
+            }
+        )
+    return {
+        "kind": advisory.kind,
+        "sessions": advisory.sessions,
+        "call": call,
+        "probabilities": None if pooled is None else _classes_json(advisory.classes, pooled),
+        "families": len({rules.family(m.name) for m in counted}),
+        "members": len(counted),
+        "lean": None if margin is None else rules.lean(margin),
+        "strength": None if margin is None else rules.strength(margin),
+        "margin": margin,
+        "forecasters": forecasters,
+    }
 
 
 def _expected_net(
@@ -375,10 +473,11 @@ def verdict(
     held: Held | None = None,
     side: Sequence[Side] = (),
     rules: Rules = RULES,
+    advisory: Sequence[Advisory] = (),
 ) -> Verdict:
     """The verdict of ``symbol`` at ``bar_close`` (module doc) from its barrier ``horizons``, the
-    prices (``market``), the trader's position in it (``held``) and the forecasts shown beside it
-    (``side``)."""
+    prices (``market``), the trader's position in it (``held``), the forecasts shown beside it
+    (``side``) and the day and the week, advisory (#697)."""
     pools: list[Pooled] = []
     members: list[dict[str, Any]] = []
     for h in sorted(horizons, key=lambda h: h.minutes):
@@ -386,9 +485,12 @@ def verdict(
         pools.append(pooled)
         members += shown
     seen = [p for p in pools if p.margin is not None]
+    advised = [advise(a, rules) for a in advisory]
 
     def made(action: str, meaning: str | None, reason: str | None, on: Pooled | None) -> Verdict:
-        return Verdict(symbol, bar_close, action, meaning, reason, on, held, pools, members, side, rules)
+        return Verdict(
+            symbol, bar_close, action, meaning, reason, on, held, pools, members, side, rules, advised
+        )
 
     if not seen:
         return made(WAIT, None, NO_MEMBERS, None)

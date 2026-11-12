@@ -15,7 +15,9 @@ simulation, ``krx-quant replay``). The mode decides the rest, and only that:
 - ``DEMO`` (the demo's morning): as ``REPLAY``, with the daily kinds; its gates are the demo's own.
 
 ``LIVE`` and ``DEMO`` read the trader's positions from its store (``state/trader.sqlite3``) for each
-bar close's verdicts (#676, ``held``); ``REPLAY`` holds nothing.
+bar close's verdicts (#676, ``held``); ``REPLAY`` holds nothing. They also rank each verdict horizon's
+algorithms at each daily review (#697, ``ranks``), ``LIVE`` with the walk-forward evidence the
+pre-validations left in ``state/`` (``walk_forward``, ``ranking_evidence.py``); ``REPLAY`` ranks none.
 
 A caller gives what is the mode's own input, not the server's configuration: the store, the clock,
 the models and the climate table, the algorithms and kinds (pre-validation's candidate) and, but
@@ -54,6 +56,7 @@ from krx_quant.macro import day_regime
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.predictions import PredictionStore
+from krx_quant.ranking import WalkForwardOf
 from krx_quant.signals import SignalRule
 from krx_quant.trader.store import DB_NAME as TRADER_DB
 from krx_quant.trader.store import read_held
@@ -70,12 +73,15 @@ class Mode(Enum):
 
 @dataclass(frozen=True)
 class Gates:
-    """Which algorithms may run (``admits``), which of those kept out were refused, and the code
-    each running bar-close algorithm runs (#454). Without: every registered algorithm runs."""
+    """Which algorithms may run (``admits``), which of those kept out were refused, the code each
+    running bar-close algorithm runs (#454), and the ranking's walk-forward evidence (#697). Without:
+    every registered algorithm runs, ranked on its live days alone."""
 
     admits: Admits | None = None
     refused: Refused | None = None
     revisions: RevisionGate | None = None
+    # The ranking's walk-forward evidence (#697, ``ranking_evidence.py``); without: live days only.
+    walk_forward: WalkForwardOf | None = None
 
 
 class EngineOptions(TypedDict):
@@ -105,14 +111,17 @@ class EngineOptions(TypedDict):
     watch_loop: bool
     garbage: Garbage | None
     held: HeldNow | None
+    ranks: bool
+    walk_forward: WalkForwardOf | None
 
 
 # The options each mode sets of its own (module doc); the others are the settings', in every mode.
-GATES = frozenset({"admits", "refused", "revisions"})
+GATES = frozenset({"admits", "refused", "revisions", "walk_forward"})
 DAILY = frozenset({"daily", "daily_algorithms", "daily_features", "daily_feature_names"})
 TRADER = frozenset({"held"})  # the trader's positions (#676), live and in the demo
+RANKING = frozenset({"ranks"})  # the nightly ranking (#697), live and in the demo
 LIVE_ONLY = frozenset({"commit", "signal_rule", "watch_loop", "garbage"})
-MODE_OPTIONS = GATES | DAILY | TRADER | LIVE_ONLY
+MODE_OPTIONS = GATES | DAILY | TRADER | RANKING | LIVE_ONLY
 
 
 def live_gates(settings: Settings) -> Gates:
@@ -120,12 +129,14 @@ def live_gates(settings: Settings) -> Gates:
     its latest pre-validation refused is told once, not as waiting (#310), and a running bar-close
     algorithm whose code changed is judged again (#454)."""
     from krx_quant.prevalidation import admits, refusals
+    from krx_quant.ranking_evidence import WalkForwardEvidence
     from krx_quant.revisions import RevisionGate
 
     return Gates(
         admits(settings.state_dir, settings.target_version),
         refusals(settings.state_dir, settings.target_version),
         RevisionGate(settings.state_dir, settings.target_version),
+        WalkForwardEvidence(settings.state_dir, settings.target_version),
     )
 
 
@@ -189,6 +200,9 @@ def engine_options(
         garbage=Garbage() if live else None,
         # The trader's positions, for a verdict's SELL (#676): its store, live and in the demo.
         held=partial(read_held, settings.state_dir / TRADER_DB) if mode is not Mode.REPLAY else None,
+        # The nightly ranking (#697); its walk-forward evidence is a gate's (the pre-validations').
+        ranks=mode is not Mode.REPLAY,
+        walk_forward=gates.walk_forward,
     )
 
 

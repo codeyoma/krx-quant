@@ -2870,7 +2870,7 @@
       "required": ["version", "verdicts"],
       "additionalProperties": false,
       "properties": {
-        "version": {"type": "integer", "minimum": 1, "description": "the verdict rules' version now (verdict.VERDICT_VERSION)"},
+        "version": {"type": "integer", "minimum": 1, "description": "the verdict rules' version now (verdict.VERDICT_VERSION): 2 since #697"},
         "verdicts": {"type": "array", "items": {"$ref": "#/$defs/verdict_item"}}
       }
     },
@@ -2905,7 +2905,107 @@
         "horizons": {"type": "array", "items": {"$ref": "#/$defs/verdict_horizon"}},
         "members": {"type": "array", "items": {"$ref": "#/$defs/verdict_member"}},
         "side": {"type": "array", "items": {"$ref": "#/$defs/verdict_side"}},
+        "advisory": {"type": "array", "items": {"$ref": "#/$defs/verdict_advisory"}, "description": "#697, version 2: the day and the week (the daily kinds' forecasts of today, from 08:50), each pooled from its ranking's members and called up, flat or down (wait without one); shown, never acted on. Absent in a version-1 verdict."},
         "rules": {"$ref": "#/$defs/verdict_rules"}
+      }
+    },
+    "verdict_advisory": {
+      "type": "object",
+      "required": ["kind", "sessions", "call", "probabilities", "families", "members", "lean", "strength", "margin", "forecasters"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string"},
+        "sessions": {"type": "integer", "minimum": 1, "description": "the sessions its window runs: 1 the day, 5 the week"},
+        "call": {"enum": ["up", "flat", "down", "wait"], "description": "up when its pooled up beats its down by the margin, down the other way, flat between; wait without a ranked member"},
+        "probabilities": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}}], "description": "p_<class> in the kind's order; null without a ranked member"},
+        "families": {"type": "integer", "minimum": 0},
+        "members": {"type": "integer", "minimum": 0},
+        "lean": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/verdict_lean"}]},
+        "strength": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/verdict_strength"}]},
+        "margin": {"type": ["number", "null"], "minimum": -1, "maximum": 1},
+        "forecasters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "family", "status", "probabilities", "lean", "strength", "margin", "weight", "counted", "ranked"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string"},
+              "family": {"type": "string"},
+              "status": {"enum": ["probation", "active", "bench", "retired", "clone", "shadow", null]},
+              "probabilities": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}},
+              "lean": {"$ref": "#/$defs/verdict_lean"},
+              "strength": {"$ref": "#/$defs/verdict_strength"},
+              "margin": {"type": "number", "minimum": -1, "maximum": 1},
+              "weight": {"type": "number", "minimum": 0, "maximum": 1},
+              "counted": {"type": "boolean"},
+              "ranked": {"type": "boolean", "description": "a member of the kind's latest ranking"}
+            }
+          }
+        }
+      }
+    },
+    "ranking": {
+      "description": "GET /v1/ranking (#697): each verdict horizon's latest ranking, of night or the latest night before it",
+      "type": "object",
+      "required": ["version", "kinds"],
+      "additionalProperties": false,
+      "properties": {
+        "version": {"type": "integer", "minimum": 1, "description": "the ranking rules' version now (ranking.RANKING_VERSION)"},
+        "kinds": {"type": "array", "items": {"$ref": "#/$defs/ranking_kind"}}
+      }
+    },
+    "ranking_kind": {
+      "type": "object",
+      "required": ["kind", "night", "version", "made_at", "through", "rules", "members", "rows"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string"},
+        "night": {"type": "string", "format": "date", "description": "the trading day it was made after (its daily review)"},
+        "version": {"type": "integer", "minimum": 1},
+        "made_at": {"$ref": "#/$defs/time"},
+        "through": {"type": ["string", "null"], "format": "date", "description": "the latest day its evidence counts"},
+        "rules": {
+          "type": "object",
+          "required": ["level", "nights", "window_days", "min_days", "min_calls"],
+          "additionalProperties": false,
+          "properties": {
+            "level": {"type": "number", "minimum": 0, "maximum": 1, "description": "the skill interval's two-sided level; ranked by its lower bound"},
+            "nights": {"type": "integer", "minimum": 1, "description": "the rankings running a result holds before an algorithm enters or leaves"},
+            "window_days": {"type": ["integer", "null"], "minimum": 1, "description": "the latest live days counted; null: every one (a daily kind)"},
+            "min_days": {"type": "integer", "minimum": 0},
+            "min_calls": {"type": "integer", "minimum": 0}
+          }
+        },
+        "members": {"type": "array", "items": {"type": "string"}, "description": "the algorithms the verdict pools at this horizon; empty: it waits"},
+        "rows": {"type": "array", "items": {"$ref": "#/$defs/ranking_row"}}
+      }
+    },
+    "ranking_row": {
+      "type": "object",
+      "required": ["rank", "algorithm", "status", "source", "days", "n", "skill", "skill_low", "skill_high", "precision", "calls", "call_rate", "longs", "net_ticks", "ranked", "why", "qualifies", "member", "nights", "pending"],
+      "additionalProperties": false,
+      "properties": {
+        "rank": {"type": ["integer", "null"], "minimum": 1, "description": "by the skill's lower bound, highest first; null unranked"},
+        "algorithm": {"type": "string"},
+        "status": {"enum": ["probation", "active", "bench", "retired", "clone", "shadow", null]},
+        "source": {"enum": ["live", "walk_forward", null], "description": "its recorded forecasts, or its pre-validation's walk-forward while those are too few; null without evidence"},
+        "days": {"type": "integer", "minimum": 0},
+        "n": {"type": "integer", "minimum": 0, "description": "its predictions paired with the climate's"},
+        "skill": {"type": ["number", "null"], "description": "the days' mean of the climate's log loss less its own; null unranked"},
+        "skill_low": {"type": ["number", "null"]},
+        "skill_high": {"type": ["number", "null"]},
+        "precision": {"type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "the share of its rise and fall calls that happened"},
+        "calls": {"type": "integer", "minimum": 0},
+        "call_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "longs": {"type": "integer", "minimum": 0, "description": "a barrier kind's long calls with a P&L"},
+        "net_ticks": {"type": ["number", "null"], "description": "their mean net after cost, ticks; null without one"},
+        "ranked": {"type": "boolean"},
+        "why": {"enum": ["few_days", "few_calls", "no_evidence", null], "description": "why unranked"},
+        "qualifies": {"type": "boolean", "description": "ranked and its lower bound above 0, this night"},
+        "member": {"type": "boolean"},
+        "nights": {"type": "integer", "minimum": 0, "description": "the rankings it has held its member state"},
+        "pending": {"type": "integer", "minimum": 0, "description": "the rankings running whose result was the other"}
       }
     },
     "verdict_strength": {"enum": ["none", "weak", "moderate", "strong"]},
@@ -2948,14 +3048,15 @@
         "name": {"type": "string"},
         "kind": {"type": "string"},
         "family": {"type": "string"},
-        "status": {"enum": ["probation", "active", "bench", "retired", "clone", null]},
+        "status": {"enum": ["probation", "active", "bench", "retired", "clone", "shadow", null], "description": "its lifecycle at the bar close: its status, or shadow (#696, #697: a shadow one the ranking made a member runs before the verdict)"},
         "evidence": {"type": "integer", "minimum": 0},
         "probabilities": {"$ref": "#/$defs/barrier_probabilities"},
         "lean": {"$ref": "#/$defs/verdict_lean"},
         "strength": {"$ref": "#/$defs/verdict_strength"},
         "margin": {"type": "number", "minimum": -1, "maximum": 1},
         "weight": {"type": "number", "minimum": 0, "maximum": 1},
-        "counted": {"type": "boolean"}
+        "counted": {"type": "boolean"},
+        "ranked": {"type": "boolean", "description": "#697, version 2: a member of the kind's latest ranking (only those are counted); absent in a version-1 verdict"}
       }
     },
     "verdict_side": {
@@ -2979,6 +3080,7 @@
         "lean_floor": {"type": "number", "minimum": 0, "maximum": 1},
         "moderate": {"type": "number", "minimum": 0, "maximum": 1},
         "strong": {"type": "number", "minimum": 0, "maximum": 1},
+        "ranked": {"type": "boolean", "description": "#697, version 2: a horizon pools only its kind's ranking members; absent in a version-1 verdict"},
         "families": {"type": "object", "additionalProperties": {"type": "string"}},
         "consensus": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}}
       }

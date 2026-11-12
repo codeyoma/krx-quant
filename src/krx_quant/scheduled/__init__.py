@@ -152,6 +152,7 @@ from krx_quant.scheduled.probes import (
 from krx_quant.scheduled.research import (
     INVERSE_REPLAY,
     NIGHTLY_HIT_RATES,
+    RANKING_EVIDENCE,
     SMT_DISCOVERY,
     SMT_HOLDOUT,
     VERDICT_REPLAY,
@@ -309,6 +310,7 @@ JOBS: tuple[Job[Any], ...] = (
     CLOSE_RESTART_MEMORY_AGAIN,
     INVERSE_REPLAY,
     VERDICT_REPLAY,
+    RANKING_EVIDENCE,
     LIVE_PROBE,
     FILL_NOTICE_COLUMNS,
     NIGHTLY_HIT_RATES,

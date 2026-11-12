@@ -47,7 +47,9 @@ before d (begun by d − H: the H − 1 days before d are purged, their labels h
 on); the baselines' past, the windows ended before the day. With H = 1 every window ends on its
 day, as before. The report (``state/prevalidations/<name>.json``, ``kind``, the kind's answer version) is
 what the engine's gate reads (``prevalidation.admits``), with the walk-forward's folds, symbols
-and years beside it.
+and years beside it. The same walk-forward is kept as the nightly ranking's evidence (#697,
+``ranking_evidence.keep_daily``: ``state/rankings/<name>.json``, a day's skill against the kind's climate
+each).
 """
 
 from __future__ import annotations
@@ -99,6 +101,7 @@ from krx_quant.prevalidation import (
     seed_history,
     tried_level,
 )
+from krx_quant.ranking_evidence import keep_daily
 from krx_quant.stats import (
     enough,
     gains_by_day,
@@ -665,6 +668,9 @@ def prevalidate_daily(
             inputs=inputs,
         )
         result = replace(result, earlier_runs=before, earlier_on_these_days=on_days)
+        # The same walk-forward is the ranking's evidence (#697): kept beside the report.
+        if run.days:
+            keep_daily(settings.state_dir, algorithm, kind, run.records, inputs, now)
         path = report_path(settings.state_dir, name)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")

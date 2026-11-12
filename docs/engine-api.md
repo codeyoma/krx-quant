@@ -238,9 +238,10 @@
 | `special_windows` | `kind`(`vi`, `circuit_breaker`, `sidecar`, `market_halt`(#625)), `symbol`(VI의 종목, 시장 전체면 비어 있음), `start`, `end`(해제 시각. 해제를 아직 모르는 VI는 발동 + 3분, 서킷브레이커 3단계는 그날 끝, 재개를 아직 모르는 시장 전체 매매 정지는 그날 장 마감), `detail`(서킷브레이커의 `1단계`·`2단계`·`3단계`, VI 종류 `static`·`dynamic`·`both`, 시장 전체 매매 정지의 `정지`·`단일가`·`재개`, 그 밖에는 비어 있음), `learned_at`(이 판을 받은 시각), `first_learned_at`(첫 판을 받은 시각, #625. 그 전에 남긴 행은 비어 있음: trader의 재생이 이때부터 구간을 안다). 엔진이 알게 된 특수 상황 구간(#236, 위 "특수 상황"). (`kind`, `symbol`, `start`)마다 하나이고, 새 판을 알면 그 행의 `end`, `detail`, `learned_at`을 바꾼다. 지난날은 엔진이 시작할 때 녹화로 채운다(아래 "지난 특수 상황 구간"). 따로 둔 표다 |
 | `special_days` | `day`, `source`(녹화를 읽은 곳. 어디에도 없었으면 비어 있음), `windows`(판정한 구간 수), `decided_at`, `rules`(판정한 규칙의 판 `special.RULES`, #625: 2. 그 전에 남긴 행은 1이고, 다음 시작 때 녹화로 다시 판정한다). 녹화로 특수 상황 구간을 판정한 지난날(#236). 구간이 없던 날도 남아서 다음 시작 때 다시 읽지 않는다. 따로 둔 표다 |
 | `smt_events` | `definition`(`rolling_extreme`), `version`(정의의 판, 지금 1), `bar_close`(묶음의 첫 봉 마감 t), `a`, `b`(쌍, `smt.PAIRS`의 순서: `005930`·`000660`, `005930`·`KOSPI200F`, `000660`·`KOSPI200F`), `direction`(`bearish`, `bullish`), `minutes`(L: 15, 30), `swept`(직전 L분의 극값을 넘은 쪽: `a`나 `b`의 코드), `source`(`live`), `recorded_at`(엔진이 쓴 시각), `a_extreme`, `b_extreme`(#521: 첫 봉 마감에서 `a`와 `b`가 견준 직전 L분 극값(하락은 최고가, 상승은 최저가)을 가진 1분봉의 시작. 같은 값이 여럿이면 가장 늦은 것. #521 전에 쓴 행은 비어 있다). 엔진이 봉 마감마다 판정한 SMT 다이버전스의 묶음 하나에 한 행(#520, [design.md](design.md) 5장 "SMT 다이버전스"). (`definition`, `version`, `bar_close`, `a`, `b`, `direction`, `minutes`, `source`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
-| `verdicts` | `symbol`, `bar_close`, `version`(판정 규칙의 판 `verdict.VERDICT_VERSION`, 지금 1), `verdict`(`buy`, `sell`, `wait`), `made_at`(엔진이 만든 시각, 그 봉 마감의 알고리즘이 다 끝난 뒤), `body`(JSON: 아래 `GET /v1/verdict`의 항목 하나 그대로): 종목의 봉 마감마다의 판정(#676, [design.md](design.md) 5장 "판정"). (`symbol`, `bar_close`, `version`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
+| `verdicts` | `symbol`, `bar_close`, `version`(판정 규칙의 판 `verdict.VERDICT_VERSION`, 지금 2. **바뀜** (2026-11-12, #PR): 1 → 2. 이유: 순위의 멤버만 합친다(#697)), `verdict`(`buy`, `sell`, `wait`), `made_at`(엔진이 만든 시각, 그 봉 마감의 알고리즘이 다 끝난 뒤), `body`(JSON: 아래 `GET /v1/verdict`의 항목 하나 그대로): 종목의 봉 마감마다의 판정(#676, [design.md](design.md) 5장 "판정"). (`symbol`, `bar_close`, `version`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
+| `rankings` | `night`(그 순위를 만든 거래일, 날마다 점검 뒤), `kind`(판정의 지평: 장벽 넷, `open_to_close`, `open_to_close_5d`), `version`(순위 규칙의 판 `ranking.RANKING_VERSION`, 지금 1), `made_at`, `through`(증거가 세는 마지막 날, 없으면 null), `body`(JSON: 아래 `GET /v1/ranking`의 `kinds` 항목 하나 그대로): 밤마다의 순위(#697, [design.md](design.md) 5장 "순위"). (`night`, `kind`, `version`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
 
-`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264), `inputs`(#304)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. `smt_events`(#520, `bar_close` 인덱스)도 그렇고, `verdicts`(#676, `bar_close` 인덱스)도 그렇다. `smt_events.a_extreme`·`b_extreme`(#521)은 `band`처럼 더한 열이다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_predictions`(인덱스 (`run`, `bar_close`)), `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
+`predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264), `inputs`(#304)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. `smt_events`(#520, `bar_close` 인덱스)도 그렇고, `verdicts`(#676, `bar_close` 인덱스)와 `rankings`(#697)도 그렇다. `smt_events.a_extreme`·`b_extreme`(#521)은 `band`처럼 더한 열이다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_predictions`(인덱스 (`run`, `bar_close`)), `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
 
 시각은 KST ISO 8601 문자열이다. 스키마 버전은 `PRAGMA user_version`에 있다(지금 4). 엔진이 시작할 때 예전 버전의 DB를 데이터를 지키며 올린다. 더 새 버전의 DB는 거부하고 시작하지 않는다(`... was written by a newer engine (schema N)`). 그래서 스키마를 올린 엔진을 배포한 뒤에는 옛 커밋으로 되돌려도 엔진이 뜨지 않는다([operations.md](operations.md#4-업데이트-배포) 4장).
 
@@ -1064,7 +1065,36 @@ KRX 마감 흐름 화면이 읽는 그날의 마감 리밸런싱 수요다(`clos
 - `horizons`: 그 봉 마감에 예측한 장벽 지평마다, 짧은 것부터. `width_ticks`(그 종류의 폭 w, 기준가가 없으면 `null`), `probabilities`(합친 세 확률, 구성원이 없으면 `null`), `families`·`members`(센 계열과 구성원 수), `lean`·`strength`·`margin`(합친 것의 기울기), `target`·`stop`(기준가 ± w × 호가단위), `expected_net`(그 지평에 지금 매도 1호가로 산 한 주의 기대 순손익, 원. 목표·손절·시간 만료 셋을 trader의 왕복 공식으로 센다. 호가가 없거나 매도 1호가가 손절가와 목표가 사이에 있지 않으면 `null`), `expected_net_ticks`(같은 값을 호가단위로).
 - `members`: 지평마다의 구성원. `name`, `kind`(그 지평의 종류), `family`, `status`(`probation`, `active`, `bench`, 기록이 없으면 `null`), `evidence`(그 종류의 예측 중 정답이 난 수. 엔진이 시작할 때와 날마다 점검 뒤에 센다), `probabilities`(자기 세 확률 그대로), `lean`(`up`, `down`, `none`)·`strength`·`margin`(자기 것), `weight`(합칠 때의 무게. 계열마다 같고 계열 안에서 나눈다), `counted`(셌는지. 자기 구성원과 함께 있는 합의는 `false`, 무게 0).
 - `side`: 섞지 않고 옆에 보이는 예측. 방향 알고리즘(`kind` `direction`, `output`은 `p_up`, `p_flat`, `p_down`, `expected_ticks`)과 최종 합의(`consensus-final`, `status` `null`), 변동폭 같은 장벽이 아닌 종류의 알고리즘(`output`은 그 종류의 출력 그대로).
-- `rules`: 그 판정의 규칙 상수(마진, 기울기 등급, 계열 표, 합의 표).
+- `rules`: 그 판정의 규칙 상수(마진, 기울기 등급, 계열 표, 합의 표). 버전 2는 `ranked`(참: 지평마다 순위의 멤버만 합친다)도 낸다.
+- **판정 버전 2 (#697).** 지금 엔진은 버전 2를 낸다(위 예의 값은 버전 1 때의 것). 다른 것:
+  - 지평마다 그 종류의 최신 순위(`GET /v1/ranking`)의 멤버만 합친다. `members`의 항목마다 `ranked`(순위의 멤버인지)가 붙고, 멤버가 아닌 예측은 `counted` 거짓, `weight` 0이다. `status`는 봉 마감 때의 수명 상태이고 순위가 멤버로 정한 그림자 알고리즘은 `shadow`다. `reason` `no_members`는 어느 지평에도 순위의 멤버가 낸 예측이 없다는 뜻이다.
+  - `advisory`: 하루(`open_to_close`, `sessions` 1)와 한 주(`open_to_close_5d`, `sessions` 5)의 참고. 그날 08:50 예측을 그 종류의 순위 멤버로 같은 방식으로 합친다. `call`은 `up`(합친 위 − 아래 ≥ 마진 0.05), `down`(≤ −0.05), `flat`(그 사이), `wait`(멤버의 예측이 없다)이다. `probabilities`(`p_up`, `p_flat`, `p_down`, 없으면 `null`), `families`, `members`, `lean`, `strength`, `margin`, `forecasters`(그날 예측한 알고리즘마다 `name`, `family`, `status`, `probabilities`, `lean`, `strength`, `margin`, `weight`, `counted`, `ranked`). 매매하지 않는다: `verdict`는 장벽 지평만으로 정한다. 하루 한 번 종류를 돌리지 않는 엔진(재생)은 빈 목록이다.
+  - 버전 1로 저장된 판정에는 `advisory`, `ranked`, `rules.ranked`가 없다.
+
+### `GET /v1/ranking?night=D` (#697)
+
+판정 지평마다의 최신 순위다(`ranking.py`, [design.md](design.md) 5장 "순위"): 엔진이 날마다 점검 뒤 만들어 저장한 것(`rankings`)을 그대로 준다. `night`(YYYY-MM-DD)를 주면 그 밤, 없으면 그 전의 마지막 밤의 것이고, 없으면 가장 최근이다. 날짜가 아니면 400이다. 아직 순위가 없는 종류는 빠진다.
+
+```json
+{
+  "version": 1,
+  "kinds": [{
+    "kind": "barrier_15m", "night": "2026-11-13", "version": 1,
+    "made_at": "2026-11-13T15:40:02+09:00", "through": "2026-11-13",
+    "rules": {"level": 0.95, "nights": 3, "window_days": 20, "min_days": 10, "min_calls": 30},
+    "members": ["breiman-15m"],
+    "rows": [{"rank": 1, "algorithm": "breiman-15m", "status": "shadow", "source": "walk_forward",
+      "days": 20, "n": 7400, "skill": 0.012, "skill_low": 0.004, "skill_high": 0.02,
+      "precision": 0.58, "calls": 900, "call_rate": 0.12, "longs": 450, "net_ticks": 0.3,
+      "ranked": true, "why": null, "qualifies": true, "member": true, "nights": 1, "pending": 0}]
+  }]
+}
+```
+
+(값은 지어낸 것이다.)
+
+- `version`(맨 위): 지금 엔진의 순위 규칙 판. `kinds`의 항목마다: `kind`, `night`, `version`, `made_at`, `through`(증거가 세는 마지막 날), `rules`(`level` 기술 구간의 양쪽 신뢰수준, `nights` 멤버가 바뀌는 연속 밤 수, `window_days` 실시간으로 세는 최근 날 수(`null`: 모든 날, 하루 한 번 종류), `min_days`·`min_calls` 최소 증거), `members`(판정이 그 지평에서 합치는 알고리즘, 비면 그 지평은 대기), `rows`.
+- `rows`는 순위 순서(기술 하한이 높은 것부터)이고 순위 밖은 이름 순으로 뒤에 온다. `rank`(순위 밖이면 `null`), `algorithm`, `status`(그 밤의 상태, 등록되지 않았으면 `shadow`), `source`(`live` 기록된 예측, `walk_forward` 사전 검증의 전진 학습, 증거가 없으면 `null`), `days`, `n`(기후와 짝지은 예측 수), `skill`·`skill_low`·`skill_high`(날마다 기후의 로그 손실 − 자기 로그 손실의 평균과 95% 구간, 순위 밖이면 `null`), `precision`(상승·하락 호출이 맞은 비율), `calls`, `call_rate`, `longs`·`net_ticks`(장벽 종류의 매수 호출 중 손익이 있는 것과 그 비용 뒤 평균 순손익, 틱), `ranked`, `why`(순위 밖의 까닭: `few_days`, `few_calls`, `no_evidence`), `qualifies`(그 밤 하한 > 0), `member`, `nights`(그 멤버 상태로 지난 순위 수), `pending`(반대 결과가 이어진 순위 수, 셋이면 바뀐다).
 
 ### `GET /v1/algorithms/{name}/stats?symbol=&period=&special=`
 

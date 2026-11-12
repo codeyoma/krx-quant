@@ -38,7 +38,7 @@ from krx_quant.trader import SYMBOL
 from krx_quant.trader.book import STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.book import Rules as BookRules
 from krx_quant.trader.replay import Fills, Recording, micros
-from krx_quant.verdict import RULES
+from krx_quant.verdict import RULES, RULES_V1
 from krx_quant.verdict_replay import (
     BEFORE_ENTRY,
     FILLED,
@@ -99,18 +99,42 @@ def day_of(
     closes: Mapping[datetime, Close],
     day: Recording | None,
     decided: Mapping[datetime, datetime] | None = None,
+    ranked: Mapping[str, frozenset[str]] | None = None,
 ) -> Day:
+    """The day replayed by version 1's rules (every forecast pooled), or with ``ranked`` version 2's
+    (#697: each kind's ranking members alone)."""
     session = CALENDAR.session(TODAY)
     assert session is not None
     book = BookRules(fee_rate=FEE)
     fills = Fills(day, [], book)
-    return Day(TODAY, session, closes, [BARRIER, FIFTEEN], fills, decided or {}, FEE, book)
+    rules = RULES_V1 if ranked is None else RULES
+    return Day(TODAY, session, closes, [BARRIER, FIFTEEN], fills, decided or {}, FEE, book, rules, ranked)
 
 
 def all_members(day: Day) -> Replayed:
     into = Replayed()
     day.replay(lambda b, c: c.forecasts, into)
     return into
+
+
+def test_version_2_replays_only_the_days_ranking_members() -> None:
+    """Input (#697): the same lean up at 10:00, replayed by version 2 with the 4 minutes' ranking making
+    ``up-4`` a member, then making none. Output: BUY with it a member; WAIT ``no_members`` without."""
+    recorded_quotes = (
+        ("09:59:58", 70_000, 70_100),
+        ("10:00:01", 70_000, 70_100),
+        ("10:02:00", 70_500, 70_600),
+    )
+
+    member = all_members(
+        day_of(
+            {at("10:00:00"): close()}, recording(*recorded_quotes), ranked={"barrier": frozenset({"up-4"})}
+        )
+    )
+    none = all_members(day_of({at("10:00:00"): close()}, recording(*recorded_quotes), ranked={}))
+
+    assert member.verdicts[TODAY] == {"buy": 1}
+    assert none.verdicts[TODAY] == {"wait_no_members": 1} and not none.alone
 
 
 def test_a_buy_is_bought_at_the_first_ask_after_its_decision_and_sold_at_its_target() -> None:
@@ -304,7 +328,7 @@ def test_the_recorded_days_are_replayed_both_ways_each_model_trained_before_its_
     stored_live(s.state_dir, days[2], "up-4", UP)
 
     report, code = verdict_replay(
-        s, AFTER, algorithms=[], kind_algorithms=[four, fifteen], kinds=[BARRIER, FIFTEEN]
+        s, AFTER, algorithms=[], kind_algorithms=[four, fifteen], kinds=[BARRIER, FIFTEEN], version=1
     )
 
     assert code == 0
@@ -362,7 +386,8 @@ def test_the_job_runs_once_the_first_night_and_again_after_a_failure_on_other_co
 
 
 def test_the_rules_are_the_verdict_s_version() -> None:
-    assert RULES.version == 1
+    assert RULES.version == 2 and RULES.ranked, "#697: the ranking's members"
+    assert RULES_V1.version == 1 and not RULES_V1.ranked
 
 
 def _stored(lifecycle: str | None, at: datetime, shown: datetime) -> NewKindPrediction:

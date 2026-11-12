@@ -78,13 +78,25 @@ def _inverse_replay(day: date | None) -> int:
     return code
 
 
-def _verdict_replay(day: date | None, days: int) -> int:
+def _verdict_replay(day: date | None, days: int, version: int) -> int:
     """The verdict (#676) made again at each recorded bar close and its BUYs replayed (#679): counts, ticks
-    and won."""
+    and won; of the verdict ``version`` (#697)."""
     from krx_quant.verdict_replay import verdict_replay
 
-    report, code = verdict_replay(Settings.from_env(require_kis=False), datetime.now(KST), day, days)
+    report, code = verdict_replay(
+        Settings.from_env(require_kis=False), datetime.now(KST), day, days, version=version
+    )
     print(report)
+    return code
+
+
+def _ranking_evidence() -> int:
+    """Each daily algorithm without current walk-forward evidence walked forward for the ranking (#697):
+    days, calls and dates, no price."""
+    from krx_quant.ranking_evidence import walk_stale
+
+    lines, code = walk_stale(Settings.from_env(require_kis=False), datetime.now(KST))
+    print("\n".join(lines))
     return code
 
 
@@ -141,4 +153,17 @@ def add(sub: Commands) -> None:
     verdict_cmd.add_argument(
         "--days", type=positive, default=20, help="the recorded trading days replayed (default 20)"
     )
-    verdict_cmd.set_defaults(run=lambda args: _verdict_replay(args.day, args.days))
+    verdict_cmd.add_argument(
+        "--version",
+        type=int,
+        choices=(1, 2),
+        default=2,
+        help="the verdict's version (#697): 2 pools each day's ranking members (default), 1 every forecast",
+    )
+    verdict_cmd.set_defaults(run=lambda args: _verdict_replay(args.day, args.days, args.version))
+    sub.add_parser(
+        "ranking-evidence",
+        help="walk forward each daily algorithm whose ranking evidence (#697, state/rankings/<name>.json) is"
+        " missing or not of its code, answers and inputs, and write it: a day's log-loss skill against the"
+        " kind's climate each; changes no status or report; no price",
+    ).set_defaults(run=lambda args: _ranking_evidence())

@@ -91,6 +91,7 @@ async def replay(
     daily_features: DailyFeatures | None = None,
     daily_feature_names: Collection[str] = (),
     held: HeldNow | None = None,
+    ranks: bool = False,
 ) -> PredictionEngine:
     """Feed ``events`` (in receipt order) received by ``until`` to an engine storing into ``db``.
 
@@ -105,7 +106,8 @@ async def replay(
     given their KRX days (``daily``), with their algorithms and features. With ``revisions`` (#454,
     tests) it keeps the code each running bar-close algorithm runs, as live; ``refused`` tells which
     of those ``admits`` keeps out were refused (#561: the demo's). ``held`` (#676, tests) gives the
-    trader's positions its verdicts read; without, nothing is held.
+    trader's positions its verdicts read; without, nothing is held. ``ranks`` (#697, tests) ranks each
+    verdict horizon's algorithms at the daily review, as live (on the live days alone).
     """
     clock = FakeClock(start or datetime.combine(kst_day(until), time(), KST))
     engine = PredictionEngine(
@@ -137,6 +139,7 @@ async def replay(
         daily_features=daily_features,
         daily_feature_names=daily_feature_names,
         held=held,
+        ranks=ranks,
     )
     await replay_into(engine, clock, events, until=until, display_delay=display_delay)
     return engine

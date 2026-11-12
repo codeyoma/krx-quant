@@ -24,6 +24,12 @@ nothing: no scoring, no status, no model reads it.
   engine). A day its model could not be trained for (nothing to learn before it: its defaults) it takes
   no part. The baselines are never members.
 
+**The verdict's version** (#697): by default the engine's now, 2: each replayed day's horizons pool only
+the members of a ranking made from the evidence before that day (``ranking.rank_kinds``: the engine
+database's recorded forecasts, else the pre-validations' walk-forward, ``ranking_evidence``), carried
+night to night through the replayed days as the live ranking is (the first day's taken as it is); the
+report names each day's members. ``--version 1`` replays #676's rules, every forecast pooled.
+
 **The verdict's inputs at a bar close**, as the engine gives them (``engine._judge``): each horizon's
 width and the bar close's reference mid-point and tick are those its answer fixed when its window opened
 (the samples' answer path: ``w``, ``anchor``, ``tick``, nothing it saw after); the quote is the latest
@@ -95,6 +101,8 @@ from krx_quant.kinds import Kind
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 from krx_quant.predictions import DB_NAME, not_shadow_in, read_only
 from krx_quant.prevalidation import PREVALIDATION_DAYS, _WalkForward
+from krx_quant.ranking import BAR_CLOSE, Snapshot, WalkForwardOf, rank_kinds
+from krx_quant.ranking_evidence import WalkForwardEvidence
 from krx_quant.sample_store import night_reads
 from krx_quant.stats import day_mean
 from krx_quant.trader import SYMBOL
@@ -126,6 +134,7 @@ from krx_quant.verdict import (
     BUY,
     EXIT,
     RULES,
+    RULES_V1,
     SELL,
     Held,
     Horizon,
@@ -418,8 +427,10 @@ class Day:
         fee_rate: float,
         book: BookRules,
         rules: Rules = RULES,
+        ranked: Mapping[str, frozenset[str]] | None = None,
     ) -> None:
         self.day = day
+        self._ranked = ranked or {}
         self._session = session
         self._closes = closes
         self._kinds = kinds
@@ -474,6 +485,7 @@ class Day:
                 round(k.horizon.total_seconds() / 60),
                 close.widths.get(k.name),
                 [Member(name, k.name, None, 0, p) for name, p in sorted(members.get(k.name, {}).items())],
+                self._ranked.get(k.name, frozenset()),
             )
             for k in self._kinds
         ]
@@ -550,6 +562,8 @@ class Run:
     replayed: dict[str, Replayed]
     stored: Counter[tuple[int, str]]
     engine_db: bool
+    # Version 2's members (#697): each day's ranking, made from the evidence before it.
+    rankings: dict[date, list[Snapshot]] = field(default_factory=dict)
 
 
 def replay(
@@ -562,8 +576,11 @@ def replay(
     kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
     kinds: Sequence[Kind] = KINDS,
     rules: Rules = RULES,
+    walk_forward: WalkForwardOf | None = None,
 ) -> Run:
-    """The verdicts of ``days`` both ways and their trades (module doc)."""
+    """The verdicts of ``days`` both ways and their trades (module doc); version 2's (``rules.ranked``)
+    with each day's ranking from the evidence before it (live from the engine database, else
+    ``walk_forward``)."""
     horizons = barrier_kinds(kinds)
     names = {k.name for k in horizons}
     members = [a for a in kind_algorithms if a.kind in names]
@@ -575,10 +592,27 @@ def replay(
         run.engine_db = db is not None
         if db is not None:
             db.row_factory = sqlite3.Row
+        before: dict[str, Snapshot] = {}
         for day in days:
             session = calendar.session(day)
             if session is None:
                 continue
+            ranked: dict[str, frozenset[str]] = {}
+            if rules.ranked:
+                todo = [(k, BAR_CLOSE, [a for a in members if a.kind == k.name]) for k in horizons]
+                made = rank_kinds(
+                    db,
+                    todo,
+                    day - timedelta(days=1),
+                    day,
+                    datetime.combine(day, time(), KST),
+                    {},
+                    before,
+                    walk_forward,
+                )
+                run.rankings[day] = made
+                before = {s.kind: s for s in made}
+                ranked = {s.kind: s.members for s in made}
             start = datetime.combine(day, time(), KST)
             stored = Stored() if db is None else stored_day(db, day, horizons, [a.name for a in members])
             run.stored.update(stored.verdicts)
@@ -594,6 +628,7 @@ def replay(
                 settings.fee_rate,
                 book,
                 rules,
+                ranked,
             )
             replayed.replay(partial(_stored, stored.forecasts), run.replayed[LIVE])
             replayed.replay(_walked, run.replayed[ALL])
@@ -673,6 +708,10 @@ def _minutes(kind: Kind) -> int:
     return round(kind.horizon.total_seconds() / 60)
 
 
+def _minutes_of(kinds: Sequence[Kind], name: str) -> int | str:
+    return next((_minutes(k) for k in kinds if k.name == name), name)
+
+
 def members_lines(replayed: Replayed, days: Sequence[date], kinds: Sequence[Kind]) -> list[str]:
     """A way of the members' sections (module doc "The report")."""
     out = ["  1. 날마다"]
@@ -735,6 +774,16 @@ def report_lines(
     ]
     if not run.engine_db:
         out.append("엔진 DB가 없다: 라이브 멤버는 없고, 결정 시각은 봉 마감이다.")
+    if rules.ranked:
+        out.append(
+            "판정 버전 2(#697): 지평마다 그날 전의 증거로 낸 순위의 멤버만 모은다"
+            "(기후 대비 로그 손실 기술의 하한 > 0, 세 밤 연속)."
+        )
+        for day, made in run.rankings.items():
+            named = " · ".join(
+                f"{_minutes_of(horizons, s.kind)}분 {', '.join(sorted(s.members)) or '없음'}" for s in made
+            )
+            out.append(f"  {day} 멤버: {named}")
     stored = " · ".join(f"버전 {v} {ACTIONS.get(a, a)} {n}" for (v, a), n in sorted(run.stored.items()))
     out.append(f"엔진이 저장한 판정(이 날들): {stored or '없음'}")
     for i, (way, words) in enumerate(MEMBERS.items(), 1):
@@ -760,10 +809,13 @@ def verdict_replay(
     algorithms: Sequence[Algorithm] = ALGORITHMS,
     kind_algorithms: Sequence[KindAlgorithm] = KIND_ALGORITHMS,
     kinds: Sequence[Kind] = KINDS,
-    rules: Rules = RULES,
+    rules: Rules | None = None,
+    version: int = RULES.version,
 ) -> tuple[str, int]:
     """The command: the report of the latest ``days`` recorded days up to ``day`` (default: the latest
-    trading day whose session is over), and its exit code."""
+    trading day whose session is over), and its exit code; of the verdict ``version`` (#697: 2, the
+    engine's now, or 1) unless ``rules`` are given."""
+    rules = rules or (RULES if version == RULES.version else RULES_V1)
     started, meter = clock.monotonic(), Meter()
     calendar = calendar_store(settings).calendar
     through = probed_day(calendar, now) if day is None else day
@@ -786,6 +838,7 @@ def verdict_replay(
         kind_algorithms=kind_algorithms,
         kinds=kinds,
         rules=rules,
+        walk_forward=WalkForwardEvidence(settings.state_dir, settings.target_version),
     )
     lines = report_lines(run, kinds, rules, clock.monotonic() - started, meter.peak_mb())
     return "\n".join(lines), 0

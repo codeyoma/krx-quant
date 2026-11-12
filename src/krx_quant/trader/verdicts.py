@@ -26,6 +26,10 @@ counts in them, unlike the practice's, #533), the risk rules (the day's 20 buy o
 the practice's and the verdict's together) and the practice's spacing, counted from the bar close of
 the day's last verdict buy (#598, ``book.spaced``).
 
+**Version 2** (#697): the engine's verdicts pool only each horizon's ranking members and carry the day
+and the week beside them as advisory (``advisory``), which this policy never reads: the barrier horizons'
+shape it reads is v1's, so its contract is unchanged. Each trade keeps its verdict's version.
+
 **Kept** (``store.py``): each trade it opens with its verdict's version (``trades.verdict_version``)
 and the verdict that opened it (``trades.verdict``, JSON: ``Call.opened``), of no policy
 (``policy_id`` null: no record, promotion or live gate counts it), so that its trades can be scored

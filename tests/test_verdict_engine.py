@@ -23,6 +23,7 @@ from krx_quant.trader.store import DB_NAME, TraderStore, read_held
 from krx_quant.verdict import Held
 from tests.algorithm_doubles import FixedAlgorithm, stand_in_card, stand_in_meanings
 from tests.api_schema import check
+from tests.ranking_doubles import seed_ranking
 from tests.replay_events import api, at, get_json, run, steady_book
 from tests.test_trader_marks import trade
 
@@ -60,6 +61,10 @@ DIRECTION = FixedAlgorithm(
 )
 
 
+# The night before ranked both stand-ins members of their kind (#697): the verdict pools them.
+RANKED = {"barrier": {"lean-4"}, "barrier_15m": {"lean-15"}}
+
+
 def morning() -> list[Any]:
     """The book at 81,200 / 81,300 every 10 s from 09:00:30 to 09:40."""
     return steady_book(at("09:00:30"), at("09:40:00"), 81_200, 81_300)
@@ -75,16 +80,18 @@ async def test_each_bar_close_has_its_verdict_from_the_barrier_algorithms_beside
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Input: two barrier stand-ins leaning down (0.1, 0.2, 0.7) at 4 and 15 minutes, a direction
-    stand-in, nothing held. Output: each bar close from 09:01 has a stored verdict of version 1: SELL,
+    stand-in, nothing held, both ranked members of their kind (#697). Output: each bar close from 09:01
+    has a stored verdict of version 2: SELL,
     avoid buying; the members with their kind, status and evidence; the 30- and 60-minute horizons
     with no member; the direction's forecast beside them, not pooled; served by ``/v1/verdict``
     within the contract; each verdict's time logged, well under a second."""
     caplog.set_level("INFO", logger="krx_quant.engine")
     db = tmp_path / "engine.db"
+    seed_ranking(db, RANKED)
     engine = await run(db, morning(), until=at("09:40:00"), algorithms=[DIRECTION], kind_algorithms=MEMBERS)
 
     made = stored(db)
-    assert {made[t] for t in ("09:01", "09:20", "09:39")} == {("sell", 1)}
+    assert {made[t] for t in ("09:01", "09:20", "09:39")} == {("sell", 2)}
     async with api(engine) as client:
         every = await get_json(client, "/v1/verdict")
         one = await get_json(client, f"/v1/verdict?symbol={SYMBOL}&bar_close=2026-10-12T09:31:00%2B09:00")
@@ -124,6 +131,7 @@ async def test_held_the_verdict_reads_exit_and_without_members_wait(tmp_path: Pa
         return {SYMBOL: position} if now >= at("09:30:00") else {}
 
     db = tmp_path / "engine.db"
+    seed_ranking(db, RANKED)
     engine = await run(
         db, morning(), until=at("09:35:00"), algorithms=[DIRECTION], kind_algorithms=MEMBERS, held=held
     )
@@ -140,7 +148,7 @@ async def test_held_the_verdict_reads_exit_and_without_members_wait(tmp_path: Pa
     assert (at_0931["verdict"], at_0931["meaning"], at_0931["held"]) == ("sell", "exit", True)
     assert at_0931["horizon"] == {"kind": "barrier_15m", "minutes": 15}
     assert at_0931["deadline"] == "2026-10-12T09:40:00+09:00"
-    assert stored(db)["09:29"] == ("sell", 1)
+    assert stored(db)["09:29"] == ("sell", 2)
     assert (nobody["verdict"], nobody["reason"]) == ("wait", "no_members")
     engine.store.close()
     alone.store.close()
