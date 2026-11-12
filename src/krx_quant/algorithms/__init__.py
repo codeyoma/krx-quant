@@ -44,10 +44,16 @@ from krx_quant.algorithms.contract import (
 )
 from krx_quant.algorithms.cox import Cox
 from krx_quant.algorithms.cox5d import Cox5d
+from krx_quant.algorithms.friedman import Friedman
+from krx_quant.algorithms.friedman5d import Friedman5d
 from krx_quant.algorithms.gauss import Gauss
 from krx_quant.algorithms.granger import Granger
+from krx_quant.algorithms.hurst import Hurst
+from krx_quant.algorithms.hurst5d import Hurst5d
 from krx_quant.algorithms.ito import Ito
 from krx_quant.algorithms.kalman import Kalman
+from krx_quant.algorithms.lorenz import Lorenz
+from krx_quant.algorithms.lorenz5d import Lorenz5d
 from krx_quant.algorithms.mandelbrot import Mandelbrot
 from krx_quant.algorithms.markov import Markov
 from krx_quant.algorithms.newton import Newton
@@ -162,10 +168,12 @@ KIND_ALGORITHMS: tuple[KindAlgorithm, ...] = register_kind_algorithms(
 )
 
 # The algorithms of the daily kinds (#264), predicted once a trading day: open_to_close's Cox,
-# then open_to_close_5d's Cox-5d (#310). Registered after pre-validation existed: each runs once it
-# has passed (its walk-forward over the KRX days, ``daily_prevalidation``).
+# then open_to_close_5d's Cox-5d (#310), then the candidates of #698 for each kind, in the same
+# order: Hurst's momentum rule, Lorenz's analog days, Friedman's trees (which read every daily
+# feature before its own, so it comes last of its kind). Registered after pre-validation existed:
+# each runs once it has passed (its walk-forward over the KRX days, ``daily_prevalidation``).
 DAILY_ALGORITHMS: tuple[DailyAlgorithm, ...] = register_daily_algorithms(
-    [Cox(), Cox5d()],
+    [Cox(), Cox5d(), Hurst(), Lorenz(), Friedman(), Hurst5d(), Lorenz5d(), Friedman5d()],
     DAILY_KINDS,
     taken={a.name for a in ALGORITHMS}
     | {a.name for a in KIND_ALGORITHMS}

@@ -32,6 +32,17 @@ a model is trained on the values it is given:
   before NXT opened on 2025-03-04, it is missing).
 - **The calendar** (``weekday``, ``month_end``, ``month_start``): the weekday, the month's
   last trading day, its first three.
+- **Momentum and the long past** (#698: ``cc_5``, ``cc_20``, ``cc_60``, ``drawdown``, ``range_5``):
+  the previous trading day's KRX close over the close 5, 20 and 60 of the symbol's KRX days
+  before it, as a log, over the realised daily volatility (the last ``RV_DAYS`` (60) days' root
+  mean square of the log close→close change) × √n; the previous close's log over the highest
+  close of the last ``DRAWDOWN_DAYS`` (250) days; the last 5 days' mean (high − low) ÷ open over
+  the last 60 days', as a log. A ratio across days takes only days kept from a KRX day candle
+  (``DayPrices.candle``: adjusted alike); a cash dividend is not taken out (``DayPrices``), a drop
+  of about its yield on its ex-date. Each is the kind's alike: no σ̂ of the kind's band.
+- **Five days' flows** (#698: ``foreign_net_5``, ``institution_net_5``): the mean of the
+  foreign and institution net-buy shares (``foreign_net``'s rule) of the symbol's last five KRX
+  days before the day, None if one of them has none.
 - **Night futures** (``night_futures``): the KOSPI200 night session (#264 part 1, ``H0MFCNT0``,
   18:00–06:00) of the night before the day, the one that began the previous trading day's
   evening: its last trade's change from the previous close (KIS's ``change_pct``), as a
@@ -83,6 +94,10 @@ NIGHT_START, NIGHT_END = time(18, 0), time(6, 0)
 PREMARKET = ((time(8, 40), time(8, 50)), (time(8, 0), time(8, 30)))
 CLIMATE_DAYS = 250
 VOL_SHORT, VOL_LONG = 20, 250
+RV_DAYS = 60  # the realised volatility the momenta are scaled by (#698)
+DRAWDOWN_DAYS = 250
+RANGE_SHORT, RANGE_LONG = 5, 60
+FLOW_DAYS = 5
 TURN_FIRST_DAYS = 3  # the month's first trading days that are its start
 
 
@@ -102,6 +117,8 @@ class DayContext:
     month_end: bool = False
     month_start: bool = False
     night_futures: float | None = None  # #264 part 1's hook: no history yet
+    # Each day's flows (``flows_by_day``), for the five days' (#698); empty when not read.
+    flow_days: Mapping[date, Mapping[str, float | None]] = field(default_factory=dict)
 
     @property
     def previous(self) -> DayPrices | None:
@@ -196,6 +213,64 @@ def _premarket_gap(ctx: DayContext) -> float | None:
     return _over_sigma(math.log(ctx.premarket / prev.close), ctx)
 
 
+def _realised(ctx: DayContext) -> float | None:
+    """The last ``RV_DAYS`` days' root mean square of the log close→close change, of the pairs of
+    days both kept from a KRX day candle (at least half of them), None otherwise (#698)."""
+    days = ctx.history[-(RV_DAYS + 1) :]
+    if len(days) < RV_DAYS + 1:
+        return None
+    changes = [
+        math.log(b.close / a.close) for a, b in zip(days, days[1:], strict=False) if a.candle and b.candle
+    ]
+    if len(changes) < RV_DAYS // 2:
+        return None
+    rms = math.sqrt(sum(c * c for c in changes) / len(changes))
+    return rms if rms > 0 else None
+
+
+def _momentum(ctx: DayContext, n: int) -> float | None:
+    """The previous close over the close ``n`` days before it, as a log, over the realised
+    volatility × √n (#698)."""
+    prev = ctx.previous
+    if prev is None or len(ctx.history) < n + 1:
+        return None
+    start = ctx.history[-1 - n]
+    rv = _realised(ctx)
+    if not prev.candle or not start.candle or rv is None:
+        return None
+    return math.log(prev.close / start.close) / (rv * math.sqrt(n))
+
+
+def _drawdown(ctx: DayContext) -> float | None:
+    """The previous close's log over the highest close of the last ``DRAWDOWN_DAYS`` days (#698)."""
+    prev = ctx.previous
+    if prev is None or not prev.candle or len(ctx.history) < DRAWDOWN_DAYS:
+        return None
+    peak = max(d.close for d in ctx.history[-DRAWDOWN_DAYS:] if d.candle)
+    return math.log(prev.close / peak)
+
+
+def _range_5(ctx: DayContext) -> float | None:
+    """The last 5 days' mean (high − low) ÷ open over the last 60 days', as a log (#698)."""
+    if ctx.previous is None or len(ctx.history) < RANGE_LONG:
+        return None
+
+    def mean_range(days: Sequence[DayPrices]) -> float:
+        return sum((d.high - d.low) / d.open for d in days) / len(days)
+
+    short, long = mean_range(ctx.history[-RANGE_SHORT:]), mean_range(ctx.history[-RANGE_LONG:])
+    return math.log(short / long) if short > 0 and long > 0 else None
+
+
+def _flows_5(ctx: DayContext, who: str) -> float | None:
+    """The mean net-buy share of ``who`` over the symbol's last ``FLOW_DAYS`` KRX days (#698)."""
+    if ctx.previous is None or len(ctx.history) < FLOW_DAYS:
+        return None
+    values = [ctx.flow_days.get(d.day, {}).get(who) for d in ctx.history[-FLOW_DAYS:]]
+    known = [v for v in values if v is not None]
+    return sum(known) / FLOW_DAYS if len(known) == FLOW_DAYS else None
+
+
 def _vix(ctx: DayContext) -> float | None:
     level = ctx.us.get("vix")
     return None if level is None or level <= 0 else math.log(level)
@@ -282,6 +357,53 @@ DAILY_FEATURES: dict[str, DailyFeature] = {
     "month_start": DailyFeature(
         Meaning("그달의 첫 3거래일이면 1, 아니면 0.", "0/1", _KNOWN), lambda c: float(c.month_start)
     ),
+    "cc_5": DailyFeature(
+        Meaning(
+            "모멘텀: 전 거래일 KRX 종가 ÷ 그 5거래일 전 종가의 로그 ÷ (실현 변동성 × √5). 실현 변동성은 최근 "
+            "60거래일 종가 → 종가 로그 변화의 제곱평균제곱근이다(#698).",
+            "표준편차",
+            _KNOWN,
+        ),
+        lambda c: _momentum(c, 5),
+    ),
+    "cc_20": DailyFeature(
+        Meaning("모멘텀: cc_5와 같은 규칙으로 20거래일(#698).", "표준편차", _KNOWN),
+        lambda c: _momentum(c, 20),
+    ),
+    "cc_60": DailyFeature(
+        Meaning("모멘텀: cc_5와 같은 규칙으로 60거래일(#698).", "표준편차", _KNOWN),
+        lambda c: _momentum(c, 60),
+    ),
+    "drawdown": DailyFeature(
+        Meaning("전 거래일 KRX 종가 ÷ 최근 250거래일 가장 높은 종가의 로그(0 이하, #698).", "로그", _KNOWN),
+        _drawdown,
+    ),
+    "range_5": DailyFeature(
+        Meaning(
+            "최근 5거래일 (고가 − 저가) ÷ 시가의 평균 ÷ 최근 60거래일의 평균, 로그(#698).", "로그", _KNOWN
+        ),
+        _range_5,
+    ),
+    "foreign_net_5": DailyFeature(
+        Meaning(
+            "최근 5거래일 외국인 순매수 비율(foreign_net의 규칙)의 평균. 하루라도 없으면 없다(#698).",
+            "비율",
+            "전 거래일 20:30에 받는다.",
+        ),
+        lambda c: _flows_5(c, "foreign"),
+        version=2,
+        stored=_flows_version,
+    ),
+    "institution_net_5": DailyFeature(
+        Meaning(
+            "최근 5거래일 기관 순매수 비율(institution_net의 규칙)의 평균. 하루라도 없으면 없다(#698).",
+            "비율",
+            "전 거래일 20:30에 받는다.",
+        ),
+        lambda c: _flows_5(c, "institution"),
+        version=2,
+        stored=_flows_version,
+    ),
     "night_futures": DailyFeature(
         Meaning(
             "KOSPI200 야간선물(#264 1부)의 전 거래일 저녁 18:00부터 06:00까지 마지막 체결의 전일 대비 "
@@ -292,6 +414,10 @@ DAILY_FEATURES: dict[str, DailyFeature] = {
         lambda c: c.night_futures,
     ),
 }
+
+
+# The features that read KIS's daily supply (``flows_by_day``).
+FLOW_FEATURES = ("foreign_net", "institution_net", "foreign_net_5", "institution_net_5")
 
 
 def input_versions(names: Sequence[str]) -> dict[str, int]:
@@ -507,6 +633,8 @@ def samples(
     out: list[DailySample] = []
     stored = {s: [d for d in files.days(s) if last is None or d.day <= last] for s in symbols}
     market = TradingDays((d.day for days in stored.values() for d in days), calendar)
+    # The kept one-minute bars are read only for the feature that reads them (#698: a day a file).
+    reads_premarket = premarket and "premarket_gap" in names
     for symbol in symbols:
         days = stored[symbol]
         if not days:
@@ -515,9 +643,7 @@ def samples(
         labels = [a.label for a in answers]
         ends = [window_end(d.day, a) for d, a in zip(days, answers, strict=True)]
         flows = (
-            flows_by_day(files.data_dir, files.state_dir, symbol)
-            if "foreign_net" in names or ("institution_net" in names)
-            else {}
+            flows_by_day(files.data_dir, files.state_dir, symbol) if set(FLOW_FEATURES) & set(names) else {}
         )
         if "night_futures" in names and not nights:
             nights.update(files.nights())
@@ -541,10 +667,11 @@ def samples(
                 band=band_of(answers[i]),
                 us=_us_values(us, day.day, previous),
                 flows=flows.get(previous, {}) if previous is not None else {},
-                premarket=premarket_from_bars(files.data_dir, day.day, symbol) if premarket else None,
+                premarket=premarket_from_bars(files.data_dir, day.day, symbol) if reads_premarket else None,
                 month_end=end,
                 month_start=start,
                 night_futures=nights.get(previous) if previous is not None else None,
+                flow_days=flows,
             )
             out.append(
                 DailySample(symbol, day.day, vector(names, ctx), answers[i], kind.answer_version, ends[i])
@@ -633,6 +760,11 @@ class LiveFeatures:
             self.kind.answers_of(before, self.fee_rate, self.calendar) if before and self.kind.answers else []
         )
         end, start = month_flags(day, self.calendar.is_trading_day)
+        flows = (
+            flows_by_day(self.data_dir, self.state_dir, symbol)
+            if set(FLOW_FEATURES) & set(algorithm.features)
+            else {}
+        )
         ctx = DayContext(
             symbol=symbol,
             day=day,
@@ -641,13 +773,12 @@ class LiveFeatures:
             previous_day=previous,
             band=band,
             us=self._us(day, previous),
-            flows=flows_by_day(self.data_dir, self.state_dir, symbol).get(previous, {})
-            if {"foreign_net", "institution_net"} & set(algorithm.features)
-            else {},
+            flows=flows.get(previous, {}),
             premarket=self.premarket(symbol, day),
             month_end=end,
             month_start=start,
             night_futures=self.night(previous) if "night_futures" in algorithm.features else None,
+            flow_days=flows,
         )
         return vector(algorithm.features, ctx)
 
