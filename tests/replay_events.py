@@ -44,8 +44,10 @@ SYMBOL = "005930"
 # while no algorithm is active. The baselines are the touch target's (#170: baseline-climate too).
 PREDICTING = {b.name for b in TOUCH_BASELINES} | {a.name for a in ALGORITHMS}
 PREDICTORS = PREDICTING | set(CONSENSUS)
-# Live, an algorithm registered after pre-validation existed waits for its report (#24).
-LIVE_PREDICTORS = PREDICTORS - {a.name for a in ALGORITHMS if a.name not in REGISTERED_BEFORE}
+# Live, an algorithm registered after pre-validation existed waits for its report (#24): it predicts in
+# shadow alone (#696), so every one predicts. Those waiting are the shadow ones.
+LIVE_PREDICTORS = PREDICTORS
+LIVE_SHADOW = {a.name for a in ALGORITHMS if a.name not in REGISTERED_BEFORE}
 DAY = date(2026, 10, 12)  # a Monday
 CALENDAR = MarketCalendar({DAY: True})
 FEE = 0.015 / 100

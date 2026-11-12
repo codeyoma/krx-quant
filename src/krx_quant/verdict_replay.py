@@ -13,7 +13,8 @@ nothing: no scoring, no status, no model reads it.
 
 - *as live statuses were* (``LIVE``): the barrier algorithms the live engine ran that day, with the
   forecasts it stored (``kind_predictions``, status ok): what the engine knew then. An algorithm waiting
-  for its pre-validation, or refused, had none; none of the barrier algorithms ran live before
+  for its pre-validation, or refused, had none, and has only shadow rows since #696, which the verdict
+  never took (``lifecycle`` ``shadow``, left out); none of the barrier algorithms ran live before
   2026-11-10, so this verdict waits (``no_members``) on every day until one does.
 - *every barrier algorithm* (``ALL``): each barrier kind's algorithm of the registry, whatever its
   status (active, waiting, refused), retrained before each day on its own window of the days before it
@@ -28,8 +29,9 @@ width and the bar close's reference mid-point and tick are those its answer fixe
 (the samples' answer path: ``w``, ``anchor``, ``tick``, nothing it saw after); the quote is the latest
 best quote received by the decision (crossed ones aside), on the trader's stream of the symbol
 (``trader.replay.read_recording``). The decision is made when the live engine had displayed every
-prediction of that bar close (its latest ``displayed_at``, which the verdict waits for), else at the bar
-close (no engine database, or no prediction stored). Nothing is held when the verdicts are counted.
+prediction of that bar close (its latest ``displayed_at``, which the verdict waits for; not the shadow
+ones', made after it, #696), else at the bar close (no engine database, or no prediction stored).
+Nothing is held when the verdicts are counted.
 
 **A BUY's trade**, by the paper trader's rules (``trader.book``, through the re-fit's replay of the
 recording, ``trader.replay.Fills``): not before 09:05 nor with its deadline after 15:15 (the trader's
@@ -91,7 +93,7 @@ from krx_quant.inverse_replay import probed_day
 from krx_quant.kind_registry import KINDS
 from krx_quant.kinds import Kind
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
-from krx_quant.predictions import DB_NAME, read_only
+from krx_quant.predictions import DB_NAME, not_shadow_in, read_only
 from krx_quant.prevalidation import PREVALIDATION_DAYS, _WalkForward
 from krx_quant.sample_store import night_reads
 from krx_quant.stats import day_mean
@@ -295,6 +297,11 @@ class Stored:
 
 def stored_day(db: sqlite3.Connection, day: date, kinds: Sequence[Kind], names: Sequence[str]) -> Stored:
     """``day``'s ``Stored`` of the traded symbol."""
+    # Not the shadow rows (#696): no verdict took them, nor waited for them.
+    direction, of_kinds = (
+        not_shadow_in(db, "predictions", "predictions"),
+        not_shadow_in(db, "kind_predictions", "kind_predictions"),
+    )
     start = datetime.combine(day, time(), KST)
     span = (SYMBOL, start.isoformat(), (start + timedelta(days=1)).isoformat())
     found = Stored()
@@ -304,7 +311,7 @@ def stored_day(db: sqlite3.Connection, day: date, kinds: Sequence[Kind], names: 
         rows = db.execute(
             "SELECT kind, algorithm, bar_close, output FROM kind_predictions WHERE symbol = ?"
             " AND bar_close >= ? AND bar_close < ? AND status = 'ok' AND output IS NOT NULL"
-            f" AND kind IN ({marks})",
+            f"{of_kinds} AND kind IN ({marks})",
             (*span, *named),
         ).fetchall()
         wanted = set(names)
@@ -321,8 +328,9 @@ def stored_day(db: sqlite3.Connection, day: date, kinds: Sequence[Kind], names: 
             found.forecasts.setdefault(at, {}).setdefault(kind_name, {})[name] = (p[0], p[1], p[2])
     for bar_close, shown in db.execute(
         "SELECT bar_close, MAX(displayed_at) FROM (SELECT bar_close, displayed_at FROM predictions"
-        " WHERE symbol = ? AND bar_close >= ? AND bar_close < ? UNION ALL SELECT bar_close, displayed_at"
-        " FROM kind_predictions WHERE symbol = ? AND bar_close >= ? AND bar_close < ?) GROUP BY bar_close",
+        f" WHERE symbol = ? AND bar_close >= ? AND bar_close < ?{direction}"
+        " UNION ALL SELECT bar_close, displayed_at FROM kind_predictions WHERE symbol = ? AND bar_close >= ?"
+        f" AND bar_close < ?{of_kinds}) GROUP BY bar_close",
         (*span, *span),
     ).fetchall():
         found.displayed[datetime.fromisoformat(bar_close)] = datetime.fromisoformat(shown)

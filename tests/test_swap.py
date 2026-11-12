@@ -37,7 +37,6 @@ from krx_quant.swap import (
     morning_swap,
     night_status,
     night_to_train,
-    not_run,
     publish_live,
     reload_models,
     swap_notice,
@@ -214,11 +213,11 @@ async def test_a_night_that_promoted_nothing_is_taken_all_the_same(
     assert status is not None and status.as_dict()["reason"] == "applied"
 
 
-async def test_the_swap_s_line_leaves_out_the_models_of_algorithms_their_pre_validation_refused(
+async def test_the_swap_s_line_names_the_models_of_algorithms_their_pre_validation_refused(
     store: ObjectStore, tmp_path: Path
 ) -> None:
-    # #544: kalman's pre-validation refused the code it has after the night trained it (the
-    # scheduled pre-validation runs after the night), and the engine's gate does not run it.
+    # #696: kalman's pre-validation refused the code it has; the engine runs it in shadow, on the model
+    # the swap installs, so the line names it (#544 left it out).
     state = tmp_path / "state"
     kalman = next(a for a in ALGORITHMS if a.name == "kalman")
     refuse(state, kalman, target_version=TARGET_VERSION)
@@ -235,18 +234,16 @@ async def test_the_swap_s_line_leaves_out_the_models_of_algorithms_their_pre_val
     )
     trained = Model("kalman-20261012-def456", {}, "2026-09-14..2026-10-07")
     promoted = {"newton": TRAINED, "kalman": trained}
-    # poisson was refused before the night: not trained (``Night.refused``).
+    # A list from before #696: poisson refused, not trained (``Night.refused``).
     night_list(tmp_path / "store", finalized=at(NIGHT, "21:40"), promoted=promoted, refused={"poisson": "x"})
 
     status = await morning(store, tmp_path, engine)
 
-    refused = not_run(engine, tmp_path / "state")
-    assert refused == {"kalman"}, "the others have no report, or run without one"
-    assert swap_notice(status, refused) == f"모델 교체 ({NIGHT} 밤 학습): newton → {TRAINED.version}"
-    assert "kalman" in (swap_notice(status) or ""), "told without the refusal"
-    assert engine.models["kalman"] == trained, "installed all the same: the list is applied whole"
-    alone = replace(status, night=replace(status.night, promoted={"kalman": trained.version}))
-    assert swap_notice(alone, refused) is None, "nothing the engine runs changed"
+    assert swap_notice(status) == (
+        f"모델 교체 ({NIGHT} 밤 학습): newton → {TRAINED.version}, kalman → {trained.version}"
+    )
+    assert morning_outcome(MORNING, status).changed == ("newton", "kalman")
+    assert engine.models["kalman"] == trained
     async with api(engine) as client:
         training = (await get_json(client, "/v1/status"))["training"]
     assert "refused" not in training, "the API does not carry the list's refused (#544)"

@@ -258,8 +258,8 @@
       "description": "The fields of a prediction, open so the stream's items can add the symbol.",
       "type": "object",
       "required": [
-        "algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "blocked",
-        "votes", "pooled", "p_up", "p_flat", "p_down", "expected_ticks", "outcome"
+        "algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "lifecycle",
+        "blocked", "votes", "pooled", "p_up", "p_flat", "p_down", "expected_ticks", "outcome"
       ],
       "properties": {
         "algorithm": {"type": "string"},
@@ -271,6 +271,10 @@
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]
         },
         "status": {"enum": ["ok", "timed_out", "error", "vi", "halt", "no_book", "no_members", "none_finished", "no_previous"]},
+        "lifecycle": {
+          "description": "Where its algorithm stood when it predicted (#696): its lifecycle status, or shadow for one the engine runs only for the evidence (waiting for its pre-validation, refused by it, a daily one kept out of its probation), never in the consensus, the signals or the verdicts. null for a baseline, a consensus and one stored before.",
+          "enum": [null, "probation", "active", "bench", "clone", "shadow"]
+        },
         "blocked": {
           "description": "Why a final consensus is not to be acted on (#88); null for any other prediction.",
           "enum": [null, "special", "no_reference", "expired"]
@@ -966,12 +970,13 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["kind", "target_version", "predicting", "states"],
+            "required": ["kind", "target_version", "predicting", "shadow", "states"],
             "additionalProperties": false,
             "properties": {
               "kind": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
               "target_version": {"type": "integer", "minimum": 1, "description": "the direction's target version (KRX_TARGET_VERSION), a kind's answer version"},
               "predicting": {"type": "array", "items": {"type": "string"}, "description": "its algorithms the engine predicts with: active, on probation, on the bench, clones"},
+              "shadow": {"type": "array", "items": {"type": "string"}, "description": "its algorithms that predict in shadow alone (#696): waiting, refused, held; none retired, none of a daily kind not run yet"},
               "states": {
                 "description": "Its algorithms by state, each in registration order; a state without one is left out.",
                 "type": "object",
@@ -1519,7 +1524,7 @@
     "kind_prediction_fields": {
       "description": "The fields of a prediction of a kind besides the direction (#179), open so the stream's items can add the symbol.",
       "type": "object",
-      "required": ["algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "flat_ticks", "width_ticks", "anchor", "tick", "band", "output", "answer"],
+      "required": ["algorithm", "model_version", "bar_close", "displayed_at", "target_at", "status", "lifecycle", "flat_ticks", "width_ticks", "anchor", "tick", "band", "output", "answer"],
       "properties": {
         "algorithm": {"type": "string"},
         "model_version": {"type": "string"},
@@ -1530,6 +1535,10 @@
           "oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]
         },
         "status": {"enum": ["ok", "timed_out", "error", "vi", "halt", "no_book", "no_previous"]},
+        "lifecycle": {
+          "description": "As a direction prediction's (#696): where its algorithm stood when it predicted: its lifecycle status, or shadow for one the engine runs only for the evidence (waiting for its pre-validation, refused by it, a daily one kept out of its probation), never in the consensus, the signals or the verdicts. null for a baseline, a consensus and one stored before.",
+          "enum": [null, "probation", "active", "bench", "clone", "shadow"]
+        },
         "flat_ticks": {
           "description": "k at the bar close (#200): the flat band in ticks at its mid-point, what the kind's predictors were given and the range's answer counts; kept as the price moves on. Every status has it. null without a mid-point at the bar close, and for predictions stored before #200.",
           "type": ["integer", "null"],

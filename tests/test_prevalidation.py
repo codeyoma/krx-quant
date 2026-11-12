@@ -36,7 +36,7 @@ from krx_quant.footprint import give_back
 from krx_quant.kind_stats import entry as kind_entry
 from krx_quant.kind_stats import kind_scoring, scored_of_kind
 from krx_quant.kind_stats import split as kind_split
-from krx_quant.lifecycle import DIRECTION_SCORING, Standing, Status
+from krx_quant.lifecycle import DIRECTION_SCORING, SHADOW, Standing, Status
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.model_shelf import Shelf
 from krx_quant.predictions import DB_NAME, KIND_REVIEWED, REVIEWED, PredictionStore, read_statuses
@@ -233,7 +233,8 @@ async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probat
 
     assert await listed(engine) == {"alpha": "probation", "contrarian": "waiting"}
     assert engine.waiting() == ["contrarian"]
-    assert not engine.store.status_counts("contrarian"), "not run"
+    waited = engine.store.recent("005930", 1000, "contrarian")
+    assert waited and {p["lifecycle"] for p in waited} == {SHADOW}, "in shadow alone (#696)"
 
     assert (await prevalidate(s, "contrarian", algorithms=registry, now=AFTER)).passed
     # Trained (at night, or by hand) while it waited: it starts on that model.
@@ -244,7 +245,8 @@ async def test_a_new_algorithm_waits_for_its_prevalidation_then_starts_on_probat
     await replay_into(engine, engine.clock, later, until=at("15:45:00", live_day))
 
     assert await listed(engine) == {"alpha": "probation", "contrarian": "probation"}
-    made = engine.store.recent("005930", 1000, "contrarian")
+    made = [p for p in engine.store.recent("005930", 1000, "contrarian") if p["lifecycle"] != SHADOW]
+    assert {p["lifecycle"] for p in made} == {"probation"}
     assert made[-1]["bar_close"] == at("09:21:00", live_day).isoformat(), "from the next bar close"
     assert {p["model_version"] for p in made} == {trained.version}
     assert outbox.sent == [], "nothing waits at the review"
@@ -311,9 +313,10 @@ async def test_a_wait_is_told_once_for_the_code_and_target_it_waits_on_across_re
     [told] = await start(days[0] + timedelta(days=7))
     assert told == lost, "Telegram did not take it: told at the next review"
     assert told == (
-        "사전 검증 대기: contrarian. 검증을 통과해야 돌기 시작합니다. 봉 마감 알고리즘은 녹화가 10거래일 "
-        "이상이면 밤 학습 뒤 예약 작업이 한 밤에 하나씩(시간이 남는 밤에는 둘) 차례로 검증합니다. 결과는 "
-        "#204에 댓글로 올라옵니다. 손으로 돌릴 것은 없습니다."
+        "사전 검증 대기: contrarian. 검증을 통과해야 수습을 시작합니다(그때까지는 그림자로 예측만 "
+        "남깁니다). 봉 마감 알고리즘은 녹화가 10거래일 이상이면 밤 학습 뒤 예약 작업이 한 밤에 "
+        "하나씩(시간이 남는 밤에는 둘) 차례로 검증합니다. 결과는 #204에 댓글로 올라옵니다. "
+        "손으로 돌릴 것은 없습니다."
     )
     assert "krx-quant prevalidate" not in told
     assert await start(days[1] + timedelta(days=7)) == [], "a restart: told already"

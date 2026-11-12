@@ -772,6 +772,11 @@ def _registered(engine: PredictionEngine) -> list[Algorithm | KindAlgorithm | Da
 
 # The states of an algorithm the engine predicts with (#561): its lifecycle status, retired aside.
 PREDICTING = (Status.ACTIVE.value, Status.PROBATION.value, Status.BENCH.value, Status.CLONE.value)
+# The state of a daily algorithm whose kind is not run yet (#310): the one that predicts nothing, not
+# even in shadow (#696).
+AWAITING = "awaiting"
+# The states of an algorithm that predicts nothing, not even in shadow (#696): retired, or awaiting.
+STOPPED = (Status.RETIRED.value, AWAITING)
 
 
 @dataclass(frozen=True)
@@ -831,13 +836,15 @@ async def _standings(engine: PredictionEngine, state_dir: Path | None = None) ->
         elif name in waiting:
             out[name] = _Standing("waiting", queue=queue.index(name) + 1 if name in queue else None)
         else:
-            out[name] = _Standing("awaiting")
+            out[name] = _Standing(AWAITING)
     return out
 
 
 def _kinds_json(engine: PredictionEngine, standings: Mapping[str, _Standing]) -> list[dict[str, Any]]:
     """Each kind the engine predicts (the direction first, then the others', then the daily ones'),
-    the target version its algorithms run on, the algorithms predicting it and each state's (#561)."""
+    the target version its algorithms run on, the algorithms predicting it, those predicting it in
+    shadow alone (#696: not enrolled; none retired, none of a daily kind not run yet) and each state's
+    (#561)."""
     registered = _registered(engine)
     out = []
     for kind in (DIRECTION_KIND, *engine.kinds, *engine.daily_kinds):
@@ -850,6 +857,7 @@ def _kinds_json(engine: PredictionEngine, standings: Mapping[str, _Standing]) ->
                 "kind": kind.name,
                 "target_version": engine.target_version if kind is DIRECTION_KIND else kind.answer_version,
                 "predicting": [name for name in of_kind if standings[name].state in PREDICTING],
+                "shadow": [name for name in of_kind if standings[name].state not in (*PREDICTING, *STOPPED)],
                 "states": states,
             }
         )

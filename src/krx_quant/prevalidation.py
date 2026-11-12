@@ -1,10 +1,11 @@
 """Pre-validation: a new algorithm replayed on the latest recorded trading days before it
 runs live (``krx-quant prevalidate <name>``).
 
-The engine runs an algorithm registered after this check existed only once it has passed
-with the code the engine runs (``admits``); until then it is not predicted, listed or
-reviewed. The algorithms registered before (``REGISTERED_BEFORE``) and any algorithm the
-engine has already enrolled run as before.
+The engine enrolls an algorithm registered after this check existed only once it has passed with the
+code the engine runs (``admits``); until then it predicts in shadow alone (#696,
+``lifecycle.SHADOW``), never reviewed, nor in the consensus, the signals or the verdicts. The
+algorithms registered before (``REGISTERED_BEFORE``) and any algorithm the engine has already
+enrolled run as before.
 
 The check replays the last ``PREVALIDATION_DAYS`` recorded trading days, one at a time,
 with every registered algorithm, into a database of its own
@@ -13,9 +14,9 @@ its promotion test gives does, below). The
 algorithm is retrained before each day on its own window of the days before it
 (walk-forward), never on the day it predicts; the others run the models the server runs. One
 the engine does not run because its latest report refused the code, target and inputs it has
-(``left_out``, #544) is not replayed beside it: the live engine predicts nothing of it, and the
-night does not train it either. The candidate itself always runs: a run again by hand judges it
-anew.
+(``left_out``, #544) is not replayed beside it: the live engine runs it in shadow alone (#696), after
+the verdicts and the first the CPU budget skips, so no check reads it. The candidate itself always
+runs: a run again by hand judges it anew.
 A registry that fails the registration check is not replayed at all (RegistrationError).
 It passes when all of these hold:
 
@@ -399,15 +400,15 @@ def left_out(
     target_version: int = TARGET_VERSION,
     kinds: Sequence[Kind] = KINDS,
 ) -> Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], Refusal | None]:
-    """The refusal that leaves an algorithm out of the night's training and of the replays beside a
-    pre-validation's candidate (#544): its latest report judged the code, target and inputs it has
-    now and refused them (``LastReport.judged``), and the engine does not run it (by ``statuses``,
-    the engine's): not enrolled, retired (a refused revision retires it, #454; so one registered
-    before pre-validation is left out too), or a daily kind's on probation, which runs only while
-    ``admits`` lets it (#264). None for any other: one the engine runs whatever its report says (an
-    enrolled bar-close one, a report run again by hand refused) trains and replays as before. A
-    change of its code, target or inputs makes the report stale: it trains again from that night,
-    and waits for a new pre-validation."""
+    """The refusal that leaves an algorithm out of the replays beside a pre-validation's candidate
+    (#544; the night trains it since #696, as the engine runs it in shadow): its latest report
+    judged the code, target and inputs it has now and refused them (``LastReport.judged``), and the
+    engine does not enroll it (by ``statuses``, the engine's): not enrolled, retired (a refused
+    revision retires it, #454; so one registered before pre-validation is left out too), or a daily
+    kind's on probation, which runs only while ``admits`` lets it (#264). None for any other: one
+    the engine runs whatever its report says (an enrolled bar-close one, a report run again by hand
+    refused) replays as before. A change of its code, target or inputs makes the report stale: it
+    waits for a new pre-validation."""
 
     def refusal(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> Refusal | None:
         standing = statuses.get(algorithm.name)
@@ -841,8 +842,8 @@ async def prevalidate(
         # horizon ladder alone doubles the kinds' writes). The direction's algorithms all run,
         # as their CPU comes first in the budget.
         own = [k for k in kinds if k.name == DIRECTION or (kind is not None and k.name == kind.name)]
-        # Beside the candidate, the algorithms the engine runs (#544): not those it does not run
-        # for a refusal of the code they have (``left_out``). The candidate runs whatever its own
+        # Beside the candidate, the algorithms the engine enrolls (#544): not those it runs in shadow
+        # alone (#696) for a refusal of the code they have (``left_out``). The candidate runs whatever its own
         # last report says: a run again by hand judges it anew.
         out = left_out(
             settings.state_dir, read_statuses(settings.state_dir / DB_NAME), settings.target_version, kinds

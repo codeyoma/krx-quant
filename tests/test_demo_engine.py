@@ -20,6 +20,7 @@ from krx_quant.algorithms import ALGORITHMS
 from krx_quant.cli import main
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.demo import DEMO_SYMBOLS, demo_app
+from krx_quant.lifecycle import SHADOW
 from krx_quant.macro import INDICATORS
 from tests.api_doubles import listening, receive_until
 from tests.api_schema import check
@@ -234,11 +235,15 @@ async def test_the_demo_has_the_daily_kinds_days_and_its_morning(demo: TestClien
     daily = next(k for k in kinds["kinds"] if k["name"] == "open_to_close")
     assert daily["daily"]["predict_at"] == "08:50"
     assert latest["bar_close"] == "2026-10-12T08:50:00+09:00"
-    assert {p["algorithm"] for p in latest["predictions"]} == {
-        "cox",
-        "otc-flat",
-        "otc-climate",
-        "otc-persist",
+    assert {p["algorithm"]: p["lifecycle"] for p in latest["predictions"]} == {
+        "cox": "probation",
+        "otc-flat": None,
+        "otc-climate": None,
+        "otc-persist": None,
+        # #698's candidates wait for their pre-validation: in shadow (#696).
+        "hurst": SHADOW,
+        "lorenz": SHADOW,
+        "friedman": SHADOW,
     }
     assert all(p["answer"] is None for p in latest["predictions"]), "the morning's day is not over"
     days = sorted({p["bar_close"] for p in made["predictions"]})
@@ -268,7 +273,11 @@ async def test_the_demo_has_the_five_session_kind_s_windows(demo: TestClient[Any
     assert daily["probation_days"] == [60, 120, 180]
     baselines = {"otc5-flat", "otc5-climate", "otc5-persist"}
     assert latest["bar_close"] == "2026-10-12T08:50:00+09:00"
-    assert {p["algorithm"] for p in latest["predictions"]} == baselines, "cox-5d was refused: not run"
+    lifecycle = {p["algorithm"]: p["lifecycle"] for p in latest["predictions"]}
+    candidates = {"hurst-5d", "lorenz-5d", "friedman-5d"}  # #698's, waiting for their pre-validation
+    assert lifecycle == {**dict.fromkeys(baselines), **dict.fromkeys({"cox-5d", *candidates}, SHADOW)}, (
+        "cox-5d was refused and the candidates wait: in shadow (#696)"
+    )
     assert all(p["target_at"] == "2026-10-16T15:30:00+09:00" for p in latest["predictions"])
     assert len({p["bar_close"] for p in made["predictions"]}) == 21
     waiting = sorted({p["bar_close"][:10] for p in made["predictions"] if p["answer"] is None})
