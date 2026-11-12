@@ -132,7 +132,7 @@ async def fill_names(
 ) -> None:
     """Fill ``names`` (the Engine API's) with the symbols' names, in the background of a start.
 
-    > **삭제됨** (2026-11-12, #PRNUM): their single-stock ETFs' names (``products.PRODUCTS``), which
+    > **삭제됨** (2026-11-12, #701): their single-stock ETFs' names (``products.PRODUCTS``), which
     > the closing flow showed (#305). 이유: the closing flow is gone (#693). 대신: none.
     """
     names.update(await read_names(session, settings, list(settings.symbols), now))

@@ -107,7 +107,7 @@ scored on its bar close's touch label (#170). ``basis``, which a screen from bef
 sent, is refused (#592): it was echoed back for one release, so that screen, which asked
 again until the answer's ``basis`` was its own, was answered once; an answer has none.
 
-Gone in #PRNUM (#693, the slimmed app shows none of them): ``/briefing``, ``/calendar``,
+Gone in #701 (#693, the slimmed app shows none of them): ``/briefing``, ``/calendar``,
 ``/symbols/{symbol}/flow``, ``/symbols/{symbol}/closing-flow`` and its ``/days``, the cost map's
 ``regimes`` and ``regimes_missing``, and the status's ``signal_rule``.
 

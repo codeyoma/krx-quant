@@ -457,7 +457,7 @@ async def keep_history(
     (``auctions``, #264), and so does a run of that alone at ``auctions.CLOSE_AT`` (15:40), so the
     day is answered from 15:45. Runs until cancelled.
 
-    > **삭제됨** (2026-11-12, #PRNUM): the period base rates of every stored day's one-minute bars
+    > **삭제됨** (2026-11-12, #701): the period base rates of every stored day's one-minute bars
     > (``base_rates``, #307) after the whole run, and its last step ``after`` (the closing flow's
     > days, #305). 이유: the slimmed app shows neither the cost map's base rates nor the closing flow
     > (#693). 대신: none.

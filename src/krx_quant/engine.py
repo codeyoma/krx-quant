@@ -419,7 +419,7 @@ _BLOCKING = (Kind.VI, Kind.CIRCUIT_BREAKER, Kind.MARKET_HALT)
 class Blocked(enum.Enum):
     """Why a final consensus is not to be acted on (#88), stored with it (``blocked``).
 
-    > **바뀜** (2026-11-12, #PRNUM): ``signals.Blocked``, why a Telegram signal was not sent → the
+    > **바뀜** (2026-11-12, #701): ``signals.Blocked``, why a Telegram signal was not sent → the
     > engine's own. 이유: the signal alerts are gone (#693); the final consensus still says why.
     """
 
