@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from krx_quant.process_log import Ran
-from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, Night, Reads, Target
+from krx_quant.scheduled.core import FAILED, OK, Attachment, Job, Night, Reads, Target, again_on_new_code
 from krx_quant.trader.mock_check import trader_in_mock
 from krx_quant.trader.notice_columns import APART, PARTIAL, apart_orders
 from krx_quant.trader.report import PRACTICE_HEADING, PRACTICE_TRADES, calls_agent
@@ -97,6 +97,35 @@ TRADER_REPORT = Job(
     ),
     # #560: the mock practice's trades a line each, folded under the report, which says their sum.
     attach=(Attachment(PRACTICE_HEADING, PRACTICE_TRADES),),
+)
+
+# The report of 2026-11-11 again (#691): that night's ``trader-report`` failed in its pick section (a
+# verdict horizon read as the practice cell, no lower bound nor p*) after the re-fit had run, so the
+# day's report was never posted. On the first night after the deploy that brings the fix, trading or
+# not, once (again on other code if it fails): ``trader-report --day 2026-11-11`` prints it read-only
+# from the store, re-fitting nothing. After the night's own report and the jobs that must follow it
+# at once (``recording-quality-570``, the night book's). Its output is the report's: no price,
+# account, order number nor key.
+REPORT_AGAIN = Job(
+    name="trader-report-1111-691",
+    due=again_on_new_code,
+    command=("trader-report", "--day", "2026-11-11"),
+    timeout=timedelta(minutes=5),
+    label_if=trader_report_calls,
+    unlabel=(),  # as the night's report: a question left for the user stays
+    targets=(
+        Target(
+            TRADER_REPORT_ISSUE,
+            note=(
+                "2026-11-11의 밤 리포트를 다시 보인다(#691): 그 밤 `trader-report`는 정책 맞추기 뒤 "
+                "칸 고르기 절에서 실패해(판정의 첫 지평을 연습 칸으로 읽고 없는 하한 − p*를 뺐다) "
+                "리포트를 올리지 못했다. 고친 엔진이 배포된 뒤 첫 밤에 한 번, 저장소에서 읽기만 한다"
+                "(정책을 맞추지 않는다). 다시 돌리기: "
+                "`docker compose run --rm engine trader-report --day 2026-11-11`. "
+                "출력에는 시세 값, 계좌번호, 주문번호, 키가 없다."
+            ),
+        ),
+    ),
 )
 
 # The mock server's fill notice (#484, #403): ``fill-notice-layout-403`` joined the mock trader's

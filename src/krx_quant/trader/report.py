@@ -93,6 +93,7 @@ from krx_quant.trader import (
     LIVE,
     PAPER,
     PICK_AT,
+    VERDICT,
     cohort,
     live,
     practice,
@@ -1495,17 +1496,22 @@ def _pick_section(report: Report) -> str:
         f"비용 지도 as_of {pick['as_of'] or '없음'}"
     )
     lines = [head, *_practice_line(report)]
-    chosen = pick["picks"]
+    # #677: the verdict's horizons, ranked before the practice cell, are no cell of the cost map (#691).
+    horizons = [p["kind"] for p in pick["picks"] if p.get("role") == VERDICT]
+    if horizons:
+        lines.append(
+            f"판정 매매(KIS 모의, KRX_TRADER_MOCK_VERDICT, #677): {', '.join(horizons)}"
+            " · 챔피언의 칸이 없는 고르기에 연습 칸보다 먼저 · 손실 예산"
+        )
+    chosen = [p for p in pick["picks"] if p.get("role") != VERDICT]
     if pick.get("practice") and chosen:  # #427: no champion cell to trade, the mock book practised one
-        practised = chosen[0]
+        practised = next((p for p in chosen if p.get("practice")), chosen[0])
         cell = _cell(practised["kind"], practised["predictor"], practised["role"])
         shares = f"{practised.get('quantity') or 1}주씩"
         if practised.get("threshold") is None:  # a pick before #474: the cost map's at each pick
-            low, p_star = practised["low"], practised["p_star"]
             lines.append(
                 f"연습 칸(KIS 모의, KRX_TRADER_MOCK_PRACTICE): {cell}: 판정이 있는 칸 가운데 하한 − p*가 "
-                f"가장 큰 칸 · 하한 {_ratio(low)} − p* {_ratio(p_star)} = {low - p_star:+.3f} ·"
-                f" {practised['calls']}건 · θ 기본값 · {shares}"
+                f"가장 큰 칸 · {_margin(practised)} · θ 기본값 · {shares}"
             )
         else:
             lines.append(
@@ -1616,6 +1622,17 @@ def _left_out_said(left_out: Sequence[Mapping[str, Any]], grid: Mapping[str, Any
                 part += f"(1주씩 잰 체결이 가장 많을 때 {max(most)}건, {needed}건 필요)"
         parts.append(part)
     return f"뺀 칸 {len(left_out)}: " + ", ".join(parts)
+
+
+def _margin(p: Mapping[str, Any]) -> str:
+    """A practice pick's lower bound less p* (#427), and why not when either is missing (#691)."""
+    low, p_star = p.get("low"), p.get("p_star")
+    margin = (
+        f" = {low - p_star:+.3f}"
+        if low is not None and p_star is not None
+        else "(하한이나 p*가 기록에 없어 차이를 셈하지 않는다)"
+    )
+    return f"하한 {_ratio(low)} − p* {_ratio(p_star)}{margin} · {p.get('calls') or 0}건"
 
 
 def _pick_figures(p: Mapping[str, Any]) -> str:

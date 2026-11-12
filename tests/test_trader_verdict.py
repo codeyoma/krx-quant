@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -359,6 +360,65 @@ async def test_the_verdict_ranks_before_the_practice_cell_and_one_position_waits
     assert practice == {"10:00": "outranked", "10:05": "holding"}
     found = read_decisions(tmp_path / DB_NAME, None, at("10:00:00").date())
     assert [b["book"] for b in found] == ["practice", VERDICT]
+
+
+# What the nightly report says of the pick (#691)
+
+VERDICT_LINE = (
+    "판정 매매(KIS 모의, KRX_TRADER_MOCK_VERDICT, #677): barrier, barrier_15m, barrier_30m, barrier_60m"
+    " · 챔피언의 칸이 없는 고르기에 연습 칸보다 먼저 · 손실 예산"
+)
+
+
+async def test_the_report_says_the_verdict_s_horizons_apart_from_the_practice_cell_it_ranks_before(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The pick of 2026-11-11 (#691): the verdict's horizons, of no cost map figure, ranked before the
+    practice cell. The report read the first of them as the practice cell and failed the night on its
+    missing lower bound and p*."""
+    fake, account = kis_mock
+    frozen_here(tmp_path)
+    desk = verdict_desk(tmp_path, fake, account, practice=True)
+    await desk.run([Read("10:00:02.3", [Barrier("10:00:00")]), said("10:00"), BOOK])
+
+    made = report.read(tmp_path / DB_NAME, DAY, CALENDAR)
+    lines = report.render(made).splitlines()
+
+    assert VERDICT_LINE in lines
+    assert any(
+        line.startswith(
+            "연습 칸(KIS 모의, KRX_TRADER_MOCK_PRACTICE): barrier breiman(top): 검토 주기에 고정한 칸(#474)"
+            " · θ 0.6 · 1주씩"
+        )
+        for line in lines
+    ), "the practice cell is the practice pick, not the verdict's first horizon"
+    assert any(line.startswith("매매할 칸 없음: ") for line in lines)
+    # A practice pick from before #474 (no θ) missing its figures: the line, without the difference.
+    assert made.pick is not None
+    unfrozen = [p | {"threshold": None, "low": None} if p["practice"] else p for p in made.pick["picks"]]
+    text = report.render(replace(made, pick={**made.pick, "picks": unfrozen}))
+    assert (
+        "연습 칸(KIS 모의, KRX_TRADER_MOCK_PRACTICE): barrier breiman(top): 판정이 있는 칸 가운데 하한 − p*가"
+        " 가장 큰 칸 · 하한 ? − p* "
+    ) in text
+    assert "(하한이나 p*가 기록에 없어 차이를 셈하지 않는다) · " in text
+
+
+async def test_the_report_says_the_verdict_s_horizons_without_a_practice_cell(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """With the practice off, the pick holds the verdict's horizons alone: they are no champion cell
+    to trade, so not under 매매할 칸 with the cost map's figures they do not have."""
+    fake, account = kis_mock
+    desk = verdict_desk(tmp_path, fake, account)
+    await desk.run([said("10:00"), BOOK])
+
+    lines = report.render(report.read(tmp_path / DB_NAME, DAY, CALENDAR)).splitlines()
+
+    assert VERDICT_LINE in lines
+    assert not any(line.startswith("매매할 칸 4") for line in lines)
+    assert not any("KRX_TRADER_MOCK_PRACTICE" in line for line in lines)
+    assert any(line.startswith("매매할 칸 없음: ") for line in lines)
 
 
 # Reading the verdicts

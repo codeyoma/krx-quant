@@ -35,6 +35,7 @@ from krx_quant.scheduled import (
     INTERRUPTED,
     JOBS,
     OK,
+    REPORT_AGAIN,
     RUNNING,
     STATE_FILE,
     TRADER_REPORT,
@@ -1158,6 +1159,20 @@ def test_the_trader_s_night_is_fitted_and_reported_every_trading_night_on_417() 
     assert not TRADER_REPORT.due(night(SUNDAY, ran))
     note = TRADER_REPORT.targets[0].note
     assert "docs/agents/trader-report.md" in note and "시세 값, 계좌번호, 주문번호, 키가 없다" in note
+
+
+def test_the_report_of_2026_11_11_is_shown_again_once_after_its_night_failed() -> None:
+    # #691: that night's report failed in its pick section after the re-fit; shown read-only, on 417.
+    assert REPORT_AGAIN.command == ("trader-report", "--day", "2026-11-11"), "no re-fit"
+    assert [t.issue for t in REPORT_AGAIN.targets] == [417]
+    assert REPORT_AGAIN.label_if is trader_report_calls and REPORT_AGAIN.unlabel == ()
+    names = [j.name for j in JOBS]
+    # After the night's own report and the jobs that must follow it at once (#570, #605).
+    assert names.index(REPORT_AGAIN.name) == names.index("night-book-verdict-605") + 1
+    assert REPORT_AGAIN.due(night(SATURDAY)), "the first night, trading or not"
+    ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:31"), COMMIT, 0, 3.0)
+    assert not REPORT_AGAIN.due(night(MONDAY, ran)), "once"
+    assert "시세 값, 계좌번호, 주문번호, 키가 없다" in REPORT_AGAIN.targets[0].note
 
 
 ROUTINE = "자동 매매 리포트 (#402) · 2026-10-15(목) · 모의(paper)\n에이전트 차례: 아님(밤의 기록만)\n"

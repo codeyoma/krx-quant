@@ -161,6 +161,7 @@ from krx_quant.scheduled.research import (
 from krx_quant.scheduled.trader import (
     FILL_NOTICE_COLUMNS,
     LIVE_PROBE,
+    REPORT_AGAIN,
     TRADER_REPORT,
     MockSessionFacts,
     read_mock_session,
@@ -195,6 +196,7 @@ __all__ = [
     "QUEUE_SCREEN",
     "RECORDING_QUALITY",
     "REFUSED",
+    "REPORT_AGAIN",
     "RESTORE_DRILL",
     "RUNNING",
     "SESSION_MEMORY",
@@ -306,6 +308,7 @@ JOBS: tuple[Job[Any], ...] = (
     RECORDING_QUALITY,
     NIGHT_BOOK_BYTES,
     NIGHT_BOOK_VERDICT,
+    REPORT_AGAIN,
     BAR_CLOSE_TIMES,
     SESSION_MEMORY,
     CLOSE_RESTART_MEMORY,
