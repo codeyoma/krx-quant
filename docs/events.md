@@ -93,7 +93,7 @@ KIS 레코드 하나가 이벤트 하나다. 한 메시지에 레코드가 여�
 | `expected_volume` | int64 | `ANTC_VOL` | 예상 거래량(주, #304) |
 | `expected_exch_cls` | string | `ANTC_EXCH_CLS_CODE` | 예상 체결의 거래소 구분 코드(원문, #304). 실측으로 `1`은 KRX 단일가, `2`는 NXT의 예상가로 본다(#314, 아래) |
 
-- 예상 체결 네 열(#304)은 장전 브리핑(#304)이 KRX 예상 시가를 보이려고 남긴다. 그 전 파일에는 이 열이 없고, 읽으면 `null`이다(하루를 합칠 때 없는 열은 `null`로 채운다). 2026-10-20부터 있다(#309 배포).
+- 예상 체결 네 열(#304)은 장전 브리핑(#304)이 KRX 예상 시가를 보이려고 남겼다. **바뀜** (2026-11-12, #PRNUM): 장전 브리핑은 지웠다(#693). 열은 그대로 남긴다(녹화 형식을 바꾸지 않는다). 그 전 파일에는 이 열이 없고, 읽으면 `null`이다(하루를 합칠 때 없는 열은 `null`로 채운다). 2026-10-20부터 있다(#309 배포).
 - 2026-10-12 – 10-20의 7거래일 실측(`probe-expected-open-314`, #314. 마지막 예상가와 실제 시가의 차이는 KRX 것만 센 10-21까지의 8거래일, `probe-expected-open-krx-314`. 자세한 개수는 [kis-feeds.md](kis-feeds.md) "피드별 메모"의 "통합 호가의 예상 체결"):
   - KRX 예상가(`expected_exch_cls` `1`)는 시가 단일가에 08:50:00–08:59:59(`hour_cls` `B`), 종가 단일가에 15:20:00–15:29:59(`A`)에 온다. 7일 모두, 세 종목 모두다. 08:30–08:50에는 없다(그때는 NXT 프리마켓이 열려 있고, 통합 호가의 `hour_cls`는 `0`이다).
   - `2`는 연속매매와 장 마감 뒤에 오고(`hour_cls` `C`), 009150은 08:30 전과 시가 단일가 시간대에도 왔다. NXT의 예상가로 보고, 장전 브리핑은 `1`만 쓴다.
@@ -420,7 +420,7 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 | `open` | int64 | 시가 단일가(원, 원래 가격). 찾지 못했으면 null |
 | `close` | int64 | 종가 단일가(원, 원래 가격). `none`이면 null |
 | `source` | string | `krx_minute_bar`(KRX 1분봉), `recorded_print`(녹화한 체결), `none`(그날 가격 없음) |
-| `close_volume` | int64 | `krx_minute_bar` 행의 종가 단일가 봉의 거래량(주). KRX 마감 흐름(#305)의 분모가 녹화가 없는 날 `close × close_volume`으로 읽는다. null: 아직 묻지 않음(이 열 전에 받은 행), 0: 봉에 거래량이 없거나 종가가 다름. 다른 출처의 행은 null |
+| `close_volume` | int64 | `krx_minute_bar` 행의 종가 단일가 봉의 거래량(주). KRX 마감 흐름(#305)의 분모가 녹화가 없는 날 `close × close_volume`으로 읽었다. **바뀜** (2026-11-12, #PRNUM): 마감 흐름을 지워(#693) 지금은 읽는 곳이 없다. 열은 그대로 쓴다. null: 아직 묻지 않음(이 열 전에 받은 행), 0: 봉에 거래량이 없거나 종가가 다름. 다른 출처의 행은 null |
 
 > **바뀜** (2026-10-20, #317): 새 파일. 이유: `open_to_close`의 종가를 KRX 일봉의 종가에서 종가 단일가로 바꿨다(정답 버전 2, #264).
 
@@ -490,6 +490,8 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 
 ## closing_flow: ETF 순자산 (REST, #305)
 
+> **삭제됨** (2026-11-12, #PRNUM): 이 파일을 쓰던 수집(`net_assets.py`, `krx_net_assets.py`). 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 없다. 서버에 남은 파일은 아무도 읽지도 쓰지도 않는다. 아래는 그때의 형식이다.
+
 단일종목 ±2배 ETF 16종(`products.PRODUCTS`)의 순자산이다. 두 수집이 쓴다: `KrxNetAssetKeeper`(`krx_net_assets.py`)가 KRX Open API ETF 일별매매정보(`etf_bydd_trd`)에서 받은 것(`krx`, 상장일부터, [krx-openapi.md](krx-openapi.md))과 `NetAssetKeeper`(`net_assets.py`)가 KIS ETF/ETN 현재가(`FHPST02400000`)에서 받은 것(`kis`, [kis-feeds.md](kis-feeds.md#etf-순자산-305))이다. KRX 마감 흐름(#305)의 수요 A·(L² − L)·r이 거래일 t에 t의 전 거래일 행을 A로 읽는다.
 
 ```
@@ -514,6 +516,8 @@ KOSPI200 선물과 달러선물은 KIS 선물옵션 분봉조회(`FHKIF03020200`
 | `nav` | double | `NAV` | (null) | 그날의 NAV |
 
 ## closing_flow: 마감 수요와 지난날 (#305)
+
+> **삭제됨** (2026-11-12, #PRNUM): 이 두 파일을 쓰고 읽던 KRX 마감 흐름(`closing_flow.py`)과 그 엔드포인트. 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 없다. 아래는 그때의 형식이다.
 
 KRX 마감 흐름(`closing_flow.py`)이 쓰는 두 파일이다. 엔진 API `GET /v1/symbols/{s}/closing-flow`와 `/closing-flow/days`가 읽는다([engine-api.md](engine-api.md#get-v1symbolssymbolclosing-flow-305)). 위 순자산과 같은 폴더에 둔다(업로드하지 않는다).
 
@@ -576,6 +580,8 @@ KRX 마감 흐름(`closing_flow.py`)이 쓰는 두 파일이다. 엔진 API `GET
 KIS 필드 순서는 [koreainvestment/open-trading-api](https://github.com/koreainvestment/open-trading-api)의 `examples_llm/domestic_stock/ccnl_total`, `asking_price_total` 예제를 따른다.
 
 ## 경제 캘린더 (#150)
+
+> **삭제됨** (2026-11-12, #PRNUM): 이 기록을 쓰던 수집(`econ_calendar.py`). 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 없다. 서버와 S3에 남은 `calendar/`는 그대로다. 아래는 그때의 형식이다.
 
 수집기가 TradingView 경제 캘린더를 읽을 때마다(기본 15분) 새로 나타나거나 바뀐 일정만 쓴다(`econ_calendar.py`, [design.md](design.md#45-매크로-지표)의 "경제 캘린더"). 바뀌었다는 것은 발표 시각, 이름, 기간, 실제·예상·이전 값, 중요도 중 하나가 달라졌다는 뜻이다. 그래서 한 일정의 줄들을 `recorded_at` 순으로 보면 그때그때 알던 값이 나온다(실제 값은 발표 뒤 처음 읽을 때 생긴다). 수집기가 다시 시작하면 `calendar/latest.json`의 마지막 답에서 이어서 비교한다. 바뀐 일정을 이 계층에 먼저 쓰고 `latest.json`을 나중에 바꾼다. 그래서 그 사이에 멈추면 다시 시작한 뒤 같은 변화가 한 번 더 기록될 수는 있어도(적어도 한 번), 빠지지는 않는다.
 

@@ -1,4 +1,0 @@
-usage: krx-quant probe-krx-etf [-h]
-
-options:
-  -h, --help  show this help message and exit

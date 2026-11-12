@@ -171,10 +171,10 @@ async def test_a_message_that_failed_for_a_moment_is_sent_again_and_those_behind
         alerts = queue(session, telegram_.url, time)
         alerts.notice("호가 멈춤")
         alerts.notice("호가 돌아옴")
-        alerts.signal("상승")
-        await until(lambda: "[신호] 상승" in telegram_.took)
+        alerts.notice("거래 재개")
+        await until(lambda: "[알림] 거래 재개" in telegram_.took)
         await alerts.close()
-    first, second, third = "[알림] 호가 멈춤", "[알림] 호가 돌아옴", "[신호] 상승"
+    first, second, third = "[알림] 호가 멈춤", "[알림] 호가 돌아옴", "[알림] 거래 재개"
     assert telegram_.asked == [first, first, first, second, third]
     assert telegram_.took == [first, second, third]
     assert time.slept == [1.0, 2.0], "RETRY_DELAYS"

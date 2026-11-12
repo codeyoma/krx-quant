@@ -145,10 +145,6 @@ class Alerts:
         if self._url is not None:
             self._enqueue(text)
 
-    def signal(self, text: str) -> None:
-        """A prediction signal (``signals.py``), sent and not waited for."""
-        self._send(f"[신호] {text}")
-
     def raise_many(self, keys: list[str], text: str) -> None:
         """One message for every key not already alerted: ``text: key, key``."""
         new = [k for k in keys if k not in self._active]

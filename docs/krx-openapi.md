@@ -1,5 +1,7 @@
 # KRX Open API 레퍼런스 (#305)
 
+> **삭제됨** (2026-11-12, #PRNUM): 엔진이 KRX Open API를 부르던 것 모두: 순자산 수집(`krx_net_assets.py`), 탐사 `probe-krx-etf`(`krx_etf_probe.py`), 설정 `KRX_OPENAPI_KEY`·`KRX_OPENAPI_URL`, 그것을 읽던 KRX 마감 흐름. 이유: 사용자 결정(2026-11-12): 앱을 종합 판단·차트·자동 매매 화면만 남기도록 줄였고(#695), 이것은 지운 화면만 읽었다(#693). 대신: 없다. 서버 `.env`의 인증키를 지우고, 이용 신청은 갱신하지 않아도 된다. 받아 둔 값(`state/closing_flow/net_assets.parquet`)은 서버에만 남고 아무도 읽지 않는다(약관: 서버 밖으로 내보내지 않는다). 아래는 기록이다.
+
 단일종목 ±2배 ETF 16종(`src/krx_quant/products.py`의 `PRODUCTS`)의 지난날 순자산과 상장좌수를 받을 출처인 한국거래소의 KRX Open API(https://openapi.krx.co.kr)를 정리한다. KIS는 순자산 총액과 상장 주수를 오늘 값만 준다(2026-10-21 `probe-nav-305`, [kis-feeds.md](kis-feeds.md) "ETF 순자산 (#305)"). 그래서 사용자가 2026-10-22에 지난날 순자산을 이 서비스의 "ETF 일별매매정보"(`etf_bydd_trd`)에서 받기로 정했다(#305 댓글).
 
 2026-10-23 23:57 예약 작업 `probe-krx-etf-305`(`krx-quant probe-krx-etf`, KRX 27번 조회 실패 0번, KIS 64번 조회 실패 0번)가 서버에서 처음 쟀다(#305 댓글, [operations.md](operations.md#krx-open-api-etf-일별매매정보-확인-305)). 아래 "실측"은 그 결과이고, "문서"는 서비스 페이지와 FAQ에서 읽은 것이다. 엔진은 이 실측으로 순자산을 받는다(`src/krx_quant/krx_net_assets.py`, 아래 "엔진이 받는 것").
