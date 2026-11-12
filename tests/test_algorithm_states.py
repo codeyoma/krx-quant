@@ -70,11 +70,14 @@ async def test_the_list_holds_every_algorithm_waiting_refused_and_retired_among_
         "why": "stats: weakest lift -0.0100",
     }
     direction, *others = body["kinds"]
-    assert all(k["predicting"] == [] and k["states"] == {} for k in others), "no algorithm of the other kinds"
+    assert all(k["predicting"] == k["shadow"] == [] and k["states"] == {} for k in others), (
+        "no algorithm of the other kinds"
+    )
     assert direction == {
         "kind": "direction",
         "target_version": TARGET_VERSION,
         "predicting": ["newton"],
+        "shadow": ["beta", "first", "second", "turned"],  # #696
         "states": {
             "probation": ["newton"],
             "retired": ["beta"],

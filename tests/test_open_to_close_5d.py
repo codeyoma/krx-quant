@@ -41,6 +41,7 @@ from krx_quant.features import FeatureVector
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import DAILY_KINDS, daily_kind_named
 from krx_quant.kinds import DIRECTION_KIND, KindForecast, KindScored
+from krx_quant.lifecycle import SHADOW
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.open_to_close import OPEN_TO_CLOSE, classify
 from krx_quant.open_to_close_5d import (
@@ -657,9 +658,14 @@ async def test_the_kind_runs_now_that_the_dividends_were_measured(tmp_path: Path
     )
     await replay_into(e, clock, [], until=at(MONDAY, "08:51"))
     made = e.store.kind_recent(OPEN_TO_CLOSE_5D.name, 1, "005930", 10)
-    assert {r["algorithm"] for r in made} == {FLAT_NAME, CLIMATE, PERSIST}
+    assert {(r["algorithm"], r["lifecycle"]) for r in made} == {
+        (FLAT_NAME, None),
+        (CLIMATE, None),
+        (PERSIST, None),
+        (algorithm.name, SHADOW),  # in shadow while it waits (#696)
+    }
     assert algorithm.name in e.waiting(), "its pre-validation comes first"
-    assert algorithm.name not in e.store.statuses(), "not run before it passes"
+    assert algorithm.name not in e.store.statuses(), "not enrolled before it passes"
     # Trained at night.
     from tests.daily_doubles import made_history
 

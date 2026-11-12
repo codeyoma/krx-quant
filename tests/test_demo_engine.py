@@ -20,6 +20,7 @@ from krx_quant.algorithms import ALGORITHMS
 from krx_quant.cli import main
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.demo import DEMO_SYMBOLS, demo_app
+from krx_quant.lifecycle import SHADOW
 from krx_quant.macro import INDICATORS
 from tests.api_doubles import listening, receive_until
 from tests.api_schema import check
@@ -266,7 +267,8 @@ async def test_the_demo_has_the_five_session_kind_s_windows(demo: TestClient[Any
     assert daily["probation_days"] == [60, 120, 180]
     baselines = {"otc5-flat", "otc5-climate", "otc5-persist"}
     assert latest["bar_close"] == "2026-10-12T08:50:00+09:00"
-    assert {p["algorithm"] for p in latest["predictions"]} == baselines, "cox-5d was refused: not run"
+    lifecycle = {p["algorithm"]: p["lifecycle"] for p in latest["predictions"]}
+    assert lifecycle == {**dict.fromkeys(baselines), "cox-5d": SHADOW}, "cox-5d was refused: in shadow (#696)"
     assert all(p["target_at"] == "2026-10-16T15:30:00+09:00" for p in latest["predictions"])
     assert len({p["bar_close"] for p in made["predictions"]}) == 21
     waiting = sorted({p["bar_close"][:10] for p in made["predictions"] if p["answer"] is None})

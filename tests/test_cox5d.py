@@ -459,7 +459,7 @@ async def test_a_passed_algorithm_held_for_its_review_days_is_not_said_to_wait_a
 ) -> None:
     """#339 review: once its pre-validation passed, an algorithm of a kind holding its review days
     is held, not waiting for a pre-validation: a restart's review says it is held, never "검증을
-    통과해야 돌기 시작합니다"."""
+    통과해야 수습을 시작합니다"."""
     from krx_quant.daily import StoredDays
     from krx_quant.replay import replay_into
     from tests.lifecycle_doubles import Outbox

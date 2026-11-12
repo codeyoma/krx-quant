@@ -14,11 +14,17 @@
   and 60 by default): made active again if its weakest lift by trading day over the last
   20 trading days has a lower bound above 0. Past the last of those days without it, it
   is a retirement candidate: an alert is sent, once.
-- **retired**: by command only (``krx-quant retire``); it is no longer run. Its records
-  stay. ``krx-quant unretire`` puts it back on probation.
+- **retired**: by command only (``krx-quant retire``); it is no longer judged, and runs on only
+  in shadow (#696, below). Its records stay. ``krx-quant unretire`` puts it back on probation.
 - **clone**: an algorithm on probation whose predictions move with an earlier registered
   one's (correlation of p_up − p_down above 0.9, on the bar closes both predicted) is a
   clone, kept out of the consensus; back on probation once the correlation falls.
+
+**Shadow** (#696, ``SHADOW``) is not a status: the engine runs every registered algorithm, and one
+it does not run by its status or its pre-validation (not enrolled: waiting for its pre-validation or
+refused by it; retired; a daily one kept out of its probation) predicts in shadow, its rows marked
+so. No review, stage or probation counts a shadow row, and the consensus, the signals and the
+verdicts never take one: shadow adds evidence (for the ranking, #697), and the status still decides.
 
 The statistics are the leaderboard's: the touch label (#170), special predictions left
 out, and a decision only with at least ``min_sample`` scored predictions and as many pairs
@@ -178,6 +184,13 @@ class Status(enum.Enum):
     BENCH = "bench"
     RETIRED = "retired"
     CLONE = "clone"
+
+
+# What a prediction row of an algorithm the engine runs only for the evidence carries instead of a
+# status (#696, ``predictions.lifecycle``): one not enrolled (waiting for its pre-validation, or
+# refused by it), retired, or a daily one kept out of its probation. Never a status: no review
+# judges it, and the consensus, the signals and the verdicts never read it.
+SHADOW = "shadow"
 
 
 @dataclass(frozen=True)

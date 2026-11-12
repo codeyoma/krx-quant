@@ -52,11 +52,15 @@ The daily kinds' algorithms (#264, ``daily_training``) come last, given the serv
 train them): each refitted on its latest days up to the night and always promoted, its report
 naming the kind and ``cadence`` ``daily``.
 
-An algorithm the engine does not run because its latest pre-validation refused the code, target
-and inputs it has (#544, ``prevalidation.left_out``: not enrolled, retired, or a daily one on
-probation) is not trained: the night's list names it (``refused``) and the summary says so in one
-line, so it is never promoted. Once its code, target or inputs change, it trains again from that
-night. The days are still read with its features (the sample store's key, #370, stays the same).
+Every registered algorithm is trained, one step after another, each step's days let go after it
+and the memory it freed handed back to the system (below): one its pre-validation refused too, as
+the engine runs it in shadow (#696).
+
+> **바뀜** (2026-11-12, #NNN): an algorithm the engine did not run because its latest pre-validation
+> refused the code, target and inputs it had (#544, ``prevalidation.left_out``) was not trained, and
+> the night's list named it (``refused``) → every one is trained. 이유: the engine runs it in shadow,
+> on the model the night trains (#696). A list from before keeps its ``refused`` and its summary
+> line.
 
 Each day is read once, with every algorithm's features and every kind's answers; at once, and
 after each step, it keeps only what the steps still to run read of it (#355, ``_Needs``), and a
@@ -73,7 +77,8 @@ Objects:
 - ``models/<algorithm>/<version>.json``: each challenger, and the models the server runs;
 - ``live.json``: the version each algorithm runs on the server, published by it;
 - ``reports/<day>/<algorithm>.json``: one algorithm's night;
-- ``promotions/<day>.json``: the night's promotion list, with the algorithms refused (#544).
+- ``promotions/<day>.json``: the night's promotion list (one from #544 to #696 with the algorithms it
+  did not train for their refusal, ``refused``).
 """
 
 from __future__ import annotations
@@ -112,7 +117,7 @@ from krx_quant.engine import ENGINE_FEEDS, partitions
 from krx_quant.features import Leaders
 from krx_quant.feeds import TRADE
 from krx_quant.feeds.base import KST, kst_day
-from krx_quant.footprint import Meter, StepUsage
+from krx_quant.footprint import Meter, StepUsage, give_back
 from krx_quant.kind_registry import KINDS, daily_kind_named, kind_named
 from krx_quant.kinds import DIRECTION_KIND, NO_ANSWER, Kind, KindForecast, TableBaseline, table_baselines
 from krx_quant.kinds import most_likely as most_likely_class
@@ -122,9 +127,6 @@ from krx_quant.nightly_hit_rates import HIT_RATE, summary_text
 from krx_quant.nightly_hit_rates import compare as compare_hit_rates
 from krx_quant.notify import send_notice
 from krx_quant.object_store import ObjectStore, file_digest, get_json, open_store, put_json
-from krx_quant.predictions import DB_NAME, read_statuses
-from krx_quant.prevalidation import Refusal
-from krx_quant.prevalidation import left_out as refused_by
 from krx_quant.pricing import most_likely
 from krx_quant.sample_store import STORE_DIR, DayKey, NightReads, SampleStore, night_reads, read_day
 from krx_quant.touch import TARGET_VERSION
@@ -134,8 +136,6 @@ log = logging.getLogger(__name__)
 
 VALIDATION_DAYS = 3
 _S = TypeVar("_S", Sample, KindSample)  # a direction's sample or a kind's (#179)
-# The refusal that leaves an algorithm out of the night (#544, ``prevalidation.left_out``).
-LeftOut = Callable[[Algorithm | KindAlgorithm | DailyAlgorithm], Refusal | None]
 LIVE = "live.json"
 # The line each step's run starts with (#355): a night killed from outside (the OOM killer) ends
 # its output on the step it was in, which the server's alert names (``swap``).
@@ -160,8 +160,9 @@ class Night:
     finalized_at: str
     promoted: dict[str, str]  # algorithm -> the version to run from the next morning
     reports: list[dict[str, Any]]
-    # The algorithms not trained because their pre-validation refused the code they have and the
-    # engine does not run them (#544, ``prevalidation.left_out``): algorithm -> the checks it failed.
+    # The algorithms a list from #544 to #696 did not train because their pre-validation refused the
+    # code they had (``prevalidation.left_out``): algorithm -> the checks it failed. A night since
+    # trains every one (#696): none.
     refused: dict[str, str] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
@@ -305,7 +306,6 @@ def train_night(
     daily: DailyTrainer | None = None,
     daily_algorithms: Sequence[DailyAlgorithm] = DAILY_ALGORITHMS,
     samples: Path | None = None,
-    left_out: LeftOut | None = None,
 ) -> Night:
     """Train every algorithm for the night of ``day`` (default: the latest day with data) and
     store the promotion list. A night already finished is returned as it was. Each report
@@ -315,9 +315,8 @@ def train_night(
     besides the direction train after them, on their kind's answers (#179), and the daily kinds'
     algorithms last, given ``daily`` (#264). Each day's samples are read from the sample store in
     ``samples`` (#370, ``sample_store.py``) when they are there under their key, else made and
-    stored there; without it, every day is made. An algorithm ``left_out`` refuses (#544,
-    ``prevalidation.left_out``) is not trained: the list names it (``Night.refused``). The days are
-    still read with every algorithm's features, so their key in the sample store stays the same.
+    stored there; without it, every day is made. Every algorithm is trained, one its pre-validation
+    refused too (#696: the engine runs it in shadow).
     """
     leaders = leaders or Leaders()
     bars, trades = (
@@ -367,23 +366,9 @@ def train_night(
         of_daily = [
             (d, k) for d in daily_algorithms if (k := daily_kind_named(d.kind)) is not None and k.runs
         ]
-    # Those the engine does not run for their pre-validation's refusal of the code they have (#544).
-    everyone: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
-        *algorithms,
-        *(a for a, _ in of_kinds),
-        *(d for d, _ in of_daily),
-    ]
-    refused = {
-        a.name: found.why for a in everyone if left_out is not None and (found := left_out(a)) is not None
-    }
-    if refused:
-        log.info(
-            "not trained tonight, refused by their pre-validation and not run (#544): %s", ", ".join(refused)
-        )
     steps: list[_Step] = [
         _Step(a.name, target_version, False, partial(trainer.train, a, live.get(a.name)), trainer.needs(a))
         for a in algorithms
-        if a.name not in refused
     ]
     steps.append(_Step(CLIMATE, target_version, False, trainer.climate, trainer.climate_needs()))
     for kind, table in tables:
@@ -397,8 +382,6 @@ def train_night(
             )
         )
     for a, kind in of_kinds:
-        if a.name in refused:
-            continue
         steps.append(
             _Step(
                 a.name,
@@ -410,16 +393,15 @@ def train_night(
         )
     if daily is not None:
         for d, daily_kind in of_daily:
-            if d.name not in refused:
-                steps.append(
-                    _Step(
-                        d.name,
-                        daily_kind.answer_version,
-                        True,
-                        partial(trainer.train_daily, daily, d, daily_kind),
-                        _Needs(),
-                    )
+            steps.append(
+                _Step(
+                    d.name,
+                    daily_kind.answer_version,
+                    True,
+                    partial(trainer.train_daily, daily, d, daily_kind),
+                    _Needs(),
                 )
+            )
     # The checkpoints first: what the steps still to run read of the days decides what the day
     # cache keeps after each one (#355).
     checkpoints = [_checkpoint(store, night, step) for step in steps]
@@ -460,7 +442,6 @@ def train_night(
         now().isoformat(),
         {r["algorithm"]: r["challenger"]["version"] for r in reports if r["promoted"]},
         reports,
-        refused,
     )
     put_json(store, promotions_key(night), result.as_dict())
     trainer.prune({d for step in steps for d in step.needs.days})
@@ -476,9 +457,6 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
         raise SettingsError("KRX_OBJECT_STORE is not set: nightly training reads and writes it")
     finished_before = day is not None and store.digest(promotions_key(day)) is not None
     calendar = calendar_store(settings).calendar
-    # Those the engine does not run for their pre-validation's refusal (#544): read from this
-    # server's state folder and engine DB.
-    statuses = read_statuses(settings.state_dir / DB_NAME)
     # The daily kinds' algorithms (#264) train on this server's files, where it has them.
     daily = DailyTrainer(
         DailyFiles(settings.data_dir, settings.state_dir), settings.symbols, settings.fee_rate, calendar
@@ -497,7 +475,6 @@ async def run_training(settings: Settings, day: date | None = None) -> Night:
         target_version=settings.target_version,
         daily=daily,
         samples=settings.state_dir / STORE_DIR,
-        left_out=refused_by(settings.state_dir, statuses, settings.target_version),
     )
     if not finished_before:
         # A report, no warning: its ``alert:`` line and the lines of its text go at INFO (#580).
@@ -583,7 +560,8 @@ class _Trainer:
     @contextmanager
     def running(self, meter: Meter) -> Iterator[StepUsage]:
         """The plan's next step, timed (``footprint``); after it, the days no later step reads
-        are let go and the others keep only what those read."""
+        are let go and the others keep only what those read, and the memory the step freed goes
+        back to the system (``footprint.give_back``, #696: the night trains every algorithm)."""
         self._usage = usage = StepUsage(meter)
         try:
             yield usage
@@ -592,6 +570,7 @@ class _Trainer:
             self._at += 1
             for day in list(self._loaded):
                 self._keep(day)
+            give_back()
 
     def _phase(self, name: str) -> Any:
         return nullcontext() if self._usage is None else self._usage.phase(name)

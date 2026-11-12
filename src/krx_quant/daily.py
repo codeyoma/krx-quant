@@ -636,6 +636,7 @@ class DailyRunner:
         running: Running | None = None,
         features: Features | None = None,
         seconds: float = 10.0,
+        lifecycle: Callable[[str], str | None] | None = None,
     ) -> None:
         self.kinds = tuple(kinds)
         self.store = store
@@ -648,6 +649,9 @@ class DailyRunner:
         self._running = running or (lambda: ())
         self._features = features
         self._seconds = seconds  # an algorithm's time limit on a day's symbols
+        # What a predictor's rows carry (#696, ``predictions.lifecycle``): an algorithm's status, or
+        # shadow; None for a baseline.
+        self._lifecycle = lifecycle or (lambda _: None)
         started_at = now()
         # The last prediction time handled: a start after a day's time skips that day.
         self._predicted_through = started_at
@@ -826,6 +830,7 @@ class DailyRunner:
                 status=m.status,
                 band=None if (band := bands.get(symbol)) is None else band.value,
                 inputs=m.inputs.get(symbol),
+                lifecycle=self._lifecycle(m.name),
             )
             for m in made
             for symbol, forecast in m.forecasts.items()

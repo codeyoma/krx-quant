@@ -264,7 +264,9 @@ def prediction_json(row: dict[str, Any]) -> dict[str, Any]:
 
     Its outcome is scored on the bar close's touch label (#170, ``touch``), and ``unscorable``
     says why it has none; the mid-points stay as stored. The old bases' classes stay in the DB
-    alone (#592: ``class_a`` and ``class_b`` carried the touch label for one release)."""
+    alone (#592: ``class_a`` and ``class_b`` carried the touch label for one release). ``lifecycle`` is
+    where its algorithm stood when it predicted (#696): its status, or ``shadow``; None for a baseline,
+    a consensus and one stored before."""
     scored = row["scored_at"] is not None
     label = row.get("touch_class")
     why = row.get("touch_unscorable") if row.get("touch_path") is not None else NO_TOUCH
@@ -275,6 +277,7 @@ def prediction_json(row: dict[str, Any]) -> dict[str, Any]:
         "displayed_at": row["displayed_at"],
         "target_at": row["target_at"],
         "status": row["status"],
+        "lifecycle": row.get("lifecycle"),
         "blocked": row.get("blocked"),
         "votes": None
         if row.get("votes_up") is None
@@ -346,7 +349,7 @@ def kind_prediction_json(
     the bar close's mid-point and its tick size (#210), the reference its answer is measured
     from, None without a mid-point there and for one stored before. A daily kind's (#264) is
     over at its day's close (``target``, ``kind_target``) and has its day's flat band (``band``,
-    None for the others)."""
+    None for the others). ``lifecycle`` as a direction prediction's (#696, ``prediction_json``)."""
     made = row["status"] == "ok"
     bar_close = datetime.fromisoformat(row["bar_close"])
     ends = target(bar_close) if target is not None else bar_close + horizon
@@ -357,6 +360,7 @@ def kind_prediction_json(
         "displayed_at": row["displayed_at"],
         "target_at": iso(ends) if made else None,
         "status": row["status"],
+        "lifecycle": row.get("lifecycle"),
         "flat_ticks": row["flat_ticks"],
         "width_ticks": row["width_ticks"],
         "anchor": row["anchor"],

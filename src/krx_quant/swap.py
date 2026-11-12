@@ -7,10 +7,12 @@ At 08:00 each trading day the latest night's list not applied yet is, if it was 
 running engine notices a model file that changed (the swap, ``krx-quant fit``,
 ``krx-quant rollback``) and switches to it within half a minute; the server then
 publishes what it runs (``live.json`` and the models), the champions of the next night. Its
-line names the models it installed, but not those of the algorithms the engine does not run because
-their pre-validation refused the code they have (#544, ``not_run``). The line is logged; the
-morning's readiness line tells whether the night's list was applied and how many models changed
-(#614, ``MorningSwap``, ``readiness.py``).
+line names the models it installed. The line is logged; the morning's readiness line tells whether
+the night's list was applied and how many models changed (#614, ``MorningSwap``, ``readiness.py``).
+
+> **바뀜** (2026-11-12, #NNN): the line left out the models of the algorithms the engine did not run
+> because their pre-validation refused the code they had (#544, ``not_run``) → it names every model
+> installed. 이유: the engine runs those in shadow on the model installed (#696).
 
 > **바뀜** (2026-11-06, #616): the line went to Telegram at 08:00, every model with its version →
 > logged only; the 08:40 readiness line carries its outcome. 이유: the night's summary had told the
@@ -37,10 +39,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 from time import monotonic
 from typing import Any
 
@@ -57,7 +58,6 @@ from krx_quant.model_shelf import Pruned, Shelf, size_text
 from krx_quant.nightly import LIVE, Night, model_key, promotions_key
 from krx_quant.notify import Alerts
 from krx_quant.object_store import ObjectStore, Stored, get_json, put_json
-from krx_quant.prevalidation import left_out
 from krx_quant.process_log import KRX_QUANT, Child, duration, run_logged
 from krx_quant.training_nights import Failure, Outcome, TrainingNights, exit_text, last_step
 
@@ -149,8 +149,7 @@ class NightStatus:
 class MorningSwap:
     """A trading day's morning swap as the readiness line tells it (#614, ``readiness.py``): the
     night whose list it read (None: no list yet), whether that list runs or why not, and the
-    algorithms whose model it changed, those the engine does not run left out (#544,
-    ``not_run``), as its line names them."""
+    algorithms whose model it changed, as its line names them."""
 
     day: date
     night: date | None
@@ -159,11 +158,11 @@ class MorningSwap:
     changed: tuple[str, ...]
 
 
-def morning_outcome(today: date, status: NightStatus | None, refused: Collection[str] = ()) -> MorningSwap:
+def morning_outcome(today: date, status: NightStatus | None) -> MorningSwap:
     """The swap of ``today`` that read ``status`` (None: no list yet), as ``swap_notice`` counts it."""
     if status is None:
         return MorningSwap(today, None, False, "no list yet", ())
-    changed = tuple(n for n in status.night.promoted if n not in refused) if status.applied else ()
+    changed = tuple(status.night.promoted) if status.applied else ()
     return MorningSwap(today, status.night.day, status.applied, status.reason, changed)
 
 
@@ -481,11 +480,10 @@ async def keep_models(
                 today = kst_day(swap_at)
                 swap_at = next_on_trading_day(calendar, SWAP_AT, now())
                 status = await morning_swap(store, shelf, engine, today=today, at=now(), watch=watch)
-                refused = frozenset() if status is None else not_run(engine, shelf.state_dir)
-                line = None if status is None else swap_notice(status, refused)
+                line = None if status is None else swap_notice(status)
                 if line is not None:  # the readiness line tells its outcome (#614)
                     log.info("the morning swap: %s", line)
-                swapped(morning_outcome(today, status, refused))
+                swapped(morning_outcome(today, status))
                 if watch is not None:
                     watch.morning()
                 await asyncio.to_thread(
@@ -692,36 +690,13 @@ def _tell_tail(day: date, lines: Sequence[str]) -> None:
     )
 
 
-def swap_notice(status: NightStatus, refused: Collection[str] = ()) -> str | None:
+def swap_notice(status: NightStatus) -> str | None:
     """The morning swap's line, logged (#614: the readiness line tells its outcome): the night's
-    list not used and why, or the models it installed. Not those of the ``refused`` algorithms
-    (#544, ``not_run``): installed, they run nothing, so they are not told as changed. None when
-    nothing is to be told: the list promoted nothing, or only theirs."""
+    list not used and why, or the models it installed. None when the list promoted nothing."""
     if not status.applied:
         return f"{status.night.day} 밤 학습 결과를 쓰지 않습니다: {status.reason}"
-    changes = ", ".join(
-        f"{name} → {version}" for name, version in status.night.promoted.items() if name not in refused
-    )
+    changes = ", ".join(f"{name} → {version}" for name, version in status.night.promoted.items())
     return f"모델 교체 ({status.night.day} 밤 학습): {changes}" if changes else None
-
-
-def not_run(engine: PredictionEngine, state_dir: Path) -> frozenset[str]:
-    """The registered algorithms the engine does not run because their pre-validation refused the
-    code they have (#544, ``prevalidation.left_out``), by its statuses and the reports in
-    ``state_dir``. A refusal that came after the night's training (its scheduled pre-validation
-    runs after it) still has its promoted model installed, never told. Empty when they cannot be
-    read (logged): the swap's line then tells every model."""
-    try:
-        out = left_out(state_dir, engine.store.statuses(), engine.target_version, engine.kinds)
-        everyone: list[Algorithm | KindAlgorithm | DailyAlgorithm] = [
-            *engine.registered,
-            *engine.kind_registered,
-            *engine.daily_registered,
-        ]
-        return frozenset(a.name for a in everyone if out(a) is not None)
-    except (OSError, ValueError):
-        log.exception("could not read which algorithms their pre-validation refused")
-        return frozenset()
 
 
 def _first_swap(calendar: MarketCalendar, started: datetime) -> datetime:
