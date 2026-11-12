@@ -49,7 +49,17 @@ def day(
 
 
 def test_cox_is_registered_with_features_of_its_own() -> None:
-    assert [a.name for a in DAILY_ALGORITHMS] == ["cox", "cox-5d"]  # #310: its five-session twin after it
+    # #310: its five-session twin after it; #698: the candidates of each kind after them.
+    assert [a.name for a in DAILY_ALGORITHMS] == [
+        "cox",
+        "cox-5d",
+        "hurst",
+        "lorenz",
+        "friedman",
+        "hurst-5d",
+        "lorenz-5d",
+        "friedman-5d",
+    ]
     cox = DAILY_ALGORITHMS[0]
     assert cox.kind == "open_to_close"
     assert set(cox.features) <= set(DAILY_FEATURES)

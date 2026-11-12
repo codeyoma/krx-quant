@@ -26,6 +26,19 @@ time budget (``KRX_ALGORITHM_SECONDS``), no other algorithm of the kind it moves
 special (circuit breakers and sidecars are not kept before 2026-10-12): the few in ten years are
 in.
 
+**Correlation** (#698, once a kind has several algorithms). The other algorithms of the kind the
+engine runs or would start are walked forward the same way beside it: active or on the bench (and
+not left out for a refusal of the code they have, ``prevalidation.left_out``, #544), or, on
+probation or not enrolled, passed on the code, answers and inputs they have now
+(``prevalidation.admits``, as the engine admits a daily one); never a retired one, whatever its
+report says, nor ``cox-5d`` (refused). One still waiting for its own verdict is not: a candidate
+never refuses one already judged, and of two candidates the night pre-validates in turn, the second
+is measured against the first once it passed. Its lean (the first class's probability less the
+third's) is correlated with each one's on the (symbol, day) both predicted out of sample
+(``lifecycle.correlated``); above the clone threshold (``CLONE_CORRELATION``, 0.9) with any, it is
+refused, as a bar-close algorithm is. Each one walked beside it costs its own walk-forward's time
+(seconds to a minute or two on the server).
+
 **Windows of several sessions** (#310, ``DailyKind.sessions``): a sample's label holds the prices
 up to its window's end (``DailySample.ends``), so every fit takes only the windows that ended
 before what it is judged on. The night's fit on the night of N, those ended by N; its recent look,
@@ -69,14 +82,19 @@ from krx_quant.kind_stats import entry as kind_entry
 from krx_quant.kind_stats import leaderboard as kind_leaderboard
 from krx_quant.kind_stats import sessions_of
 from krx_quant.kinds import KindForecast, KindScored
+from krx_quant.lifecycle import Status, correlated
 from krx_quant.market_calendar import MarketCalendar, calendar_store
+from krx_quant.predictions import DB_NAME, read_statuses
 from krx_quant.prevalidation import (
     Check,
     Prevalidation,
+    _correlation,
     _held,
     _record_run,
+    admits,
     code_digest,
     earlier_runs,
+    left_out,
     report_path,
     seed_history,
     tried_level,
@@ -224,8 +242,10 @@ def walk_forward(
     *,
     calendar: MarketCalendar | None = None,
     last: date | None = None,
+    baselines: bool = True,
 ) -> WalkForward:
-    """The walk-forward (module doc), over the last ``WALK_YEARS`` years up to ``last``."""
+    """The walk-forward (module doc), over the last ``WALK_YEARS`` years up to ``last``; without
+    the kind's baselines' forecasts for ``baselines`` False (one walked beside a candidate, #698)."""
     newest = last or max((d.day for s in symbols for d in files.days(s)), default=None)
     if newest is None:
         return WalkForward({}, [], {}, 0, 0.0)
@@ -268,10 +288,11 @@ def walk_forward(
                 if s.answer is not None and s.label is not None:
                     records[algorithm.name].append(_scored(kind, algorithm.name, model.version, s, forecast))
     first_predicted = predicted[0] if predicted else None
-    for name, scored in baseline_forecasts(
-        kind, files, symbols, fee_rate, first_predicted, newest, calendar=calendar
-    ).items():
-        records[name] = scored
+    if baselines:
+        for name, scored in baseline_forecasts(
+            kind, files, symbols, fee_rate, first_predicted, newest, calendar=calendar
+        ).items():
+            records[name] = scored
     present = {f: sum(1 for s in found if s.features[f] is not None) for f in algorithm.features}
     return WalkForward(dict(records), predicted, models, folds, slowest, len(found), present)
 
@@ -357,6 +378,7 @@ def _checks(
     seconds: float,
     tries: int,
     strict_low: float | None,
+    correlations: Mapping[str, float],
 ) -> list[Check]:
     return [
         Check(
@@ -373,7 +395,7 @@ def _checks(
             run.slowest <= seconds,
             f"the slowest day's forecasts of every symbol took {run.slowest:.3f}s (at most {seconds:g}s)",
         ),
-        Check("correlation", True, "no other algorithm of its kind to measure against"),
+        _correlation(correlations),
         _stats_daily(stats, min_sample, tries, strict_low),
     ]
 
@@ -503,6 +525,61 @@ def overlap_report(
     }
 
 
+def _lean(record: KindScored) -> float:
+    """A forecast's lean: its first class's probability less its third's (``kinds``' ``lean``)."""
+    return record.probabilities[0] - record.probabilities[-1]
+
+
+def correlations_beside(
+    settings: Settings,
+    candidate: DailyAlgorithm,
+    kind: DailyKind,
+    mine: Sequence[KindScored],
+    algorithms: Sequence[DailyAlgorithm],
+    files: DailyFiles,
+    calendar: MarketCalendar | None,
+    last: date | None,
+) -> dict[str, float]:
+    """The candidate's correlation with each other algorithm of its kind the engine runs or would
+    start (module doc, "Correlation"), each walked forward over the same days."""
+    statuses = read_statuses(settings.state_dir / DB_NAME)
+    out = left_out(settings.state_dir, statuses, settings.target_version)
+    admitted = admits(settings.state_dir)
+
+    def runs(a: DailyAlgorithm) -> bool:
+        standing = statuses.get(a.name)
+        if standing is not None and standing.status is Status.RETIRED:
+            return False  # the engine no longer runs it, whatever its report says
+        if standing is None or standing.status is Status.PROBATION:
+            # On probation a daily one runs only while its report stands (``engine._admit``).
+            return admitted(a)
+        return out(a) is None  # active or on the bench: judged live, it runs whatever its report says
+
+    beside = [a for a in algorithms if a.kind == kind.name and a.name != candidate.name and runs(a)]
+    if not beside:
+        return {}
+    leans: dict[str, dict[tuple[str, str], float]] = {
+        candidate.name: {(r.symbol, r.bar_close.isoformat()): _lean(r) for r in mine}
+    }
+    for other in beside:
+        began = timer.monotonic()
+        run = walk_forward(
+            other,
+            kind,
+            files,
+            settings.symbols,
+            settings.fee_rate,
+            calendar=calendar,
+            last=last,
+            baselines=False,
+        )
+        leans[other.name] = {
+            (r.symbol, r.bar_close.isoformat()): _lean(r) for r in run.records.get(other.name, [])
+        }
+        log.info("%s: walked %s beside it in %.1fs", candidate.name, other.name, timer.monotonic() - began)
+    return correlated(candidate.name, [a.name for a in beside], [leans])
+
+
 def daily_algorithm(name: str) -> tuple[DailyAlgorithm, DailyKind] | None:
     """A registered daily algorithm and its kind, by name."""
     found = next((a for a in DAILY_ALGORITHMS if a.name == name), None)
@@ -542,6 +619,8 @@ def prevalidate_daily(
         inputs = stored_versions(algorithm.features, settings.state_dir, settings.symbols)
         run = walk_forward(algorithm, kind, files, settings.symbols, settings.fee_rate, calendar=calendar)
         mine = run.records.get(name, [])
+        last = run.days[-1] if run.days else None
+        measured = correlations_beside(settings, algorithm, kind, mine, algorithms, files, calendar, last)
         baselines = {b.name: run.records.get(b.name, []) for b in kind.daily_baselines}
         seed_history(settings.state_dir, name)
         before, on_days = earlier_runs(settings.state_dir, name, run.days)
@@ -556,10 +635,17 @@ def prevalidate_daily(
             days=list(run.days),
             models=dict(run.models),
             checks=_checks(
-                algorithm, run, stats, settings.min_sample, settings.algorithm_seconds, tries, strict
+                algorithm,
+                run,
+                stats,
+                settings.min_sample,
+                settings.algorithm_seconds,
+                tries,
+                strict,
+                measured,
             ),
             stats=stats,
-            correlations={},
+            correlations=measured,
             statuses={"ok": len(mine)},
             skipped_for_cpu=0,
             db=None,

@@ -55,6 +55,7 @@ FEE = 0.015 / 100
 LAST = date(2026, 10, 16)
 NOW = datetime(2026, 10, 16, 22, 30, tzinfo=KST)
 DAYS = 1_300  # 550 days out of sample: above WALK_MIN_DAYS
+CANDIDATES = ("hurst", "lorenz", "friedman", "hurst-5d", "lorenz-5d", "friedman-5d")  # #698
 
 
 def settings(
@@ -294,6 +295,8 @@ def test_the_commands_fit_and_prevalidate_cox(tmp_path: Path, monkeypatch: pytes
     assert main(["fit", "cox"]) == 0
     saved = Model.from_json((s.state_dir / "models" / "cox.json").read_text())
     assert saved.version.startswith("cox-20261016-")
+    # Not the clone check's test (the candidates learn the same planted lean here: below).
+    monkeypatch.setattr("krx_quant.daily_training.correlations_beside", lambda *a, **k: {})
     assert main(["prevalidate", "cox"]) == 0
     assert json.loads(report_path(s.state_dir, "cox").read_text())["passed"] is True
     save_model(s.state_dir, "cox", saved)
@@ -324,7 +327,13 @@ def test_the_night_trains_cox_last_and_puts_it_on_the_promotion_list(tmp_path: P
     )
     # Its five-session twin trains too, now that its kind runs (#310); held from probation, it
     # runs on none of its models yet.
-    assert list(night.promoted) == ["baseline-climate", "cox", "cox-5d"]  # the climate every night
+    # The candidates of #698 train too, each night, whether or not they have passed.
+    assert list(night.promoted) == [
+        "baseline-climate",
+        "cox",
+        "cox-5d",
+        *CANDIDATES,
+    ]  # the climate every night
     [report] = [r for r in night.reports if r["algorithm"] == "cox"]
     assert (report["cadence"], report["day"]) == ("daily", night_day.isoformat())
     stored = json.loads((root / f"models/cox/{night.promoted['cox']}.json").read_text())
@@ -378,7 +387,7 @@ async def test_a_report_on_answer_version_1_has_cox_on_probation_judged_again_be
 
     e = _engine(s, clock)
     # cox-5d waits for its first pre-validation too (#310: its kind runs, no report yet).
-    assert e.daily_algorithms == () and e.waiting() == ["cox", "cox-5d"], (
+    assert e.daily_algorithms == () and e.waiting() == ["cox", "cox-5d", *CANDIDATES], (
         "on probation, judged on version 1: waits"
     )
     # Listed as waiting, not by its stored probation, and not predicting (#684 review): only a
@@ -407,7 +416,7 @@ async def test_a_report_on_answer_version_1_has_cox_on_probation_judged_again_be
 
     path.write_text(json.dumps({**report, "target_version": OPEN_TO_CLOSE.answer_version}))
     e = _engine(s, clock)
-    assert [a.name for a in e.daily_algorithms] == ["cox"] and e.waiting() == ["cox-5d"], (
+    assert [a.name for a in e.daily_algorithms] == ["cox"] and e.waiting() == ["cox-5d", *CANDIDATES], (
         "passed on version 2: runs"
     )
     e.store.change_status("cox", clock.now(), Status.PROBATION, Status.ACTIVE, "test")
