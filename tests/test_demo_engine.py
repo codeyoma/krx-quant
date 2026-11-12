@@ -17,11 +17,13 @@ import pytest_asyncio
 from aiohttp.test_utils import TestClient, TestServer
 
 from krx_quant.algorithms import ALGORITHMS
+from krx_quant.api import ENGINE_KEY
 from krx_quant.cli import main
 from krx_quant.consensus import NAMES as CONSENSUS
 from krx_quant.demo import DEMO_SYMBOLS, demo_app
 from krx_quant.lifecycle import SHADOW
 from krx_quant.macro import INDICATORS
+from krx_quant.verdict import VERDICT_VERSION
 from tests.api_doubles import listening, receive_until
 from tests.api_schema import check
 from tests.replay_events import get_json
@@ -706,3 +708,29 @@ async def test_a_pause_from_the_screen_waits_in_the_demo_for_a_trader(tmp_path: 
     assert state["controls"][0] == posted["control"]
     assert posted["control"]["applied_at"] is None
     assert state["status"] == "running"
+
+
+@ON_THE_SHARED_DEMO
+async def test_the_demo_has_a_ranking_its_verdicts_pool_and_the_day_and_week_beside_them(
+    demo: TestClient[Any, Any],
+) -> None:
+    """#697: the demo keeps a ranking of the night before its morning (members of every horizon, one of
+    each daily kind below the climate or unranked), served by ``/v1/ranking``; the morning's verdicts
+    (version 2) pool those members, so BUY, SELL and WAIT all come; the day and the week are advisory
+    pools of their members' 08:50 forecasts."""
+    ranking = await get_json(demo, "/v1/ranking")
+    check("ranking", ranking)
+    members = {k["kind"]: k["members"] for k in ranking["kinds"]}
+    assert members["barrier_60m"] == ["breiman-60m"] and members["open_to_close"] == ["cox", "hurst"]
+    assert {r["why"] for r in next(k for k in ranking["kinds"] if k["kind"] == "open_to_close")["rows"]} == {
+        None,
+        "few_days",
+    }
+    with demo.app[ENGINE_KEY].store.reading() as db:
+        rows = db.execute("SELECT version, verdict FROM verdicts").fetchall()
+    assert {v for v, _ in rows} == {VERDICT_VERSION}
+    assert {a for _, a in rows} == {"buy", "sell", "wait"}
+    latest = (await get_json(demo, f"/v1/verdict?symbol={DEMO_SYMBOLS[0]}"))["verdicts"][0]
+    advisory = {a["kind"]: a for a in latest["advisory"]}
+    assert set(advisory) == {"open_to_close", "open_to_close_5d"}
+    assert all(a["members"] > 0 and a["call"] != "wait" for a in advisory.values()), advisory
