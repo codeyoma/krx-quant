@@ -1167,8 +1167,8 @@ def test_the_report_of_2026_11_11_is_shown_again_once_after_its_night_failed() -
     assert [t.issue for t in REPORT_AGAIN.targets] == [417]
     assert REPORT_AGAIN.label_if is trader_report_calls and REPORT_AGAIN.unlabel == ()
     names = [j.name for j in JOBS]
-    # After the night's own report and the jobs that must follow it at once (#570, #605).
-    assert names.index(REPORT_AGAIN.name) == names.index("night-book-verdict-605") + 1
+    # After the night's own report and the job that must follow it at once (#570).
+    assert names.index(REPORT_AGAIN.name) == names.index("recording-quality-570") + 1
     assert REPORT_AGAIN.due(night(SATURDAY)), "the first night, trading or not"
     ran = JobRecord(FRIDAY, OK, at(FRIDAY, "22:31"), COMMIT, 0, 3.0)
     assert not REPORT_AGAIN.due(night(MONDAY, ran)), "once"

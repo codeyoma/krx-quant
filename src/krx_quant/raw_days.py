@@ -6,8 +6,8 @@ SHA-256, and leaves a mark in the partition's folder (``archive.PRUNED``: the ke
 The folders stay, so what was recorded is still listed; the rows are only in the store. Reading a
 pruned partition as if it were there fails (``archive.RawMissing``): no reader finds the day empty.
 
-``RawDays`` is where the readers of raw rows (``recording_quality``, ``night_probe``, ``gaps_probe``,
-``night_book``) find a day's feed: the data directory's own folder while none of its partitions is
+``RawDays`` is where the readers of raw rows (``recording_quality``, ``night_probe``, ``gaps_probe``)
+find a day's feed: the data directory's own folder while none of its partitions is
 pruned, else a copy in a temporary directory, with the layout of the data directory: the pruned
 partitions downloaded from the store, each checked against its mark's SHA-256, and the others linked
 to the data directory's. Without a store, or when the store's copy is missing or differs, it raises

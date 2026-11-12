@@ -204,8 +204,9 @@ async def test_the_demo_has_finished_weeks_months_and_years_made_of_its_days(
 async def test_the_demo_has_daily_supply_on_its_candles_days_but_the_morning_s(
     demo: TestClient[Any, Any],
 ) -> None:
-    """#226. Output: every symbol's eight daily values on the 500 candle days, none on the
-    morning (its day is not over), so a chart shows them in every view."""
+    """#226. Output: every symbol's six KIS daily values on the 500 candle days, none on the
+    morning (its day is not over), so a chart shows them in every view; the foreign holdings and
+    ratio, Toss's until #694, none."""
     supply = {
         s: await get_json(demo, f"/v1/symbols/{s}/supply?from=2016-01-01&to=2026-10-12") for s in DEMO_SYMBOLS
     }
@@ -215,9 +216,10 @@ async def test_the_demo_has_daily_supply_on_its_candles_days_but_the_morning_s(
         check("supply", body)
         days = body["days"]
         assert [d["date"] for d in days] == [c["date"] for c in candles["candles"]], symbol
-        assert all(v is not None for d in days for v in d.values()), "every value made up"
+        toss = ("foreign_holding", "foreign_ratio")
+        assert all(v is not None for d in days for k, v in d.items() if k not in toss), "every value made up"
         assert any(d["foreign_net"] < 0 for d in days) and any(d["foreign_net"] > 0 for d in days)
-        assert all(0 < d["foreign_ratio"] < 100 for d in days)
+        assert all(d[k] is None for d in days for k in toss)
 
 
 @ON_THE_SHARED_DEMO

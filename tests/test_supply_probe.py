@@ -218,8 +218,7 @@ async def probed(
     )
     lines: list[str] = []
     calls, failed = await probe_supply(settings, TODAY, lines.append)
-    if "toss_client_id" not in changes:
-        assert calls == len(kis.rest_requests)
+    assert calls == len(kis.rest_requests)
     return "\n".join(lines), calls, failed
 
 
@@ -312,10 +311,7 @@ async def test_the_report_carries_no_market_value(
     assert [s for s in SENTINELS if s in report] == []
     # No long number at all, but in TR codes (symbols have six digits).
     assert re.search(r"(?<![A-Za-z0-9])\d{7,}", report) is None
-    assert (
-        "Toss (secondary; foreign holdings primary, #235)\n"
-        "  skipped: TOSS_CLIENT_ID/TOSS_CLIENT_SECRET not set" in report
-    )
+    assert "Toss" not in report, "the daily supply's Toss part left with #694"
 
 
 async def test_the_cached_token_is_used_until_it_expires(

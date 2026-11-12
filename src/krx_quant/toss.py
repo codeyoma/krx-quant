@@ -3,14 +3,14 @@
 Market data only: callers ask the stock information endpoints. This module must never hold
 order or account endpoints (``scripts/check_forbidden.py`` rejects the order ones).
 
-Toss keeps one valid access token per client: issuing one revokes the one before it, wherever
-it is in use (401 ``token-revoked``). So every process of this client (the supply probe now,
-the collector later) shares the token cached in the state directory (``toss_token.json``,
-mode 600, like the KIS token in ``auth.py``), and a new one is issued only when the cached
-one is missing or expired (its ``expires_in``, less ``EXPIRY_MARGIN``). Issuing holds a file
-lock, so two processes do not both issue. A call Toss refuses for its token reads the cache
-again (another process may have issued since) and, if it still holds the refused token,
-issues one; a client does that once at most.
+Toss keeps one valid access token per client: issuing one revokes the one before it, wherever it
+is in use (401 ``token-revoked``). So every process of this client (the collector's company
+names, #250; the daily supply and its probe until #694) shares the token cached in the state
+directory (``toss_token.json``, mode 600, like the KIS token in ``auth.py``), and a new one is
+issued only when the cached one is missing or expired (its ``expires_in``, less
+``EXPIRY_MARGIN``). Issuing holds a file lock, so two processes do not both issue. A call Toss
+refuses for its token reads the cache again (another process may have issued since) and, if it
+still holds the refused token, issues one; a client does that once at most.
 
 Toss answers only allowed addresses (WTS 설정 > Open API > 허용 IP 관리): any other gets 403
 ``ip-not-allowed`` (``access_denied`` from the token endpoint), reported as ``IP_MESSAGE``.

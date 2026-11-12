@@ -827,7 +827,7 @@ async def test_vis_and_estimates_are_not_polled_while_the_market_is_closed(
 ) -> None:
     """The investor estimates keep a trading day's session too (#488). A REST fallback, polled at
     any hour, shows the poll jobs have gone round: the book is refused for the session limit."""
-    kis.max_subscriptions = 3  # the night futures (#264) and the trade feed fit
+    kis.max_subscriptions = 2  # the night trades (#264) and the trade feed fit
     kis.rest_responses["FHKST01010200"] = lambda q: {"rt_cd": "1", "msg1": "not needed here"}
     kis.rest_responses["FHPST01390000"] = lambda q: ok(output=[])
     kis.rest_responses["HHPTJ04160200"] = lambda q: ok(output2=[])
