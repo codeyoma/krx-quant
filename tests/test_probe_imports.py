@@ -66,7 +66,6 @@ LEAVES = frozenset(
         "close_restart_probe",
         "session_memory_probe",
         "supply_probe",
-        "toss_probe",
         # Checks (``*_check``), a claim measured on the stored data: none since #658 removed the last
         # (``closing_flow_check``, ``daily_check``, ``structure_check``).
         # Experiments and research reports: a hypothesis judged, or a report an agent reads.

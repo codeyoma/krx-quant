@@ -45,7 +45,7 @@ DEFAULT_GITHUB_REPO = "codeyoma/krx-quant"
 DEFAULT_GITHUB_API_URL = "https://api.github.com"
 # The collector looks for issues asking for a server snapshot (#322) no faster than this.
 MIN_SNAPSHOT_MINUTES = 1
-# The Toss Securities Open API, the daily supply data's secondary source (#226, #235).
+# The Toss Securities Open API: the company names (#250; the daily supply's second source until #694).
 DEFAULT_TOSS_URL = "https://openapi.tossinvest.com"
 # The KRX Open API (openapi.krx.co.kr): the ETFs' daily net assets and listed units (#305).
 DEFAULT_KRX_OPENAPI_URL = "https://data-dbg.krx.co.kr"
@@ -241,8 +241,8 @@ class Settings:
     # the engine reads it only to keep it out of what the jobs post.
     bind_address: str | None = None
     # The Toss Securities Open API client (TOSS_CLIENT_ID, TOSS_CLIENT_SECRET, made in Toss's
-    # WTS under 설정 > Open API; #235): the daily supply data's secondary source and the
-    # foreign holdings' primary one. Unset: nothing asks Toss.
+    # WTS under 설정 > Open API; #235): the screen's company names (#250); the daily supply data's
+    # second source until #694. Unset: nothing asks Toss.
     toss_client_id: str | None = field(default=None, repr=False)
     toss_client_secret: str | None = field(default=None, repr=False)
     toss_url: str = DEFAULT_TOSS_URL

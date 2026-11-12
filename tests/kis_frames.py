@@ -124,17 +124,6 @@ NIGHT_FUTURES_COLUMNS = (
     "dynm_mxpr dynm_llam dynm_prc_limt_yn"
 ).split()
 
-# KRX야간선물 실시간호가 (H0MFASP0), examples_llm/domestic_futureoption/krx_ngt_futures_asking_price.
-NIGHT_BOOK_COLUMNS = (
-    "futs_shrn_iscd bsop_hour futs_askp1 futs_askp2 futs_askp3 futs_askp4 futs_askp5 futs_bidp1 "
-    "futs_bidp2 futs_bidp3 futs_bidp4 futs_bidp5 askp_csnu1 askp_csnu2 askp_csnu3 askp_csnu4 "
-    "askp_csnu5 bidp_csnu1 bidp_csnu2 bidp_csnu3 bidp_csnu4 bidp_csnu5 askp_rsqn1 askp_rsqn2 "
-    "askp_rsqn3 askp_rsqn4 askp_rsqn5 bidp_rsqn1 bidp_rsqn2 bidp_rsqn3 bidp_rsqn4 bidp_rsqn5 "
-    "total_askp_csnu total_bidp_csnu total_askp_rsqn total_bidp_rsqn total_askp_rsqn_icdc "
-    "total_bidp_rsqn_icdc"
-).split()
-
-
 # 국내주식 실시간호가 (KRX) (H0STASP0), examples_llm/domestic_stock/asking_price_krx (read 2026-11-06):
 # 63 fields, the last four added on 2026-09-28; 59 before.
 KRX_BOOK_COLUMNS = (
@@ -188,10 +177,6 @@ def futures_frame(tr_id: str, *records: Mapping[str, str]) -> str:
 
 def night_futures_frame(*records: Mapping[str, str]) -> str:
     return frame("H0MFCNT0", NIGHT_FUTURES_COLUMNS, *records)
-
-
-def night_book_frame(*records: Mapping[str, str]) -> str:
-    return frame("H0MFASP0", NIGHT_BOOK_COLUMNS, *records)
 
 
 def krx_book_frame(*records: Mapping[str, str], columns: list[str] = KRX_BOOK_COLUMNS) -> str:

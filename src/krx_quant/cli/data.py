@@ -69,14 +69,6 @@ async def _recording_quality(day: date | None) -> int:
     return 0
 
 
-def _night_book_bytes(verdict: bool) -> int:
-    """The night futures' book's bytes a night, or the rule applied to them (#605)."""
-    from krx_quant.night_book import night_book_bytes
-
-    print(night_book_bytes(Settings.from_env(require_kis=False), datetime.now(KST), verdict=verdict))
-    return 0
-
-
 def _macro() -> int:
     from krx_quant.macro import run_macro
 
@@ -133,19 +125,6 @@ def add(sub: Commands) -> None:
         " trading day before)",
     )
     quality_cmd.set_defaults(run=lambda args: asyncio.run(_recording_quality(args.day)))
-    book_cmd = sub.add_parser(
-        "night-book-bytes",
-        help="measure the bytes a night of the KOSPI200 night futures' book takes (#605), raw and parsed as"
-        " the merged files hold them, over its complete nights from 2026-11-06's evening; reads the"
-        " recordings, writes only its state file, prints no market value",
-    )
-    book_cmd.add_argument(
-        "--verdict",
-        action="store_true",
-        help="also apply the rule set for 2026-11-20: a median over 100 MiB a night of seven complete nights"
-        " and no live module naming the book stop its subscription, anything else keeps it",
-    )
-    book_cmd.set_defaults(run=lambda args: _night_book_bytes(args.verdict))
     sub.add_parser("macro", help="read today's macro indicators and decide the regime, once").set_defaults(
         run=lambda args: _macro()
     )

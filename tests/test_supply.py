@@ -1,20 +1,18 @@
 """The daily supply data kept for the chart's lower indicators (SupplyKeeper, #226), through
-the fake KIS and the fake Toss, and served by ``GET /v1/symbols/{symbol}/supply``.
+the fake KIS, and served by ``GET /v1/symbols/{symbol}/supply``. Toss was a second source until
+#694: nothing asks it or reads its file since.
 
 Every number here is made up: a day's values are worked out from its date, so a test can
-tell which source and which query a stored value came from.
+tell which query a stored value came from.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import aiohttp
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -36,7 +34,6 @@ from krx_quant.supply import (
     NET_MARKET,
     NXT_OPENED,
     SHORT_SALE,
-    TOSS,
     SupplyKeeper,
     history_floor,
     krx_history_stored,
@@ -44,9 +41,7 @@ from krx_quant.supply import (
     stored_supply,
     write_supply,
 )
-from krx_quant.toss import TossClient, TossTokens
 from tests.api_schema import check
-from tests.fake_toss import CLIENT_ID, CLIENT_SECRET, FakeToss, fake_toss
 from tests.kis_rest import requests_for, rest_client
 from tests.replay_events import at, get_json, run
 
@@ -71,7 +66,7 @@ def n(day: date) -> int:
     return day.toordinal() % 10_000
 
 
-# KIS's value of each field on a day, and Toss's (a different one, to tell them apart).
+# KIS's value of each field on a day.
 def kis_value(name: str, day: date) -> int:
     return {
         "short_volume": 1_000 + n(day),
@@ -89,19 +84,6 @@ def krx_value(name: str, day: date) -> int:
         "individual_net": -(12_000 + n(day)),
         "institution_net": 13_000 + n(day),
         "foreign_net": -(14_000 + n(day)),
-    }[name]
-
-
-def toss_value(name: str, day: date) -> int | float:
-    return {
-        "short_volume": 7_000 + n(day),
-        "individual_net": -(8_000 + n(day)),
-        "institution_net": 9_000 + n(day),
-        "foreign_registered": 11_000 + n(day),
-        "foreign_holding": 1_000_000 + n(day),
-        "foreign_ratio": round((5_000 + n(day) % 100) / 100, 2),  # %
-        "lending_balance": 700_000 + n(day),
-        "credit_balance": 80_000 + n(day),
     }[name]
 
 
@@ -144,7 +126,7 @@ class KisSupply:
                 "prsn_ntby_qty": str(value("individual_net", d)),
                 "orgn_ntby_qty": str(value("institution_net", d)),
                 "frgn_ntby_qty": str(value("foreign_net", d)),
-                "frgn_reg_ntby_qty": str(toss_value("foreign_registered", d)),
+                "frgn_reg_ntby_qty": str(11_000 + n(d)),  # the registered foreigners: not kept
             }
             for d in reversed(self.days)
             if ymd(d) <= last
@@ -184,68 +166,21 @@ class KisSupply:
         kis.rest_responses[CREDIT.tr] = self.credit
 
 
-def toss_records(days: list[date]) -> Callable[[str, str], list[dict[str, Any]] | tuple[int, str]]:
-    """Toss's four endpoints over ``days`` (oldest first): records newest first. Its foreigner is
-    the registered ones; each value is Toss's own (``toss_value``)."""
-
-    def value(name: str, day: date) -> str:
-        return str(toss_value(name, day))
-
-    def records(symbol: str, name: str) -> list[dict[str, Any]] | tuple[int, str]:
-        out = []
-        for d in reversed(days):
-            record: dict[str, Any] = {"date": d.isoformat(), "updatedAt": f"{d.isoformat()}T18:00:00+09:00"}
-            if name == "investor-trading":
-                record |= {
-                    "individual": {"netBuyVolume": value("individual_net", d)},
-                    "institution": {"netBuyVolume": value("institution_net", d)},
-                    "foreigner": {"netBuyVolume": value("foreign_registered", d)},
-                    "foreignerHolding": {
-                        "holdingQuantity": value("foreign_holding", d),
-                        "limitQuantity": "2000000",
-                        "holdingRate": str(round(float(toss_value("foreign_ratio", d)) / 100, 4)),
-                    },
-                }
-            elif name == "short-selling":
-                record |= {"shortSellingVolume": value("short_volume", d), "shortSellingVolumeRate": "0.01"}
-            elif name == "securities-lending":
-                record |= {"balanceQuantity": value("lending_balance", d)}
-            elif name == "credit-trades":
-                record |= {"marginLoan": {"balanceQuantity": value("credit_balance", d)}}
-            out.append(record)
-        return out
-
-    return records
-
-
-@asynccontextmanager
-async def toss_maker(toss: FakeToss, state_dir: Path) -> AsyncIterator[Callable[[], TossClient]]:
-    """Toss clients as the collector makes them (one token, shared), without the pace."""
-    async with aiohttp.ClientSession() as session:
-        tokens = TossTokens(session, toss.url, CLIENT_ID, CLIENT_SECRET, state_dir, lambda: datetime.now(KST))
-        yield lambda: TossClient(session, toss.url, tokens, 0)
-
-
 async def keep(
     kis: FakeKis,
     tmp_path: Path,
     now: datetime,
-    toss: Callable[[], TossClient] | None = None,
     symbols: tuple[str, ...] = (SYMBOL,),
 ) -> int:
     pace = RateLimiter(1, 0.001, margin=0)  # the backfill's, in the collector
     async with rest_client(kis, tmp_path, now) as client:
-        return await SupplyKeeper(client, CALENDAR, tmp_path / "state", symbols, pace, toss).run(now)
+        return await SupplyKeeper(client, CALENDAR, tmp_path / "state", symbols, pace).run(now)
 
 
 def kept(
     tmp_path: Path, first: date = date(2000, 1, 1), last: date = date(2030, 1, 1)
 ) -> list[dict[str, Any]]:
     return stored_supply(tmp_path / "state", SYMBOL, first, last)
-
-
-def toss_calls(toss: FakeToss, name: str) -> list[dict[str, str]]:
-    return [query for _, path, query, _ in toss.requests if path.endswith(f"/{name}")]
 
 
 def investor_calls(kis: FakeKis, market: str) -> list[dict[str, str]]:
@@ -280,7 +215,7 @@ async def test_the_first_run_takes_the_history_of_each_kis_query_paging_back(
 
     changed = await keep(kis, tmp_path, EVENING)
 
-    assert changed == 1, "one file: KIS's (no Toss client)"
+    assert changed == 1, "one file: KIS's"
     floor = date(2024, 10, 13)  # a Sunday
     stored = read_supply(tmp_path / "state", SYMBOL, KIS)
     assert [r["date"] for r in stored] == [d for d in days if d >= floor], "every day, back to the floor"
@@ -319,75 +254,24 @@ async def test_the_first_run_takes_the_history_of_each_kis_query_paging_back(
     assert len(requests_for(kis, INVESTORS.tr)) == len(integrated) + len(krx)
     assert len(requests_for(kis, LENDING.tr)) == pages(days, 100, floor)
     assert len(requests_for(kis, CREDIT.tr)) == pages(days, 30, floor)
-    assert not read_supply(tmp_path / "state", SYMBOL, TOSS)
+    assert not supply.supply_path(tmp_path / "state", SYMBOL, "toss").exists(), "Toss's left with #694"
 
 
-async def test_the_merged_days_take_kis_first_toss_where_kis_lacks_a_day_and_toss_s_holdings(
-    kis: FakeKis, tmp_path: Path
-) -> None:
-    days = trading_days(date(2026, 6, 1), date(2026, 10, 13))
-    missing = date(2026, 10, 7)  # KIS has no row that day; Toss does
-    KisSupply([d for d in days if d != missing]).serve(kis)
-
-    async with fake_toss(toss_records(days)) as toss, toss_maker(toss, tmp_path / "state") as maker:
-        changed = await keep(kis, tmp_path, MORNING, maker)
-
-    assert changed == 2, "KIS's file and Toss's"
-    by_day = {r["date"]: r for r in kept(tmp_path)}
-    day = date(2026, 10, 8)
-    assert by_day[day] == {
-        "date": day,
-        "short_volume": kis_value("short_volume", day),
-        "individual_net": kis_value("individual_net", day),
-        "institution_net": kis_value("institution_net", day),
-        "foreign_net": kis_value("foreign_net", day),
-        "foreign_holding": toss_value("foreign_holding", day),
-        "foreign_ratio": toss_value("foreign_ratio", day),
-        "lending_balance": kis_value("lending_balance", day),
-        "credit_balance": kis_value("credit_balance", day),
-    }
-    assert by_day[missing] == {
-        "date": missing,
-        "short_volume": toss_value("short_volume", missing),
-        "individual_net": toss_value("individual_net", missing),
-        "institution_net": toss_value("institution_net", missing),
-        # Toss's foreigners are the registered ones only, not KIS's: no secondary.
-        "foreign_net": None,
-        "foreign_holding": toss_value("foreign_holding", missing),
-        "foreign_ratio": toss_value("foreign_ratio", missing),
-        "lending_balance": toss_value("lending_balance", missing),
-        "credit_balance": toss_value("credit_balance", missing),
-    }
-    assert sorted(by_day) == days
-
-
-async def test_today_is_taken_from_kis_after_20_30_and_from_toss_only_the_next_run(
-    kis: FakeKis, tmp_path: Path
-) -> None:
-    days = trading_days(date(2026, 9, 1), date(2026, 10, 14))  # KIS and Toss answer with the 14th too
+async def test_today_is_taken_from_kis_after_20_30(kis: FakeKis, tmp_path: Path) -> None:
+    days = trading_days(date(2026, 9, 1), date(2026, 10, 14))  # KIS answers with the 14th too
     KisSupply(days).serve(kis)
     afternoon = datetime(2026, 10, 13, 16, 0, tzinfo=KST)
 
-    async with fake_toss(toss_records(days)) as toss, toss_maker(toss, tmp_path / "state") as maker:
-        await keep(kis, tmp_path, afternoon, maker)
-        before = {r["date"]: r for r in kept(tmp_path)}
-        await keep(kis, tmp_path, EVENING, maker)
-        evening = {r["date"]: r for r in kept(tmp_path)}
-        await keep(kis, tmp_path, MORNING, maker)
-        morning = {r["date"]: r for r in kept(tmp_path)}
+    await keep(kis, tmp_path, afternoon)
+    before = {r["date"]: r for r in kept(tmp_path)}
+    await keep(kis, tmp_path, EVENING)
+    evening = {r["date"]: r for r in kept(tmp_path)}
 
     # Before 20:30 the day is not over: up to the 12th.
     assert max(before) == date(2026, 10, 12)
-    # At 21:00 KIS's day is in, but Toss's record of the day is provisional: not its holdings yet.
     assert max(evening) == date(2026, 10, 13)
     assert evening[date(2026, 10, 13)]["short_volume"] == kis_value("short_volume", date(2026, 10, 13))
-    assert evening[date(2026, 10, 13)]["foreign_holding"] is None
-    assert evening[date(2026, 10, 12)]["foreign_holding"] == toss_value("foreign_holding", date(2026, 10, 12))
-    # The next morning's run takes Toss's record of the 13th; the 14th is not over.
-    assert max(morning) == date(2026, 10, 13)
-    assert morning[date(2026, 10, 13)]["foreign_holding"] == toss_value("foreign_holding", date(2026, 10, 13))
-    until = [q["until"] for q in toss_calls(toss, "investor-trading")]
-    assert until == ["2026-10-12", "2026-10-12", "2026-10-13"]
+    assert evening[date(2026, 10, 13)]["foreign_holding"] is None, "Toss's, until #694"
 
 
 async def test_a_later_run_asks_back_to_the_newest_day_held_and_takes_revised_values(
@@ -456,38 +340,7 @@ async def test_a_query_kis_refuses_leaves_the_others_and_is_asked_again_next_run
     assert all(r["lending_balance"] is not None for r in read_supply(tmp_path / "state", SYMBOL, KIS))
 
 
-async def test_toss_refusing_the_address_stops_toss_for_the_run_and_kis_is_kept(
-    kis: FakeKis, tmp_path: Path
-) -> None:
-    days = trading_days(date(2026, 8, 3), date(2026, 10, 13))
-    KisSupply(days).serve(kis)
-
-    async with fake_toss(toss_records(days)) as toss, toss_maker(toss, tmp_path / "state") as maker:
-        toss.api_ip_allowed = False
-        changed = await keep(kis, tmp_path, EVENING, maker, symbols=(SYMBOL, "000660"))
-        asked = len(toss.requests)
-
-    assert changed == 2, "KIS's two files"
-    assert asked == 1, "one call refused, then no more"
-    assert not read_supply(tmp_path / "state", SYMBOL, TOSS)
-
-
-async def test_toss_s_stock_not_found_on_one_endpoint_leaves_its_others(kis: FakeKis, tmp_path: Path) -> None:
-    days = trading_days(date(2026, 8, 3), date(2026, 10, 13))
-    KisSupply(days).serve(kis)
-    records = toss_records(days)
-
-    def some(symbol: str, name: str) -> list[dict[str, Any]] | tuple[int, str]:
-        return (404, "stock-not-found") if name == "credit-trades" else records(symbol, name)
-
-    async with fake_toss(some) as toss, toss_maker(toss, tmp_path / "state") as maker:
-        await keep(kis, tmp_path, EVENING, maker)
-
-    stored = read_supply(tmp_path / "state", SYMBOL, TOSS)
-    assert stored and all(r["credit_balance"] is None and r["foreign_holding"] is not None for r in stored)
-
-
-def test_stored_supply_merges_the_sources_by_day_within_the_days_asked(tmp_path: Path) -> None:
+def test_stored_supply_gives_kis_s_days_within_the_days_asked_and_no_toss(tmp_path: Path) -> None:
     state = tmp_path / "state"
     write_supply(
         state,
@@ -498,27 +351,18 @@ def test_stored_supply_merges_the_sources_by_day_within_the_days_asked(tmp_path:
             {"date": date(2026, 10, 6), "short_volume": None, "credit_balance": 3},
         ],
     )
-    write_supply(
-        state,
-        SYMBOL,
-        TOSS,
-        [
-            {"date": date(2026, 10, 6), "short_volume": 10, "foreign_ratio": 50.5, "credit_balance": 30},
-            {"date": date(2026, 10, 7), "foreign_holding": 40},
-        ],
-    )
+    # A Toss file written before #694 is left on the server and read no more.
+    toss = pa.table({"date": [date(2026, 10, 6), date(2026, 10, 7)], "foreign_holding": [40, 41]})
+    pq.write_table(toss, supply.supply_path(state, SYMBOL, "toss"))
 
     rows = stored_supply(state, SYMBOL, date(2026, 10, 6), date(2026, 10, 7))
 
     empty = dict.fromkeys(FIELDS)
-    assert rows == [
-        {"date": date(2026, 10, 6), **empty, "short_volume": 10, "foreign_ratio": 50.5, "credit_balance": 3},
-        {"date": date(2026, 10, 7), **empty, "foreign_holding": 40},
-    ]
+    assert rows == [{"date": date(2026, 10, 6), **empty, "credit_balance": 3}]
     assert stored_supply(state, "000660", date(2026, 10, 1), date(2026, 10, 7)) == []
 
 
-def test_kis_s_no_figure_zeros_are_none_and_take_toss_s_but_a_real_0_stays(tmp_path: Path) -> None:
+def test_kis_s_no_figure_zeros_are_none_but_a_real_0_stays(tmp_path: Path) -> None:
     """KIS's integrated investor query answers 0 shares where it has no figure: the days before
     NXT opened (2025-03-04), and a day all three are 0 (#270). The files the keeper wrote before
     keep those zeros; reading takes them as none. After NXT opened, one class at 0 beside the
@@ -547,7 +391,6 @@ def test_kis_s_no_figure_zeros_are_none_and_take_toss_s_but_a_real_0_stays(tmp_p
             for d, (i, o, f) in nets.items()
         ],
     )
-    write_supply(state, SYMBOL, TOSS, [{"date": d, "individual_net": -7, "institution_net": 8} for d in nets])
 
     rows = read_supply(state, SYMBOL, KIS)
 
@@ -559,10 +402,9 @@ def test_kis_s_no_figure_zeros_are_none_and_take_toss_s_but_a_real_0_stays(tmp_p
         (None, None, None),
     ]
     assert all(r["short_volume"] == 5 for r in rows), "the other queries' values stay"
-    merged = {r["date"]: r for r in stored_supply(state, SYMBOL, before, blank)}
-    assert (merged[before]["individual_net"], merged[before]["institution_net"]) == (-7, 8), "Toss's"
-    assert merged[before]["foreign_net"] is None, "no secondary for the foreign net buy"
-    assert merged[real]["institution_net"] == 0, "KIS's real 0, not Toss's"
+    answered = {r["date"]: r for r in stored_supply(state, SYMBOL, before, blank)}
+    assert answered[before]["individual_net"] is None and answered[before]["foreign_net"] is None
+    assert answered[real]["institution_net"] == 0, "KIS's real 0"
 
 
 async def test_the_keeper_stores_kis_s_no_figure_zeros_as_none(kis: FakeKis, tmp_path: Path) -> None:
@@ -633,8 +475,8 @@ async def test_the_net_buys_are_krx_s_before_nxt_opened_and_integrated_after_krx
 async def test_krx_zeros_before_nxt_opened_stay_no_figure_and_are_not_asked_again(
     kis: FakeKis, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If KRX also has no figure before NXT opened, nothing changes: the days stay none (Toss's
-    values where Toss has them), and KRX is not asked again."""
+    """If KRX also has no figure before NXT opened, nothing changes: the days stay none, and KRX is
+    not asked again."""
     monkeypatch.setattr(supply, "HISTORY_YEARS", 1)
     supplied = KisSupply(trading_days(date(2024, 3, 4), date(2025, 4, 30)))
     supplied.serve(kis)
@@ -752,7 +594,6 @@ async def test_the_api_gives_the_days_asked_oldest_first_and_refuses_bad_ranges(
     state = tmp_path / "state"
     days = trading_days(date(2025, 9, 1), date(2026, 10, 8))
     write_supply(state, SYMBOL, KIS, [{"date": d, "short_volume": n(d), "foreign_net": -n(d)} for d in days])
-    write_supply(state, SYMBOL, TOSS, [{"date": d, "foreign_ratio": 50.25} for d in days])
     engine = await run(tmp_path / "engine.db", [], until=at("10:00:00"))  # Monday the 12th
 
     async with TestClient(TestServer(create_app(engine, state_dir=state))) as client:
@@ -785,7 +626,6 @@ async def test_the_api_gives_the_days_asked_oldest_first_and_refuses_bad_ranges(
                 **dict.fromkeys(FIELDS),
                 "short_volume": n(d),
                 "foreign_net": -n(d),
-                "foreign_ratio": 50.25,
             }
             for d in trading_days(date(2026, 10, 5), date(2026, 10, 8))
         ],
