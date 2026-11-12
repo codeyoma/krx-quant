@@ -513,7 +513,12 @@ def _revision_note(algorithm: str) -> str:
 # night. Its result goes to #204, with them, and to its daily kind's issue (``DAILY_KIND_ISSUES``:
 # open_to_close's ``DAILY_CHECK_ISSUE``, #204 too since #688, so once there; open_to_close_5d's #310,
 # whose review days were fixed from the variance ratio its first pre-validation measured: a later
-# algorithm's report measures it again).
+# algorithm's report measures it again). Several due on one night (#698: its six candidates, the
+# night after their deploy) run in turn, each its own process; each also walks the algorithms of its
+# kind the engine runs beside it (its correlation check). On ten made-up years in a container of two
+# CPUs and 2 GB, a candidate's walk-forward took 3-42 s and under 250 MB, and the six in turn about
+# four minutes at the most (each passing, so the next walks it too); the server is about three times
+# slower.
 DAILY_PREVALIDATION_TIMEOUT = timedelta(hours=1)
 DAILY_KIND_ISSUES = {"open_to_close": DAILY_CHECK_ISSUE, "open_to_close_5d": 310}
 

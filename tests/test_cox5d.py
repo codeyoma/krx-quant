@@ -76,7 +76,7 @@ def settings(tmp_path: Path, days: int, signal: float = 0.0, seed: int = 310) ->
 
 
 def test_cox_5d_is_cox_on_the_five_sessions_and_its_code_is_cox_s_too() -> None:
-    assert [a.name for a in DAILY_ALGORITHMS] == ["cox", "cox-5d"]
+    assert [a.name for a in DAILY_ALGORITHMS][:2] == ["cox", "cox-5d"]
     algorithm = DAILY_ALGORITHMS[1]
     assert isinstance(algorithm, Cox5d) and algorithm.kind == "open_to_close_5d"
     assert algorithm.features == FEATURES and algorithm.card.unique_features == OWN

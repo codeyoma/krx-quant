@@ -203,9 +203,10 @@ _STEPS = 6  # …in steps of 10 seconds
 _FEE = 0.00015
 # The algorithms the server's pre-validation refused, which the engine does not enroll: cox-5d
 # (2026-10-23, #310; kept refused by the user's decision of 2026-10-24), with a made-up report's
-# failed check (#561). The demo enrolls every other but one waiting for its pre-validation (#561):
-# the 60-minute barrier's Breiman, as on the server since before 2026-10-23. Neither has a status:
-# the engines predict with them in shadow alone (#696).
+# failed check (#561). The demo enrolls every other but those waiting for their pre-validation (#561):
+# the 60-minute barrier's Breiman, as on the server since before 2026-10-23, and the daily kinds'
+# candidates of #698, as on the server the morning after their deploy. None has a status: the engines
+# predict with them in shadow alone (#696).
 _REFUSED = {
     "cox-5d": (
         "2026-10-23T23:41:07+09:00",
@@ -213,7 +214,7 @@ _REFUSED = {
         "weakest lift 0.0204; by trading day low -0.0072 at 95.00%",
     )
 }
-_WAITING = frozenset({"breiman-60m"})
+_WAITING = frozenset({"breiman-60m", "hurst", "lorenz", "friedman", "hurst-5d", "lorenz-5d", "friedman-5d"})
 
 
 def _admitted(algorithm: Algorithm | KindAlgorithm | DailyAlgorithm) -> bool:

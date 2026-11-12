@@ -235,11 +235,15 @@ async def test_the_demo_has_the_daily_kinds_days_and_its_morning(demo: TestClien
     daily = next(k for k in kinds["kinds"] if k["name"] == "open_to_close")
     assert daily["daily"]["predict_at"] == "08:50"
     assert latest["bar_close"] == "2026-10-12T08:50:00+09:00"
-    assert {p["algorithm"] for p in latest["predictions"]} == {
-        "cox",
-        "otc-flat",
-        "otc-climate",
-        "otc-persist",
+    assert {p["algorithm"]: p["lifecycle"] for p in latest["predictions"]} == {
+        "cox": "probation",
+        "otc-flat": None,
+        "otc-climate": None,
+        "otc-persist": None,
+        # #698's candidates wait for their pre-validation: in shadow (#696).
+        "hurst": SHADOW,
+        "lorenz": SHADOW,
+        "friedman": SHADOW,
     }
     assert all(p["answer"] is None for p in latest["predictions"]), "the morning's day is not over"
     days = sorted({p["bar_close"] for p in made["predictions"]})
@@ -270,7 +274,10 @@ async def test_the_demo_has_the_five_session_kind_s_windows(demo: TestClient[Any
     baselines = {"otc5-flat", "otc5-climate", "otc5-persist"}
     assert latest["bar_close"] == "2026-10-12T08:50:00+09:00"
     lifecycle = {p["algorithm"]: p["lifecycle"] for p in latest["predictions"]}
-    assert lifecycle == {**dict.fromkeys(baselines), "cox-5d": SHADOW}, "cox-5d was refused: in shadow (#696)"
+    waiting = {"hurst-5d", "lorenz-5d", "friedman-5d"}  # #698's, waiting for their pre-validation
+    assert lifecycle == {**dict.fromkeys(baselines), **dict.fromkeys({"cox-5d", *waiting}, SHADOW)}, (
+        "cox-5d was refused and the candidates wait: in shadow (#696)"
+    )
     assert all(p["target_at"] == "2026-10-16T15:30:00+09:00" for p in latest["predictions"])
     assert len({p["bar_close"] for p in made["predictions"]}) == 21
     waiting = sorted({p["bar_close"][:10] for p in made["predictions"] if p["answer"] is None})
@@ -306,8 +313,8 @@ async def test_the_demo_has_a_briefing_of_its_morning(demo: TestClient[Any, Any]
     otc = body["open_to_close"]
     assert otc["day"] == "2026-10-12" and not otc["previous"]
     for symbol in otc["symbols"]:
-        [inputs] = symbol["inputs"]
-        assert inputs["algorithm"] == "cox" and inputs["bias"] is not None
+        [inputs] = [i for i in symbol["inputs"] if i["algorithm"] == "cox"]  # #698's in shadow beside it
+        assert inputs["bias"] is not None
 
 
 @ON_THE_SHARED_DEMO
