@@ -55,7 +55,7 @@ review (``engine._rank``), after the day's answers, from stored rows only: no mo
 run) and the scalp (#706, ``scalp.py``), ranked the same way against ``scalp-climate`` for the mock scalp
 policy (#705) to read its members. The scalp is not a verdict horizon: the verdict never pools it.
 
-> **바뀜** (2026-11-18, #PR): the verdict's horizons only → the scalp too. 이유: the scalp policy reads a
+> **바뀜** (2026-11-18, #708): the verdict's horizons only → the scalp too. 이유: the scalp policy reads a
 > member trained on its own event (#706).
 """
 
