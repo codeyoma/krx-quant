@@ -1174,6 +1174,9 @@ def _scalp(db: sqlite3.Connection, mode: str, day: date, end: datetime) -> Scalp
             (mode, cutoff),
         )
     ]
+    for r in rows:  # an exit after the day is still open on it (the day's and the cumulative figures)
+        if r["exit_at"] is not None and str(r["exit_at"]) >= cutoff:
+            r["exit_at"], r["net"], r["exit_reason"] = None, None, None
     decisions = _counted(db, "", " AND d.predictor = ?", [mode, day.isoformat(), SCALP])
     if not rows and not decisions:
         return None

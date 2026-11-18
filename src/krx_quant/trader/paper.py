@@ -219,7 +219,6 @@ from krx_quant.trader.book import (
     plan,
     plan_scalp,
     plan_verdict,
-    raised,
     refused,
     risk_held,
     risk_state,
@@ -1172,7 +1171,7 @@ class PaperTrader:
         if not trade.scalp:
             return trade
         target, stop = scalp_levels(trade.entry_price, self.rules)
-        if raised(trade.entry_price, trade.stop):
+        if trade.stop_raised:  # raised on a quote: kept; a provisional stop is set again
             stop = trade.stop
         if (target, stop) == (trade.target, trade.stop):
             return trade
@@ -1216,7 +1215,7 @@ class PaperTrader:
         sale = exit_on(trade, quote, standing, self.rules, trade.time_barrier >= self.started_at)
         if sale is not None:
             reason = sale.reason
-            if trade.scalp and reason == STOP_LOSS and raised(trade.entry_price, trade.stop):
+            if trade.scalp and reason == STOP_LOSS and trade.stop_raised:
                 reason = RAISED_STOP  # #705: the stop raised to the level that nets +0.1%
             self._exit(trade, sale.at, sale.price, reason, sale.quote)
         elif trade.scalp:
@@ -1228,8 +1227,8 @@ class PaperTrader:
         level = scalp_raise(trade.entry_price, trade.stop, quote.bid, self.rules)
         if level is None:
             return
-        self.store.set_barriers(trade.id, trade.target, level)
-        self.position = replace(trade, stop=level)
+        self.store.set_barriers(trade.id, trade.target, level, raised=True)
+        self.position = replace(trade, stop=level, stop_raised=True)
         self.dirty = True
         log.info(
             "%s scalp trade %s: its stop raised to %s on a bid of %s",

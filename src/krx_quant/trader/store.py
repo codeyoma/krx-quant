@@ -434,6 +434,9 @@ _ADDED = {
         # every other trade, and before #705.
         ("scalp", "INTEGER"),
         ("scalp_signal", "TEXT"),
+        # 1 once a scalp trade's stop was raised to the level that nets +0.1% (#705, ``set_barriers``):
+        # its stop then sells as ``raised_stop``. Null or 0 otherwise.
+        ("stop_raised", "INTEGER"),
     ),
     "unfilled_buys": (
         ("practice", "INTEGER"),  # 1: a practice buy (#427); null or 0 otherwise
@@ -694,6 +697,7 @@ class OpenTrade:
     entry_at: datetime | None = None
     practice: bool = False  # a practice trade (#427)
     scalp: bool = False  # a scalp trade (#705)
+    stop_raised: bool = False  # its stop raised to the level that nets +0.1% (#705)
 
     @property
     def uncounted(self) -> bool:
@@ -1248,11 +1252,16 @@ class TraderStore:
                 (iso(at), fill_price, fill_quantity, trade, ENTRY),
             )
 
-    def set_barriers(self, trade: int, target: float, stop: float) -> None:
+    def set_barriers(self, trade: int, target: float, stop: float, raised: bool = False) -> None:
         """A scalp trade's target and stop set again (#705, ``scalp.py``): on its fill price, or its stop
-        raised; its paper take-profit's sell resting at the new target."""
+        raised (``raised``: kept, ``stop_raised``); its paper take-profit's sell resting at the new
+        target."""
         with self._db:
-            self._db.execute("UPDATE trades SET target = ?, stop = ? WHERE id = ?", (target, stop, trade))
+            self._db.execute(
+                "UPDATE trades SET target = ?, stop = ?, stop_raised = max(coalesce(stop_raised, 0), ?)"
+                " WHERE id = ?",
+                (target, stop, int(raised), trade),
+            )
             if self._mode(trade) == PAPER:
                 self._db.execute(
                     "UPDATE orders SET price = ? WHERE trade_id = ? AND purpose = 'take_profit'"
@@ -1362,6 +1371,7 @@ class TraderStore:
             datetime.fromisoformat(row["entry_at"]),
             bool(row["practice"]),
             bool(row["scalp"]),
+            bool(row["stop_raised"]),
         )
 
     def realized_of(

@@ -38,15 +38,15 @@ from krx_quant.trader.book import (
     Plan,
     ScalpRules,
     plan_scalp,
-    raised,
     scalp_held,
     scalp_raise,
 )
 from krx_quant.trader.decisions import read_decisions
 from krx_quant.trader.money import net_of
+from krx_quant.trader.paper import PaperTrader
 from krx_quant.trader.selection import choose
 from krx_quant.trader.settings import TraderSettings
-from krx_quant.trader.store import DB_NAME
+from krx_quant.trader.store import DB_NAME, TraderStore
 from tests.kis_doubles import Fill, kis_mock, rows
 from tests.test_trader_practice import FAILING
 from tests.test_trader_shadow import DAY, Event, MockDesk
@@ -98,7 +98,6 @@ def test_the_stop_is_raised_once_a_bid_reaches_the_level_and_never_lowered() -> 
     assert scalp_raise(FILLED, STOP, RAISE_AT - 100, RULES) is None
     assert scalp_raise(FILLED, STOP, RAISE_AT, RULES) == RAISE_AT
     assert scalp_raise(FILLED, RAISE_AT, RAISE_AT + 100, RULES) is None  # raised once
-    assert raised(FILLED, RAISE_AT) and not raised(FILLED, STOP)
 
 
 def test_the_plan_buys_at_the_threshold_by_15_15() -> None:
@@ -378,3 +377,42 @@ def test_its_rules_are_settings() -> None:
         TraderSettings.from_env({"KRX_TRADER_MOCK_SCALP_RAISE_PERCENT": "0.2"}, None)
     with pytest.raises(SettingsError, match="scalp buy orders a day"):
         TraderSettings.from_env({"KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS": "21"}, None)
+
+
+async def test_a_provisional_stop_above_the_fill_is_set_again_and_only_a_raised_one_kept(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """A buy whose fills are read later (``mock.KisFills._absorb``) carries barriers priced at the ask it
+    was sent at: should the fill come below that stop, the stop is set again on the fill, not kept as a
+    raised one. A stop raised on a quote is kept."""
+    fake, account = kis_mock
+    await scalp_desk(tmp_path, fake, account).run([said("10:00"), BOOK])
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db, db:
+        db.execute("UPDATE trades SET stop = 71000")  # provisional, above the fill of 70,050
+    store = TraderStore(tmp_path / DB_NAME)
+    try:
+        book = PaperTrader(store, RULES, CALENDAR.session, at("10:01:00"), MOCK)
+        trade = store.open_trade(MOCK)
+        assert trade is not None and not trade.stop_raised
+        again = book.scalp_filled(trade)
+        assert again.target == TARGET and again.stop == pytest.approx(STOP)
+        store.set_barriers(trade.id, TARGET, RAISE_AT, raised=True)
+        raised_trade = store.open_trade(MOCK)
+        assert raised_trade is not None and raised_trade.stop_raised
+        assert book.scalp_filled(raised_trade).stop == RAISE_AT
+    finally:
+        store.close()
+
+
+async def test_an_exit_after_the_day_is_open_in_that_day_s_report(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    fake, account = kis_mock
+    await scalp_desk(tmp_path, fake, account).run([said("10:00"), BOOK, quote("10:02:00", 69_800, 69_900)])
+    with closing(sqlite3.connect(tmp_path / DB_NAME)) as db, db:
+        db.execute("UPDATE trades SET exit_at = '2026-10-15T09:10:00+09:00'")
+
+    lines = report.render(report.read(tmp_path / DB_NAME, DAY, CALENDAR)).splitlines()
+
+    assert "그날: 매매 1건(열림 1) · 그날 매수 주문 1/?" in lines
+    assert any(line.startswith("누적(2026-10-14부터): 매매 1건(열림 1)") for line in lines)

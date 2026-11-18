@@ -336,12 +336,6 @@ def scalp_raise(entry_price: float, stop: float, bid: float, rules: Rules) -> fl
     return level if bid >= level and stop < level else None
 
 
-def raised(entry_price: float, stop: float) -> bool:
-    """Whether a scalp trade's stop was raised (#705, ``scalp_raise``): above its fill price, where no
-    first stop is."""
-    return stop > entry_price
-
-
 def scalp_held(rules: Rules, at: datetime, buys: int, exits: Sequence[tuple[datetime, float]]) -> str | None:
     """Why the scalp's own risk rules hold its buy at ``at`` (#705), from its own buy orders and exits of
     ``at``'s day (``risk_held``'s, the scalp's trades alone): ``buy_limit`` at ``ScalpRules.daily_buys``,
