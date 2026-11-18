@@ -349,10 +349,14 @@ class Answer:
     first: bool
 
 
-def day_answers(db: sqlite3.Connection, cell: Cell, day: date) -> dict[int, Answer]:
+def day_answers(
+    db: sqlite3.Connection, cell: Cell, day: date, ids: Collection[int] | None = None
+) -> dict[int, Answer]:
     """The answers of ``cell``'s predictions of 005930 with bar closes on ``day``, by prediction: the
     direction's touch label (``touches``, the touch target's version) and a kind's answer of its answer
-    version (``kind_answers``); those with a class alone (the calibration's, #475)."""
+    version (``kind_answers``); those with a class alone (the calibration's, #475). With ``ids``, a
+    kind's predictions of those ids whatever their algorithm (#706: the scalp's cell, whose predictor
+    ``scalp`` reads a ranking member's predictions)."""
     kind = traded_kind(cell.kind)
     start = datetime.combine(day, time(), KST)
     span = (start.isoformat(), (start + timedelta(days=1)).isoformat())
@@ -362,6 +366,17 @@ def day_answers(db: sqlite3.Connection, cell: Cell, day: date) -> dict[int, Answ
             " WHERE p.algorithm = ? AND p.symbol = ? AND p.bar_close >= ? AND p.bar_close < ?"
             " AND t.class IS NOT NULL",
             (cell.predictor, SYMBOL, *span),
+        )
+    elif ids is not None:
+        wanted = sorted(set(ids))
+        if not wanted:
+            return {}
+        marks = ", ".join("?" * len(wanted))
+        rows = db.execute(
+            f"SELECT p.id, a.class AS label, NULL AS path FROM kind_predictions p {KIND_ANSWER_JOIN}"
+            f" WHERE p.kind = ? AND p.symbol = ? AND p.id IN ({marks})"
+            " AND p.bar_close >= ? AND p.bar_close < ? AND a.class IS NOT NULL",
+            (kind.answer_version, kind.name, SYMBOL, *wanted, *span),
         )
     else:
         rows = db.execute(

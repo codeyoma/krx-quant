@@ -16,8 +16,8 @@ side's notional, and the sell tax (``pricing.SELL_TAX``, 0.20 %) on the sale's.
 - **Deadline**: ``MINUTES`` (15) minutes from t (``Kind.horizon``).
 
 These are the scalp policy's settings as the user set them (2026-11-18, #705). The policy reads its
-own settings; this kind's answers keep these, and a policy run with other levels reads a forecast of
-this event, not of its own.
+own settings; this kind's answers keep these, and a policy run with other levels does not read this
+kind's member (``trader/scalp.differs``): it keeps the 4-minute pool's signal.
 
 **Answer** (``scalp_answer``). Of the usable integrated best quotes received in [t, t + 15 minutes)
 (the touch label's quotes, crossed ones included as the barrier's: each side a price one could trade

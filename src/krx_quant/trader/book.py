@@ -64,6 +64,7 @@ from krx_quant.trader import (
 from krx_quant.trader.cells import Cell, Signal, learned_at
 from krx_quant.trader.db import iso
 from krx_quant.trader.limits import RUNNING, Limits
+from krx_quant.trader.money import net_of
 from krx_quant.trader.quotes import BestQuote
 
 if TYPE_CHECKING:
@@ -92,6 +93,8 @@ VERDICT_WAIT, VERDICT_SELL = "verdict_wait", "verdict_sell"
 # A scalp trade sold at its stop once the stop was raised to the level that nets +0.1% (#705,
 # ``scalp_raise``); a scalp buy held by its own daily loss cap (``scalp_held``).
 RAISED_STOP = "raised_stop"
+# A scalp signal of the scalp kind's ranking member (#706, ``scalp.MEMBER``): it buys at the break-even.
+SCALP_MEMBER = "scalp_member"
 SCALP_LOSS_CAP = "scalp_loss_cap"
 BUY, SKIP = "buy", "skip"
 # The status of a prediction the engine did not make for a VI (``engine._record_not_predicted``), and
@@ -133,6 +136,15 @@ class ScalpRules:
     def stop(self, price: float) -> float:
         """The stop of a share bought at ``price``: ``stop_percent`` below it, gross."""
         return price * (1 - self.stop_percent / 100)
+
+    def break_even(self, price: float, fee_rate: float) -> float:
+        """The probability of the target first at which a share bought at ``price`` nets nothing on
+        average (#706, ``scalp.py`` "The entry"): the stop's net loss over the target's net gain plus that
+        loss, each a round trip of one share after both commissions and the sell tax (``money.net_of``),
+        the target rounded up to the tick. The raised stop and a sale at the deadline are left out."""
+        won = net_of(price, self.target(price, fee_rate), 1, fee_rate)
+        lost = -net_of(price, self.stop(price), 1, fee_rate)
+        return lost / (won + lost)
 
 
 @dataclass(frozen=True)
@@ -283,6 +295,16 @@ def plan_verdict(
     return Plan(call.target, call.stop, call.deadline)
 
 
+def scalp_threshold(signal: Signal, rules: Rules) -> float | None:
+    """The rise's probability at which a scalp signal buys (#705, #706, ``scalp.py`` "The entry"): a
+    signal of the scalp kind's ranking member (``Signal.scalp``'s ``source``, ``scalp.MEMBER``) at the
+    break-even rate on its bar close's mid-point (``ScalpRules.break_even``; None without one), any other
+    at ``ScalpRules.threshold``."""
+    if (signal.scalp or {}).get("source") != SCALP_MEMBER:
+        return rules.scalp.threshold
+    return None if not signal.anchor else rules.scalp.break_even(signal.anchor, rules.fee_rate)
+
+
 def plan_scalp(
     signal: Signal,
     rules: Rules,
@@ -293,8 +315,8 @@ def plan_scalp(
     """A scalp signal read at ``at`` (#705, ``scalp.py``), with the special windows known then: its buy's
     barriers on the bar close's mid-point (``anchor``; the trade's own are set again on its fill price,
     ``scalp_entry``), its deadline the bar close plus ``ScalpRules.deadline``; or why it buys nothing:
-    ``special``, ``not_ok``, ``stale``, ``expired``, ``below_threshold`` (its up first under
-    ``ScalpRules.threshold``), ``no_reference``, and the session's and the special windows' reasons as
+    ``special``, ``not_ok``, ``stale``, ``expired``, ``below_threshold`` (its rise under its threshold,
+    ``scalp_threshold``), ``no_reference``, and the session's and the special windows' reasons as
     ``plan``'s. No most likely class is asked: the threshold alone buys (the user's decision)."""
     scalp = rules.scalp
     if signal.status in NOT_MADE:
@@ -307,7 +329,10 @@ def plan_scalp(
     deadline = signal.bar_close + scalp.deadline
     if at >= deadline:
         return EXPIRED
-    if p < scalp.threshold:
+    threshold = scalp_threshold(signal, rules)
+    if threshold is None:
+        return NO_REFERENCE
+    if p < threshold:
         return BELOW_THRESHOLD
     if signal.anchor is None or not signal.tick or not signal.width:
         return NO_REFERENCE

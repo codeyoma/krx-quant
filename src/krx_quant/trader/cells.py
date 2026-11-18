@@ -247,7 +247,7 @@ class EngineReader:
         """Read ``cells`` from now on: one already followed goes on from where it was, a new one
         from the predictions of bar closes after ``since``; the others are no longer read. The
         verdict policy's cells, any of them, follow the verdicts (#677); the scalp's, its signal's source
-        (#705, ``scalp.reader``)."""
+        (#705, ``scalp.reader``): its cell's, read anew from ``since`` when the cell changed (#706)."""
         from krx_quant.trader import SCALP, VERDICT
         from krx_quant.trader.scalp import reader
         from krx_quant.trader.verdicts import VerdictReader
@@ -255,8 +255,11 @@ class EngineReader:
         cells = list(cells)
         verdict = any(c.predictor == VERDICT for c in cells)
         self._verdict = (self._verdict or VerdictReader(self.symbol, since)) if verdict else None
-        scalp = any(c.predictor == SCALP for c in cells)
-        self._scalp = (self._scalp or reader(self.symbol, since)) if scalp else None
+        scalp = next((c for c in cells if c.predictor == SCALP), None)
+        if scalp is None:
+            self._scalp = None
+        elif self._scalp is None or self._scalp.cell != scalp:  # #706: the pool's or the member's
+            self._scalp = reader(self.symbol, since, scalp)
         followed = [c for c in cells if c.predictor not in (VERDICT, SCALP)]
         self._readers = {c: self._readers.get(c) or CellReader(c, self.symbol, since) for c in followed}
 
