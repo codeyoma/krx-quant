@@ -555,6 +555,22 @@ async def test_with_a_member_the_scalp_buys_on_its_target_first_at_the_break_eve
     assert scalped["threshold"] is None, "the break-even differs by price: kept on the trade"
     check("trader_trade", trade)
     check("trader_decisions", {"day": DAY.isoformat(), "book": None, "books": found})
+    assert scalped["answer"] is None, "not answered yet"
+
+    # Once the engine answers the bar close, the decision has its answer, read by the member's prediction
+    # though its predictor is the scalp's.
+    from krx_quant.kinds import Answer
+    from krx_quant.predictions import DB_NAME as ENGINE_DB
+    from krx_quant.predictions import PredictionStore
+
+    engine = PredictionStore(tmp_path / ENGINE_DB)
+    try:
+        engine.add_kind_answers("scalp", 1, [("005930", at("10:00:00"), Answer("target_first"), False)])
+    finally:
+        engine.close()
+    answered = read_decisions(tmp_path / DB_NAME, tmp_path / ENGINE_DB, DAY, SCALP)
+    [decided] = answered[0]["decisions"]
+    assert (decided["answer"], decided["right"]) == ("up", True)
 
     lines = report.render(report.read(tmp_path / DB_NAME, DAY, CALENDAR)).splitlines()
     [read] = [line for line in lines if line.startswith("신호: ")]

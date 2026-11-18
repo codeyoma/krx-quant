@@ -80,6 +80,7 @@ BOOKS = (CHAMPION, PRACTICE, VERDICT_BOOK, SCALP_BOOK, SHADOW, CHALLENGER)
 _BUY = "buy"
 # The scalp's signal by its cell's kind (#706, ``scalp.CELL``, ``scalp.MEMBER_CELL``).
 SCALP_SIGNALS = {"barrier": "verdict_pool_4m", "scalp": "scalp_member"}
+SCALP_MEMBER_CELL = ("scalp", SCALP)  # ``scalp.MEMBER_CELL``: its answers are read by prediction id
 # A skip kept without its reason (the trader always gives one), as the night report counts it.
 _NO_REASON = "?"
 
@@ -330,13 +331,20 @@ def _answers(engine: Path | None, rows: Sequence[Mapping[str, Any]]) -> dict[tup
     wanted = {(Cell(r["kind"], r["predictor"]), str(r["bar_close"])[:10]) for r in rows}
     if not wanted or engine is None or not engine.exists():
         return {}
+    # #706: the scalp member's cell (predictor ``scalp``) reads a ranking member's predictions: by id.
+    member = {int(r["prediction_id"]) for r in rows if (r["kind"], r["predictor"]) == SCALP_MEMBER_CELL}
     try:
         db = open_engine_db(engine)
         try:
             return {
                 (cell.kind, cell.predictor, prediction): answer.outcome
                 for cell, day in wanted
-                for prediction, answer in day_answers(db, cell, date.fromisoformat(day)).items()
+                for prediction, answer in day_answers(
+                    db,
+                    cell,
+                    date.fromisoformat(day),
+                    member if (cell.kind, cell.predictor) == SCALP_MEMBER_CELL else None,
+                ).items()
             }
         finally:
             db.close()

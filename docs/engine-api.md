@@ -1610,7 +1610,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 
     > **바뀜** (2026-11-18, #709): 스캘프 결정의 종류는 늘 `barrier`였고 `threshold`는 trader의 `KRX_TRADER_THRESHOLD`였다 → 종류가 신호의 출처를 따르고, `scalp_signal`이 생겼고, `threshold`는 스캘프의 문턱(판정 풀) 또는 `null`(순위 멤버)이다. 이유: 결정 API가 스캘프 매수마다 어느 신호를 읽었는지 말하게 하려고(#706). 스캘프에 `KRX_TRADER_THRESHOLD`는 쓰이지 않는다.
 
-  - `answer`, `right`: 엔진이 그 예측에 낸 정답이다(밤 리포트 #560과 같은 `replay.day_answers`: 방향은 도달 정답, 다른 종류는 그 정답 버전의 것). `answer`는 `up`(그 종류의 오름: 방향 `up`, 장벽 `up_first`), `flat`(가운데: 방향 `flat`, 장벽 `timeout`), `down`(내림)이다. `right`는 오름이 왔는지다. trader는 오름에 걸고 사니, 산 결정이면 맞게 산 것이다(#560 리포트의 "맞음"). 건너뛴 결정이면 놓친 오름인지를 본다. 정답이 아직 없거나 엔진 DB를 읽지 못하면 둘 다 `null`이다.
+  - `answer`, `right`: 엔진이 그 예측에 낸 정답이다(밤 리포트 #560과 같은 `replay.day_answers`: 방향은 도달 정답, 다른 종류는 그 정답 버전의 것). `answer`는 `up`(그 종류의 오름: 방향 `up`, 장벽 `up_first`), `flat`(가운데: 방향 `flat`, 장벽 `timeout`), `down`(내림)이다. `right`는 오름이 왔는지다. trader는 오름에 걸고 사니, 산 결정이면 맞게 산 것이다(#560 리포트의 "맞음"). 건너뛴 결정이면 놓친 오름인지를 본다. 정답이 아직 없거나 엔진 DB를 읽지 못하면 둘 다 `null`이다. 스캘프 순위 멤버의 결정(#706, 종류 `scalp`)은 예측자가 `scalp`라도 그 멤버의 예측(`prediction_id`)으로 스캘프 종류의 정답을 찾는다(`up`은 목표 먼저). 판정 풀의 스캘프 결정은 `null`이다.
 - 데모 엔진: 매매마다 그 사기 결정만 있다(건너뛴 결정은 없다). 고르기를 지어내지 않아 `threshold`와 `p_star`가 `null`이고, 데모의 엔진 DB는 `state/engine.sqlite3`가 아니어서 `answer`도 `null`이다. 10-12는 챔피언 장부 둘(10:05까지 `paper`, 그 뒤 `live`)과 도전 정책 2의 장부가 나온다.
 
 ### `GET /v1/trader/policies?limit=N` (#399)
