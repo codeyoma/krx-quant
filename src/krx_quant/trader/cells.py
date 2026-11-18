@@ -40,11 +40,11 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from krx_quant.feeds.base import KST
 from krx_quant.kind_registry import kind_named
@@ -54,6 +54,7 @@ from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
 
 if TYPE_CHECKING:
+    from krx_quant.trader.scalp import Reader as ScalpReader
     from krx_quant.trader.verdicts import Call, VerdictReader
 
 log = logging.getLogger(__name__)
@@ -91,6 +92,9 @@ class Signal:
     model_version: str | None = None  # the model that made it (#469)
     # The engine's verdict it is (#677, ``verdicts.py``): a verdict policy's horizon, not a prediction.
     call: Call | None = None
+    # A scalp signal (#705, ``scalp.py``): where it was read (its source, ``scalp.Source``) and what of it
+    # a trade it opens keeps (``trades.scalp_signal``); None for every other signal.
+    scalp: Mapping[str, Any] | None = None
 
     @property
     def rise_probability(self) -> float | None:
@@ -221,32 +225,39 @@ def _rise(kind: Kind) -> int:
 class EngineReader:
     """The engine's database, read-only at each read: the followed cells' new predictions of
     ``symbol`` and the special windows kept that touch it. The verdict policy's cells (#677) are read
-    together, from the engine's verdicts (``verdicts.VerdictReader``)."""
+    together, from the engine's verdicts (``verdicts.VerdictReader``), and the scalp's (#705) from its
+    signal's source (``scalp.reader``)."""
 
     def __init__(self, path: Path, symbol: str) -> None:
         self.path = path
         self.symbol = symbol
         self._readers: dict[Cell, CellReader] = {}
         self._verdict: VerdictReader | None = None
+        self._scalp: ScalpReader | None = None
         self._missing = False
 
     @property
     def cells(self) -> list[Cell]:
         from krx_quant.trader.verdicts import CELLS
 
-        return [*self._readers, *(CELLS if self._verdict is not None else ())]
+        scalped = [self._scalp.cell] if self._scalp is not None else []
+        return [*self._readers, *(CELLS if self._verdict is not None else ()), *scalped]
 
     def follow(self, cells: Iterable[Cell], since: datetime) -> None:
         """Read ``cells`` from now on: one already followed goes on from where it was, a new one
         from the predictions of bar closes after ``since``; the others are no longer read. The
-        verdict policy's cells, any of them, follow the verdicts (#677)."""
-        from krx_quant.trader import VERDICT
+        verdict policy's cells, any of them, follow the verdicts (#677); the scalp's, its signal's source
+        (#705, ``scalp.reader``)."""
+        from krx_quant.trader import SCALP, VERDICT
+        from krx_quant.trader.scalp import reader
         from krx_quant.trader.verdicts import VerdictReader
 
         cells = list(cells)
         verdict = any(c.predictor == VERDICT for c in cells)
         self._verdict = (self._verdict or VerdictReader(self.symbol, since)) if verdict else None
-        followed = [c for c in cells if c.predictor != VERDICT]
+        scalp = any(c.predictor == SCALP for c in cells)
+        self._scalp = (self._scalp or reader(self.symbol, since)) if scalp else None
+        followed = [c for c in cells if c.predictor not in (VERDICT, SCALP)]
         self._readers = {c: self._readers.get(c) or CellReader(c, self.symbol, since) for c in followed}
 
     def read(self, windows_since: datetime) -> tuple[list[Window], list[Signal]] | None:
@@ -264,6 +275,8 @@ class EngineReader:
             signals = [s for reader in self._readers.values() for s in reader.read(db)]
             if self._verdict is not None:
                 signals += self._verdict.read(db)
+            if self._scalp is not None:
+                signals += self._scalp.read(db)
         finally:
             db.close()
         signals.sort(key=lambda s: (s.bar_close, s.displayed_at))

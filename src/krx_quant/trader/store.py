@@ -99,6 +99,14 @@ map's figures of it that night, and every cell × θ it measured on the replay, 
 pick finds its predictor gone, by the trader (``gone_at``: no practice for the rest of the cycle), or
 not active (``inactive_at``, #603: likewise).
 
+**Scalp** (#705, ``KRX_TRADER_MOCK_SCALP``, ``scalp.py``): the mock book's scalp trades are kept with
+``trades.scalp`` 1 (``SCALP_TRADE``) and their signal (``scalp_signal``, JSON: its source, the up first,
+the threshold, the levels), their decisions by the predictor ``scalp``. The trader's own (``champion``
+1: the cash, the KIS checks, the reconcile and the chart count them), of no policy; no loss limit counts
+them, as none counts the practice's (``realized``, ``UNCOUNTED_TRADE``); the book's risk rules count none
+of them and the scalp's own count them alone (``day_buys``, ``day_exits`` with ``scalp``). A raised stop
+is kept on its trade (``set_barriers``), as are the target and the stop set on its fill price.
+
 Every row carries its mode (``paper``, ``mock``, ``live``): paper, KIS mock and live trades are told
 apart in the same tables (a pause and a resume hold whatever the mode). The records (``policy_days`` and the
 policies' trades' P&L) are paper's whatever the mode (``promotion.records_of``, #405: in mock mode
@@ -123,7 +131,7 @@ from typing import TYPE_CHECKING, Any
 
 from krx_quant.feeds.base import KST
 from krx_quant.market_calendar import MarketCalendar, Session
-from krx_quant.trader import KIS_MODES, MOCK, PAPER, VERDICT, policy, promotion, review
+from krx_quant.trader import KIS_MODES, MOCK, PAPER, SCALP, VERDICT, policy, promotion, review
 from krx_quant.trader.cells import Cell
 from krx_quant.trader.db import iso, reading
 from krx_quant.trader.gap import day_gap
@@ -422,6 +430,13 @@ _ADDED = {
         # Null for every other trade, and before #677.
         ("verdict_version", "INTEGER"),
         ("verdict", "TEXT"),
+        # A scalp trade (#705, ``scalp.py``): 1, and its signal (JSON, ``scalp.opened``). Null or 0 for
+        # every other trade, and before #705.
+        ("scalp", "INTEGER"),
+        ("scalp_signal", "TEXT"),
+        # 1 once a scalp trade's stop was raised to the level that nets +0.1% (#705, ``set_barriers``):
+        # its stop then sells as ``raised_stop``. Null or 0 otherwise.
+        ("stop_raised", "INTEGER"),
     ),
     "unfilled_buys": (
         ("practice", "INTEGER"),  # 1: a practice buy (#427); null or 0 otherwise
@@ -505,6 +520,11 @@ PRACTICE_TRADE = "coalesce(t.practice, 0) = 1"
 # the trader's own: the cash, the loss limits, the risk rules and the KIS checks count it), of no
 # policy (no record counts it); the verdict's version that opened it is kept on it.
 VERDICT_TRADE = "t.verdict_version IS NOT NULL"
+# A scalp trade ``t`` (#705, ``scalp.py``): the mock book's on the scalp signal (``champion`` 1), of no
+# policy; no loss limit counts it, nor the book's risk rules (the scalp's own do).
+SCALP_TRADE = "coalesce(t.scalp, 0) = 1"
+# The champion's book's trades no loss limit counts (#533, #705): the practice's and the scalp's.
+UNCOUNTED_TRADE = f"({PRACTICE_TRADE} OR {SCALP_TRADE})"
 
 BUY, SELL = "buy", "sell"
 OPEN, FILLED, CANCELLED = "open", "filled", "cancelled"
@@ -584,6 +604,9 @@ class Entry:
     # (``verdicts.Call.opened``); None for every other trade.
     verdict_version: int | None = None
     verdict: dict[str, Any] | None = None
+    # A scalp trade (#705) and its signal (``scalp.opened``); False and None for every other trade.
+    scalp: bool = False
+    scalp_signal: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -673,6 +696,13 @@ class OpenTrade:
     bar_close: datetime
     entry_at: datetime | None = None
     practice: bool = False  # a practice trade (#427)
+    scalp: bool = False  # a scalp trade (#705)
+    stop_raised: bool = False  # its stop raised to the level that nets +0.1% (#705)
+
+    @property
+    def uncounted(self) -> bool:
+        """Whether no loss limit counts it (#533, #705): a practice or a scalp trade."""
+        return self.practice or self.scalp
 
 
 @dataclass(frozen=True)
@@ -940,6 +970,7 @@ class TraderStore:
             entry.bar_close,
             entry.entry_at,
             entry.practice,
+            entry.scalp,
         )
 
     def exit(self, trade: OpenTrade, out: Exit) -> None:
@@ -1019,6 +1050,7 @@ class TraderStore:
             entry.bar_close,
             entry.entry_at,
             entry.practice,
+            entry.scalp,
         )
 
     def add_order(
@@ -1220,6 +1252,23 @@ class TraderStore:
                 (iso(at), fill_price, fill_quantity, trade, ENTRY),
             )
 
+    def set_barriers(self, trade: int, target: float, stop: float, raised: bool = False) -> None:
+        """A scalp trade's target and stop set again (#705, ``scalp.py``): on its fill price, or its stop
+        raised (``raised``: kept, ``stop_raised``); its paper take-profit's sell resting at the new
+        target."""
+        with self._db:
+            self._db.execute(
+                "UPDATE trades SET target = ?, stop = ?, stop_raised = max(coalesce(stop_raised, 0), ?)"
+                " WHERE id = ?",
+                (target, stop, int(raised), trade),
+            )
+            if self._mode(trade) == PAPER:
+                self._db.execute(
+                    "UPDATE orders SET price = ? WHERE trade_id = ? AND purpose = 'take_profit'"
+                    " AND status = 'open'",
+                    (target, trade),
+                )
+
     def close_entry(self, trade: int, status: str, at: datetime) -> None:
         """A mock trade's buy settled (#405): filled whole, or cancelled for the rest."""
         with self._db:
@@ -1321,6 +1370,8 @@ class TraderStore:
             datetime.fromisoformat(row["bar_close"]),
             datetime.fromisoformat(row["entry_at"]),
             bool(row["practice"]),
+            bool(row["scalp"]),
+            bool(row["stop_raised"]),
         )
 
     def realized_of(
@@ -1352,12 +1403,14 @@ class TraderStore:
         challenger: int | None = None,
         shadow: bool = False,
         practice: bool = False,
+        scalp: bool = False,
     ) -> list[tuple[datetime, float]]:
         """A book's trades of ``mode`` exited at or after ``since`` (its day's 00:00), each one's exit
         time and net, in the order they exited: the risk rules' losses in a row (#471,
         ``book.risk_held``). By the exit, not the entry: a position carried overnight (the trader down
-        at its time barrier, a sale not settled, ``mock.py``) counts on the day it is sold."""
-        return day_exits(self._db, mode, since, None, challenger, shadow, practice)
+        at its time barrier, a sale not settled, ``mock.py``) counts on the day it is sold. The
+        champion's book's leave its scalp trades out; with ``scalp``, those alone (#705)."""
+        return day_exits(self._db, mode, since, None, challenger, shadow, practice, scalp)
 
     def day_buys(
         self,
@@ -1366,12 +1419,14 @@ class TraderStore:
         challenger: int | None = None,
         shadow: bool = False,
         practice: bool = False,
+        scalp: bool = False,
     ) -> int:
         """A book's buy orders of ``mode`` since ``since`` (its day's 00:00), the risk rules' day count
         (#471, ``book.risk_held``): the KIS book's (#405: ``mock``, ``live``) each buy it sent or tried
         to send, kept before it is (``unfilled_buys``, #406: those KIS refused, of which nothing filled
-        or whose answer was lost too); a paper book's each buy it filled (a trade)."""
-        return day_buys(self._db, mode, since, None, challenger, shadow, practice)
+        or whose answer was lost too); a paper book's each buy it filled (a trade). The champion's
+        book's leave the scalp's out (by its decision's predictor); with ``scalp``, those alone (#705)."""
+        return day_buys(self._db, mode, since, None, challenger, shadow, practice, scalp)
 
     def last_practice_buy(self, mode: str, since: datetime) -> datetime | None:
         """The bar close of the champion's book's last practice buy order of ``mode`` since ``since``
@@ -1451,10 +1506,11 @@ class TraderStore:
     def realized(self, mode: str, since: datetime | None, practice: bool = False) -> tuple[float, int]:
         """The net P&L of ``mode``'s trades exited at or after ``since`` (all if None), and how many:
         the champion's alone (``CHAMPION_TRADE``), the trades the loss limits hold (#396), but for the
-        mock book's practice trades (#427), which they do not count (#533); with ``practice``, those
-        alone. The account's P&L, which the cash buys on, is both (#427: its KIS fills, the same
-        account). A challenger's paper trades (#400) are neither, nor a shadow's."""
-        which = PRACTICE_TRADE if practice else f"NOT {PRACTICE_TRADE}"
+        mock book's practice trades (#427) and scalp trades (#705), which they do not count (#533,
+        ``UNCOUNTED_TRADE``); with ``practice``, those alone. The account's P&L, which the cash buys on,
+        is both (#427: its KIS fills, the same account). A challenger's paper trades (#400) are neither,
+        nor a shadow's."""
+        which = UNCOUNTED_TRADE if practice else f"NOT {UNCOUNTED_TRADE}"
         where, params = ("AND exit_at >= ?", [iso(since)]) if since is not None else ("", [])
         row = self._db.execute(
             "SELECT coalesce(sum(net), 0), count(*) FROM trades t"
@@ -1738,8 +1794,8 @@ class TraderStore:
             " threshold, anchor, tick, width_ticks, target, stop, time_barrier, decided_at, entry_at,"
             " entry_price, quantity, buy_fee, selection_id, role, p_star, precision_low, kelly, fraction,"
             " policy_id, champion, shadow, practice, model_version, evaluation, decided_mid,"
-            " verdict_version, verdict)"
-            f" VALUES ({', '.join('?' * 34)})",
+            " verdict_version, verdict, scalp, scalp_signal)"
+            f" VALUES ({', '.join('?' * 36)})",
             (
                 entry.mode,
                 entry.symbol,
@@ -1775,6 +1831,8 @@ class TraderStore:
                 entry.decided_mid,
                 entry.verdict_version,
                 None if entry.verdict is None else json.dumps(entry.verdict, ensure_ascii=False),
+                int(entry.scalp),
+                None if entry.scalp_signal is None else json.dumps(entry.scalp_signal, ensure_ascii=False),
             ),
         )
         assert cursor.lastrowid is not None
@@ -1818,10 +1876,12 @@ def day_exits(
     challenger: int | None = None,
     shadow: bool = False,
     practice: bool = False,
+    scalp: bool = False,
 ) -> list[tuple[datetime, float]]:
     """``TraderStore.day_exits`` on ``db`` (the trader's, or the report's read-only one, #475), to
     ``until`` (excluded) if given."""
     whose, params = _whose(challenger, shadow, practice)
+    whose += _scalped(db, challenger, shadow, scalp)
     to, before = ("", ()) if until is None else (" AND t.exit_at < ?", (iso(until),))
     rows = db.execute(
         f"SELECT t.exit_at, t.net FROM trades t WHERE t.mode = ? AND t.exit_at >= ?{to}"
@@ -1839,23 +1899,38 @@ def day_buys(
     challenger: int | None = None,
     shadow: bool = False,
     practice: bool = False,
+    scalp: bool = False,
 ) -> int:
     """``TraderStore.day_buys`` on ``db`` (the trader's, or the report's read-only one, #475), to
     ``until`` (excluded) if given."""
     if mode in KIS_MODES and challenger is None and not shadow:
-        to, before = ("", ()) if until is None else (" AND placed_at < ?", (iso(until),))
+        to, before = ("", ()) if until is None else (" AND u.placed_at < ?", (iso(until),))
+        which = "=" if scalp else "!="  # the scalp's by its decision's predictor (#705)
         row = db.execute(
-            f"SELECT count(*) FROM unfilled_buys WHERE mode = ? AND placed_at >= ?{to}",
-            (mode, iso(since), *before),
+            "SELECT count(*) FROM unfilled_buys u LEFT JOIN decisions d ON d.id = u.decision_id"
+            f" WHERE u.mode = ? AND u.placed_at >= ?{to} AND coalesce(d.predictor, '') {which} ?",
+            (mode, iso(since), *before, SCALP),
         ).fetchone()
         return int(row[0])
     whose, params = _whose(challenger, shadow, practice)
+    whose += _scalped(db, challenger, shadow, scalp)
     to, before = ("", ()) if until is None else (" AND t.entry_at < ?", (iso(until),))
     row = db.execute(
         f"SELECT count(*) FROM trades t WHERE t.mode = ? AND t.entry_at >= ?{to} AND {whose}",
         (mode, iso(since), *before, *params),
     ).fetchone()
     return int(row[0])
+
+
+def _scalped(db: sqlite3.Connection, challenger: int | None, shadow: bool, scalp: bool) -> str:
+    """The champion's book's trades less its scalp trades, or with ``scalp`` those alone (#705): the
+    scalp's risk rules are its own. A store without the column (the report's of one the trader has not
+    opened since) holds no scalp trade."""
+    if challenger is not None or shadow:
+        return ""
+    if "scalp" not in {r[1] for r in db.execute("PRAGMA table_info(trades)")}:
+        return " AND 0" if scalp else ""
+    return f" AND {SCALP_TRADE}" if scalp else f" AND NOT {SCALP_TRADE}"
 
 
 def _whose(challenger: int | None, shadow: bool, practice: bool) -> tuple[str, tuple[Any, ...]]:
@@ -2242,6 +2317,9 @@ def _trade_json(
         "practice": bool(row.get("practice")),  # the mock book's practice trade, or its shadow's (#427)
         # The verdict that opened a verdict trade (#677), its version first; null for every other trade.
         "verdict": None if row.get("verdict") is None else json.loads(row["verdict"]),
+        # A scalp trade (#705) and its signal; false and null for every other trade.
+        "scalp": bool(row.get("scalp")),
+        "scalp_signal": None if row.get("scalp_signal") is None else json.loads(row["scalp_signal"]),
         "anchor": row["anchor"],
         "tick": row["tick"],
         "width_ticks": row["width_ticks"],

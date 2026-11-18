@@ -20,6 +20,8 @@ told from a decision's mode, its policy and its pick:
   of no policy (``policy`` null, though the store keeps the champion's on them);
 - ``verdict`` (#677): the mock book's decisions on the engine's verdicts (``verdicts.py``: the
   predictor ``verdict``), of no policy likewise;
+- ``scalp`` (#705): the mock book's decisions on the scalp signal (``scalp.py``: the predictor
+  ``scalp``), of no policy likewise;
 - ``shadow`` (#405): the champion policy's paper book beside a KIS book: ``paper`` decisions under the
   champion (or none before the first) while the trader ran in ``mock`` or ``live`` (``runs``, as
   ``promotion.mode_at`` reads them);
@@ -59,7 +61,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from krx_quant.trader import KIS_MODES, MODES, VERDICT
+from krx_quant.trader import KIS_MODES, MODES, SCALP, VERDICT
 from krx_quant.trader.cells import Cell, open_engine_db
 from krx_quant.trader.db import iso, reading
 from krx_quant.trader.replay import UP, day_answers
@@ -68,7 +70,8 @@ log = logging.getLogger(__name__)
 
 # The books, in the order an answer gives them (module doc).
 CHAMPION, PRACTICE, VERDICT_BOOK, SHADOW, CHALLENGER = "champion", "practice", VERDICT, "shadow", "challenger"
-BOOKS = (CHAMPION, PRACTICE, VERDICT_BOOK, SHADOW, CHALLENGER)
+SCALP_BOOK = SCALP
+BOOKS = (CHAMPION, PRACTICE, VERDICT_BOOK, SCALP_BOOK, SHADOW, CHALLENGER)
 
 _BUY = "buy"
 # A skip kept without its reason (the trader always gives one), as the night report counts it.
@@ -91,8 +94,8 @@ class _Book:
 
     @property
     def order(self) -> tuple[int, int, int]:
-        """The champion's book first, then the practice, the verdict, the shadow and the challengers by
-        version; a book of two modes paper first."""
+        """The champion's book first, then the practice, the verdict, the scalp, the shadow and the
+        challengers by version; a book of two modes paper first."""
         return BOOKS.index(self.name), self.policy or 0, MODES.index(self.mode) if self.mode in MODES else 0
 
 
@@ -252,6 +255,8 @@ def _book_of(
     if mode in KIS_MODES:
         if row["predictor"] == VERDICT:  # the verdict policy's (#677), whatever its pick
             return _Book(VERDICT_BOOK, mode, None)
+        if row["predictor"] == SCALP:  # the scalp policy's (#705)
+            return _Book(SCALP_BOOK, mode, None)
         return _Book(PRACTICE, mode, None) if row["practice"] else _Book(CHAMPION, mode, policy)
     if row["practice"]:
         return None  # the practice's paper shadow (#427, none since #548)

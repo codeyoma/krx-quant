@@ -86,6 +86,9 @@ same cells' predictions and the same quotes, in one process.
   its horizons ranked before the practice cell, each BUY sized by the loss budget; the KIS book stays
   the one owner of the account's orders, one position at a time. Its trades are of no policy and the
   loss limits count them. Once a pick finds a champion cell again the verdict is picked no more.
+- **Scalp** (#705, ``KRX_TRADER_MOCK_SCALP``, mock mode alone, ``scalp.py``): on the same picks the
+  champion's book follows the scalp's cell too, after the verdict's horizons and before the practice
+  cell, a share at a time; its own buy cap, cooldown and daily loss cap, and no loss limit counts it.
 - **Records** (``record``): while a trading day's session is open (from its open to the end of its
   closing auction), each running book's policy ran that day (``policy_days``), always in paper
   (#405): the champion's (in mock and live mode its shadow's), stopped once a pause or a failed
@@ -154,8 +157,8 @@ class Desk:
     books are in paper as ever. More than ``stall_after`` without a quote in continuous trading is a
     stall of the quotes (#407; None watches nothing). With ``practice`` (#427, mock mode alone) the
     champion's book practises a cell on a day no champion cell trades, and with ``verdict`` (#677, mock
-    mode alone) trades the engine's verdict then too (module doc), each of its buys and sales told to
-    ``announce`` (Telegram's ``[buy]`` and ``[sell]``)."""
+    mode alone) trades the engine's verdict then too, and with ``scalp`` (#705) the scalp (module doc),
+    each of their buys and sales told to ``announce`` (Telegram's ``[buy]`` and ``[sell]``)."""
 
     def __init__(
         self,
@@ -172,6 +175,7 @@ class Desk:
         stall_after: timedelta | None = STALL_AFTER,
         practice: bool = False,
         verdict: bool = False,
+        scalp: bool = False,
         engine: Path | None = None,
         announce: Notify | None = None,
     ) -> None:
@@ -179,8 +183,11 @@ class Desk:
             raise ValueError(f"the mock practice is for the mock mode alone, not {mode}")
         if verdict and mode != MOCK:  # #677: likewise
             raise ValueError(f"the verdict policy is for the mock mode alone, not {mode}")
+        if scalp and mode != MOCK:  # #705: likewise
+            raise ValueError(f"the scalp policy is for the mock mode alone, not {mode}")
         self.practice = practice
         self.verdict = verdict
+        self.scalp = scalp
         self.engine = engine  # the engine's database, where a policy's predictor is found gone (#469)
         self.store = store
         self.rules = rules
@@ -347,6 +354,7 @@ class Desk:
             mode=self.mode,
             practice=self.practice,
             verdict=self.verdict,
+            scalp=self.scalp,
         )
         self.champion.practice_state = picked.practice
         self.champion.select(picked.chosen, at)

@@ -68,7 +68,7 @@ from typing import Any
 
 import aiohttp
 
-from krx_quant.trader import COST_MAP_PERIOD, ROLES, SYMBOL, TRADED_KINDS, VERDICT
+from krx_quant.trader import COST_MAP_PERIOD, ROLES, SCALP, SYMBOL, TRADED_KINDS, VERDICT
 from krx_quant.trader.cells import Cell
 
 log = logging.getLogger(__name__)
@@ -146,6 +146,11 @@ class Pick:
         return self.role == VERDICT
 
     @property
+    def scalp(self) -> bool:
+        """Whether it is the scalp policy's cell (#705, ``scalp.py``), not a cell's pick."""
+        return self.role == SCALP
+
+    @property
     def priority(self) -> float | None:
         """Its hit rate's lower bound less p*; None without either."""
         return None if self.low is None or self.p_star is None else self.low - self.p_star
@@ -219,8 +224,16 @@ class Selection:
         cell trades."""
         return any(p.verdict for p in self.picks)
 
+    @property
+    def on_scalp(self) -> bool:
+        """Whether its picks hold the scalp policy's cell (#705, ``scalp.py``): no champion cell trades."""
+        return any(p.scalp for p in self.picks)
+
     def describe(self) -> str:
         """A line for the log."""
+        if self.on_scalp and not self.on_verdict:
+            rest = replace(self, picks=tuple(p for p in self.picks if not p.scalp)).describe()
+            return f"the scalp, a share at a time; then {rest}"
         if self.on_verdict:
             rest = replace(self, picks=tuple(p for p in self.picks if not p.verdict)).describe()
             kinds = ", ".join(p.kind for p in self.picks if p.verdict)

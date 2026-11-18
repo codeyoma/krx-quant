@@ -248,6 +248,16 @@ async def _run(
             "mock_practice": trader.mock_practice,  # #427
             "practice_spacing_minutes": trader.practice_spacing_minutes,  # #598
             "mock_verdict": trader.mock_verdict,  # #677
+            "mock_scalp": trader.mock_scalp,  # #705
+            "scalp": {
+                "threshold": trader.scalp_threshold,
+                "target_percent": trader.scalp_target_percent,
+                "raise_percent": trader.scalp_raise_percent,
+                "stop_percent": trader.scalp_stop_percent,
+                "deadline_minutes": trader.scalp_deadline_minutes,
+                "daily_buy_orders": trader.scalp_daily_buy_orders,
+                "daily_loss_won": trader.scalp_daily_loss_won,
+            },
             "cost_map": {"engine": trader.engine_url, "symbol": SYMBOL, "period": COST_MAP_PERIOD},
             "commit": settings.commit,
         },
@@ -272,7 +282,8 @@ async def _run(
                     timing=timing,
                     practice=trader.mock_practice and mode == MOCK,  # #427: the settings allow mock alone
                     verdict=trader.mock_verdict and mode == MOCK,  # #677: likewise
-                    announce=alerts.trade,  # #677: the verdict trades' [buy] and [sell]
+                    scalp=trader.mock_scalp and mode == MOCK,  # #705: likewise
+                    announce=alerts.trade,  # #677, #705: the verdict's and the scalp's [buy] and [sell]
                     engine=settings.state_dir / ENGINE_DB,  # where a policy's predictor is found gone (#469)
                 )
                 watch = LiveWatch(trader.mode, mode, book, sessions, alerts.notice, broker=broker)

@@ -97,6 +97,12 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   mock alone), on a day no champion cell trades the mock book trades the engine's verdict (#676) too,
   ranked before the practice cell: a BUY bought by the loss budget at the verdict's target, stop and
   deadline (up to 60 minutes), sold there or on a later SELL; each trade keeps the verdict's version.
+- **Scalp** (``scalp.py``, #705): with ``KRX_TRADER_MOCK_SCALP`` on (the default in mock mode, mock
+  alone), on the same picks the mock book also buys one share when the 4-minute barrier pool of the
+  ranking's members says up first at the threshold or more: its target the level that nets +0.2% on the
+  fill, its stop 0.3% below it, raised to the level that nets +0.1% once a bid reaches it, sold at market
+  15 minutes after its bar close. Its buy cap, cooldown and daily loss cap are its own, and the loss
+  limits do not count it, as they do not the practice.
 - **Quotes stalled** (``stall.py``, #407): more than five seconds without a quote in continuous
   trading is a stall, kept, and sent to Telegram with the quotes' return, once each, when its
   silence is thirty seconds long (#624): no book buys anything new meanwhile; the mock champion
@@ -172,6 +178,22 @@ PRACTICE_SPACING = timedelta(minutes=15)
 # The verdict policy (#677, ``verdicts.py``): the predictor of its cells (one a barrier horizon of the
 # engine's verdict, #676) and the role of its picks; its trades' ``predictor``.
 VERDICT = "verdict"
+
+# The scalp policy (#705, ``scalp.py``): the predictor and the role of its pick, its trades'
+# ``predictor``; and its defaults, the user's decisions of 2026-11-18. The target nets this percent of
+# the fill price after both commissions and the sell tax (about +0.43% gross), the stop is this far below
+# the fill (gross, about -0.53% net), and once a bid reaches the level that nets ``SCALP_RAISE_PERCENT``
+# the stop is raised to it. Sold at market by ``SCALP_DEADLINE`` after its bar close. Its entry: the
+# 4-minute barrier pool's up first at ``SCALP_THRESHOLD`` at least (``scalp.py`` says why that figure).
+# Its own day: ``SCALP_DAILY_BUY_ORDERS`` buy orders, a net loss of ``SCALP_DAILY_LOSS_WON`` won.
+SCALP = "scalp"
+SCALP_TARGET_PERCENT = 0.2
+SCALP_RAISE_PERCENT = 0.1
+SCALP_STOP_PERCENT = 0.3
+SCALP_DEADLINE = timedelta(minutes=15)
+SCALP_THRESHOLD = 0.30
+SCALP_DAILY_BUY_ORDERS = 20
+SCALP_DAILY_LOSS_WON = 5_000
 
 # The cost map the cells are picked from (#395): 005930's, its last 20 days with predictions, the
 # special situations left out (the trader buys in none). Picked at each start, and every day at

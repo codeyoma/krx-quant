@@ -6,7 +6,9 @@ changed for all of them. What each rule does is in the paper book's module doc (
 applies them all.
 
 - **The entry** (``plan``): whether a prediction read may buy, and its barriers; a verdict's
-  (``plan_verdict``, #677: the verdict policy, ``verdicts.py``).
+  (``plan_verdict``, #677: the verdict policy, ``verdicts.py``); a scalp's (``plan_scalp``, #705: the
+  scalp policy, ``scalp.py``, its levels ``ScalpRules``, its raised stop ``scalp_raise``, its own risk
+  rules ``scalp_held``).
 - **The priority** (``admit``, ``settle``): a rise waits for the cells ranked above it.
 - **Why not now** (``not_now``, ``held_off``): the book's status, a stall, what it holds or waits to
   buy (``Taken``: the cell and bar close, for ``outranked``; a reason of the book's own, such as the KIS
@@ -28,7 +30,7 @@ out instead) and spaces no practice buy (it replays policies alone).
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, overload
 
@@ -37,6 +39,7 @@ import numpy as np
 from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kinds import most_likely
 from krx_quant.market_calendar import Session
+from krx_quant.pricing import SELL_TAX, tick_up
 from krx_quant.special import HALT_STATUS, Kind, Window, touching
 from krx_quant.trader import (
     CAPITAL,
@@ -49,6 +52,13 @@ from krx_quant.trader import (
     LOSS_STREAK,
     PRACTICE_SPACING,
     RISK_PER_TRADE_PERCENT,
+    SCALP_DAILY_BUY_ORDERS,
+    SCALP_DAILY_LOSS_WON,
+    SCALP_DEADLINE,
+    SCALP_RAISE_PERCENT,
+    SCALP_STOP_PERCENT,
+    SCALP_TARGET_PERCENT,
+    SCALP_THRESHOLD,
     THRESHOLD,
 )
 from krx_quant.trader.cells import Cell, Signal, learned_at
@@ -79,11 +89,50 @@ SPACING = "spacing"
 # Why a verdict bought nothing (#677, ``plan_verdict``): it said WAIT, or SELL. A SELL that exits a
 # verdict trade sells it with the same reason (``paper.py``).
 VERDICT_WAIT, VERDICT_SELL = "verdict_wait", "verdict_sell"
+# A scalp trade sold at its stop once the stop was raised to the level that nets +0.1% (#705,
+# ``scalp_raise``); a scalp buy held by its own daily loss cap (``scalp_held``).
+RAISED_STOP = "raised_stop"
+SCALP_LOSS_CAP = "scalp_loss_cap"
 BUY, SKIP = "buy", "skip"
 # The status of a prediction the engine did not make for a VI (``engine._record_not_predicted``), and
 # for a market halt (#625).
 VI_STATUS = "vi"
 NOT_MADE = (VI_STATUS, HALT_STATUS)
+
+
+@dataclass(frozen=True)
+class ScalpRules:
+    """The scalp policy's rules (#705, ``scalp.py``), its settings' (``KRX_TRADER_MOCK_SCALP_*``): the
+    up first that buys, the target's and the raised stop's net and the stop's gross in percent of the
+    fill price, the deadline after the bar close, and its own day's buy orders and net loss in won."""
+
+    threshold: float = SCALP_THRESHOLD
+    target_percent: float = SCALP_TARGET_PERCENT
+    raise_percent: float = SCALP_RAISE_PERCENT
+    stop_percent: float = SCALP_STOP_PERCENT
+    deadline: timedelta = SCALP_DEADLINE
+    daily_buys: int = SCALP_DAILY_BUY_ORDERS
+    daily_loss: float = SCALP_DAILY_LOSS_WON
+
+    def netting(self, price: float, percent: float, fee_rate: float) -> int:
+        """The first price on the tick at which a share bought at ``price`` nets ``percent`` of
+        ``price`` sold there, after the buy's and the sale's commissions and the sell tax: the solution
+        of s × (1 − fee − tax) − price × (1 + fee) = price × percent / 100, rounded up to the tick."""
+        exact = price * (1 + fee_rate + percent / 100) / (1 - fee_rate - SELL_TAX)
+        return tick_up(exact)
+
+    def target(self, price: float, fee_rate: float) -> int:
+        """The take-profit's limit for a share bought at ``price``: the level that nets
+        ``target_percent``."""
+        return self.netting(price, self.target_percent, fee_rate)
+
+    def raise_at(self, price: float, fee_rate: float) -> int:
+        """The level that nets ``raise_percent``: once a bid reaches it, the stop is raised to it."""
+        return self.netting(price, self.raise_percent, fee_rate)
+
+    def stop(self, price: float) -> float:
+        """The stop of a share bought at ``price``: ``stop_percent`` below it, gross."""
+        return price * (1 - self.stop_percent / 100)
 
 
 @dataclass(frozen=True)
@@ -111,6 +160,8 @@ class Rules:
     # The clock passes a deadline by this much before it acts without a quote: quotes received
     # before the deadline but still on their way come in first.
     grace: timedelta = timedelta(seconds=1)
+    # The scalp policy's (#705, ``ScalpRules``): the mock book's alone.
+    scalp: ScalpRules = ScalpRules()
 
     @property
     def limits(self) -> Limits:
@@ -131,6 +182,15 @@ class Rules:
             daily_buys=trader.daily_buy_orders,
             practice_spacing=timedelta(minutes=trader.practice_spacing_minutes),
             fee_rate=fee_rate,
+            scalp=ScalpRules(
+                threshold=trader.scalp_threshold,
+                target_percent=trader.scalp_target_percent,
+                raise_percent=trader.scalp_raise_percent,
+                stop_percent=trader.scalp_stop_percent,
+                deadline=timedelta(minutes=trader.scalp_deadline_minutes),
+                daily_buys=trader.scalp_daily_buy_orders,
+                daily_loss=trader.scalp_daily_loss_won,
+            ),
         )
 
     def budget(self, capital: float) -> float:
@@ -221,6 +281,70 @@ def plan_verdict(
     if touching(special, signal.symbol, signal.bar_close, call.deadline):
         return SPECIAL
     return Plan(call.target, call.stop, call.deadline)
+
+
+def plan_scalp(
+    signal: Signal,
+    rules: Rules,
+    session: Session | None,
+    at: datetime,
+    special: Sequence[Window] = (),
+) -> Plan | str:
+    """A scalp signal read at ``at`` (#705, ``scalp.py``), with the special windows known then: its buy's
+    barriers on the bar close's mid-point (``anchor``; the trade's own are set again on its fill price,
+    ``scalp_entry``), its deadline the bar close plus ``ScalpRules.deadline``; or why it buys nothing:
+    ``special``, ``not_ok``, ``stale``, ``expired``, ``below_threshold`` (its up first under
+    ``ScalpRules.threshold``), ``no_reference``, and the session's and the special windows' reasons as
+    ``plan``'s. No most likely class is asked: the threshold alone buys (the user's decision)."""
+    scalp = rules.scalp
+    if signal.status in NOT_MADE:
+        return SPECIAL
+    p = signal.rise_probability
+    if signal.status != "ok" or signal.probabilities is None or p is None:
+        return NOT_OK
+    if at - signal.displayed_at > rules.fresh:
+        return STALE
+    deadline = signal.bar_close + scalp.deadline
+    if at >= deadline:
+        return EXPIRED
+    if p < scalp.threshold:
+        return BELOW_THRESHOLD
+    if signal.anchor is None or not signal.tick or not signal.width:
+        return NO_REFERENCE
+    if session is None:
+        return CLOSED
+    if signal.bar_close < session.open + rules.entry_after_open:
+        return BEFORE_ENTRY
+    if deadline > session.closing_auction - rules.exit_before_auction:
+        return PAST_LAST_EXIT
+    if touching(special, signal.symbol, signal.bar_close, deadline):
+        return SPECIAL
+    return Plan(scalp.target(signal.anchor, rules.fee_rate), scalp.stop(signal.anchor), deadline)
+
+
+def scalp_levels(entry_price: float, rules: Rules) -> tuple[float, float]:
+    """A scalp trade's target and stop on its fill price (#705): the take-profit's limit, placed at once
+    after the fill, and the stop below it."""
+    return float(rules.scalp.target(entry_price, rules.fee_rate)), rules.scalp.stop(entry_price)
+
+
+def scalp_raise(entry_price: float, stop: float, bid: float, rules: Rules) -> float | None:
+    """The stop a scalp trade bought at ``entry_price`` raises to on a quote of ``bid`` (#705): the level
+    that nets ``ScalpRules.raise_percent``, once the bid reaches it and while its stop is below it; None
+    otherwise. Raised on one quote, the stop sells from the next (``exit_on``)."""
+    level = float(rules.scalp.raise_at(entry_price, rules.fee_rate))
+    return level if bid >= level and stop < level else None
+
+
+def scalp_held(rules: Rules, at: datetime, buys: int, exits: Sequence[tuple[datetime, float]]) -> str | None:
+    """Why the scalp's own risk rules hold its buy at ``at`` (#705), from its own buy orders and exits of
+    ``at``'s day (``risk_held``'s, the scalp's trades alone): ``buy_limit`` at ``ScalpRules.daily_buys``,
+    ``cooldown`` as the book's (``Rules.loss_streak`` net losses in a row start ``Rules.cooldown``), and
+    ``scalp_loss_cap`` once the day's scalp trades net a loss of ``ScalpRules.daily_loss`` won or more."""
+    held = risk_held(replace(rules, daily_buys=rules.scalp.daily_buys), at, buys, exits)
+    if held is not None:
+        return held
+    return SCALP_LOSS_CAP if sum(net for _, net in exits) <= -rules.scalp.daily_loss else None
 
 
 @dataclass(frozen=True)
