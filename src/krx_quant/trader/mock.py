@@ -164,7 +164,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
@@ -186,7 +185,7 @@ from krx_quant.kis_orders import (
     same_number,
 )
 from krx_quant.market_calendar import Phase, Session
-from krx_quant.pricing import tick_size
+from krx_quant.pricing import tick_up
 from krx_quant.trader import LIVE, MOCK, SYMBOL
 from krx_quant.trader.book import HOLDING, TAKE_PROFIT, TIME, Busy, Rules, mid_of
 from krx_quant.trader.limits import ORDER_FAILED, SALE, Notify
@@ -327,14 +326,6 @@ class _Lost:
         """The day it was sent on: the day order inquiry that shows it, if KIS took it."""
         assert self.placed.at is not None
         return kst_day(self.placed.at)
-
-
-def tick_up(price: float) -> int:
-    """The first price on KRX's tick at or above ``price``."""
-    up = math.ceil(round(price / tick_size(price), 9)) * tick_size(price)
-    while up % tick_size(up):  # past a band's edge, onto the coarser tick of the band above
-        up = math.ceil(up / tick_size(up)) * tick_size(up)
-    return int(up)
 
 
 def _row_of(rows: list[OrderRow], number: str | None) -> OrderRow | None:
@@ -1114,7 +1105,7 @@ class KisFills:
             trade.id,
         )
         if not live:
-            self.book.announce_bought(trade)  # #677: a verdict trade's ``[buy]``
+            self.book.announce_bought(trade)  # #677, #705: a verdict or scalp trade's ``[buy]``
             await self._place_take_profit(trade)
 
     async def _account_clear(self, waiting: _Waiting) -> bool:
@@ -1193,7 +1184,8 @@ class KisFills:
                     buy_fee=commission(average, filled, self.rules.fee_rate),
                 )
                 status = OPEN if left else None
-                self.book.position = self.store.open_position(live.decision, entry, live.placed, status)
+                opened = self.store.open_position(live.decision, entry, live.placed, status)
+                self.book.position = self.book.scalp_filled(opened)  # #705: its levels on this price
                 self.store.close_unfilled_buy(live.unfilled, FILLED)
                 log.info("trader: the buy at %s filled %s on KIS, read later", live.placed.price, filled)
             else:
@@ -1202,7 +1194,8 @@ class KisFills:
                 new = filled - live.filled
                 fill = (at, (amount - live.amount) / new, new)
                 self.store.grow_position(trade.id, filled, average, fee, fill)
-                self.book.position = replace(trade, quantity=filled, entry_price=average, buy_fee=fee)
+                grown = replace(trade, quantity=filled, entry_price=average, buy_fee=fee)
+                self.book.position = self.book.scalp_filled(grown)  # #705: its levels on the new average
                 log.info("trader: %s more of the buy filled on KIS (trade %s)", new, trade.id)
             live = self._live_buy = replace(
                 live, filled=filled, amount=amount, decision=None, entry=None, unfilled=None
@@ -1714,7 +1707,7 @@ class KisFills:
         self.book.dirty = True
         log.info("trader: trade %s sold on KIS (%s): net %.0f won", trade.id, reason, net)
         self.book.announce_sold(trade, reason, net)  # #677: a verdict trade's ``[sell]``
-        if self.book.holds.exited(net, at, trade.practice) is not None:  # its realized loss reached a limit
+        if self.book.holds.exited(net, at, trade.uncounted) is not None:  # its realized loss reached a limit
             self.book.enforce(at)
 
     def _failed(

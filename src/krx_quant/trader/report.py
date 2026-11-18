@@ -49,6 +49,14 @@ one kept for the day's review cycle (#474, ``practice.py``): its θ, when it was
 replayed figures; the night's choice of the next cycle's is in the re-fit's output below
 (``practice.freeze_now``, which ``run_night`` runs after the re-fit).
 
+**The scalp** (#705, ``scalp.py``, ``Scalp``): a mock day's scalp trades are apart too, in a section of
+their own and a row of the sources' table: that day's and every day's to it (since its first trade):
+the trades, the share that netted a profit after costs (the user judges by it first), the net a trade,
+the sum, the deepest fall of the summed net from its high (in exit order), and the exits by the target,
+the raised stop, the stop and the deadline; its own buy orders against its cap, and what it did with
+the signals it read. It says which signal it read and that its algorithms were not trained for its
+target. The ledger and the limits count none of it (as the practice's).
+
 **Execution cost and the risk rules** (#475, spec #468 8): under each trade its legs' adverse ticks
 from the mid-point the book knew at each decision (a take-profit's from its target) and their delays
 (``store.execution``), then the day's means and whose clock the times are on (a paper fill's quote, or
@@ -93,6 +101,7 @@ from krx_quant.trader import (
     LIVE,
     PAPER,
     PICK_AT,
+    SCALP,
     VERDICT,
     cohort,
     live,
@@ -225,6 +234,7 @@ class Trade:
     cost: float | None
     net: float | None
     practice: bool = False  # the mock book's practice trade (#427)
+    scalp: bool = False  # the mock book's scalp trade (#705), apart from the champion's
     # Its execution cost (#475, ``store.execution``): each leg's adverse ticks and delays; None from a
     # store the trader has not opened since #475.
     execution: Mapping[str, Any] | None = None
@@ -304,6 +314,59 @@ class Risk:
 
 
 @dataclass(frozen=True)
+class Tally:
+    """Scalp trades' figures (#705, ``Scalp``): how many, those still open, those that netted more than 0
+    after costs, the net summed and its deepest fall from its high (exit order), and how they exited."""
+
+    trades: int = 0
+    open: int = 0
+    wins: int = 0
+    net: float = 0.0
+    drawdown: float = 0.0
+    exits: Mapping[str, int] = field(default_factory=dict)
+
+    @property
+    def exited(self) -> int:
+        return self.trades - self.open
+
+
+def tally(rows: Sequence[Mapping[str, Any]]) -> Tally:
+    """``rows`` of scalp trades (``exit_at``, ``net``, ``exit_reason``) as ``Tally``: the drawdown over
+    the exited ones in their exit order."""
+    done = sorted((r for r in rows if r["exit_at"] is not None), key=lambda r: (r["exit_at"], r["id"]))
+    summed = high = drawdown = 0.0
+    for r in done:
+        summed += float(r["net"] or 0.0)
+        high = max(high, summed)
+        drawdown = max(drawdown, high - summed)
+    return Tally(
+        trades=len(rows),
+        open=len(rows) - len(done),
+        wins=sum(1 for r in done if float(r["net"] or 0.0) > 0),
+        net=summed,
+        drawdown=drawdown,
+        exits=dict(Counter(str(r["exit_reason"]) for r in done)),
+    )
+
+
+@dataclass(frozen=True)
+class Scalp:
+    """The mock book's scalp on the day (#705): its trades that day and to it, its buy orders that day
+    against its cap (``cap`` None: the trader's last start kept none), the sources its signals were read
+    from, and what it did with them (as ``Report.decisions``)."""
+
+    day: Tally
+    total: Tally
+    since: date | None
+    buys: int
+    cap: int | None
+    sources: tuple[str, ...] = ()
+    decisions: Mapping[tuple[str, str | None], int] = field(default_factory=dict)
+    # Its rules as the trader's last start kept them (``runs``' ``scalp``); empty: none kept.
+    rules: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Report:
     """A trading day and its night, as read from the trader's store."""
 
@@ -353,6 +416,7 @@ class Report:
     sources: tuple[Source, ...] = ()  # each decision source's trades that day (#560)
     champion_policy: policies.Policy | None = None  # the day's champion as kept; None if unreadable
     tonight: Refitted | None = None  # the night's fit, kept or not (``run_night``); None: not run with it
+    scalp: Scalp | None = None  # the mock book's scalp (#705); None: it never traded nor read a signal
 
     @property
     def gate_passed(self) -> bool:
@@ -518,6 +582,7 @@ def read(
             else (),
             champion_policy=_policy(db, champion) if has_policies and champion is not None else None,
             tonight=tonight,
+            scalp=_scalp(db, mode, day, end) if {"trades", "decisions"} <= tables else None,
         )
 
 
@@ -541,15 +606,16 @@ def _sources(
 ) -> tuple[Source, ...]:
     """Each decision source's trades entered on ``day`` (#560, ``Source``): the champion's book (of
     ``mode``) always; the mock book's practice when it traded; the mock book's verdict trades, each
-    version of the verdict apart, when it traded (#677); the champion policy's paper shadow on a KIS
+    version of the verdict apart, when it traded (#677); the mock book's scalp when it traded (#705);
+    the champion policy's paper shadow on a KIS
     day; each challenger running that day. A store from before a column has none of what it tells
     apart (a practice, a verdict, a shadow, a challenger)."""
     columns = _columns(db, "trades")
     champions, practised = champion_of(db), practice_of(db)
     verdicts: list[int] = []
-    unverdicted = ""
+    unverdicted = " AND coalesce(t.scalp, 0) = 0" if "scalp" in columns else ""  # #705: apart
     if "verdict_version" in columns:
-        unverdicted = " AND t.verdict_version IS NULL"
+        unverdicted += " AND t.verdict_version IS NULL"
         verdicts = [
             int(r[0])
             for r in db.execute(
@@ -570,6 +636,11 @@ def _sources(
         *(
             (f"판정 v{v}(KIS 모의)", mode, f"{champions} AND t.verdict_version = ?", (v,), False)
             for v in verdicts
+        ),
+        *(
+            [("스캘프(KIS 모의)", mode, f"{champions} AND coalesce(t.scalp, 0) = 1", (), False)]
+            if "scalp" in columns
+            else []
         ),
     ]
     if mode in KIS_MODES and "shadow" in columns:
@@ -737,6 +808,7 @@ def render(report: Report) -> str:
     sections = [
         _day_section(report),
         *([_sources_section(report)] if report.sources else []),
+        *([] if report.scalp is None else [_scalp_section(report.scalp)]),
         *([] if report.gap is None else [_gap_section(report.gap, report.mode)]),
         _pick_section(report),
         _standings_section(report),
@@ -1037,6 +1109,7 @@ def _trades(db: sqlite3.Connection, mode: str, day: date) -> tuple[Trade, ...]:
                 cost=r["cost"],
                 net=r["net"],
                 practice=bool(r.get("practice")),
+                scalp=bool(r.get("scalp")),
                 # The champion's book's trades: a KIS day's are KIS's fills (#405).
                 execution=execution(r, orders.get(int(r["id"]), []), fills, kis=mode in KIS_MODES)
                 if measured
@@ -1063,6 +1136,15 @@ def _decisions(
         whose += f" AND coalesce(s.practice, 0) = {int(practice)}"
     elif practice:
         return {}  # a store the trader has not opened since #427: no practice pick
+    whose += " AND d.predictor != ?"  # the scalp's apart (#705, ``Scalp.decisions``)
+    params.append(SCALP)
+    return _counted(db, joined, whose, params)
+
+
+def _counted(
+    db: sqlite3.Connection, joined: str, whose: str, params: Sequence[Any]
+) -> dict[tuple[str, str | None], int]:
+    """Decisions of a mode and a day (``params``' first two), as ``Report.decisions`` counts them."""
     out: dict[tuple[str, str | None], int] = {}
     for action, reason, filled, count in db.execute(
         "SELECT d.action, d.reason, d.trade_id IS NOT NULL, count(*) FROM decisions d"
@@ -1075,6 +1157,52 @@ def _decisions(
             key = ("skip", reason)
         out[key] = out.get(key, 0) + int(count)
     return out
+
+
+def _scalp(db: sqlite3.Connection, mode: str, day: date, end: datetime) -> Scalp | None:
+    """The mock book's scalp on ``day`` (#705, ``Scalp``); None when it never traded to the day and
+    read no signal that day (a store from before #705, or the scalp off)."""
+    if "scalp" not in _columns(db, "trades"):
+        return None
+    cutoff = (day + timedelta(days=1)).isoformat()
+    rows = [
+        dict(r)
+        for r in db.execute(
+            "SELECT t.id, t.entry_at, t.exit_at, t.net, t.exit_reason, t.scalp_signal FROM trades t"
+            f" WHERE t.mode = ? AND coalesce(t.scalp, 0) = 1 AND t.entry_at < ? AND {champion_of(db)}"
+            " ORDER BY t.entry_at, t.id",
+            (mode, cutoff),
+        )
+    ]
+    decisions = _counted(db, "", " AND d.predictor = ?", [mode, day.isoformat(), SCALP])
+    if not rows and not decisions:
+        return None
+    today = [r for r in rows if str(r["entry_at"])[:10] == day.isoformat()]
+    sources = sorted(
+        {str(json.loads(r["scalp_signal"]).get("source")) for r in today if r.get("scalp_signal")}
+    )
+    row = (
+        db.execute(
+            "SELECT detail FROM runs WHERE mode = ? AND at < ? ORDER BY id DESC LIMIT 1", (mode, iso(end))
+        ).fetchone()
+        if "runs" in _tables(db)
+        else None
+    )
+    kept = (json.loads(row[0]) if row is not None else {}).get("scalp") or {}
+    cap = kept.get("daily_buy_orders")
+    since = datetime.combine(day, time(), KST)
+    return Scalp(
+        day=tally(today),
+        total=tally(rows),
+        since=None if not rows else datetime.fromisoformat(rows[0]["entry_at"]).date(),
+        buys=day_buys(db, mode, since, since + timedelta(days=1), scalp=True)
+        if "unfilled_buys" in _tables(db)
+        else len(today),
+        cap=int(cap) if isinstance(cap, int | float) and not isinstance(cap, bool) else None,
+        sources=tuple(sources),
+        decisions=decisions,
+        rules=kept,
+    )
 
 
 def _pick(
@@ -1272,7 +1400,7 @@ def _day_section(report: Report) -> str:
             f"{_used(ledger['cumulative_worst'], ledger['cumulative_limit'])})"
         )
         lines += _split_line(ledger)
-    champions = [t for t in report.trades if not t.practice]
+    champions = [t for t in report.trades if not t.practice and not t.scalp]  # #705: the scalp apart
     practised = [t for t in report.trades if t.practice]
     if champions:
         net = sum(t.net or 0.0 for t in champions)
@@ -1292,6 +1420,53 @@ def _day_section(report: Report) -> str:
     if report.practice_decisions:
         lines.append(_decisions_line(report.practice_decisions, "연습 칸 고르기의 챔피언 장부"))
     return "\n".join(lines)
+
+
+# The scalp's sources (#705, ``scalp.reader``), as the report names them.
+POOL = "verdict_pool_4m"  # ``scalp.POOL``
+SCALP_SOURCES = {POOL: "판정의 4분 장벽 풀(순위 멤버, 위 먼저 확률)"}
+# Its exits, in their order (``scalp.py``); any other (a pause, a limit) is "그밖".
+SCALP_EXITS = {"take_profit": "목표", "raised_stop": "올린 손절", "stop_loss": "손절", "time": "마감"}
+
+
+def _scalp_section(scalp: Scalp) -> str:
+    """The scalp's section (#705, ``Scalp``): won, counts and shares; no price."""
+    sources = ", ".join(SCALP_SOURCES.get(s, s) for s in scalp.sources) or SCALP_SOURCES[POOL]
+    cap = "?" if scalp.cap is None else str(scalp.cap)
+    kept = scalp.rules
+
+    def rule(key: str) -> str:
+        value = kept.get(key)
+        return "?" if not isinstance(value, int | float) else f"{value:g}"
+
+    lines = [
+        f"스캘프 (#705, KIS 모의, KRX_TRADER_MOCK_SCALP): 1주씩 · 위 먼저 ≥ {rule('threshold')}에 산다 ·"
+        f" 목표는 체결가 대비 순 +{rule('target_percent')}%, 순 +{rule('raise_percent')}%에 닿으면 손절을"
+        f" 그리로 올림, 손절 -{rule('stop_percent')}%(총), {rule('deadline_minutes')}분 마감 ·"
+        " 손실 한도·승격·관문·모의 기록에는 세지 않는다",
+        f"신호: {sources} · 이 알고리즘들은 이 목표(순 +0.2% 먼저, -0.3% 전, 15분)로 학습하지 않았다"
+        "(그 목표로 학습한 알고리즘은 #706)",
+        f"그날: {_scalp_tally(scalp.day)} · 그날 매수 주문 {scalp.buys}/{cap}",
+        f"누적({scalp.since or '-'}부터): {_scalp_tally(scalp.total)}",
+    ]
+    if scalp.decisions:
+        lines.append(_decisions_line(scalp.decisions, "스캘프"))
+    return "\n".join(lines)
+
+
+def _scalp_tally(t: Tally) -> str:
+    if not t.trades:
+        return "매매 0건"
+    head = f"매매 {t.trades}건" + (f"(열림 {t.open})" if t.open else "")
+    if not t.exited:
+        return head
+    exits = ", ".join(f"{said} {t.exits.get(reason, 0)}" for reason, said in SCALP_EXITS.items())
+    other = t.exited - sum(t.exits.get(reason, 0) for reason in SCALP_EXITS)
+    return (
+        f"{head} · 순이익 매매 {t.wins / t.exited:.0%}({t.wins}/{t.exited}) · 매매당 순손익"
+        f" {_won(t.net / t.exited)} · 순손익 합 {_won(t.net)} · 최대 낙폭 {_amount(t.drawdown)}"
+        f" · 청산: {exits}" + (f", 그밖 {other}" if other else "")
+    )
 
 
 def _sources_section(report: Report) -> str:
@@ -1503,7 +1678,12 @@ def _pick_section(report: Report) -> str:
             f"판정 매매(KIS 모의, KRX_TRADER_MOCK_VERDICT, #677): {', '.join(horizons)}"
             " · 챔피언의 칸이 없는 고르기에 연습 칸보다 먼저 · 손실 예산"
         )
-    chosen = [p for p in pick["picks"] if p.get("role") != VERDICT]
+    if any(p.get("role") == SCALP for p in pick["picks"]):  # #705: no cell of the cost map either
+        lines.append(
+            "스캘프(KIS 모의, KRX_TRADER_MOCK_SCALP, #705): barrier의 판정 풀 · 챔피언의 칸이 없는 고르기에"
+            " 판정 다음, 연습 칸보다 먼저 · 1주씩"
+        )
+    chosen = [p for p in pick["picks"] if p.get("role") not in (VERDICT, SCALP)]
     if pick.get("practice") and chosen:  # #427: no champion cell to trade, the mock book practised one
         practised = next((p for p in chosen if p.get("practice")), chosen[0])
         cell = _cell(practised["kind"], practised["predictor"], practised["role"])

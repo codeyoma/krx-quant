@@ -37,11 +37,12 @@ from krx_quant.kis_orders import Servers, trader_broker
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.predictions import DB_NAME as ENGINE_DB
 from krx_quant.predictions import PredictionStore
+from krx_quant.pricing import tick_up
 from krx_quant.trader import MOCK, PAPER, SYMBOL, promotion, report
 from krx_quant.trader.book import BUY_LIMIT, STOP_LOSS, TAKE_PROFIT, TIME
 from krx_quant.trader.desk import Desk
 from krx_quant.trader.limits import ORDER_FAILED, RUNNING
-from krx_quant.trader.mock import UNFILLED, KisFills, tick_up
+from krx_quant.trader.mock import UNFILLED, KisFills
 from krx_quant.trader.paper import PaperTrader
 from krx_quant.trader.quotes import QuoteFeed
 from krx_quant.trader.run import run_trader

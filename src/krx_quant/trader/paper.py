@@ -103,6 +103,14 @@ Its reference price is the prediction's ``anchor`` (the bar close's integrated m
 target ``anchor + w × tick``, the stop ``anchor − w × tick`` (w = k for the direction), the time
 barrier the bar close plus the kind's horizon: the trade is the event its hit rate measured.
 
+**Scalp** (#705, ``scalp.py``): the mock book's scalp cell is a pick like another, its rise read by
+``book.plan_scalp`` (its threshold and deadline), one share, of no policy. Its trade's target and stop are
+set on its fill price (``book.scalp_levels``; the KIS book's again when more of its buy fills,
+``scalp_filled``); a quote whose bid reaches the level that nets +0.1% raises its stop there
+(``book.scalp_raise``, kept), and the stop then sells as ``raised_stop``. Its own risk rules
+(``book.scalp_held``) count its own orders and exits; the book's count none of them, and no loss limit
+counts its P&L (``OpenTrade.uncounted``), as the practice's.
+
 **Fills** on the collector's best quotes (``quotes.py``), in the order received:
 
 - the buy at the best ask of the first quote received after the decision. None if a special
@@ -170,7 +178,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -187,10 +195,12 @@ from krx_quant.trader.book import (
     BUY,
     NO_QUOTE,
     NOT_PICKED,
+    RAISED_STOP,
     RESTARTED,
     SKIP,
     SPECIAL,
     STALLED,
+    STOP_LOSS,
     TAKE_PROFIT,
     VERDICT_SELL,
     Busy,
@@ -207,10 +217,15 @@ from krx_quant.trader.book import (
     midnight,
     not_now,
     plan,
+    plan_scalp,
     plan_verdict,
+    raised,
     refused,
     risk_held,
     risk_state,
+    scalp_held,
+    scalp_levels,
+    scalp_raise,
     settle,
     spaced,
 )
@@ -657,6 +672,8 @@ class PaperTrader:
             if picked.verdict:
                 self._verdict_exit(signal, at)
                 planned = plan_verdict(signal, self.rules, session, at, self._special)
+            elif picked.scalp:  # #705: its threshold, its levels, its deadline
+                planned = plan_scalp(signal, self.rules, session, at, self._special)
             else:
                 planned = plan(signal, self.rules, session, at, self._special, picked.threshold)
             admit(self._pending, signal, planned, at, self._skip, self._not_now)
@@ -720,7 +737,7 @@ class PaperTrader:
         if sale is not None and sale[0] == trade.id and quote.received_at > sale[1]:
             self._exit(trade, quote.received_at, quote.bid, VERDICT_SELL, quote)
             return
-        reached = self.holds.mark(self._unrealized(trade, quote.bid), quote.received_at, trade.practice)
+        reached = self.holds.mark(self._unrealized(trade, quote.bid), quote.received_at, trade.uncounted)
         if reached is not None:
             self.dirty = True
             self.enforce(quote.received_at, quote)
@@ -826,6 +843,7 @@ class PaperTrader:
                 "unrealized": guard.unrealized,
                 "selling": self.status in SALE,
                 "practice": trade.practice,  # the mock book's practice trade (#427)
+                "scalp": trade.scalp,  # the mock book's scalp trade (#705)
             }
         limits = guard.limits
         since = guard.since
@@ -933,7 +951,7 @@ class PaperTrader:
             status=self.status,
             busy=self._busy_with(),
             rank=self._rank,
-            risk=self._risk,
+            risk=(lambda when: self._scalp_risk(when)) if self._is_scalp(signal) else self._risk,
             stalled=self.stall is not None,
             spacing=self._spacing,
         )
@@ -949,6 +967,21 @@ class PaperTrader:
         if not picked[1].practice:
             return None
         return spaced(self.rules, signal.bar_close, self.store.last_practice_buy(self.mode, midnight(at)))
+
+    def _is_scalp(self, signal: Signal) -> bool:
+        picked = self._picks.get(Cell(signal.kind, signal.predictor))
+        return picked is not None and picked[1].scalp
+
+    def _scalp_risk(self, at: datetime) -> str | None:
+        """Why the scalp's own risk rules hold its buy at ``at`` (#705, ``scalp_held``): its own buy
+        orders and exits of the day, as the store has them."""
+        since = midnight(at)
+        return scalp_held(
+            self.rules,
+            at,
+            self.store.day_buys(self.mode, since, scalp=True),
+            self.store.day_exits(self.mode, since, scalp=True),
+        )
 
     def _risk(self, at: datetime) -> str | None:
         """Why the risk rules hold a buy at ``at`` (#471, ``risk_held``): the book's buy orders and
@@ -1081,6 +1114,9 @@ class PaperTrader:
         assert signal.anchor is not None and signal.tick is not None and signal.width is not None
         p = signal.rise_probability
         assert p is not None
+        target, stop = planned.target, planned.stop
+        if pick.scalp:  # #705: its target and stop on the fill price
+            target, stop = scalp_levels(price, self.rules)
         return Entry(
             mode=self.mode,
             symbol=SYMBOL,
@@ -1089,12 +1125,16 @@ class PaperTrader:
             prediction_id=signal.prediction_id,
             bar_close=signal.bar_close,
             probability=p,
-            threshold=self.rules.threshold if pick.threshold is None else pick.threshold,
+            threshold=self.rules.scalp.threshold
+            if pick.scalp
+            else self.rules.threshold
+            if pick.threshold is None
+            else pick.threshold,
             anchor=signal.anchor,
             tick=signal.tick,
             width_ticks=signal.width,
-            target=planned.target,
-            stop=planned.stop,
+            target=target,
+            stop=stop,
             time_barrier=planned.time_barrier,
             decided_at=waiting.decided_at,
             entry_at=at,
@@ -1107,9 +1147,9 @@ class PaperTrader:
             p_star=pick.p_star,
             low=pick.low,
             kelly=pick.kelly,  # f*, a diagnosis alone (#471): no trade is sized by it
-            # A practice trade is of no policy (#427), nor a verdict trade (#677): no record, promotion
-            # or gate counts it.
-            policy_id=None if pick.practice or pick.verdict else self._policy,
+            # A practice trade is of no policy (#427), nor a verdict trade (#677), nor a scalp trade
+            # (#705): no record, promotion or gate counts it.
+            policy_id=None if pick.practice or pick.verdict or pick.scalp else self._policy,
             champion=self.challenger is None and not self.shadow,
             shadow=self.shadow,
             practice=pick.practice,
@@ -1117,21 +1157,54 @@ class PaperTrader:
             decided_mid=waiting.mid,
             verdict_version=None if signal.call is None else signal.call.version,
             verdict=None if signal.call is None else signal.call.opened(),
+            scalp=pick.scalp,
+            scalp_signal=self._scalp_signal(signal, price) if pick.scalp else None,
         )
 
+    def _scalp_signal(self, signal: Signal, price: float) -> dict[str, Any]:
+        from krx_quant.trader.scalp import opened
+
+        return opened(signal, self.rules, price)
+
+    def scalp_filled(self, trade: OpenTrade) -> OpenTrade:
+        """A scalp trade whose fill price is known again (#705: the KIS book's buy filled more after
+        its cancel, ``mock.py``): its target and stop set on that price, kept; another trade as it is."""
+        if not trade.scalp:
+            return trade
+        target, stop = scalp_levels(trade.entry_price, self.rules)
+        if raised(trade.entry_price, trade.stop):
+            stop = trade.stop
+        if (target, stop) == (trade.target, trade.stop):
+            return trade
+        self.store.set_barriers(trade.id, target, stop)
+        found = replace(trade, target=target, stop=stop)
+        if self.position is not None and self.position.id == trade.id:
+            self.position = found
+        return found
+
     def announce_bought(self, trade: OpenTrade) -> None:
-        """A verdict trade's buy settled (#677): ``[buy]`` to ``announce``; nothing for another trade."""
+        """A verdict trade's buy settled (#677), or a scalp trade's (#705): ``[buy]`` to ``announce``;
+        nothing for another trade."""
         if self.announce is not None and trade.predictor == VERDICT:
             from krx_quant.trader.verdicts import bought_text
 
             self.announce(bought_text(self.mode, trade))
+        elif self.announce is not None and trade.scalp:  # #705
+            from krx_quant.trader import scalp
+
+            self.announce(scalp.bought_text(self.mode, trade))
 
     def announce_sold(self, trade: OpenTrade, reason: str, net: float) -> None:
-        """A verdict trade sold whole (#677): ``[sell]`` to ``announce``; nothing for another trade."""
+        """A verdict trade sold whole (#677), or a scalp trade (#705): ``[sell]`` to ``announce``; nothing
+        for another trade."""
         if self.announce is not None and trade.predictor == VERDICT:
             from krx_quant.trader.verdicts import sold_text
 
             self.announce(sold_text(self.mode, trade, reason, net))
+        elif self.announce is not None and trade.scalp:  # #705
+            from krx_quant.trader import scalp
+
+            self.announce(scalp.sold_text(self.mode, trade, reason, net))
 
     def give_up(self, waiting: _Waiting, reason: str) -> None:
         self._waiting = None
@@ -1142,7 +1215,29 @@ class PaperTrader:
         # At the time barrier, the last quote before it sells only if the trader was running then.
         sale = exit_on(trade, quote, standing, self.rules, trade.time_barrier >= self.started_at)
         if sale is not None:
-            self._exit(trade, sale.at, sale.price, sale.reason, sale.quote)
+            reason = sale.reason
+            if trade.scalp and reason == STOP_LOSS and raised(trade.entry_price, trade.stop):
+                reason = RAISED_STOP  # #705: the stop raised to the level that nets +0.1%
+            self._exit(trade, sale.at, sale.price, reason, sale.quote)
+        elif trade.scalp:
+            self._raise(trade, quote)
+
+    def _raise(self, trade: OpenTrade, quote: BestQuote) -> None:
+        """A scalp trade's stop raised on ``quote`` (#705, ``scalp_raise``): kept on the trade, selling
+        from the next quote whose bid is at or below it."""
+        level = scalp_raise(trade.entry_price, trade.stop, quote.bid, self.rules)
+        if level is None:
+            return
+        self.store.set_barriers(trade.id, trade.target, level)
+        self.position = replace(trade, stop=level)
+        self.dirty = True
+        log.info(
+            "%s scalp trade %s: its stop raised to %s on a bid of %s",
+            self._whose(),
+            trade.id,
+            level,
+            quote.bid,
+        )
 
     def _exit(self, trade: OpenTrade, at: datetime, price: float, reason: str, quote: BestQuote) -> None:
         """The position sold at ``price`` at ``at`` for ``reason``, on ``quote``: by its fills
@@ -1177,5 +1272,5 @@ class PaperTrader:
             trade.id,
             net,
         )
-        if self.holds.exited(net, at, trade.practice) is not None:  # its realized loss reached a limit
+        if self.holds.exited(net, at, trade.uncounted) is not None:  # its realized loss reached a limit
             self.enforce(at)

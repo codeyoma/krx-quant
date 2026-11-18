@@ -45,6 +45,15 @@ def tick_size(price: float) -> int:
     return next(tick for low, tick in _TICK_BANDS if price >= low)
 
 
+def tick_up(price: float) -> int:
+    """The first price on KRX's tick at or above ``price`` (a take-profit's limit, ``trader/mock.py``; the
+    scalp's levels, #705)."""
+    up = math.ceil(round(price / tick_size(price), 9)) * tick_size(price)
+    while up % tick_size(up):  # past a band's edge, onto the coarser tick of the band above
+        up = math.ceil(up / tick_size(up)) * tick_size(up)
+    return int(up)
+
+
 def tick_band(price: float) -> tuple[int, int | None]:
     """The edges of the band ``price`` falls in (#307): its lowest price, and the next band's
     lowest (None for the top band). A price at an edge is in the band above it."""

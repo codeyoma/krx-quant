@@ -37,6 +37,17 @@ narrow the capital, never widen it (#393).
   others. On a day no champion cell trades, the mock book trades the engine's verdict too
   (``verdicts.py``), sized by the loss budget. For ``KRX_TRADER_MODE=mock`` alone: ``on`` with ``paper``
   or ``live`` is a configuration error, as the practice's. ``off`` narrows what the trader does.
+- ``KRX_TRADER_MOCK_SCALP`` (#705): ``on`` or ``off``; unset, ``on`` in mock mode and ``off`` in the
+  others. On the same picks, the mock book buys a share on the scalp signal too (``scalp.py``). For
+  ``KRX_TRADER_MODE=mock`` alone, as the verdict's. Its rules (read in every mode, used with it alone):
+  ``KRX_TRADER_MOCK_SCALP_THRESHOLD`` (the up first that buys, 0.30 unless set; 0–1),
+  ``KRX_TRADER_MOCK_SCALP_TARGET_PERCENT`` (the target's net in percent of the fill price, 0.2),
+  ``KRX_TRADER_MOCK_SCALP_RAISE_PERCENT`` (the net the stop is raised to, 0.1; from 0, below the
+  target's), ``KRX_TRADER_MOCK_SCALP_STOP_PERCENT`` (the stop below the fill, gross, 0.3),
+  ``KRX_TRADER_MOCK_SCALP_DEADLINE_MINUTES`` (15), ``KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS`` (its own
+  buy orders a day, 20; from 1 to 20) and ``KRX_TRADER_MOCK_SCALP_DAILY_LOSS_WON`` (its own day's net
+  loss that stops its buys, 5,000 won; above 0). Its losses in a row and their cooldown are the book's
+  settings (``KRX_TRADER_LOSS_STREAK``, ``KRX_TRADER_COOLDOWN_MINUTES``), counted on its own trades.
 
 ``KRX_TRADER_KIND`` and ``KRX_TRADER_PREDICTOR`` (#394: the one cell traded) are gone: the cost map
 picks the cells (#395). One still set is not read, and since #644 nothing says so: in the 14 days
@@ -64,6 +75,13 @@ from krx_quant.trader import (
     PAPER,
     PRACTICE_SPACING,
     RISK_PER_TRADE_PERCENT,
+    SCALP_DAILY_BUY_ORDERS,
+    SCALP_DAILY_LOSS_WON,
+    SCALP_DEADLINE,
+    SCALP_RAISE_PERCENT,
+    SCALP_STOP_PERCENT,
+    SCALP_TARGET_PERCENT,
+    SCALP_THRESHOLD,
     THRESHOLD,
 )
 
@@ -96,6 +114,15 @@ class TraderSettings:
     practice_spacing_minutes: float = PRACTICE_SPACING.total_seconds() / 60
     # The mock book trades the engine's verdict on a day no champion cell trades (#677, ``verdicts.py``).
     mock_verdict: bool = False
+    # The mock book's scalp policy (#705, ``scalp.py``) and its rules (``book.ScalpRules``).
+    mock_scalp: bool = False
+    scalp_threshold: float = SCALP_THRESHOLD
+    scalp_target_percent: float = SCALP_TARGET_PERCENT
+    scalp_raise_percent: float = SCALP_RAISE_PERCENT
+    scalp_stop_percent: float = SCALP_STOP_PERCENT
+    scalp_deadline_minutes: float = SCALP_DEADLINE.total_seconds() / 60
+    scalp_daily_buy_orders: int = SCALP_DAILY_BUY_ORDERS
+    scalp_daily_loss_won: float = SCALP_DAILY_LOSS_WON
 
     @classmethod
     def from_env(
@@ -153,6 +180,38 @@ class TraderSettings:
                 f"KRX_TRADER_MOCK_VERDICT=on is for KRX_TRADER_MODE=mock alone, not {mode} (#677): the"
                 " verdict's trades order on KIS's mock server only"
             )
+        scalp = values.get("KRX_TRADER_MOCK_SCALP", "").strip().lower() or (ON if mode == MOCK else OFF)
+        if scalp not in (ON, OFF):
+            raise SettingsError(f"KRX_TRADER_MOCK_SCALP must be on or off, got {scalp!r}")
+        if scalp == ON and mode != MOCK:
+            raise SettingsError(
+                f"KRX_TRADER_MOCK_SCALP=on is for KRX_TRADER_MODE=mock alone, not {mode} (#705): the"
+                " scalp's trades order on KIS's mock server only"
+            )
+        scalp_threshold = float(
+            _number(values, "KRX_TRADER_MOCK_SCALP_THRESHOLD", f"{SCALP_THRESHOLD:g}", float, 0.0, 1.0)
+        )
+        target = _positive(values, "KRX_TRADER_MOCK_SCALP_TARGET_PERCENT", SCALP_TARGET_PERCENT)
+        lift = float(
+            _number(
+                values, "KRX_TRADER_MOCK_SCALP_RAISE_PERCENT", f"{SCALP_RAISE_PERCENT:g}", float, 0.0, None
+            )
+        )
+        if lift >= target:
+            raise SettingsError(
+                f"KRX_TRADER_MOCK_SCALP_RAISE_PERCENT ({lift:g}) must be below"
+                f" KRX_TRADER_MOCK_SCALP_TARGET_PERCENT ({target:g}): the stop is raised before the target"
+            )
+        stop = _positive(values, "KRX_TRADER_MOCK_SCALP_STOP_PERCENT", SCALP_STOP_PERCENT)
+        if stop >= 100:
+            raise SettingsError(f"KRX_TRADER_MOCK_SCALP_STOP_PERCENT must be below 100, got {stop:g}")
+        deadline = _positive(
+            values, "KRX_TRADER_MOCK_SCALP_DEADLINE_MINUTES", SCALP_DEADLINE.total_seconds() / 60
+        )
+        scalp_orders = _fewer(
+            values, "KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS", SCALP_DAILY_BUY_ORDERS, "scalp buy orders a day"
+        )
+        scalp_loss = _positive(values, "KRX_TRADER_MOCK_SCALP_DAILY_LOSS_WON", SCALP_DAILY_LOSS_WON)
         spacing = float(
             _number(
                 values,
@@ -178,6 +237,14 @@ class TraderSettings:
             mock_practice=practice == ON,
             practice_spacing_minutes=spacing,
             mock_verdict=verdict == ON,
+            mock_scalp=scalp == ON,
+            scalp_threshold=scalp_threshold,
+            scalp_target_percent=target,
+            scalp_raise_percent=lift,
+            scalp_stop_percent=stop,
+            scalp_deadline_minutes=deadline,
+            scalp_daily_buy_orders=scalp_orders,
+            scalp_daily_loss_won=scalp_loss,
         )
 
 
@@ -192,6 +259,14 @@ def _limit(values: Mapping[str, str], name: str, code: float) -> float:
             f"{name} ({value:g}%) is above the trader's limit of {code:g}% of the capital: "
             ".env may narrow it, never widen it"
         )
+    return value
+
+
+def _positive(values: Mapping[str, str], name: str, code: float) -> float:
+    """A figure of the scalp's rules (#705): above 0."""
+    value = float(_number(values, name, f"{code:g}", float, 0.0, None))
+    if value <= 0:
+        raise SettingsError(f"{name} must be above 0, got {value:g}")
     return value
 
 

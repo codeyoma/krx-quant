@@ -112,6 +112,7 @@ class MockDesk:
     selection: Selection | None = None
     practice: bool = False
     verdict: bool = False  # the verdict policy (#677)
+    scalp: bool = False  # the scalp policy (#705)
     announced: list[str] = field(default_factory=list)  # its trades told to Telegram (#677)
     state_now: dict[str, Any] | None = None  # GET /v1/trader after the last event
     # The trader stopped after the last event once this holds, its order in flight cancelled (a stop
@@ -151,6 +152,7 @@ class MockDesk:
                     stall_after=None,  # the made-up quotes are sparse (``trader_doubles.Day``)
                     practice=self.practice,
                     verdict=self.verdict,
+                    scalp=self.scalp,
                     announce=self.announced.append,
                     engine=self.state / ENGINE_DB if self.engine else None,
                 )
