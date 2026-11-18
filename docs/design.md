@@ -2045,7 +2045,7 @@ mock trader의 체결 통보 기록기(#484)는 이 저장소에 쓰지 않는�
 - 텔레그램: 판정 매매처럼 산 때 `[buy] 스캘프 매수(mock): …`, 다 판 때 `[sell] 스캘프 매도(mock): …`를 한 번씩 보낸다(`scalp.bought_text`, `sold_text`).
 - 테스트(`tests/test_trader_scalp.py`, 가짜 KIS와 엔진 DB): 목표·올림·손절 가격의 순손익, 문턱 이상이면 1주 사고 목표 지정가를 바로 거는 것, 문턱 아래, 목표·올린 손절·손절·마감 청산(재생한 호가), 15:15 뒤 마감, 자기 매수 상한과 하루 손실 상한, 챔피언 한도가 세지 않는 것, 결정 API의 장부, 밤 리포트, 설정.
 
-> **바뀜** (2026-11-18, #PR): `GET /v1/trader`의 `today.practice`·`cumulative.practice`와 `days`의 `practice`는 mock 연습 매매의 손익이었다 → 손실 한도가 세지 않는 손익, 곧 연습과 스캘프의 손익이다(`store.UNCOUNTED_TRADE`). `position.practice`는 그대로 연습 포지션만이고 스캘프 포지션은 `position.scalp`다. 이유: 스캘프 손실을 연습처럼 한도에 세지 않기로 했다(사용자 결정 2026-11-18, #705). 한도의 셈 자체는 바뀌지 않았다.
+> **바뀜** (2026-11-18, #707): `GET /v1/trader`의 `today.practice`·`cumulative.practice`와 `days`의 `practice`는 mock 연습 매매의 손익이었다 → 손실 한도가 세지 않는 손익, 곧 연습과 스캘프의 손익이다(`store.UNCOUNTED_TRADE`). `position.practice`는 그대로 연습 포지션만이고 스캘프 포지션은 `position.scalp`다. 이유: 스캘프 손실을 연습처럼 한도에 세지 않기로 했다(사용자 결정 2026-11-18, #705). 한도의 셈 자체는 바뀌지 않았다.
 
 **호가 끊김 (#407, `trader/stall.py`).** spec #393 "호가"의 둘째 줄이다. trader는 수집기의 호가 스트림으로 체결을 흉내 내고 손절·시간을 본다. 스트림이 끊기면(수집기가 멈추거나, 그 KIS WebSocket이 끊기거나, trader의 연결이 끊긴다) 그것을 알아야 한다.
 
