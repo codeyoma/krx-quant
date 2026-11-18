@@ -26,6 +26,7 @@ from krx_quant.clock import FakeClock
 from krx_quant.collector import run_collector
 from krx_quant.demo import demo_app
 from krx_quant.fake_kis import FakeKis
+from krx_quant.scalp import SCALP
 from krx_quant.touch import TARGET_VERSION
 from tests.api_schema import KIND_ROUTES, ROUTES, SCHEMA, STREAM, WRITES, check
 from tests.collector_doubles import settings_for
@@ -327,8 +328,8 @@ async def test_a_morning_with_another_kind_keeps_the_contract(tmp_path: Path) ->
 
 
 async def test_a_morning_with_the_range_and_the_barrier_keeps_the_contract(tmp_path: Path) -> None:
-    """#180, #183, #263. Input: a replayed busy morning with the kinds the engine predicts (the
-    range, the barrier and its horizon ladder). Output: every endpoint within the contract; each
+    """#180, #183, #263, #706. Input: a replayed busy morning with the kinds the engine predicts (the
+    range, the barrier and its horizon ladder, the scalp). Output: every endpoint within the contract; each
     kind's outputs, answer paths and own statistics within theirs (``range_output``,
     ``range_path``, ``range_stats``; ``barrier_output``, ``barrier_path``, ``barrier_stats``, the
     ladder's too); every window over by 10:00 answered; a scored prediction's k (``flat_ticks``,
@@ -336,6 +337,7 @@ async def test_a_morning_with_the_range_and_the_barrier_keeps_the_contract(tmp_p
     a barrier prediction's width (``width_ticks``) its answer's w."""
     horizons = {"range": timedelta(minutes=4), "barrier": timedelta(minutes=4)}
     horizons |= {k.name: k.horizon for k in BARRIER_LADDER}
+    horizons |= {SCALP.name: SCALP.horizon}  # #706
     engine = await run(
         tmp_path / "engine.db", busy_morning(), until=at("10:00:00"), target_version=TARGET_VERSION
     )
@@ -350,13 +352,17 @@ async def test_a_morning_with_the_range_and_the_barrier_keeps_the_contract(tmp_p
 
     assert checked["kind_latest"] == len(horizons)
     for kind, horizon in horizons.items():
-        family = "range" if kind == "range" else "barrier"
+        family = kind if kind in ("range", "scalp") else "barrier"
         ok = [p for p in made[kind]["predictions"] if p["status"] == "ok"]
         over = [p for p in ok if datetime.fromisoformat(p["bar_close"]) + horizon < at("10:00:00")]
         assert ok and all(p["answer"] is not None for p in over), kind
         for p in ok:
             check(f"{family}_output", p["output"])
-            if p["answer"] is not None:
+            if p["answer"] is not None and family == "scalp":
+                check("scalp_path", p["answer"]["path"])
+                assert p["width_ticks"] is None, "the scalp has no width"
+                assert p["anchor"] == p["answer"]["path"]["anchor"], "the bar close's mid-point, the answer's"
+            elif p["answer"] is not None:
                 check(f"{family}_path", p["answer"]["path"])
                 assert p["flat_ticks"] == p["answer"]["path"]["k"], "the bar close's k, the answer's (#200)"
                 reference = (p["answer"]["path"]["anchor"], p["answer"]["path"]["tick"])

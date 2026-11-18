@@ -1565,7 +1565,7 @@
           "minimum": 0
         },
         "output": {
-          "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok. The range's: range_output (#180); the barrier's: barrier_output (#183); open_to_close's and open_to_close_5d's (#310): open_to_close_output (#264).",
+          "description": "p_<class> for each of the kind's three classes (GET /v1/kinds), a distribution, then the kind's fields; null unless the status is ok. The range's: range_output (#180); the barrier's: barrier_output (#183); the scalp's: scalp_output (#706); open_to_close's and open_to_close_5d's (#310): open_to_close_output (#264).",
           "oneOf": [
             {"type": "null"},
             {
@@ -1603,7 +1603,7 @@
         "unscorable": {"type": ["string", "null"]},
         "special": {"type": "boolean"},
         "scored_at": {"$ref": "#/$defs/time"},
-        "path": {"description": "The kind's summary of the window. The range's: range_path (#180); the barrier's: barrier_path (#183); open_to_close's: open_to_close_path (#264); open_to_close_5d's: open_to_close_5d_path (#310).", "type": "object"}
+        "path": {"description": "The kind's summary of the window. The range's: range_path (#180); the barrier's: barrier_path (#183); the scalp's: scalp_path (#706); open_to_close's: open_to_close_path (#264); open_to_close_5d's: open_to_close_5d_path (#310).", "type": "object"}
       }
     },
     "range_output": {
@@ -1737,6 +1737,58 @@
         "short": {"$ref": "#/$defs/barrier_pnl"},
         "pnl_inverse": {"description": "As pnl, the shorts through the symbol's single-stock inverse product (#267): no sell tax; a short on a symbol without one, or before it was listed, is no trade.", "$ref": "#/$defs/barrier_pnl"},
         "short_inverse": {"description": "The shorts alone, through the inverse product (#267).", "$ref": "#/$defs/barrier_pnl"}
+      }
+    },
+    "scalp_output": {
+      "description": "A scalp prediction's output (#706, kind scalp): the three classes' probabilities (a distribution), target first, timeout, stop first; no other field.",
+      "type": "object",
+      "required": ["p_target_first", "p_timeout", "p_stop_first"],
+      "additionalProperties": false,
+      "properties": {
+        "p_target_first": {"type": "number", "minimum": 0, "maximum": 1},
+        "p_timeout": {"type": "number", "minimum": 0, "maximum": 1},
+        "p_stop_first": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "scalp_path": {
+      "description": "A scalp answer's path (#706): empty for a window not followed (restarted, not recorded); else the entry (the best ask received last before the bar close), the target T (nets +0.2 % after costs, rounded up to the tick) and the stop S (0.3 % below the entry), their nets (fractions of the entry), the entry's tick, the mid-point at the bar close, the best bid then, when each level was first reached by a best bid (received time) and that bid, the last best quote received in the window, the quotes received (crossed ones included) and whether they went silent for 60 s. Without an entry the levels and nets are null.",
+      "oneOf": [
+        {"type": "object", "maxProperties": 0},
+        {
+          "type": "object",
+          "required": ["entry", "target", "stop", "target_net", "stop_net", "tick", "anchor", "bid_start", "target_at", "target_bid", "stop_at", "stop_bid", "bid_end", "ask_end", "quotes", "silent"],
+          "additionalProperties": false,
+          "properties": {
+            "entry": {"type": ["number", "null"]},
+            "target": {"type": ["number", "null"]},
+            "stop": {"type": ["number", "null"]},
+            "target_net": {"type": ["number", "null"]},
+            "stop_net": {"type": ["number", "null"]},
+            "tick": {"type": ["number", "null"]},
+            "anchor": {"type": ["number", "null"]},
+            "bid_start": {"type": ["number", "null"]},
+            "target_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+            "target_bid": {"type": ["number", "null"]},
+            "stop_at": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/time"}]},
+            "stop_bid": {"type": ["number", "null"]},
+            "bid_end": {"type": ["number", "null"]},
+            "ask_end": {"type": ["number", "null"]},
+            "quotes": {"type": "integer", "minimum": 0},
+            "silent": {"type": "boolean"}
+          }
+        }
+      ]
+    },
+    "scalp_stats": {
+      "description": "A scalp predictor's own statistics (#706, a kind entry's extra): of its n scored predictions, the longs its target_first calls make (sold at the target, at the first bid at or below the stop, or at the last bid before the deadline, less both commissions and the sell tax): how many (trades), the mean net per trade (a fraction of the entry) with its normal 95% interval, and the share that netted above 0 (won; null without a trade).",
+      "type": "object",
+      "required": ["n", "trades", "net_per_trade", "won"],
+      "additionalProperties": false,
+      "properties": {
+        "n": {"type": "integer", "minimum": 0},
+        "trades": {"type": "integer", "minimum": 0},
+        "net_per_trade": {"$ref": "#/$defs/interval"},
+        "won": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
       }
     },
     "touch_pnl": {
@@ -1890,7 +1942,7 @@
         "precision": {"description": "Of the calls of the kind's action classes, the share that happened.", "$ref": "#/$defs/interval"},
         "coverage": {"description": "The share of calls of the kind's action classes.", "$ref": "#/$defs/interval"},
         "brier": {"$ref": "#/$defs/interval"},
-        "extra": {"description": "The kind's own statistics; null for a kind without. The range's: range_stats (#180); the barrier's: barrier_stats (#183); open_to_close's: open_to_close_stats (#264); open_to_close_5d's: open_to_close_5d_stats (#310).", "type": ["object", "null"]},
+        "extra": {"description": "The kind's own statistics; null for a kind without. The range's: range_stats (#180); the barrier's: barrier_stats (#183); the scalp's: scalp_stats (#706); open_to_close's: open_to_close_stats (#264); open_to_close_5d's: open_to_close_5d_stats (#310).", "type": ["object", "null"]},
         "overlap_sessions": {"description": "How many trading sessions the kind's windows run (#310): 1 for every kind but a daily kind of several sessions, whose neighbouring days' windows share sessions; then its accuracy, precision, coverage, Brier score, lifts and P&L intervals are Driscoll–Kraay ones and its lifts by trading day Newey–West ones (its calibration bins are not corrected).", "type": "integer", "minimum": 1},
         "independent_days": {"description": "About how many independent windows the entry's trading days hold (#310): the days with a scored prediction ÷ overlap_sessions, rounded down.", "type": "integer", "minimum": 0},
         "lift": {"$ref": "#/$defs/lift"}

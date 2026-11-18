@@ -282,7 +282,15 @@ from krx_quant.predictions import (
     Score,
 )
 from krx_quant.pricing import Direction, classify, flat_ticks, most_likely, tick_size
-from krx_quant.ranking import BAR_CLOSE, DAILY, RANKING_VERSION, Snapshot, WalkForwardOf, rank_kinds
+from krx_quant.ranking import (
+    BAR_CLOSE,
+    DAILY,
+    RANKING_VERSION,
+    Snapshot,
+    WalkForwardOf,
+    rank_kinds,
+    ranked_kind,
+)
 from krx_quant.ranking import Window as RankingWindow
 from krx_quant.ranking import text as ranking_text
 from krx_quant.reference import Bar
@@ -1987,12 +1995,12 @@ class PredictionEngine:
     def _ranked_kinds(
         self,
     ) -> list[tuple[PredictionKind, RankingWindow, list[KindAlgorithm | DailyAlgorithm]]]:
-        """The verdict's horizons the ranking ranks (#697): each barrier kind and each daily kind run,
-        with its window and its registered algorithms."""
+        """The kinds the ranking ranks (#697): each barrier kind (the verdict's horizons), the scalp (#706,
+        ``ranking.ranked_kind``) and each daily kind run, with its window and its registered algorithms."""
         out: list[tuple[PredictionKind, RankingWindow, list[KindAlgorithm | DailyAlgorithm]]] = [
             (k, BAR_CLOSE, [a for a in self.kind_registered if a.kind == k.name])
             for k in self.kinds
-            if k.classes == BARRIER_CLASSES
+            if ranked_kind(k)
         ]
         out += [
             (k, DAILY, [a for a in self.daily_registered if a.kind == k.name])

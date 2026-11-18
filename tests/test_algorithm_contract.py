@@ -57,6 +57,7 @@ from krx_quant.features import (
 )
 from krx_quant.feeds import KST
 from krx_quant.kind_registry import kind_named
+from krx_quant.kinds import Answer
 from krx_quant.market_calendar import MarketCalendar
 from krx_quant.training import bar_answers, recorded_samples, samples
 from tests.algorithm_doubles import CAUTIOUS, FixedAlgorithm, PlacedAlgorithm
@@ -291,6 +292,11 @@ def test_a_kind_s_algorithm_keeps_the_contract_on_its_kind(
     calendar = MarketCalendar(dict.fromkeys(DAYS, True))
     bar_days = {("005930", DAYS[0]): trending(DAYS[0]), ("005930", DAYS[1]): random_walk(DAYS[1])}
     answers = bar_answers(bar_days, calendar, FEE, (kind,))
+    made = samples(bar_days, calendar, kind_algorithm.features, FEE)
+    if kind.bar_answer is None:  # a kind of the recording only (the scalp, #706): its classes in turn
+        answers = {
+            (kind.name, s.symbol, s.bar_close): Answer(kind.classes[i % 3]) for i, s in enumerate(made)
+        }
     training = [
         KindSample(
             s.symbol,
@@ -300,7 +306,7 @@ def test_a_kind_s_algorithm_keeps_the_contract_on_its_kind(
             kind.answer_version,
             "close",
         )
-        for s in samples(bar_days, calendar, kind_algorithm.features, FEE)
+        for s in made
     ]
 
     model = kind_algorithm.fit(training)
