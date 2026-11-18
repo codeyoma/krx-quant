@@ -92,8 +92,8 @@ def test_the_direction_is_the_first_kind_registered_as_it_always_ran() -> None:
         DIRECTION_KIND.answer_version == TARGET_VERSION == 3
     )  # the touch label (#170), crossed quotes counted (#187)
     ladder = ["barrier_15m", "barrier_30m", "barrier_60m"]
-    assert [k.name for k in KINDS] == ["direction", "range", "barrier", *ladder], (
-        "the range, then the barrier (#180, #183), then the barrier's horizon ladder (#263)"
+    assert [k.name for k in KINDS] == ["direction", "range", "barrier", *ladder, "scalp"], (
+        "the range, then the barrier (#180, #183), then the barrier's horizon ladder (#263), the scalp (#706)"
     )
 
 

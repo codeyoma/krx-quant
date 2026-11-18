@@ -123,8 +123,8 @@ FORMAT = 1  # the file's layout; another is a miss
 # REVIEWED_CODE is ``code_digest()`` as last reviewed. GOLDEN and SAMPLE_SEMANTICS are in every
 # day's key (a change to either makes every day again), REVIEWED_CODE is not.
 SAMPLE_SEMANTICS = 1
-GOLDEN = "9ad340d6e42b4493126df0bcd9d9ec3b"
-REVIEWED_CODE = "d1afb25cad107e86"
+GOLDEN = "551a7fec20af39cb1eee5d8f0f3465f7"
+REVIEWED_CODE = "5ffc9889577f58bb"
 # How far before a day the key holds the calendar's sessions: the 20 trading days whose bars the slot
 # returns read (#265), with holidays, and their previous days, are well inside. Of the days after it
 # the samples ask only the trading days to the options expiry, which the key holds as they are.
@@ -152,6 +152,7 @@ _PARTS: dict[str, tuple[str, ...]] = {
     "pricing": ("classify", "cost_ticks", "flat_ticks", "tick_size", "Direction"),
     "ranges": ("range_answer", "bar_range", "range_class", "_at"),
     "replay": ("recorded_events", "recorded_partitions", "_keys", "_partition_rows"),
+    "scalp": ("scalp_answer", "target_price", "stop_price", "net_return", "_first", "_at"),
     "sample_store": ("encode", "decode", "content", "_value", "FORMAT"),
 }
 # Imported by the whole modules for what does not make samples: the registries (the kinds a day is

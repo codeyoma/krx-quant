@@ -66,6 +66,8 @@ from krx_quant.open_to_close_5d import CLIMATE as OTC5_CLIMATE
 from krx_quant.open_to_close_5d import NAME as OTC5
 from krx_quant.ranges import CLIMATE as RANGE_CLIMATE
 from krx_quant.ranges import NAME as RANGE
+from krx_quant.scalp import CLIMATE as SCALP_CLIMATE
+from krx_quant.scalp import NAME as SCALP
 from krx_quant.stats import on_target
 
 LIMIT = 20  # the days a series holds by default
@@ -78,6 +80,7 @@ CLIMATES = {
     DIRECTION: DIRECTION_CLIMATE,
     RANGE: RANGE_CLIMATE,
     BARRIER: BARRIER_CLIMATE,
+    SCALP: SCALP_CLIMATE,  # #706
     OTC: OTC_CLIMATE,
     OTC5: OTC5_CLIMATE,
 }

@@ -2,7 +2,8 @@
 
 The direction comes first, as it always ran (``kinds.DIRECTION_KIND``); then the range
 (``ranges.RANGE``, #180); then the barrier (``barriers.BARRIER``, #183); then the barrier at
-15, 30 and 60 minutes (``barriers.BARRIER_LADDER``, #263). A kind added later
+15, 30 and 60 minutes (``barriers.BARRIER_LADDER``, #263); then the scalp (``scalp.SCALP``, #706,
+the mock scalp policy's event). A kind added later
 goes after them, and its algorithms after theirs: the CPU budget skips them first. The kinds'
 framework is ``kinds.py``; each kind's rules are its own module, built on it, so the list is
 kept here.
@@ -23,9 +24,11 @@ from krx_quant.kinds import DIRECTION_KIND, Kind, register_kinds
 from krx_quant.open_to_close import OPEN_TO_CLOSE
 from krx_quant.open_to_close_5d import OPEN_TO_CLOSE_5D
 from krx_quant.ranges import RANGE
+from krx_quant.scalp import SCALP
 
-# The barrier's horizon ladder (#263: 15, 30 and 60 minutes) after the four-minute barrier.
-KINDS: tuple[Kind, ...] = register_kinds([DIRECTION_KIND, RANGE, BARRIER, *BARRIER_LADDER])
+# The barrier's horizon ladder (#263: 15, 30 and 60 minutes) after the four-minute barrier, then the
+# scalp's event (#706).
+KINDS: tuple[Kind, ...] = register_kinds([DIRECTION_KIND, RANGE, BARRIER, *BARRIER_LADDER, SCALP])
 # Predicted once a trading day (#264), apart from the bar-close kinds: the day's open to its close,
 # then the five sessions' (#310).
 DAILY_KINDS: tuple[DailyKind, ...] = register_daily_kinds([OPEN_TO_CLOSE, OPEN_TO_CLOSE_5D], KINDS)

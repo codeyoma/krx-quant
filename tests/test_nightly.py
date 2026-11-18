@@ -494,9 +494,11 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
         RANGE_CLIMATE,
         BARRIER_CLIMATE,
         *ladder,
+        "scalp-climate",  # the scalp's (#706), after the ladder's
         MANDELBROT,
         BREIMAN,
         *(f"{BREIMAN}-{m}m" for m in (15, 30, 60)),  # a Breiman for each of the ladder (#263)
+        "breiman-scalp",  # the scalp's (#706)
         "cox",  # the daily kind's (#264), last, on this server's KRX day candles: none here
         "cox-5d",  # the five-session kind's (#310), trained once its kind runs
         *("hurst", "lorenz", "friedman", "hurst-5d", "lorenz-5d", "friedman-5d"),  # #698's candidates
@@ -510,6 +512,7 @@ def test_the_train_command_trains_every_registered_algorithm_from_the_store(
         MANDELBROT: 1,
         BREIMAN: BARRIER.answer_version,
         **{f"{BREIMAN}-{m}m": BARRIER.answer_version for m in (15, 30, 60)},
+        **dict.fromkeys(("scalp-climate", "breiman-scalp"), 1),  # the scalp's answers (#706)
         "cox": OPEN_TO_CLOSE.answer_version,
         "cox-5d": OPEN_TO_CLOSE_5D.answer_version,
         **dict.fromkeys(("hurst", "lorenz", "friedman"), OPEN_TO_CLOSE.answer_version),
