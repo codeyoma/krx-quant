@@ -335,16 +335,18 @@ def barrier_stats(
     }
 
 
-def _certain(label: str) -> KindForecast:
-    up, timeout, down = (1.0 if c == label else 0.0 for c in CLASSES)
+def _certain(label: str, classes: Sequence[str] = CLASSES) -> KindForecast:
+    up, timeout, down = (1.0 if c == label else 0.0 for c in classes)
     return KindForecast((up, timeout, down))
 
 
 class BarrierPersist:
     """The last window's barrier answer goes on (#183): the window one horizon back (four
-    minutes, or a longer barrier's, #263)."""
+    minutes, or a longer barrier's, #263). A kind of the same shape but other classes (the scalp's,
+    ``scalp.py``, #706) gives its own ``classes``."""
 
     version = "v1"
+    classes: tuple[str, str, str] = CLASSES
 
     def __init__(self, minutes: int = BARRIER_MINUTES) -> None:
         self.minutes = minutes
@@ -376,7 +378,7 @@ class BarrierPersist:
         previous = inputs.previous
         if previous is None or previous.label is None:
             return None
-        return _certain(previous.label)
+        return _certain(previous.label, self.classes)
 
 
 class BarrierClimate:
@@ -386,9 +388,12 @@ class BarrierClimate:
     ``p_timeout``, ``p_down_first`` and ``n`` (the answers counted), and the same of
     ``<symbol>.all``, the symbol's whole day. A slot the table lacks backs off to its symbol's
     day, then to a third each (a baseline predicts every bar close, so the lifts pair it with
-    every forecast)."""
+    every forecast). A kind of the same shape but other classes and answers (the scalp's,
+    ``scalp.py``, #706) gives its own ``classes`` and ``answer_version``."""
 
     days = CLIMATE_DAYS
+    classes: tuple[str, str, str] = CLASSES
+    answer_version = ANSWER_VERSION
     card = Card(
         scientist=None,
         character="기준 예측: 장벽 시간대 기후",
@@ -454,7 +459,7 @@ class BarrierClimate:
                 cells.setdefault(cell, []).append(label)
         params: dict[str, float] = {}
         for cell, seen in sorted(cells.items()):
-            for c in CLASSES:
+            for c in self.classes:
                 params[f"{cell}.p_{c}"] = seen.count(c) / len(seen)
             params[f"{cell}.n"] = float(len(seen))
         first = min(s.bar_close for s, _ in answered).astimezone(KST).date()
@@ -466,14 +471,14 @@ class BarrierClimate:
             params=params,
             trained=f"{first}..{last}, {len(answered)} samples, {len(cells)} cells",
             trained_until=last,
-            target_version=ANSWER_VERSION,  # the barrier's answers
+            target_version=self.answer_version,  # the kind's answers
         )
 
     def predict(self, inputs: KindInputs) -> KindForecast:
         params = self.table.params if self.table is not None else {}
         for cell in (f"{inputs.symbol}.{slot(inputs.bar_close)}", f"{inputs.symbol}.{ALL_DAY}"):
             if f"{cell}.n" in params:
-                up, timeout, down = (params[f"{cell}.p_{c}"] for c in CLASSES)
+                up, timeout, down = (params[f"{cell}.p_{c}"] for c in self.classes)
                 return KindForecast((up, timeout, down))
         return KindForecast((1 / 3, 1 / 3, 1 / 3))
 

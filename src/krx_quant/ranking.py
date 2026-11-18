@@ -15,7 +15,8 @@ The user's decisions (2026-11-12, #697):
   (``stats.overlap_t_test``, #310). **It is ranked by that interval's lower bound**, highest first.
 - Beside it, as shown, not ranked by: its **precision** (the share of its rise and fall calls, the
   kind's ``sides``, that happened), how many **calls** and how often it calls (``call_rate``), and for a
-  barrier kind the **net** of its long calls after cost (``barriers.barrier_profit``, ticks a trade).
+  barrier kind the **net** of its long calls after cost (``barriers.barrier_profit``, ticks a trade); for
+  the scalp (#706) the net of its target_first calls' longs (``scalp.scalp_ticks``, ticks of the entry).
 - **Members** are every ranked algorithm whose lower bound is above 0 (not a share of the ranked). A
   horizon without one says WAIT.
 - **Hysteresis**: re-ranked every night, an algorithm **enters or leaves** the members only once the
@@ -49,6 +50,13 @@ Without enough of either it is **unranked** (``why``): fewer than ``Window.min_d
 (``predictions.rankings``), with its version (``RANKING_VERSION``: these constants), the night, when it
 was made and the latest day its evidence counts (``through``). The live engine makes it at each daily
 review (``engine._rank``), after the day's answers, from stored rows only: no model is trained.
+
+**The kinds ranked** (``ranked_kind``): the verdict's horizons (the barrier kinds and the daily kinds
+run) and the scalp (#706, ``scalp.py``), ranked the same way against ``scalp-climate`` for the mock scalp
+policy (#705) to read its members. The scalp is not a verdict horizon: the verdict never pools it.
+
+> **바뀜** (2026-11-18, #PR): the verdict's horizons only → the scalp too. 이유: the scalp policy reads a
+> member trained on its own event (#706).
 """
 
 from __future__ import annotations
@@ -68,6 +76,8 @@ from krx_quant.feeds.base import KST
 from krx_quant.kind_stats import scored_of_kind
 from krx_quant.kinds import Kind, KindScored
 from krx_quant.predictions import iso, kind_reviewed_rows
+from krx_quant.scalp import CLASSES as SCALP_CLASSES
+from krx_quant.scalp import scalp_ticks
 from krx_quant.stats import Lift, on_target, overlap_t_test, session_index, t_test
 
 if TYPE_CHECKING:
@@ -122,6 +132,24 @@ class DayScore:
         )
 
 
+def ranked_kind(kind: Kind) -> bool:
+    """Whether a bar-close kind is ranked nightly (module doc): a barrier kind (a verdict horizon), or
+    the scalp (#706)."""
+    return kind.classes in (BARRIER_CLASSES, SCALP_CLASSES)
+
+
+def _long_net(kind: Kind, called: str, outcome: str, path: Mapping[str, Any]) -> float | None:
+    """A long call's net after cost in ticks (module doc): a barrier kind's up_first, the scalp's
+    target_first; None for any other call or kind, or without the prices."""
+    if kind.sides is None or called != kind.sides[0]:
+        return None
+    if kind.classes == BARRIER_CLASSES:
+        return barrier_profit(called, outcome, path)
+    if kind.classes == SCALP_CLASSES:
+        return scalp_ticks(outcome, path)
+    return None
+
+
 def _loss(r: KindScored) -> float:
     return -math.log(max(r.probabilities[r.outcome], LOSS_FLOOR))
 
@@ -133,7 +161,6 @@ def score_day(
     itself and a predictor sharing no bar close with it are left out."""
     theirs = {(r.symbol, r.bar_close): r for r in records.get(climate, ())}
     sides = kind.sides or ()
-    barrier = kind.classes == BARRIER_CLASSES
     out: dict[str, DayScore] = {}
     for name, mine in records.items():
         if name == climate:
@@ -150,11 +177,10 @@ def score_day(
             if called in sides:
                 calls += 1
                 hits += r.predicted == r.outcome
-            if barrier and sides and called == sides[0]:
-                profit = barrier_profit(called, kind.classes[r.outcome], r.path)
-                if profit is not None:
-                    longs += 1
-                    net += profit
+            profit = _long_net(kind, called, kind.classes[r.outcome], r.path)
+            if profit is not None:
+                longs += 1
+                net += profit
         if n:
             out[name] = DayScore(day, n, skill, calls, hits, longs, net)
     return out

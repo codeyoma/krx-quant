@@ -336,6 +336,7 @@ async def test_the_daily_kind_s_row_is_in_basis_points_without_a_breakeven(tmp_p
         "barrier_15m",
         "barrier_30m",
         "barrier_60m",
+        "scalp",  # #706: no width, so no breakeven
         "open_to_close",
         "open_to_close_5d",
     ], "the range has no direction"

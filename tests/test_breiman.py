@@ -190,7 +190,12 @@ def test_it_is_registered_with_the_barrier_and_waits_for_its_pre_validation(tmp_
     first when the CPU budget runs short); its card is filled in and every parameter a model
     can hold has a meaning. It was registered after pre-validation existed: the engine runs it
     only once it has passed."""
-    assert [a.name for a in KIND_ALGORITHMS] == [MANDELBROT, NAME, *(f"{NAME}-{m}m" for m in (15, 30, 60))]
+    assert [a.name for a in KIND_ALGORITHMS] == [
+        MANDELBROT,
+        NAME,
+        *(f"{NAME}-{m}m" for m in (15, 30, 60)),
+        "breiman-scalp",  # #706, the scalp's (tests/test_scalp.py)
+    ]
     assert BREIMAN.kind == "barrier" and kind_named(BREIMAN.kind) is BARRIER
     card = BREIMAN.card
     assert card.scientist == "Leo Breiman" and card.logic and card.training and card.forecasting
@@ -217,7 +222,7 @@ def test_each_barrier_of_the_horizon_ladder_has_a_breiman_of_its_own(tmp_path: P
     """#263. On the barrier at 15, 30 and 60 minutes, Breiman is ``breiman-<H>m``, that kind's,
     with the barrier's features and own features; its card says its minutes; each waits for
     its own pre-validation. The four-minute one is as it was."""
-    ladder = [a for a in KIND_ALGORITHMS if a.name.startswith(f"{NAME}-")]
+    ladder = [a for a in KIND_ALGORITHMS if a.name.startswith(f"{NAME}-") and a.kind.startswith("barrier_")]
     assert [(a.name, a.kind) for a in ladder] == [(f"{NAME}-{k.name[8:]}", k.name) for k in BARRIER_LADDER]
     for a, kind in zip(ladder, BARRIER_LADDER, strict=True):
         minutes = round(kind.horizon.total_seconds() / 60)

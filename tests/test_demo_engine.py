@@ -317,10 +317,15 @@ async def test_the_demo_has_a_cost_map(demo: TestClient[Any, Any]) -> None:
         "barrier_15m",
         "barrier_30m",
         "barrier_60m",
+        "scalp",  # #706: no width, so no breakeven
         "open_to_close",
         "open_to_close_5d",
     ]
-    assert all(r["breakeven"] is not None for k, r in rows.items() if not k.startswith("open_to_close"))
+    assert all(
+        r["breakeven"] is not None
+        for k, r in rows.items()
+        if not k.startswith("open_to_close") and k != "scalp"
+    )
     assert rows["direction"]["consensus"]["algorithm"] == "consensus-final"
     assert rows["open_to_close"]["unit"] == "bp" and rows["open_to_close"]["bar_closes"] > 0
 

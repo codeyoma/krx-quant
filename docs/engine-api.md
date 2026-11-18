@@ -239,7 +239,7 @@
 | `special_days` | `day`, `source`(녹화를 읽은 곳. 어디에도 없었으면 비어 있음), `windows`(판정한 구간 수), `decided_at`, `rules`(판정한 규칙의 판 `special.RULES`, #625: 2. 그 전에 남긴 행은 1이고, 다음 시작 때 녹화로 다시 판정한다). 녹화로 특수 상황 구간을 판정한 지난날(#236). 구간이 없던 날도 남아서 다음 시작 때 다시 읽지 않는다. 따로 둔 표다 |
 | `smt_events` | `definition`(`rolling_extreme`), `version`(정의의 판, 지금 1), `bar_close`(묶음의 첫 봉 마감 t), `a`, `b`(쌍, `smt.PAIRS`의 순서: `005930`·`000660`, `005930`·`KOSPI200F`, `000660`·`KOSPI200F`), `direction`(`bearish`, `bullish`), `minutes`(L: 15, 30), `swept`(직전 L분의 극값을 넘은 쪽: `a`나 `b`의 코드), `source`(`live`), `recorded_at`(엔진이 쓴 시각), `a_extreme`, `b_extreme`(#521: 첫 봉 마감에서 `a`와 `b`가 견준 직전 L분 극값(하락은 최고가, 상승은 최저가)을 가진 1분봉의 시작. 같은 값이 여럿이면 가장 늦은 것. #521 전에 쓴 행은 비어 있다). 엔진이 봉 마감마다 판정한 SMT 다이버전스의 묶음 하나에 한 행(#520, [design.md](design.md) 5장 "SMT 다이버전스"). (`definition`, `version`, `bar_close`, `a`, `b`, `direction`, `minutes`, `source`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
 | `verdicts` | `symbol`, `bar_close`, `version`(판정 규칙의 판 `verdict.VERDICT_VERSION`, 지금 2. **바뀜** (2026-11-12, #704): 1 → 2. 이유: 순위의 멤버만 합친다(#697)), `verdict`(`buy`, `sell`, `wait`), `made_at`(엔진이 만든 시각, 그 봉 마감의 알고리즘이 다 끝난 뒤), `body`(JSON: 아래 `GET /v1/verdict`의 항목 하나 그대로): 종목의 봉 마감마다의 판정(#676, [design.md](design.md) 5장 "판정"). (`symbol`, `bar_close`, `version`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
-| `rankings` | `night`(그 순위를 만든 거래일, 날마다 점검 뒤), `kind`(판정의 지평: 장벽 넷, `open_to_close`, `open_to_close_5d`), `version`(순위 규칙의 판 `ranking.RANKING_VERSION`, 지금 1), `made_at`, `through`(증거가 세는 마지막 날, 없으면 null), `body`(JSON: 아래 `GET /v1/ranking`의 `kinds` 항목 하나 그대로): 밤마다의 순위(#697, [design.md](design.md) 5장 "순위"). (`night`, `kind`, `version`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
+| `rankings` | `night`(그 순위를 만든 거래일, 날마다 점검 뒤), `kind`(판정의 지평: 장벽 넷, `open_to_close`, `open_to_close_5d`. 그리고 스캘프 `scalp`, #706), `version`(순위 규칙의 판 `ranking.RANKING_VERSION`, 지금 1), `made_at`, `through`(증거가 세는 마지막 날, 없으면 null), `body`(JSON: 아래 `GET /v1/ranking`의 `kinds` 항목 하나 그대로): 밤마다의 순위(#697, [design.md](design.md) 5장 "순위"). (`night`, `kind`, `version`)마다 하나이고, 한 번 쓴 행은 바꾸지 않는다. 따로 둔 표다 |
 
 `predictions`에는 (`algorithm`, `bar_close`) 인덱스도 있다(#170, 알고리즘마다 도달 정답 모델의 첫 예측을 찾는다). `kind_predictions`에는 (`kind`, `bar_close`), (`kind`, `symbol`, `bar_close`), (`algorithm`, `bar_close`) 인덱스가 있다(#179). 새 표와 인덱스는 스키마 버전을 올리지 않는다. `kind_predictions.flat_ticks`(#200)도 스키마 버전을 올리지 않고 더한 열이다: 엔진이 열 때 그 열이 없는 DB(#200 전)에 `ALTER TABLE … ADD COLUMN`으로 더한다(`predictions._ADDED_COLUMNS`). 옛 엔진은 쓰는 열을 이름으로 적으므로 그 열이 있는 DB도 열고 쓴다. 그 행의 `flat_ticks`는 비어 있다. `kind_predictions.width_ticks`(#183)와 `anchor`·`tick`(#210), `band`(#264), `inputs`(#304)도 같은 방식으로 더한 열이다. `special_windows`(유일 인덱스 (`kind`, `ifnull(symbol, '')`, `start`)와 `start` 인덱스)와 `special_days`(#236)도 스키마 버전을 올리지 않은 새 표다. `smt_events`(#520, `bar_close` 인덱스)도 그렇고, `verdicts`(#676, `bar_close` 인덱스)와 `rankings`(#697)도 그렇다. `smt_events.a_extreme`·`b_extreme`(#521)은 `band`처럼 더한 열이다. 수습 시뮬레이션의 표 `simulation_runs`, `simulations`, `sim_predictions`(인덱스 (`run`, `bar_close`)), `sim_kind_predictions`(인덱스 (`run`, `kind`, `bar_close`))도 그렇고, `statuses.simulated`(#298)는 `band`처럼 더한 열이다(기본 0).
 
@@ -951,7 +951,10 @@
 
 ### `GET /v1/ranking?night=D` (#697)
 
-판정 지평마다의 최신 순위다(`ranking.py`, [design.md](design.md) 5장 "순위"): 엔진이 날마다 점검 뒤 만들어 저장한 것(`rankings`)을 그대로 준다. `night`(YYYY-MM-DD)를 주면 그 밤, 없으면 그 전의 마지막 밤의 것이고, 없으면 가장 최근이다. 날짜가 아니면 400이다. 아직 순위가 없는 종류는 빠진다.
+판정 지평마다의 최신 순위와 스캘프(`scalp`, #706)의 최신 순위다(`ranking.py`, [design.md](design.md) 5장 "순위"): 엔진이 날마다 점검 뒤 만들어 저장한 것(`rankings`)을 그대로 준다. 스캘프는 판정의 지평이 아니다: 그 `members`는 판정이 아니라 스캘프 정책(#705)이 읽을 멤버다.
+
+> **바뀜** (2026-11-18, #PR): `kinds`는 판정의 지평뿐이었다 → 스캘프(`scalp`)도 든다. 이유: 스캘프 사건으로 학습한 알고리즘을 같은 규칙으로 매기려고(#706).
+ `night`(YYYY-MM-DD)를 주면 그 밤, 없으면 그 전의 마지막 밤의 것이고, 없으면 가장 최근이다. 날짜가 아니면 400이다. 아직 순위가 없는 종류는 빠진다.
 
 ```json
 {
@@ -972,7 +975,7 @@
 (값은 지어낸 것이다.)
 
 - `version`(맨 위): 지금 엔진의 순위 규칙 판. `kinds`의 항목마다: `kind`, `night`, `version`, `made_at`, `through`(증거가 세는 마지막 날), `rules`(`level` 기술 구간의 양쪽 신뢰수준, `nights` 멤버가 바뀌는 연속 밤 수, `window_days` 실시간으로 세는 최근 날 수(`null`: 모든 날, 하루 한 번 종류), `min_days`·`min_calls` 최소 증거), `settled`(그 밤이나 그 전에 알고리즘을 하나라도 매겼는지: 그 뒤로는 아무도 못 매긴 밤에도 세 밤 규칙을 지킨다), `members`(판정이 그 지평에서 합치는 알고리즘, 비면 그 지평은 대기), `rows`.
-- `rows`는 순위 순서(기술 하한이 높은 것부터)이고 순위 밖은 이름 순으로 뒤에 온다. `rank`(순위 밖이면 `null`), `algorithm`, `status`(그 밤의 상태, 등록되지 않았으면 `shadow`), `source`(`live` 기록된 예측, `walk_forward` 사전 검증의 전진 학습, 증거가 없으면 `null`), `days`, `n`(기후와 짝지은 예측 수), `skill`·`skill_low`·`skill_high`(날마다 기후의 로그 손실 − 자기 로그 손실의 평균과 95% 구간, 순위 밖이면 `null`), `precision`(상승·하락 호출이 맞은 비율), `calls`, `call_rate`, `longs`·`net_ticks`(장벽 종류의 매수 호출 중 손익이 있는 것과 그 비용 뒤 평균 순손익, 틱), `ranked`, `why`(순위 밖의 까닭: `few_days`, `few_calls`, `no_evidence`), `qualifies`(그 밤 하한 > 0), `member`, `nights`(그 멤버 상태로 지난 순위 수), `pending`(반대 결과가 이어진 순위 수, 셋이면 바뀐다).
+- `rows`는 순위 순서(기술 하한이 높은 것부터)이고 순위 밖은 이름 순으로 뒤에 온다. `rank`(순위 밖이면 `null`), `algorithm`, `status`(그 밤의 상태, 등록되지 않았으면 `shadow`), `source`(`live` 기록된 예측, `walk_forward` 사전 검증의 전진 학습, 증거가 없으면 `null`), `days`, `n`(기후와 짝지은 예측 수), `skill`·`skill_low`·`skill_high`(날마다 기후의 로그 손실 − 자기 로그 손실의 평균과 95% 구간, 순위 밖이면 `null`), `precision`(상승·하락 호출이 맞은 비율), `calls`, `call_rate`, `longs`·`net_ticks`(장벽 종류의 매수 호출 중 손익이 있는 것과 그 비용 뒤 평균 순손익, 틱. 스캘프는 목표 먼저 호출의 롱이고 진입가의 틱이다), `ranked`, `why`(순위 밖의 까닭: `few_days`, `few_calls`, `no_evidence`), `qualifies`(그 밤 하한 > 0), `member`, `nights`(그 멤버 상태로 지난 순위 수), `pending`(반대 결과가 이어진 순위 수, 셋이면 바뀐다).
 
 ### `GET /v1/algorithms/{name}/stats?symbol=&period=&special=`
 
@@ -999,6 +1002,10 @@
 ### `GET /v1/cost-map?symbol=&period=&special=` (#307)
 
 비용 지도다. 상승·하락 신호가 왕복 비용을 갚으려면 얼마나 맞혀야 하는지를, 엔진이 예측하는 지평마다 실제 맞힘률 옆에 놓는다(`cost_map.py`). 자동 매매 trader가 시작할 때와 매일 08:30에 `?symbol=005930&period=20d&special=exclude`로 읽는다(#395, 설계 [14장](design.md#14-자동-매매-393) "칸"): 방향과 4·15·30분 장벽 줄의 세 예측자의 이름과 수치. **바뀜** (2026-11-12, #701): 지평·비용 화면도 읽었다 → trader만 읽는다. 이유: 그 화면을 지웠다(#695). trader가 매매할 칸을 이 답으로 고르므로 엔드포인트는 남는다(#693). 밤 정책 맞추기는 그 이름이 있는 칸 모두를 녹화로 재생해 실행 손익의 하한으로 고르고(#472), trader는 챔피언 정책의 칸을 판정과 상관없이 산다. **바뀜** (2026-11-03, #480): trader는 `verdict.market`이 `pass`인 칸만 매매했다 → 판정은 진단이다. 이유: spec #468 3절 "진입". 리서치의 결론(`research/reports/`)이 바탕이다: 대칭 목표 ±W틱, 왕복 비용 C틱이면 P(상승|신호) − P(하락|신호) ≥ C/W여야 본전이고, 맞힘률로 말하면 p* = (W + C) ÷ 2W를 넘어야 한다. W < C면 다 맞혀도 손해다.
+
+스캘프(`scalp`, #706)도 방향이 있는 종류라 줄이 있다: 폭이 없어(목표와 손절이 가격의 비율이다) `unit`, W, C, 손익분기는 `null`이고 예측자들의 맞힘률만 있다. trader는 그 줄을 읽지 않는다(`trader.TRADED_KINDS`).
+
+> **바뀜** (2026-11-18, #PR): 줄은 `barrier_60m`에서 끝났다 → 그 뒤에 `scalp`. 이유: 방향이 있는 종류(`sides`)는 모두 줄이 있다(#706).
 
 질의 값은 순위표와 같다(`symbol`, `period`, `special`. `kind`는 받지 않는다. `basis`는 순위표처럼 400이다). 잘못된 값은 400이다. `symbol`을 빼면(`all`) 모든 종목이다. **바뀜** (2026-11-06, #595): `basis`가 `a`, `b`면 받고 쓰지 않았다 → 400. 이유: 순위표의 `basis`를 없앴다.
 
@@ -1114,9 +1121,11 @@
 
 ### `GET /v1/kinds` (#179)
 
-엔진이 예측하는 종류다. 방향이 처음이고 그 뒤로 등록 순서다(아래 "예측 종류"). 방향, 변동폭(#180), 장벽(#183), 장벽의 지평 사다리 `barrier_15m`, `barrier_30m`, `barrier_60m`(#263), 그 뒤로 하루 한 번 예측 종류 `open_to_close`(#264, 아래 "하루 한 번 예측 종류")다.
+엔진이 예측하는 종류다. 방향이 처음이고 그 뒤로 등록 순서다(아래 "예측 종류"). 방향, 변동폭(#180), 장벽(#183), 장벽의 지평 사다리 `barrier_15m`, `barrier_30m`, `barrier_60m`(#263), 스캘프 `scalp`(#706, 아래 "스캘프"), 그 뒤로 하루 한 번 예측 종류 `open_to_close`(#264, 아래 "하루 한 번 예측 종류")다.
 
 > **바뀜** (2026-10-18, #293): 목록은 장벽의 지평 사다리에서 끝났다 → 그 뒤에 `open_to_close`. 모든 항목에 `daily`가 생겼고(봉 마감 종류는 `null`), `horizon_minutes`가 `null`일 수 있다(하루 한 번 예측 종류). 이유: #264.
+
+> **바뀜** (2026-11-18, #PR): 봉 마감 종류는 `barrier_60m`에서 끝났다 → 그 뒤에 `scalp`(`horizon_minutes` 15). 이유: 스캘프 정책의 사건(#706).
 
 > **바뀜** (2026-10-15, #197): "지금은 방향 하나다" → 방향과 변동폭. 이유: 변동폭이 첫 종류다.
 
@@ -1187,6 +1196,16 @@
     },
     {"name": "barrier_30m", "title": "장벽 30분", "horizon_minutes": 30, "...": "..."},
     {"name": "barrier_60m", "title": "장벽 60분", "horizon_minutes": 60, "...": "..."},
+    {
+      "name": "scalp",
+      "title": "스캘프 15분",
+      "classes": ["target_first", "timeout", "stop_first"],
+      "class_titles": ["목표 먼저", "시간 만료", "손절 먼저"],
+      "action": ["target_first", "stop_first"],
+      "answer_version": 1,
+      "horizon_minutes": 15,
+      "...": "..."
+    },
     {
       "name": "open_to_close",
       "title": "시가→종가",
@@ -1691,7 +1710,7 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 | `fields`, `check` | 세 확률 말고 내는 출력 필드와 그 뜻(`cards.Meaning`), 출력 전체의 검사(어기면 그 이유) |
 | `horizon` | 지평(#263): 창이 봉 마감부터 이어지는 시간(`timedelta`). 기본은 도달 정답의 4분이고, 4분 이상의 온 분이어야 한다. 방향은 늘 4분이다. 지평이 길면 그 종류의 창, 정답, 기준 예측이 읽는 직전 창, 예측 구간의 끝, 특수 상황 표시가 모두 그 지평을 따른다(아래 "지평") |
 | `stats` | 추가 통계: 그 예측자의 채점된 예측(`kinds.KindScored`)과 그 종류 기준 예측들의 채점된 예측(이름마다)에서 JSON 객체를 낸다. 통계 항목의 `extra`가 된다 |
-| `sides` | 오름과 내림의 클래스(#307), 첫째와 셋째 클래스 그 순서다: 첫째를 내면 매수, 둘째를 내면 매도(공매도나 인버스) 신호다. 비용 지도(`GET /v1/cost-map`)가 이 종류의 맞힘률을 비용과 견준다. 방향이 없는 종류(변동폭)는 `None`이다. 방향 `up`·`down`, 장벽 `up_first`·`down_first`, 시가→종가 `up`·`down` |
+| `sides` | 오름과 내림의 클래스(#307), 첫째와 셋째 클래스 그 순서다: 첫째를 내면 매수, 둘째를 내면 매도(공매도나 인버스) 신호다. 비용 지도(`GET /v1/cost-map`)가 이 종류의 맞힘률을 비용과 견준다. 방향이 없는 종류(변동폭)는 `None`이다. 방향 `up`·`down`, 장벽 `up_first`·`down_first`, 스캘프 `target_first`·`stop_first`(#706. 손절 먼저는 매매하지 않는다), 시가→종가 `up`·`down` |
 
 > **바뀜** (2026-10-15, #197): `stats`는 그 예측자의 채점된 예측만 받았다 → 그 종류 기준 예측들의 것도 받는다. 이유: 변동폭의 `range-climate` 대비 pinball loss 차이를 내려고(#177).
 
@@ -1874,6 +1893,23 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 - 알고리즘의 장벽 피처(`barrier_width`, `barrier_sigma`)는 4분 장벽의 것 그대로다.
 - 지평마다의 첫 모델은 `breiman-15m`, `breiman-30m`, `breiman-60m`이다(아래 "알고리즘"의 "Breiman"의 "지평 사다리의 Breiman"). 사전 검증을 통과하기 전에는 기준 예측 둘만 예측한다.
 - 지난 정답: 위 "지난 정답"대로, 이 종류들을 담은 엔진이 처음 뜰 때 2026-10-12부터의 녹화일 정답을 채운다(방향이 예측한 봉 마감이 기준이다. 창이 종가 단일가 시작을 넘는 봉 마감은 빼고, `scored_at`은 t + H분). 기준 예측은 지난 봉 마감을 다시 예측하지 않는다. 기후 표는 첫 밤 학습부터 최근 20거래일의 정답(녹화일은 호가, 그 전 날은 1분봉 규칙)으로 맞춘다.
+
+### 스캘프 (#706)
+
+`scalp.py`, 이름 `scalp`, 화면 이름 `스캘프 15분`, 지평 15분, 정답 버전 1. 모의 스캘프 정책(#705)의 매매 그대로다: 봉 마감 t에 매도 호가로 산 롱이 15분 안에 순 +0.2% 목표가와 −0.3% 손절가 중 어느 쪽에 먼저 닿는가. 설계는 [design.md](design.md) 5장 "스캘프 (#706)"다.
+
+- **수준(정답 버전 1의 상수, 하나라도 바꾸면 새 정답 버전).** `TARGET_NET` 0.002(순), `STOP_GROSS` 0.003(총), `MINUTES` 15, `FEE_RATE` 0.00015(편도 수수료, `KRX_FEE_PERCENT`의 기본값). 세금은 `pricing.SELL_TAX` 0.0020. 설정이 아니다: 정책의 설정이 바뀌어도 이 종류의 정답은 이 수준 그대로다.
+- **진입가** e = `Followed.ask_start`(t 전에 마지막으로 받은 최우선 매도 호가). **목표가** T = e × (1 + 0.00015 + 0.002) ÷ (1 − 0.00015 − 0.002) 이상인 가장 낮은 가격을 그 가격대의 호가 단위로 올림한 것(`scalp.target_price`). **손절가** S = e × 0.997(`scalp.stop_price`, 올림하지 않는다). 순손익은 `(팔린 값 × (1 − f − 세금) − e × (1 + f)) ÷ e`다(`scalp.net_return`, `trader/money.py`의 왕복과 같은 식).
+  - 예(손계산, `tests/test_scalp.py`): e = 70,000원이면 T의 원값은 70,000 × 1.00215 ÷ 0.99785 = 70,301.6원이고 100원 단위로 올려 70,400원(순 +0.340%)이다. 한 틱 아래 70,300원은 순 +0.198%로 모자란다. S = 69,790원(순 −0.529%). e = 49,950원이면 T는 50,200원(50원 단위 가격대의 원값 50,165.3원이 50,000원을 넘어 100원 단위로 올린다), 순 +0.269%다.
+- **정답(`scalp_answer`).** [t, t + 15분)에 받은 호가(뒤집힌 호가도 센다, 장벽과 같은 #187 규칙)에서 매수 호가 ≥ T이면 목표 도달, 매수 호가 ≤ S이면 손절 도달이다. `target_first`: T에 먼저(받은 시각) 닿았거나 S에 닿지 않았다. `stop_first`: 그 반대. `timeout`: 둘 다 아니다. 같은 받은 시각에 둘 다(서로 다른 호가 둘): 클래스 없음 `ambiguous`. e가 없다: `no entry`. 공통 규칙(기준가 없음, REST 호가, 60초 끊김, 재시작)으로 채점할 수 없는 창도 클래스가 없다. 정답은 t + 15분에 만든다. 창이 종가 단일가 시작을 넘는 봉 마감(보통 15:05 뒤)은 예측하지 않는다.
+- **경로(`kind_answers.path`).** `entry`, `target`, `stop`, `target_net`, `stop_net`(e의 비율), `tick`(e의 호가 단위), `anchor`(t의 중간가), `bid_start`, `target_at`·`target_bid`, `stop_at`·`stop_bid`(처음 닿은 시각과 그때의 매수 호가), `bid_end`·`ask_end`(마감 전 마지막 호가), `quotes`, `silent`.
+- **1분봉 규칙이 없다**(`bar_answer` 없음): 1분봉 날에는 정답이 없고, 학습은 녹화일 정답만 쓴다.
+- **출력**: `p_target_first`, `p_timeout`, `p_stop_first`만. 폭이 없는 종류다(`width_ticks`는 비어 있다).
+- **기준 예측.** `scalp-climate`(종목 × 30분 시간대 비율, 최근 20거래일, 버전 `scalp-climate-<마지막 날>-<해시>`, 학습 전 `scalp-climate-default`, 표 파일 `state/models/scalp-climate.json`), `scalp-persist`(t에 끝난 15분 창의 정답, 그날 처음 15분은 `no_previous`). 가장 약한 lift는 이 둘 대비다.
+- **통계(`scalp_stats`, 순위표의 `extra`).** `n`, `trades`(목표 먼저라고 부른 예측 중 순손익이 있는 것), `net_per_trade`(거래당 순손익, e의 비율, 정규 95% 구간), `won`(순손익 > 0인 거래의 비율). 목표가에 팔거나, 손절가 이하의 첫 매수 호가(`stop_bid`)에 팔거나, 마감 전 마지막 매수 호가(`bid_end`)에 판다. 손절 먼저 호출은 매매하지 않는다(롱만).
+- **판정에 들지 않는다**: 클래스가 장벽의 것이 아니다(`verdict.py`는 장벽 종류만 읽는다). 밤 순위는 매긴다(`ranking.ranked_kind`, `scalp-climate` 대비). 순위표는 `/v1/leaderboard?kind=scalp`다.
+- **첫 알고리즘 `breiman-scalp`**(아래 "알고리즘"의 "스캘프의 Breiman").
+- **지난 정답**: 이 종류를 담은 엔진이 처음 뜰 때 위 "지난 정답"대로 2026-10-12부터의 녹화일 정답을 채운다(`scored_at`은 t + 15분).
 
 ## 하루 한 번 예측 종류 (#264)
 
@@ -2207,13 +2243,15 @@ trader가 돈 거래일마다의 장부다. `from`부터 `to`까지(KST 날짜, 
 - 고유 피처가 없거나, 고유 피처를 이미 등록된 알고리즘이 쓴다. 나중에 등록하는 알고리즘은 앞선 알고리즘의 고유 피처를 공유 피처로 써도 된다(Turing은 모든 피처를 쓴다). 그래서 검사는 등록 순서대로 한다.
 - 고유 피처가 선언 피처에 없거나, 모르는 피처를 선언했거나, 이름이 겹친다.
 
-다른 종류의 알고리즘(#179)은 `KIND_ALGORITHMS`에 넣는다(`register_kind_algorithms`. 지금은 변동폭의 `mandelbrot`, #181, 장벽의 `breiman`, #184, 15·30·60분 장벽의 `breiman-15m`, `breiman-30m`, `breiman-60m`, #263 순서). 방향 알고리즘 뒤에 등록되는 것으로 친다(CPU 예산이 먼저 건너뛴다. 그중에서도 뒤의 것부터). 위 검사는 같은 종류의 알고리즘끼리만 본다. 다른 종류의 알고리즘이 방향 알고리즘의 고유 피처를 자기 고유 피처로 삼아도 된다. 더 거부하는 경우: 등록된 종류가 아니거나 방향이다, 이름이 다른 알고리즘(방향 포함)이나 기준 예측, 합의의 이름과 같다. 엔진은 다른 종류의 기준 예측 이름이 방향의 예측자 이름과 겹쳐도 거부한다.
+다른 종류의 알고리즘(#179)은 `KIND_ALGORITHMS`에 넣는다(`register_kind_algorithms`. 지금은 변동폭의 `mandelbrot`, #181, 장벽의 `breiman`, #184, 15·30·60분 장벽의 `breiman-15m`, `breiman-30m`, `breiman-60m`, #263, 스캘프의 `breiman-scalp`, #706 순서). 방향 알고리즘 뒤에 등록되는 것으로 친다(CPU 예산이 먼저 건너뛴다. 그중에서도 뒤의 것부터). 위 검사는 같은 종류의 알고리즘끼리만 본다. 다른 종류의 알고리즘이 방향 알고리즘의 고유 피처를 자기 고유 피처로 삼아도 된다. 더 거부하는 경우: 등록된 종류가 아니거나 방향이다, 이름이 다른 알고리즘(방향 포함)이나 기준 예측, 합의의 이름과 같다. 엔진은 다른 종류의 기준 예측 이름이 방향의 예측자 이름과 겹쳐도 거부한다.
 
 > **바뀜** (2026-10-15, #196): 피처 검사는 등록된 모든 알고리즘과 견줬다 → 같은 종류의 알고리즘과만. 방향 알고리즘끼리는 그대로다. 이유: 종류마다 맞히는 것이 달라 피처가 겹쳐도 성격이 겹치지 않는다(#177).
 
 > **바뀜** (2026-10-15, #209): "지금은 변동폭의 `mandelbrot`, #181" → 장벽의 `breiman`(#184)이 그 뒤에 등록되어 있다. 이유: 장벽의 첫 모델이다(#178).
 
 > **바뀜** (2026-10-18, #289): "`mandelbrot`, `breiman` 순서" → 그 뒤로 `breiman-15m`, `breiman-30m`, `breiman-60m`. 이유: 장벽의 지평 사다리(#263)마다 LightGBM을 두기로 사용자가 정했다(2026-10-18).
+
+> **바뀜** (2026-11-18, #PR): `breiman-60m`이 마지막이었다 → 그 뒤에 `breiman-scalp`. 이유: 스캘프 사건의 첫 알고리즘(#706).
 
 등록 검사는 엔진이 시작할 때(`ALGORITHMS`를 읽을 때) 한다. 그 뒤 새 알고리즘은 사전 검증을 통과해야 돈다(아래 "사전 검증").
 
@@ -2921,6 +2959,13 @@ docker compose run --rm --no-deps engine neyman-variants --backfill --until 2026
 - 사전 검증과 수습: 사전 검증이 생긴 뒤에 등록되었다. 예약 작업이 기다리는 다섯, `neyman`, 확률 과정 넷(#518) 다음에 `breiman-15m`, `breiman-30m`, `breiman-60m` 순서로 한 밤에 하나씩(조용한 밤에는 둘, #546) 돌린다(#204).
 
   > **바뀜** (2026-11-04, #525): "기다리는 다섯과 `neyman` 다음" → 그 뒤 확률 과정 넷(`samuelson`, `ito`, `ulam`, `bishop`)도 먼저다. 이유: 방향 알고리즘이 다른 종류보다 앞에 등록되고, 그 넷이 방향 알고리즘으로 등록되었다(#518). 제한 시간은 `breiman`처럼 6시간이다. lift는 그 종류의 `barrier-climate-<H>m`, `barrier-persist-<H>m` 대비다. 통과하면 다음 봉 마감부터 수습이다.
+
+**스캘프의 Breiman(#706, `BreimanScalp`, `algorithms/breiman_scalp/`).** `breiman-scalp`(`kind` `scalp`, 위 "스캘프").
+- 위 `breiman`과 같은 트리, 피처, 설정이다. 트리의 클래스는 그 종류의 순서(`target_first`, `timeout`, `stop_first`)다. 고유 피처 `barrier_width`, `barrier_sigma`도 4분 장벽의 것 그대로다: 목표와 손절은 가격의 비율로 정해져 있어, 그 종목의 변동성에 비해 얼마나 먼지를 폭과 그 비율이 말해 준다.
+- 학습: 최근 20거래일의 스캘프 정답(녹화일만. 1분봉 규칙이 없다)이다. 모델 버전은 `breiman-scalp-<마지막 날>-<해시>`, 기본 모델은 `breiman-scalp-default`(1/3씩), 모델 파일은 `state/models/breiman-scalp.json`이다. 파라미터는 `rounds`, `share.target_first`, `share.timeout`, `share.stop_first`다.
+- 카드의 캐릭터는 `트리 앙상블 (스캘프 15분)`이다.
+- 사전 검증: 사전 검증이 생긴 뒤에 등록되었다. 기다리는 다른 알고리즘 다음 차례로(예약 작업 `prevalidate-breiman-scalp`, 다른 종류의 알고리즘처럼 제한 시간 4시간 30분) 돌고, 결과는 #204에 댓글로 올라온다. 전진 학습 재생이 승격 검사(#681)다: 통과하면 바로 활성이다. lift는 `scalp-climate`, `scalp-persist` 대비이고 리포트의 `stats.extra`는 스캘프 순손익이다. 상관은 같은 종류(스캘프)의 다른 알고리즘과만 잰다(지금은 없다).
+- 순위: 밤마다 `scalp-climate` 대비 기술로 매긴다(실시간 날이 10일이 안 되면 사전 검증 재생의 최근 20일).
 
 ### Cox (시가→종가, #264)
 

@@ -588,7 +588,9 @@ def test_a_barrier_forecast_is_three_probabilities_or_an_error(
 
 
 def test_the_barrier_is_registered_after_the_range() -> None:
-    assert [k.name for k in KINDS] == ["direction", "range", "barrier", *LADDER], "then the ladder (#263)"
+    assert [k.name for k in KINDS] == ["direction", "range", "barrier", *LADDER, "scalp"], (
+        "then the ladder (#263)"
+    )
     assert (BARRIER.classes, BARRIER.action, BARRIER.answer_version) == (
         ("up_first", "timeout", "down_first"),
         ("up_first", "down_first"),
@@ -872,7 +874,7 @@ async def test_both_baselines_predict_and_are_scored_on_the_barrier_with_the_bar
         assert entry["extra"]["n"] == entry["n"]
     assert entries[CLIMATE]["extra"]["pnl"]["trades"] == 0, "a third each calls timeout: no trade"
     assert entries[PERSIST]["extra"]["pnl"]["trades"] > 0
-    assert [k["name"] for k in kinds["kinds"]] == ["direction", "range", "barrier", *LADDER]
+    assert [k["name"] for k in kinds["kinds"]] == ["direction", "range", "barrier", *LADDER, "scalp"]
     assert kinds["kinds"][2]["fields"] == {} and kinds["kinds"][2]["action"] == ["up_first", "down_first"]
     for p in at_0937["predictions"]:
         assert p["width_ticks"] == 8

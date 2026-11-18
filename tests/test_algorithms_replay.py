@@ -143,6 +143,7 @@ async def test_a_trained_model_is_used_and_recorded(tmp_path: Path) -> None:
         "breiman-15m",  # the horizon ladder's (#263)
         "breiman-30m",
         "breiman-60m",
+        "breiman-scalp",  # the scalp's (#706)
     }
     newton = listed["newton"]
     assert listed["gauss"]["model"]["version"] == "gauss-default"
