@@ -21,7 +21,11 @@ told from a decision's mode, its policy and its pick:
 - ``verdict`` (#677): the mock book's decisions on the engine's verdicts (``verdicts.py``: the
   predictor ``verdict``), of no policy likewise;
 - ``scalp`` (#705): the mock book's decisions on the scalp signal (``scalp.py``: the predictor
-  ``scalp``), of no policy likewise;
+  ``scalp``), of no policy likewise. Each says which signal it read (``scalp_signal``, #706, by its
+  cell's kind): the verdicts' 4-minute pool (kind ``barrier``, ``verdict_pool_4m``) or the scalp kind's
+  ranking member (kind ``scalp``, ``scalp_member``); its θ is the pool's ``KRX_TRADER_MOCK_SCALP_THRESHOLD``
+  of the trader's start then (``runs``), and null for the member's, whose break-even differs by price
+  (kept on its trade's ``scalp_signal``);
 - ``shadow`` (#405): the champion policy's paper book beside a KIS book: ``paper`` decisions under the
   champion (or none before the first) while the trader ran in ``mock`` or ``live`` (``runs``, as
   ``promotion.mode_at`` reads them);
@@ -59,7 +63,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from krx_quant.trader import KIS_MODES, MODES, SCALP, VERDICT
 from krx_quant.trader.cells import Cell, open_engine_db
@@ -74,8 +78,16 @@ SCALP_BOOK = SCALP
 BOOKS = (CHAMPION, PRACTICE, VERDICT_BOOK, SCALP_BOOK, SHADOW, CHALLENGER)
 
 _BUY = "buy"
+# The scalp's signal by its cell's kind (#706, ``scalp.CELL``, ``scalp.MEMBER_CELL``).
+SCALP_SIGNALS = {"barrier": "verdict_pool_4m", "scalp": "scalp_member"}
 # A skip kept without its reason (the trader always gives one), as the night report counts it.
 _NO_REASON = "?"
+
+
+class ThresholdAt(Protocol):
+    """The θ of the trader's start in force at a moment (``_runs``), or with ``scalp`` its scalp pool's."""
+
+    def __call__(self, moment: str, scalp: bool = False) -> float | None: ...
 
 
 @dataclass(frozen=True)
@@ -201,21 +213,24 @@ def _number(value: Any) -> float | None:
     return None if value is None else float(value)
 
 
-def _runs(db: sqlite3.Connection) -> tuple[Callable[[str], str | None], Callable[[str], float | None]]:
+def _runs(db: sqlite3.Connection) -> tuple[Callable[[str], str | None], ThresholdAt]:
     """The mode the trader last started in at or before a time (as ``promotion.mode_at``; None before
-    its first start), and that start's θ (``Rules.threshold``, what a pick without one buys at)."""
-    starts: list[tuple[str, str, float | None]] = []
+    its first start), and that start's θ (``Rules.threshold``, what a pick without one buys at; with
+    ``scalp`` the scalp pool's, ``ScalpRules.threshold``, #705)."""
+    starts: list[tuple[str, str, float | None, float | None]] = []
     if _has(db, "runs"):
         for at, mode, detail in db.execute("SELECT at, mode, detail FROM runs ORDER BY at, id"):
-            threshold = None
+            threshold = scalp = None
             try:
-                threshold = _number(json.loads(detail).get("threshold"))
+                kept = json.loads(detail)
+                threshold = _number(kept.get("threshold"))
+                scalp = _number((kept.get("scalp") or {}).get("threshold"))  # #705
             except (ValueError, TypeError, AttributeError):
                 log.warning("trader decisions: cannot read the start at %s", at)
-            starts.append((str(at), str(mode), threshold))
-    times = [at for at, _, _ in starts]
+            starts.append((str(at), str(mode), threshold, scalp))
+    times = [at for at, *_ in starts]
 
-    def started(moment: str) -> tuple[str, str, float | None] | None:
+    def started(moment: str) -> tuple[str, str, float | None, float | None] | None:
         n = bisect.bisect_right(times, moment)
         return starts[n - 1] if n else None
 
@@ -223,9 +238,11 @@ def _runs(db: sqlite3.Connection) -> tuple[Callable[[str], str | None], Callable
         found = started(moment)
         return None if found is None else found[1]
 
-    def threshold_at(moment: str) -> float | None:
+    def threshold_at(moment: str, scalp: bool = False) -> float | None:
         found = started(moment)
-        return None if found is None else found[2]
+        if found is None:
+            return None
+        return found[3] if scalp else found[2]
 
     return mode_at, threshold_at
 
@@ -331,12 +348,15 @@ def _answers(engine: Path | None, rows: Sequence[Mapping[str, Any]]) -> dict[tup
 def _decision_json(
     row: Mapping[str, Any],
     picks: Mapping[int, Mapping[tuple[str, str], _Pick]],
-    threshold_at: Callable[[str], float | None],
+    threshold_at: ThresholdAt,
     answers: Mapping[tuple[str, str, int], str],
 ) -> dict[str, Any]:
     picked = picks.get(row["selection_id"], {}).get((row["kind"], row["predictor"]))
+    signal = SCALP_SIGNALS.get(str(row["kind"])) if row["predictor"] == SCALP else None  # #706
     threshold = None
-    if picked is not None:
+    if picked is not None and signal is not None:  # the pool's setting; the member's break-even varies
+        threshold = threshold_at(row["decided_at"], True) if signal == SCALP_SIGNALS["barrier"] else None
+    elif picked is not None:
         threshold = picked.threshold if picked.threshold is not None else threshold_at(row["decided_at"])
     answer = answers.get((row["kind"], row["predictor"], int(row["prediction_id"])))
     return {
@@ -356,4 +376,5 @@ def _decision_json(
         "trade_id": row["trade_id"],
         "answer": answer,
         "right": None if answer is None else answer == UP,
+        "scalp_signal": signal,  # #706: the scalp's source, null for any other book's
     }

@@ -99,10 +99,11 @@ challengers stay in paper. The trader holds no order code: the KIS order calls l
   deadline (up to 60 minutes), sold there or on a later SELL; each trade keeps the verdict's version.
 - **Scalp** (``scalp.py``, #705): with ``KRX_TRADER_MOCK_SCALP`` on (the default in mock mode, mock
   alone), on the same picks the mock book also buys one share when the 4-minute barrier pool of the
-  ranking's members says up first at the threshold or more: its target the level that nets +0.2% on the
-  fill, its stop 0.3% below it, raised to the level that nets +0.1% once a bid reaches it, sold at market
-  15 minutes after its bar close. Its buy cap, cooldown and daily loss cap are its own, and the loss
-  limits do not count it, as they do not the practice.
+  ranking's members says up first at the threshold or more (or, once the scalp kind has a ranking member
+  and the levels are the kind's, that member's target first at the break-even rate, #706): its target
+  the level that nets +0.2% on the fill, its stop 0.3% below it, raised to the level that nets +0.1%
+  once a bid reaches it, sold at market 15 minutes after its bar close. Its buy cap, cooldown and daily
+  loss cap are its own, and the loss limits do not count it, as they do not the practice.
 - **Quotes stalled** (``stall.py``, #407): more than five seconds without a quote in continuous
   trading is a stall, kept, and sent to Telegram with the quotes' return, once each, when its
   silence is thirty seconds long (#624): no book buys anything new meanwhile; the mock champion
@@ -184,7 +185,8 @@ VERDICT = "verdict"
 # the fill price after both commissions and the sell tax (about +0.43% gross), the stop is this far below
 # the fill (gross, about -0.53% net), and once a bid reaches the level that nets ``SCALP_RAISE_PERCENT``
 # the stop is raised to it. Sold at market by ``SCALP_DEADLINE`` after its bar close. Its entry: the
-# 4-minute barrier pool's up first at ``SCALP_THRESHOLD`` at least (``scalp.py`` says why that figure).
+# 4-minute barrier pool's up first at ``SCALP_THRESHOLD`` at least (``scalp.py`` says why that figure),
+# or the scalp kind's ranking member's target first at the break-even rate (#706, ``scalp.py``).
 # Its own day: ``SCALP_DAILY_BUY_ORDERS`` buy orders, a net loss of ``SCALP_DAILY_LOSS_WON`` won.
 SCALP = "scalp"
 SCALP_TARGET_PERCENT = 0.2

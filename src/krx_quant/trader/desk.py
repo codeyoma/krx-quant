@@ -89,6 +89,9 @@ same cells' predictions and the same quotes, in one process.
 - **Scalp** (#705, ``KRX_TRADER_MOCK_SCALP``, mock mode alone, ``scalp.py``): on the same picks the
   champion's book follows the scalp's cell too, after the verdict's horizons and before the practice
   cell, a share at a time; its own buy cap, cooldown and daily loss cap, and no loss limit counts it.
+  Each pick chooses where its signal is read (#706, ``scalp.source``): the scalp kind's ranking member
+  in the engine's database when there is one and the policy's levels are the kind's, else the
+  verdicts' 4-minute pool.
 - **Records** (``record``): while a trading day's session is open (from its open to the end of its
   closing auction), each running book's policy ran that day (``policy_days``), always in paper
   (#405): the champion's (in mock and live mode its shadow's), stopped once a pause or a failed
@@ -132,7 +135,7 @@ from krx_quant.feeds.base import KST, kst_day
 from krx_quant.kis_orders import Broker
 from krx_quant.market_calendar import Session
 from krx_quant.special import Window
-from krx_quant.trader import KIS_MODES, LIVE, MOCK, PAPER, buyable, live, policy, review
+from krx_quant.trader import KIS_MODES, LIVE, MOCK, PAPER, buyable, live, policy, review, scalp
 from krx_quant.trader.book import Rules
 from krx_quant.trader.cells import Cell, Signal
 from krx_quant.trader.limits import RUNNING, Notify
@@ -355,6 +358,7 @@ class Desk:
             practice=self.practice,
             verdict=self.verdict,
             scalp=self.scalp,
+            scalp_source=scalp.source(self.engine, self.rules) if self.scalp else None,  # #706
         )
         self.champion.practice_state = picked.practice
         self.champion.select(picked.chosen, at)

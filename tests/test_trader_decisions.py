@@ -461,6 +461,7 @@ async def test_no_price_is_given(tmp_path: Path) -> None:
         "trade_id",
         "answer",
         "right",
+        "scalp_signal",
     }
     assert max(numbers(body)) < 100, "ids, counts and probabilities alone"
     assert not any(str(n) in json.dumps(body) for n in (70_000, 70_050, 70_100, 70_250, 70_300))

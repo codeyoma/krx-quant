@@ -54,8 +54,10 @@ their own and a row of the sources' table: that day's and every day's to it (sin
 the trades, the share that netted a profit after costs (the user judges by it first), the net a trade,
 the sum, the deepest fall of the summed net from its high (in exit order), and the exits by the target,
 the raised stop, the stop and the deadline; its own buy orders against its cap, and what it did with
-the signals it read. It says which signal it read and that its algorithms were not trained for its
-target. The ledger and the limits count none of it (as the practice's).
+the signals it read. It says which signal it read (#706: the verdicts' 4-minute pool, or the scalp
+kind's ranking member at the break-even rate), how many buys each source made that day, and of the
+pool that its algorithms were not trained for its target. The ledger and the limits count none of it
+(as the practice's).
 
 **Execution cost and the risk rules** (#475, spec #468 8): under each trade its legs' adverse ticks
 from the mid-point the book knew at each decision (a take-profit's from its target) and their delays
@@ -362,6 +364,10 @@ class Scalp:
     cap: int | None
     sources: tuple[str, ...] = ()
     decisions: Mapping[tuple[str, str | None], int] = field(default_factory=dict)
+    # #706: the day's buys by source, the members its member buys read, and the thresholds they bought at.
+    bought: Mapping[str, int] = field(default_factory=dict)
+    members: tuple[str, ...] = ()
+    break_even: tuple[float, ...] = ()
     # Its rules as the trader's last start kept them (``runs``' ``scalp``); empty: none kept.
     rules: Mapping[str, Any] = field(default_factory=dict)
 
@@ -1181,8 +1187,21 @@ def _scalp(db: sqlite3.Connection, mode: str, day: date, end: datetime) -> Scalp
     if not rows and not decisions:
         return None
     today = [r for r in rows if str(r["entry_at"])[:10] == day.isoformat()]
-    sources = sorted(
-        {str(json.loads(r["scalp_signal"]).get("source")) for r in today if r.get("scalp_signal")}
+    signals = [json.loads(r["scalp_signal"]) for r in today if r.get("scalp_signal")]
+    read = {  # #706: the sources of the day's signals, by their cell's kind, bought or not
+        SCALP_KINDS.get(str(kind), str(kind))
+        for (kind,) in db.execute(
+            "SELECT DISTINCT d.kind FROM decisions d WHERE d.mode = ? AND substr(d.decided_at, 1, 10) = ?"
+            " AND d.predictor = ?",
+            (mode, day.isoformat(), SCALP),
+        )
+    }
+    sources = sorted({str(s.get("source")) for s in signals} | read)
+    members = sorted({str(s["member"]) for s in signals if s.get("member")})
+    break_even = sorted(
+        float(s["threshold"])
+        for s in signals
+        if s.get("source") == MEMBER and isinstance(s.get("threshold"), int | float)
     )
     row = (
         db.execute(
@@ -1205,6 +1224,9 @@ def _scalp(db: sqlite3.Connection, mode: str, day: date, end: datetime) -> Scalp
         sources=tuple(sources),
         decisions=decisions,
         rules=kept,
+        bought=dict(Counter(str(s.get("source")) for s in signals)),
+        members=tuple(members),
+        break_even=tuple(break_even),
     )
 
 
@@ -1425,16 +1447,37 @@ def _day_section(report: Report) -> str:
     return "\n".join(lines)
 
 
-# The scalp's sources (#705, ``scalp.reader``), as the report names them.
+# The scalp's sources (#705, #706, ``scalp.reader``), as the report names them, and by their cell's kind.
 POOL = "verdict_pool_4m"  # ``scalp.POOL``
-SCALP_SOURCES = {POOL: "판정의 4분 장벽 풀(순위 멤버, 위 먼저 확률)"}
+MEMBER = "scalp_member"  # ``scalp.MEMBER``
+SCALP_SOURCES = {
+    POOL: "판정의 4분 장벽 풀(순위 멤버, 위 먼저 확률)",
+    MEMBER: "스캘프 종류의 순위 멤버(목표 먼저 확률, #706)",
+}
+SCALP_KINDS = {"barrier": POOL, "scalp": MEMBER}  # ``scalp.CELL``'s and ``scalp.MEMBER_CELL``'s kinds
 # Its exits, in their order (``scalp.py``); any other (a pause, a limit) is "그밖".
 SCALP_EXITS = {"take_profit": "목표", "raised_stop": "올린 손절", "stop_loss": "손절", "time": "마감"}
 
 
 def _scalp_section(scalp: Scalp) -> str:
     """The scalp's section (#705, ``Scalp``): won, counts and shares; no price."""
-    sources = ", ".join(SCALP_SOURCES.get(s, s) for s in scalp.sources) or SCALP_SOURCES[POOL]
+    found = scalp.sources or (POOL,)
+    sources = " · ".join(
+        f"{SCALP_SOURCES.get(s, s)}"
+        + (f" {', '.join(scalp.members)}" if s == MEMBER and scalp.members else "")
+        + f" 매수 {scalp.bought.get(s, 0)}건"
+        for s in found
+    )
+    notes = []
+    if POOL in found:
+        notes.append("판정 풀의 알고리즘들은 이 목표(순 +0.2% 먼저, -0.3% 전, 15분)로 학습하지 않았다")
+    if MEMBER in found:
+        rates = scalp.break_even
+        notes.append(
+            "순위 멤버는 이 사건으로 학습했고, 목표 먼저 확률이 손익분기"
+            "(목표와 손절의 순손익으로, 틱 올림 포함) 이상이면 산다"
+            + (f"(그날 문턱 {rates[0]:.3f}–{rates[-1]:.3f})" if rates else "")
+        )
     cap = "?" if scalp.cap is None else str(scalp.cap)
     kept = scalp.rules
 
@@ -1443,12 +1486,12 @@ def _scalp_section(scalp: Scalp) -> str:
         return "?" if not isinstance(value, int | float) else f"{value:g}"
 
     lines = [
-        f"스캘프 (#705, KIS 모의, KRX_TRADER_MOCK_SCALP): 1주씩 · 위 먼저 ≥ {rule('threshold')}에 산다 ·"
+        f"스캘프 (#705, KIS 모의, KRX_TRADER_MOCK_SCALP): 1주씩 · 판정 풀이면 위 먼저 ≥ {rule('threshold')},"
+        " 순위 멤버면 목표 먼저 ≥ 손익분기에 산다 ·"
         f" 목표는 체결가 대비 순 +{rule('target_percent')}%, 순 +{rule('raise_percent')}%에 닿으면 손절을"
         f" 그리로 올림, 손절 -{rule('stop_percent')}%(총), {rule('deadline_minutes')}분 마감 ·"
         " 손실 한도·승격·관문·모의 기록에는 세지 않는다",
-        f"신호: {sources} · 이 알고리즘들은 이 목표(순 +0.2% 먼저, -0.3% 전, 15분)로 학습하지 않았다"
-        "(그 목표로 학습한 알고리즘은 #706)",
+        f"신호: {sources} · " + " · ".join(notes),
         f"그날: {_scalp_tally(scalp.day)} · 그날 매수 주문 {scalp.buys}/{cap}",
         f"누적({scalp.since or '-'}부터): {_scalp_tally(scalp.total)}",
     ]
@@ -1681,9 +1724,11 @@ def _pick_section(report: Report) -> str:
             f"판정 매매(KIS 모의, KRX_TRADER_MOCK_VERDICT, #677): {', '.join(horizons)}"
             " · 챔피언의 칸이 없는 고르기에 연습 칸보다 먼저 · 손실 예산"
         )
-    if any(p.get("role") == SCALP for p in pick["picks"]):  # #705: no cell of the cost map either
+    scalped = [p for p in pick["picks"] if p.get("role") == SCALP]  # #705: no cell of the cost map either
+    if scalped:
+        read = "스캘프 종류의 순위 멤버(#706)" if scalped[0].get("kind") == "scalp" else "barrier의 판정 풀"
         lines.append(
-            "스캘프(KIS 모의, KRX_TRADER_MOCK_SCALP, #705): barrier의 판정 풀 · 챔피언의 칸이 없는 고르기에"
+            f"스캘프(KIS 모의, KRX_TRADER_MOCK_SCALP, #705): {read} · 챔피언의 칸이 없는 고르기에"
             " 판정 다음, 연습 칸보다 먼저 · 1주씩"
         )
     chosen = [p for p in pick["picks"] if p.get("role") not in (VERDICT, SCALP)]

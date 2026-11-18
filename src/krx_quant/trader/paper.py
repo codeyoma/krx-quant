@@ -225,6 +225,7 @@ from krx_quant.trader.book import (
     scalp_held,
     scalp_levels,
     scalp_raise,
+    scalp_threshold,
     settle,
     spaced,
 )
@@ -1124,7 +1125,7 @@ class PaperTrader:
             prediction_id=signal.prediction_id,
             bar_close=signal.bar_close,
             probability=p,
-            threshold=self.rules.scalp.threshold
+            threshold=scalp_threshold(signal, self.rules) or 0.0
             if pick.scalp
             else self.rules.threshold
             if pick.threshold is None

@@ -28,7 +28,8 @@ less those resting for the cycle.
   practice (a cost map and a champion read, no champion cell to trade), the verdict policy's horizons,
   ranked first, before the practice cell if one is practised; sized by the loss budget.
 - **The scalp** (#705, ``scalped``, ``scalp.py``): in mock mode alone, on the same picks, the scalp's one
-  cell, after the verdict's horizons and before the practice cell; a share at a time.
+  cell, after the verdict's horizons and before the practice cell; a share at a time. Its cell's kind is
+  its signal's source's, which the desk chose for the pick (#706, ``scalp.source``).
 
 **What it does not change.** The practice and the verdict are for the mock mode alone (``champion``
 refuses them in any other); the champion is read at the picks only and changes on a review night alone
@@ -68,6 +69,7 @@ from krx_quant.trader.selection import (
 
 if TYPE_CHECKING:
     from krx_quant.trader import practice as practices
+    from krx_quant.trader import scalp as scalp_policy
     from krx_quant.trader.policy import Policy
     from krx_quant.trader.store import TraderStore
 
@@ -423,17 +425,20 @@ def verdicted(under: Selection, chosen: Selection, *, enabled: bool) -> Selectio
     return replace(chosen, picks=(*verdicts.picks(), *chosen.picks), inactive=())
 
 
-def scalped(under: Selection, chosen: Selection, *, enabled: bool) -> Selection:
+def scalped(
+    under: Selection, chosen: Selection, *, enabled: bool, source: scalp_policy.Source | None = None
+) -> Selection:
     """``chosen`` (the champion's pick, or the practice cell, with the verdict's horizons first), with the
     scalp ``enabled`` and no champion cell to trade on a cost map and a champion read: the scalp's cell
-    after the verdict's horizons, before the rest (#705, module doc)."""
+    (of ``source``'s kind, #706; None: the pool's) after the verdict's horizons, before the rest (#705,
+    module doc)."""
     from krx_quant.trader import scalp
 
     if not enabled or under.picks or under.reason not in (NO_PASS, NOT_IN_POLICY, NO_CHAMPION):
         return chosen
     verdict = tuple(p for p in chosen.picks if p.verdict)
     rest = tuple(p for p in chosen.picks if not p.verdict)
-    return replace(chosen, picks=(*verdict, *scalp.picks(), *rest), inactive=())
+    return replace(chosen, picks=(*verdict, *scalp.picks(source), *rest), inactive=())
 
 
 # The desk's questions.
@@ -461,12 +466,13 @@ def champion(
     practice: bool = False,
     verdict: bool = False,
     scalp: bool = False,
+    scalp_source: scalp_policy.Source | None = None,
 ) -> Champion:
     """The cost map's cells (``selection``) at ``at`` under the champion kept in ``store``, less those
     resting in ``cycle`` (``rest_of``), and with ``practice`` the practice cell on a pick no champion
     cell trades (``practised``), with ``verdict`` the verdict policy's horizons before it
-    (``verdicted``), with ``scalp`` the scalp's cell after those (``scalped``): in mock mode alone (#427,
-    #677, #705; ValueError in another ``mode``)."""
+    (``verdicted``), with ``scalp`` the scalp's cell after those (``scalped``, of ``scalp_source``'s kind,
+    #706): in mock mode alone (#427, #677, #705; ValueError in another ``mode``)."""
     if practice and mode != MOCK:  # #427: the settings refuse it before (``settings.py``)
         raise ValueError(f"the mock practice is for the mock mode alone, not {mode}")
     if verdict and mode != MOCK:  # #677: likewise
@@ -480,7 +486,7 @@ def champion(
     under = under_champion(store, selection, rest_for)
     chosen, state = practised(under, cycle, at, store=store, engine=engine, enabled=practice)
     chosen = verdicted(under, chosen, enabled=verdict)
-    return Champion(under, scalped(under, chosen, enabled=scalp), state)
+    return Champion(under, scalped(under, chosen, enabled=scalp, source=scalp_source), state)
 
 
 def challenger(

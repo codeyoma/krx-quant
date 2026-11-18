@@ -47,6 +47,7 @@ from krx_quant.trader.paper import PaperTrader
 from krx_quant.trader.selection import choose
 from krx_quant.trader.settings import TraderSettings
 from krx_quant.trader.store import DB_NAME, TraderStore
+from tests.api_schema import check
 from tests.kis_doubles import Fill, kis_mock, rows
 from tests.test_trader_practice import FAILING
 from tests.test_trader_shadow import DAY, Event, MockDesk
@@ -416,3 +417,195 @@ async def test_an_exit_after_the_day_is_open_in_that_day_s_report(
 
     assert "그날: 매매 1건(열림 1) · 그날 매수 주문 1/?" in lines
     assert any(line.startswith("누적(2026-10-14부터): 매매 1건(열림 1)") for line in lines)
+
+
+# The switch to the scalp kind's ranking member (#706)
+#
+# The engine's ranking of the scalp kind of 2026-10-13 has one member, breiman-scalp, ranked first; a
+# second algorithm ranked below it is no member. Its 10:00 prediction says P(target first) 0.70 about
+# the mid-point 70,050. There the break-even is 0.6634: the target 70,400 nets +0.2686% (70,400 ×
+# 0.99785 − 70,050 × 1.00015 = 188.13 won), the stop 69,839.85 −0.5294% (370.79 won), and
+# 370.79 ÷ (188.13 + 370.79) = 0.6634. Every value is made up.
+
+MEMBER_NAME = "breiman-scalp"
+BREAK_EVEN = 370.79 / (188.13 + 370.79)
+
+
+def ranking_body(members: dict[str, int | None]) -> dict[str, Any]:
+    """A scalp ranking as the engine keeps it, its rows the algorithms with their ranks; those with a
+    rank are members, as ``ranking.Snapshot.as_json`` gives them (only the fields read here)."""
+    rows = [
+        {"rank": rank, "algorithm": name, "member": rank is not None, "ranked": rank is not None}
+        for name, rank in members.items()
+    ]
+    return {"kind": "scalp", "night": "2026-10-13", "version": 1, "rows": rows}
+
+
+def engine_with(state: Path, members: dict[str, int | None], p_target: float = 0.70) -> None:
+    """The engine's database before the day: the scalp ranking of the night before (``members``), and
+    each algorithm's 10:00 scalp prediction displayed 2 s after it, saying ``p_target`` first."""
+    from krx_quant.predictions import DB_NAME as ENGINE_DB
+    from krx_quant.predictions import NewKindPrediction, PredictionStore
+
+    store = PredictionStore(state / ENGINE_DB)
+    try:
+        night = DAY - timedelta(days=1)
+        store.add_rankings([(night, "scalp", 1, at("15:40:00"), None, ranking_body(members))])
+        close = at("10:00:00")
+        output = {"p_target_first": p_target, "p_timeout": 0.2, "p_stop_first": round(0.8 - p_target, 6)}
+        store.add_kind_predictions(
+            "scalp",
+            [
+                NewKindPrediction(
+                    symbol="005930",
+                    algorithm=name,
+                    model_version="v1",
+                    bar_close=close,
+                    displayed_at=close + timedelta(seconds=2),
+                    output=output,
+                    anchor=70_050.0,
+                    tick=100,
+                )
+                for name in members
+            ],
+        )
+    finally:
+        store.close()
+
+
+def test_the_break_even_is_the_stop_s_net_loss_over_both_payoffs() -> None:
+    rules = ScalpRules()
+    p = rules.break_even(FILLED, FEE)
+    assert p == pytest.approx(BREAK_EVEN, abs=1e-4)
+    won, lost = net_of(FILLED, TARGET, 1, FEE), net_of(FILLED, STOP, 1, FEE)
+    assert p * won + (1 - p) * lost == pytest.approx(0.0, abs=1e-9), "nets nothing on average"
+    # Without the tick's rounding the target nets +0.2% alone: 0.529 / (0.2 + 0.529).
+    assert ScalpRules().break_even(70_000, FEE) < p < 0.0052935 / (0.002 + 0.0052935)
+
+
+def test_the_policy_reads_the_rankings_of_the_ranking_s_version() -> None:
+    from krx_quant.ranking import RANKING_VERSION
+    from krx_quant.trader import scalp
+
+    assert scalp.RANKING_VERSION == RANKING_VERSION
+
+
+def test_the_member_ranked_highest_is_read(tmp_path: Path) -> None:
+    from krx_quant.predictions import DB_NAME as ENGINE_DB
+    from krx_quant.trader import scalp
+
+    assert scalp.source(tmp_path / ENGINE_DB, RULES) == scalp.Source(scalp.POOL), "no engine database"
+    engine_with(tmp_path, {"zeta-scalp": 2, MEMBER_NAME: 1, "breiman-scalp-b": None})
+    found = scalp.source(tmp_path / ENGINE_DB, RULES)
+    assert found == scalp.Source(scalp.MEMBER, MEMBER_NAME) and found.cell == scalp.MEMBER_CELL
+
+
+def test_without_a_member_the_pool_is_read(tmp_path: Path) -> None:
+    from krx_quant.predictions import DB_NAME as ENGINE_DB
+    from krx_quant.trader import scalp
+
+    engine_with(tmp_path, {MEMBER_NAME: None})
+    assert scalp.source(tmp_path / ENGINE_DB, RULES) == scalp.Source(scalp.POOL)
+
+
+@pytest.mark.parametrize(
+    ("changes", "said"),
+    [
+        ({"scalp": ScalpRules(target_percent=0.25)}, "target 0.25% net, the kind's 0.2%"),
+        ({"scalp": ScalpRules(stop_percent=0.4)}, "stop 0.4% gross, the kind's 0.3%"),
+        ({"scalp": ScalpRules(deadline=timedelta(minutes=10))}, "deadline 10 minutes, the kind's 15"),
+        ({"fee_rate": 0.0002}, "commission 0.0002 a side, the kind's 0.00015"),
+    ],
+)
+def test_levels_other_than_the_kind_s_keep_the_pool_and_say_why(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, changes: dict[str, Any], said: str
+) -> None:
+    from krx_quant.predictions import DB_NAME as ENGINE_DB
+    from krx_quant.trader import scalp
+
+    engine_with(tmp_path, {MEMBER_NAME: 1})
+    rules = whole_rules(**changes)
+    assert scalp.differs(RULES) is None
+    with caplog.at_level("WARNING", logger="krx_quant.trader.scalp"):
+        found = scalp.source(tmp_path / ENGINE_DB, rules)
+    assert found == scalp.Source(scalp.POOL, MEMBER_NAME, said)
+    assert any(MEMBER_NAME in r.getMessage() and said in r.getMessage() for r in caplog.records)
+
+
+async def test_with_a_member_the_scalp_buys_on_its_target_first_at_the_break_even(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    """The member's 0.70 is above the break-even 0.6634: a share bought. The verdict's 4-minute pool of
+    the same bar close is not read."""
+    fake, account = kis_mock
+    engine_with(tmp_path, {MEMBER_NAME: 1, "zeta-scalp": None})
+    desk = scalp_desk(tmp_path, fake, account, engine=True)
+
+    await desk.run([said("10:00", p=(0.9, 0.05, 0.05)), BOOK])
+
+    [trade] = desk.trades()
+    assert (trade["kind"], trade["predictor"], trade["scalp"]) == ("scalp", SCALP, True)
+    assert (trade["entry"]["price"], trade["target"], trade["stop"]) == (FILLED, TARGET, pytest.approx(STOP))
+    signal = trade["scalp_signal"]
+    assert (signal["source"], signal["member"], signal["p_up"]) == ("scalp_member", MEMBER_NAME, 0.70)
+    assert signal["threshold"] == pytest.approx(BREAK_EVEN, abs=1e-4)
+    found = read_decisions(tmp_path / DB_NAME, None, DAY)
+    [scalped] = [d for b in found if b["book"] == SCALP for d in b["decisions"]]
+    assert (scalped["kind"], scalped["scalp_signal"], scalped["action"]) == ("scalp", "scalp_member", "buy")
+    assert scalped["threshold"] is None, "the break-even differs by price: kept on the trade"
+    check("trader_trade", trade)
+    check("trader_decisions", {"day": DAY.isoformat(), "book": None, "books": found})
+
+    lines = report.render(report.read(tmp_path / DB_NAME, DAY, CALENDAR)).splitlines()
+    [read] = [line for line in lines if line.startswith("신호: ")]
+    assert f"스캘프 종류의 순위 멤버(목표 먼저 확률, #706) {MEMBER_NAME} 매수 1건" in read
+    assert "그날 문턱 0.663–0.663" in read and "학습하지 않았다" not in read
+    picked = "스캘프(KIS 모의, KRX_TRADER_MOCK_SCALP, #705): 스캘프 종류의 순위 멤버"
+    assert any(line.startswith(picked) for line in lines)
+
+
+async def test_a_member_s_target_first_below_the_break_even_buys_nothing(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    fake, account = kis_mock
+    engine_with(tmp_path, {MEMBER_NAME: 1}, p_target=0.66)
+    desk = scalp_desk(tmp_path, fake, account, engine=True)
+
+    await desk.run([Read("10:00:03.3"), BOOK])
+
+    assert decisions(tmp_path) == {"10:00": ("skip", BELOW_THRESHOLD)}
+    assert desk.trades() == [] and account.orders == []
+
+
+async def test_with_levels_other_than_the_kind_s_the_pool_s_signal_stays(
+    kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
+) -> None:
+    fake, account = kis_mock
+    engine_with(tmp_path, {MEMBER_NAME: 1})
+    rules = whole_rules(scalp=ScalpRules(stop_percent=0.4))
+    desk = scalp_desk(tmp_path, fake, account, engine=True, rules=rules)
+
+    await desk.run([said("10:00"), BOOK])
+
+    [trade] = desk.trades()
+    assert (trade["kind"], trade["scalp_signal"]["source"], trade["scalp_signal"]["threshold"]) == (
+        "barrier",
+        "verdict_pool_4m",
+        0.30,
+    )
+    found = read_decisions(tmp_path / DB_NAME, None, DAY)
+    [scalped] = [d for b in found if b["book"] == SCALP for d in b["decisions"]]
+    assert scalped["scalp_signal"] == "verdict_pool_4m"
+
+
+def test_the_engine_reader_reads_the_scalp_cell_picked(tmp_path: Path) -> None:
+    from krx_quant.trader import scalp
+    from krx_quant.trader.cells import EngineReader
+
+    reader = EngineReader(tmp_path / "engine.sqlite3", "005930")
+    reader.follow([scalp.CELL], at("09:00:00"))
+    assert reader.cells == [scalp.CELL]
+    reader.follow([scalp.MEMBER_CELL], at("09:00:00"))
+    assert reader.cells == [scalp.MEMBER_CELL]
+    reader.follow([], at("09:00:00"))
+    assert reader.cells == []
