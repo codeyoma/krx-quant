@@ -2,12 +2,19 @@
 
 A move counts as up or down only when it is at least k ticks, where k ticks cover the
 round-trip cost of trading it: the sell tax plus the commission on both sides.
+
+**Instruments** (#711, ``Instrument``): a share's round trip pays the sell tax and moves on the stock
+tick table (``STOCK``); an ETF's pays no securities transaction tax (the tax falls on shares only,
+증권거래세법 제2조, ``products.py``) and moves on the ETF tick (``etf_tick``, ``ETF``). Which codes are
+ETFs is ``products.instrument``'s to say.
 """
 
 from __future__ import annotations
 
 import enum
 import math
+from collections.abc import Callable
+from dataclasses import dataclass
 
 # Securities transaction tax on the sell side in 2026 (KOSPI 0.05% + rural special tax 0.15%,
 # KOSDAQ 0.20%).
@@ -45,13 +52,59 @@ def tick_size(price: float) -> int:
     return next(tick for low, tick in _TICK_BANDS if price >= low)
 
 
-def tick_up(price: float) -> int:
+def tick_up(price: float, tick: Callable[[float], int] = tick_size) -> int:
     """The first price on KRX's tick at or above ``price`` (a take-profit's limit, ``trader/mock.py``; the
-    scalp's levels, #705)."""
-    up = math.ceil(round(price / tick_size(price), 9)) * tick_size(price)
-    while up % tick_size(up):  # past a band's edge, onto the coarser tick of the band above
-        up = math.ceil(up / tick_size(up)) * tick_size(up)
+    scalp's levels, #705), on the stock table or another (``tick``: an ETF's, #711)."""
+    up = math.ceil(round(price / tick(price), 9)) * tick(price)
+    while up % tick(up):  # past a band's edge, onto the coarser tick of the band above
+        up = math.ceil(up / tick(up)) * tick(up)
     return int(up)
+
+
+# The tick an ETF's price moves by (KRX: 1 won below 2,000 won, 5 won from 2,000 won; the stock table,
+# ``tick_size``, does not cover ETFs). The inverse ETF's book bore it out on 2026-11-06: no best quote nor
+# spread off it in 36,716 records of continuous trading (#606, ``probe-inverse-book``). Moved here from
+# ``products.py`` (#711) beside the stock table.
+ETF_TICK_FROM = 2_000
+
+
+def etf_tick(price: float) -> int:
+    return 5 if price >= ETF_TICK_FROM else 1
+
+
+@dataclass(frozen=True)
+class Instrument:
+    """What a listed code's round trip pays and the tick it moves by (module doc "Instruments"): a
+    stock's, or an ETF's (``etf``)."""
+
+    etf: bool = False
+
+    @property
+    def sell_tax(self) -> float:
+        """The tax on a sale's notional: ``SELL_TAX`` for a share, none for an ETF."""
+        return 0.0 if self.etf else SELL_TAX
+
+    def tick(self, price: float) -> int:
+        return etf_tick(price) if self.etf else tick_size(price)
+
+    def tick_up(self, price: float) -> int:
+        """The first price on this instrument's tick at or above ``price``."""
+        return tick_up(price, self.tick)
+
+    def net(self, entry: float, exit_price: float, fee_rate: float) -> float:
+        """A unit bought at ``entry`` and sold at ``exit_price``: its net in won after the commission
+        ``fee_rate`` on each side's notional and the sell tax on the sale's (``trader/money.net_of``'s
+        round trip, with this instrument's tax)."""
+        return exit_price * (1 - fee_rate - self.sell_tax) - entry * (1 + fee_rate)
+
+    def netting(self, price: float, percent: float, fee_rate: float) -> int:
+        """The first price on the tick at which a unit bought at ``price`` nets ``percent`` of ``price``
+        sold there (``trader/book.ScalpRules.netting``, with this instrument's tax and tick)."""
+        return self.tick_up(price * (1 + fee_rate + percent / 100) / (1 - fee_rate - self.sell_tax))
+
+
+STOCK = Instrument()
+ETF = Instrument(etf=True)
 
 
 def tick_band(price: float) -> tuple[int, int | None]:

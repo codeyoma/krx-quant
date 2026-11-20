@@ -1,9 +1,9 @@
 usage: krx-quant [-h]
-                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,ranking-evidence,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+                 {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,scalp-lab,verdict-replay,ranking-evidence,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
                  ...
 
 positional arguments:
-  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,verdict-replay,ranking-evidence,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
+  {collect,replay,rescore,fit,prevalidate,screen-queue,train,simulate,rollback,retire,unretire,trade,refit-policy,trader-report,check-mock-trades,fill-notice-layout,fill-notice-columns,probe-live-account,probe-kis-orders,measure-subscriptions,check-fallbacks,backfill,archive,recording-quality,macro,probe-supply,probe-night,probe-gaps,probe-sample-keys,bar-close-times,session-memory,close-restart-memory,smt,smt-experiment,nightly-hit-rates,inverse-replay,scalp-lab,verdict-replay,ranking-evidence,test-alert,doctor,backup-state,restore-state,restore-drill,notify,fake-kis,demo-engine}
     collect             record KIS real-time feeds until interrupted
     replay              replay a recorded day through the engine into its own
                         database (no KIS needed)
@@ -147,6 +147,13 @@ positional arguments:
                         first ask after the call, sold at the bid on the
                         stock's barrier or expiry; net won after the
                         commissions; reads only, places no order, no price
+    scalp-lab           replay the mock scalp's variants (005930 and its
+                        inverse ETF, target, stop, deadline, raised stop, the
+                        pool's and breiman-scalp's thresholds) over the
+                        recorded days, one position at a time, and rank them
+                        by net per day, with a day-level walk-forward and the
+                        live scalp's reproduction (#711); reads only, places
+                        no order, no price
     verdict-replay      make the verdict (#676) again at each bar close of the
                         recorded days, with the barrier algorithms the live
                         engine ran and with every one walked forward (#679),
