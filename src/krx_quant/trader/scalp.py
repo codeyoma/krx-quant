@@ -59,10 +59,11 @@ the trade, so a restart goes on with it) and sells from the next quote whose bid
 bid aside). At the deadline neither reached sells at market (``time``). The exits are ``take_profit``,
 ``raised_stop``, ``stop_loss``, ``time``, and the book's own (a pause, a loss limit).
 
-**Its own day** (``book.scalp_held``): its buy orders (``ScalpRules.daily_buys``, 20), its net losses in
-a row and their cooldown (the book's ``KRX_TRADER_LOSS_STREAK`` and ``KRX_TRADER_COOLDOWN_MINUTES``),
-and its net loss of the day (``ScalpRules.daily_loss``, 5,000 won), each counted on the scalp's trades
-alone; the book's risk rules count none of them. The champion's loss limits count none of its P&L,
+**Its own day** (``book.scalp_held``): its buy orders (``ScalpRules.daily_buys``, 100; 0 for no cap),
+counted on the scalp's alone; the book's risk rules count none of them. Since #710 it takes no cooldown
+after net losses in a row and no daily loss cap (it had 5,000 won), and its cap may go above 20: the user
+wants it to trade all day so that its results can be measured (2026-11-20). The account still holds one
+position at a time. The champion's loss limits count none of its P&L,
 realized or open, as they count none of the practice's (#533, ``limits.py``); a limit reached holds it
 all the same. Its trades are of no policy: no record, promotion or live gate counts them.
 

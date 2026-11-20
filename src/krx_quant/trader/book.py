@@ -30,7 +30,7 @@ out instead) and spaces no practice buy (it replays policies alone).
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING, Any, Protocol, overload
 
@@ -53,7 +53,6 @@ from krx_quant.trader import (
     PRACTICE_SPACING,
     RISK_PER_TRADE_PERCENT,
     SCALP_DAILY_BUY_ORDERS,
-    SCALP_DAILY_LOSS_WON,
     SCALP_DEADLINE,
     SCALP_RAISE_PERCENT,
     SCALP_STOP_PERCENT,
@@ -91,11 +90,11 @@ SPACING = "spacing"
 # verdict trade sells it with the same reason (``paper.py``).
 VERDICT_WAIT, VERDICT_SELL = "verdict_wait", "verdict_sell"
 # A scalp trade sold at its stop once the stop was raised to the level that nets +0.1% (#705,
-# ``scalp_raise``); a scalp buy held by its own daily loss cap (``scalp_held``).
+# ``scalp_raise``). A scalp buy held by its own daily loss cap said ``scalp_loss_cap`` (#705) until #710
+# removed the cap and its constant: decisions kept before then still say it.
 RAISED_STOP = "raised_stop"
 # A scalp signal of the scalp kind's ranking member (#706, ``scalp.MEMBER``): it buys at the break-even.
 SCALP_MEMBER = "scalp_member"
-SCALP_LOSS_CAP = "scalp_loss_cap"
 BUY, SKIP = "buy", "skip"
 # The status of a prediction the engine did not make for a VI (``engine._record_not_predicted``), and
 # for a market halt (#625).
@@ -107,7 +106,7 @@ NOT_MADE = (VI_STATUS, HALT_STATUS)
 class ScalpRules:
     """The scalp policy's rules (#705, ``scalp.py``), its settings' (``KRX_TRADER_MOCK_SCALP_*``): the
     up first that buys, the target's and the raised stop's net and the stop's gross in percent of the
-    fill price, the deadline after the bar close, and its own day's buy orders and net loss in won."""
+    fill price, the deadline after the bar close, and its own day's buy orders (0: no cap, #710)."""
 
     threshold: float = SCALP_THRESHOLD
     target_percent: float = SCALP_TARGET_PERCENT
@@ -115,7 +114,6 @@ class ScalpRules:
     stop_percent: float = SCALP_STOP_PERCENT
     deadline: timedelta = SCALP_DEADLINE
     daily_buys: int = SCALP_DAILY_BUY_ORDERS
-    daily_loss: float = SCALP_DAILY_LOSS_WON
 
     def netting(self, price: float, percent: float, fee_rate: float) -> int:
         """The first price on the tick at which a share bought at ``price`` nets ``percent`` of
@@ -201,7 +199,6 @@ class Rules:
                 stop_percent=trader.scalp_stop_percent,
                 deadline=timedelta(minutes=trader.scalp_deadline_minutes),
                 daily_buys=trader.scalp_daily_buy_orders,
-                daily_loss=trader.scalp_daily_loss_won,
             ),
         )
 
@@ -361,15 +358,16 @@ def scalp_raise(entry_price: float, stop: float, bid: float, rules: Rules) -> fl
     return level if bid >= level and stop < level else None
 
 
-def scalp_held(rules: Rules, at: datetime, buys: int, exits: Sequence[tuple[datetime, float]]) -> str | None:
-    """Why the scalp's own risk rules hold its buy at ``at`` (#705), from its own buy orders and exits of
-    ``at``'s day (``risk_held``'s, the scalp's trades alone): ``buy_limit`` at ``ScalpRules.daily_buys``,
-    ``cooldown`` as the book's (``Rules.loss_streak`` net losses in a row start ``Rules.cooldown``), and
-    ``scalp_loss_cap`` once the day's scalp trades net a loss of ``ScalpRules.daily_loss`` won or more."""
-    held = risk_held(replace(rules, daily_buys=rules.scalp.daily_buys), at, buys, exits)
-    if held is not None:
-        return held
-    return SCALP_LOSS_CAP if sum(net for _, net in exits) <= -rules.scalp.daily_loss else None
+def scalp_held(rules: Rules, buys: int) -> str | None:
+    """Why the scalp's own rule holds its buy (#705), from its own buy orders of the day (``buys``, the
+    scalp's alone): ``buy_limit`` at ``ScalpRules.daily_buys`` of them; None below it, or with no cap (0).
+
+    > Changed (#710, 2026-11-20): it also held a buy for the book's cooldown (``Rules.loss_streak`` net
+    scalp losses in a row, ``Rules.cooldown``) and once the day's scalp trades netted a loss of
+    ``KRX_TRADER_MOCK_SCALP_DAILY_LOSS_WON`` (``scalp_loss_cap``), and its cap was 20 at most. The user
+    wants the scalp to trade all day so that its results can be measured."""
+    cap = rules.scalp.daily_buys
+    return BUY_LIMIT if 0 < cap <= buys else None
 
 
 @dataclass(frozen=True)

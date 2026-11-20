@@ -107,8 +107,9 @@ barrier the bar close plus the kind's horizon: the trade is the event its hit ra
 ``book.plan_scalp`` (its threshold and deadline), one share, of no policy. Its trade's target and stop are
 set on its fill price (``book.scalp_levels``; the KIS book's again when more of its buy fills,
 ``scalp_filled``); a quote whose bid reaches the level that nets +0.1% raises its stop there
-(``book.scalp_raise``, kept), and the stop then sells as ``raised_stop``. Its own risk rules
-(``book.scalp_held``) count its own orders and exits; the book's count none of them, and no loss limit
+(``book.scalp_raise``, kept), and the stop then sells as ``raised_stop``. Its own rule
+(``book.scalp_held``) counts its own buy orders against its cap (100, 0 none); since #710 it takes no
+cooldown and no daily loss cap. The book's risk rules count none of its orders or exits, and no loss limit
 counts its P&L (``OpenTrade.uncounted``), as the practice's.
 
 **Fills** on the collector's best quotes (``quotes.py``), in the order received:
@@ -973,15 +974,9 @@ class PaperTrader:
         return picked is not None and picked[1].scalp
 
     def _scalp_risk(self, at: datetime) -> str | None:
-        """Why the scalp's own risk rules hold its buy at ``at`` (#705, ``scalp_held``): its own buy
-        orders and exits of the day, as the store has them."""
-        since = midnight(at)
-        return scalp_held(
-            self.rules,
-            at,
-            self.store.day_buys(self.mode, since, scalp=True),
-            self.store.day_exits(self.mode, since, scalp=True),
-        )
+        """Why the scalp's own rule holds its buy at ``at`` (#705, ``scalp_held``): its own buy orders of
+        the day, as the store has them. No cooldown and no daily loss cap since #710."""
+        return scalp_held(self.rules, self.store.day_buys(self.mode, midnight(at), scalp=True))
 
     def _risk(self, at: datetime) -> str | None:
         """Why the risk rules hold a buy at ``at`` (#471, ``risk_held``): the book's buy orders and
