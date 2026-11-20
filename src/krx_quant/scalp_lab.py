@@ -54,8 +54,8 @@ scalp kind's ``target_first``.
 
 **One position at a time** (as the trader holds the scalp): of a variant's signals in display order, one
 read while a trade is held is not taken; one that buys nothing (no quote, a gap, ``target_reached``)
-holds nothing. The scalp's own daily caps are not applied to the variants (they measure the signal and
-the geometry; the caps are #710's), but to the reproduction below.
+holds nothing. The scalp's own daily buy cap (#710: 100) is not applied to the variants (they measure the
+signal and the geometry), but to the reproduction below.
 
 **Per variant**: trades per day (over the days its instrument and source were recorded), the net win
 rate (net above 0), its break-even measured (mean loss ÷ (mean win + mean loss)) and binary (the stop's
@@ -74,7 +74,7 @@ the member at its break-even, its geometry).
 every day is what choosing by this lab would have earned; nothing of a day chooses that day's variant.
 
 **The reproduction** (a check): the policy's current variant (its source of that day, by the live
-trades' ``scalp_signal``; its threshold, geometry and its own risk rules, ``book.scalp_held``) replayed
+trades' ``scalp_signal``; its threshold, geometry and its own buy cap, ``book.scalp_held``) replayed
 on the stock, with the champion's book held by the live non-scalp trades of the day (one position for
 the whole book), against the live scalp trades of the trader's store (``trades.scalp``): the trades each
 way, those of the same bar close and of those how many left by the same reason, and the exits each way.
@@ -657,13 +657,12 @@ def live_day(path: Path, day: date) -> Live | None:
 
 
 def policy_held(rules: Rules, busy: Sequence[tuple[int, int | None]]) -> Held:
-    """The policy's own risk rules (``book.scalp_held``) and the live book's other trades holding it."""
+    """The policy's own buy cap (``book.scalp_held``) and the live book's other trades holding it."""
 
     def held(done: Outcome, taken: Sequence[Outcome]) -> bool:
         if any(s <= done.at and (e is None or done.at < e) for s, e in busy):
             return True
-        exits = [(moment(t.free), t.net) for t in taken]
-        return scalp_held(rules, moment(done.at), len(taken), exits) is not None
+        return scalp_held(rules, len(taken)) is not None
 
     return held
 
