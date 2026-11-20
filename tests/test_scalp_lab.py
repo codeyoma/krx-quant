@@ -58,10 +58,12 @@ from krx_quant.scalp_lab import (
     best,
     entry,
     grid,
+    held_out,
     one_at_a_time,
     plan_refused,
     report,
     report_lines,
+    thresholds,
     trade,
 )
 from krx_quant.scheduled import FAILED, JOBS, OK, JobRecord, Night
@@ -69,7 +71,7 @@ from krx_quant.scheduled.research import SCALP_LAB, SCALP_LAB_ISSUE, scalp_lab_c
 from krx_quant.special import Kind as SpecialKind
 from krx_quant.special import Window
 from krx_quant.trader import SYMBOL
-from krx_quant.trader.book import RAISED_STOP, STOP_LOSS, TAKE_PROFIT, TIME, ScalpRules
+from krx_quant.trader.book import RAISED_STOP, STOP_LOSS, TAKE_PROFIT, TIME, ScalpRules, halt_spans
 from krx_quant.trader.money import net_of
 from krx_quant.trader.replay import micros
 from krx_quant.trader.store import DB_NAME as TRADER_DB
@@ -195,6 +197,27 @@ def test_a_special_window_known_by_the_entry_buys_nothing() -> None:
     assert traded(OPENED, windows=[vi]) != SPECIAL, "learned at its start, after the entry"
     early = Window(SpecialKind.VI, SYMBOL, at("09:59:00"), at("10:01:00"))
     assert traded(OPENED, windows=[early]) == SPECIAL
+
+
+def test_a_market_halt_after_the_entry_fills_no_exit_on_its_reopening_auction_s_book() -> None:
+    # A halt from 10:05 to 10:10: its quotes (a bid at the target) are not traded on; the first after it is.
+    halt = Window(SpecialKind.MARKET_HALT, None, at("10:05:00"), at("10:10:00"))
+    rows = [*OPENED, ("10:06:00", 70_400, 70_500), ("10:10:01", 69_600, 69_700)]
+    day = held_out(leg(rows, gaps=(("10:05:00", "10:07:00"),)), halt_spans([halt]))
+    c = call()
+    found = entry(day, c, 30)
+    assert isinstance(found, Entry)
+
+    done = trade(day, c, found, NOT_RAISED, FEE, [halt])
+    assert isinstance(done, Outcome) and done.reason == STOP_LOSS, (
+        "the gap that began in the halt is its silence"
+    )
+    assert done.free == micros(at("10:10:01"))
+    whole = leg(rows)
+    opened = entry(whole, c, 30)
+    assert isinstance(opened, Entry)
+    unheld = trade(whole, c, opened, NOT_RAISED, FEE, [halt])
+    assert isinstance(unheld, Outcome) and unheld.reason == TAKE_PROFIT, "without the halt rule it would fill"
 
 
 def test_the_session_s_rules_are_the_plan_s() -> None:
@@ -380,6 +403,20 @@ def test_the_report_ranks_the_variants_and_reproduces_the_live_trade(tmp_path: P
     assert Variant(SYMBOL, MEMBER, BREAK_EVEN, NOW).label in out
     assert "7. 실행" in out and AGENT_LINE not in out, "one day: no lower bound, nothing qualifies"
     assert "70,000" not in out and "70000" not in out, "no price"
+
+
+def test_a_configured_pool_threshold_off_the_grid_is_measured_too(tmp_path: Path) -> None:
+    assert thresholds(SYMBOL, POOL, 0.35) == (0.2, 0.3, 0.35, 0.4, 0.5)
+    assert thresholds(SYMBOL, POOL, 0.3) == thresholds(ETF_CODE, POOL, 0.35) == (0.2, 0.3, 0.4, 0.5)
+    engine(tmp_path)
+    record_quotes(tmp_path / "data", [quote(t, b, a) for t, b, a in [*OPENED, ("10:03:00", 70_400, 70_500)]])
+    rules = whole_rules(scalp=ScalpRules(threshold=0.35))
+
+    with RawDays(tmp_path / "data") as raw:
+        out, _ = report(settings(tmp_path), CALENDAR, TODAY, raw, rules)
+
+    current = Variant(SYMBOL, POOL, 0.35, NOW).label
+    assert any(line.startswith(f"  {current} | 1.0 | 100% |") for line in out.splitlines()), out
 
 
 def test_without_a_recorded_day_or_an_engine_database_it_says_so(tmp_path: Path) -> None:

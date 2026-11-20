@@ -28,7 +28,8 @@ own tick (the stock table, the ETF's 1 or 5 won) and its own round trip (the com
 
 **The variants** (each a row): an instrument, a source, a threshold and a geometry.
 
-- *Threshold* on the source's probability: the pool's ``POOL_THRESHOLDS``, the member's
+- *Threshold* on the source's probability: the pool's ``POOL_THRESHOLDS`` (on the stock with the policy's
+  ``KRX_TRADER_MOCK_SCALP_THRESHOLD`` when they lack it), the member's
   ``MEMBER_THRESHOLDS``, and on the stock the member at its break-even too (``BREAK_EVEN``: the
   geometry's binary break-even on the bar close's mid-point, as ``book.scalp_threshold`` buys).
 - *Geometry*: the target's net ``TARGETS`` (+0.1, +0.2, +0.3 %), the stop's gross ``STOPS`` (−0.15,
@@ -51,6 +52,10 @@ with the raise on, the stop raised to R once a bid reaches it (selling from the 
 the first after it (``time``). The trade is the policy-matched outcome: its net after the costs, with
 the raised stop, the deadline and the delay from the bar close to the entry the trader has, not the
 scalp kind's ``target_first``.
+
+**Market halts** (#625, ``book.halt_spans``): the quotes received in a halt, from when the engine learned
+it to its end, are left out of both legs, and so are the recorded gaps that begin in one, as the paper book
+and the re-fit's replay take them (``held_out``): no buy nor exit fills on the reopening auction's book.
 
 **One position at a time** (as the trader holds the scalp): of a variant's signals in display order, one
 read while a trade is held is not taken; one that buys nothing (no quote, a gap, ``target_reached``)
@@ -96,7 +101,7 @@ import statistics
 import time as clock
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -118,7 +123,16 @@ from krx_quant.scalp import NAME as SCALP_KIND
 from krx_quant.special import Window, touching
 from krx_quant.stats import day_mean
 from krx_quant.trader import ENTRY_AFTER_OPEN, EXIT_BEFORE_AUCTION, SYMBOL
-from krx_quant.trader.book import EXPIRED, RAISED_STOP, STOP_LOSS, TAKE_PROFIT, TIME, Rules, scalp_held
+from krx_quant.trader.book import (
+    EXPIRED,
+    RAISED_STOP,
+    STOP_LOSS,
+    TAKE_PROFIT,
+    TIME,
+    Rules,
+    halt_spans,
+    scalp_held,
+)
 from krx_quant.trader.cells import KIND_COLUMNS, Signal, special_windows
 from krx_quant.trader.db import reading
 from krx_quant.trader.replay import day_gaps, known, micros, moment, read_recording
@@ -218,8 +232,12 @@ class Variant:
         return f"{self.leg} {SOURCE_WORDS[self.source]}{side}≥{at} {self.geometry.label}"
 
 
-def thresholds(leg: str, source: str) -> tuple[float, ...]:
+def thresholds(leg: str, source: str, current: float | None = None) -> tuple[float, ...]:
+    """A leg's and a source's thresholds; the stock's pool with the policy's ``current`` one too when
+    the grid lacks it (``KRX_TRADER_MOCK_SCALP_THRESHOLD``), so that its row is measured."""
     if source == POOL:
+        if leg == SYMBOL and current is not None and current not in POOL_THRESHOLDS:
+            return tuple(sorted((*POOL_THRESHOLDS, current)))
         return POOL_THRESHOLDS
     return (*MEMBER_THRESHOLDS, BREAK_EVEN) if leg == SYMBOL else MEMBER_THRESHOLDS
 
@@ -274,6 +292,19 @@ def etf_leg(data_dir: Path, raw: RawDays, day: date) -> Leg | None:
     later = np.ones(len(times), dtype=bool)
     later[1:] = times[1:] > times[:-1]
     return Leg(ETF_CODE, instrument(ETF_CODE), times[later], bids[later], asks[later], gaps)
+
+
+def held_out(leg: Leg, spans: Sequence[tuple[datetime, datetime]]) -> Leg:
+    """``leg`` as a paper book takes it through market halts (#625, ``book.halt_spans``, as
+    ``trader.replay.held_out``): without the quotes received in one (the reopening auction's book is not
+    one to trade on), and without the recorded gaps that begin in one (the halt's silence)."""
+    if not spans:
+        return leg
+    keep = np.ones(len(leg.times), dtype=bool)
+    for start, end in spans:
+        keep &= ~((leg.times >= micros(start)) & (leg.times < micros(end)))
+    gaps = tuple(g for g in leg.gaps if not any(micros(s) <= g[0] < micros(e) for s, e in spans))
+    return replace(leg, times=leg.times[keep], bids=leg.bids[keep], asks=leg.asks[keep], gaps=gaps)
 
 
 # The signals.
@@ -744,7 +775,9 @@ def run(
         for source, found in calls.items():
             lab.calls[source] += len(found)
         stock = stock_leg(data_dir, day)
-        legs = [leg for leg in (stock, etf_leg(data_dir, raw, day) if stock is not None else None) if leg]
+        etf = etf_leg(data_dir, raw, day) if stock is not None else None
+        spans = halt_spans(windows)
+        legs = [held_out(leg, spans) for leg in (stock, etf) if leg is not None]
         made_stock: dict[str, DayLeg] = {}
         for leg in legs:
             for source in SOURCES:
@@ -755,7 +788,7 @@ def run(
                 if leg.code == SYMBOL:
                     made_stock[source] = made
                 for g in geometries:
-                    for threshold in thresholds(leg.code, source):
+                    for threshold in thresholds(leg.code, source, float(rules.scalp.threshold)):
                         at = made.break_even[g] if threshold == BREAK_EVEN else threshold
                         taken = one_at_a_time(made.trades[g], made.probability, at)
                         lab.tallies.setdefault(Variant(leg.code, source, threshold, g), Tally()).add(
