@@ -187,15 +187,16 @@ VERDICT = "verdict"
 # the stop is raised to it. Sold at market by ``SCALP_DEADLINE`` after its bar close. Its entry: the
 # 4-minute barrier pool's up first at ``SCALP_THRESHOLD`` at least (``scalp.py`` says why that figure),
 # or the scalp kind's ranking member's target first at the break-even rate (#706, ``scalp.py``).
-# Its own day: ``SCALP_DAILY_BUY_ORDERS`` buy orders, a net loss of ``SCALP_DAILY_LOSS_WON`` won.
+# Its own day: ``SCALP_DAILY_BUY_ORDERS`` buy orders at most (0: no cap). It takes no daily loss cap and
+# no cooldown since #710: the user wants it to trade all day so that its results can be measured
+# (2026-11-20; on 11-19 its 5,000-won cap stopped it in the afternoon and 18 signals went unbought).
 SCALP = "scalp"
 SCALP_TARGET_PERCENT = 0.2
 SCALP_RAISE_PERCENT = 0.1
 SCALP_STOP_PERCENT = 0.3
 SCALP_DEADLINE = timedelta(minutes=15)
 SCALP_THRESHOLD = 0.30
-SCALP_DAILY_BUY_ORDERS = 20
-SCALP_DAILY_LOSS_WON = 5_000
+SCALP_DAILY_BUY_ORDERS = 100
 
 # The cost map the cells are picked from (#395): 005930's, its last 20 days with predictions, the
 # special situations left out (the trader buys in none). Picked at each start, and every day at

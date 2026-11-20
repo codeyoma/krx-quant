@@ -255,8 +255,7 @@ async def _run(
                 "raise_percent": trader.scalp_raise_percent,
                 "stop_percent": trader.scalp_stop_percent,
                 "deadline_minutes": trader.scalp_deadline_minutes,
-                "daily_buy_orders": trader.scalp_daily_buy_orders,
-                "daily_loss_won": trader.scalp_daily_loss_won,
+                "daily_buy_orders": trader.scalp_daily_buy_orders,  # 0: no cap (#710)
             },
             "cost_map": {"engine": trader.engine_url, "symbol": SYMBOL, "period": COST_MAP_PERIOD},
             "commit": settings.commit,

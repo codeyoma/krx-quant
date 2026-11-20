@@ -28,9 +28,9 @@ from krx_quant.trader import MOCK, SCALP, report
 from krx_quant.trader.book import (
     BELOW_THRESHOLD,
     BUY_LIMIT,
+    COOLING_DOWN,
     PAST_LAST_EXIT,
     RAISED_STOP,
-    SCALP_LOSS_CAP,
     STALE,
     STOP_LOSS,
     TAKE_PROFIT,
@@ -38,6 +38,7 @@ from krx_quant.trader.book import (
     Plan,
     ScalpRules,
     plan_scalp,
+    risk_held,
     scalp_held,
     scalp_raise,
 )
@@ -123,13 +124,24 @@ def test_the_plan_buys_at_the_threshold_by_15_15() -> None:
     assert plan_scalp(signal, higher, session, at("10:00:03.3")) == BELOW_THRESHOLD
 
 
-def test_its_own_risk_rules_hold_its_buys() -> None:
-    rules = whole_rules(daily_buys=1, scalp=ScalpRules(daily_buys=2, daily_loss=500))
-    now = at("11:00:00")
-    assert scalp_held(rules, now, 1, []) is None  # the book's one buy a day is not its cap
-    assert scalp_held(rules, now, 2, []) == BUY_LIMIT
-    assert scalp_held(rules, now, 0, [(at("10:30:00"), -300.0)]) is None
-    assert scalp_held(rules, now, 0, [(at("10:30:00"), -300.0), (at("10:45:00"), -200.0)]) == SCALP_LOSS_CAP
+def test_its_buy_cap_alone_holds_its_buys() -> None:
+    """Since #710 the scalp's own buy cap is its only rule: 100 a day unless set, 0 for none."""
+    rules = whole_rules(daily_buys=1, scalp=ScalpRules(daily_buys=2))
+    assert scalp_held(rules, 1) is None  # the book's one buy a day is not its cap
+    assert scalp_held(rules, 2) == BUY_LIMIT
+    assert scalp_held(RULES, 20) is None and scalp_held(RULES, 99) is None
+    assert scalp_held(RULES, 100) == BUY_LIMIT
+    assert scalp_held(whole_rules(scalp=ScalpRules(daily_buys=0)), 10_000) is None
+
+
+def test_the_book_s_risk_rules_are_unchanged() -> None:
+    """The champion's and the practice's risk rules (#471) still hold at 20 buy orders a day and for 30
+    minutes after three net losses in a row (#710 changed the scalp's alone)."""
+    losses = [(at("10:10:00"), -100.0), (at("10:20:00"), -100.0), (at("10:30:00"), -100.0)]
+    assert risk_held(RULES, at("10:31:00"), 19, []) is None
+    assert risk_held(RULES, at("10:31:00"), 20, []) == BUY_LIMIT
+    assert risk_held(RULES, at("10:59:00"), 0, losses) == COOLING_DOWN
+    assert risk_held(RULES, at("11:00:00"), 0, losses) is None
 
 
 # What it buys, and how it leaves
@@ -260,6 +272,7 @@ async def test_a_deadline_past_15_15_buys_nothing(
 # Its own book
 
 
+BOOK_10_30 = quote("10:30:03.5", 70_000, 70_100)
 STOPPED_THEN_AGAIN: list[Event] = [
     said("10:00"),
     BOOK,
@@ -282,22 +295,30 @@ async def test_its_buy_cap_is_its_own(kis_mock: tuple[FakeKis, FakeAccount], tmp
     assert desk.state_now is not None and desk.state_now["risk"]["buys"] == 0, "the book's day counts none"
 
 
-async def test_its_daily_loss_cap_is_its_own_and_the_champion_s_limits_count_none_of_it(
+def stopped(hm: str) -> list[Event]:
+    """A scalp buy on the bar close ``HH:MM``, stopped two minutes later."""
+    h, m = hm.split(":")
+    return [said(hm), quote(f"{hm}:03.5", 70_000, 70_100), quote(f"{h}:{int(m) + 2:02d}:00", 69_800, 69_900)]
+
+
+async def test_losses_neither_cool_it_down_nor_stop_its_day_and_the_champion_s_limits_count_none(
     kis_mock: tuple[FakeKis, FakeAccount], tmp_path: Path
 ) -> None:
-    """A champion's daily limit of 0.01% (100 won) and a scalp cap of 100 won: the 10:00 stop loses more
-    than either. The scalp's own cap holds its 10:20 buy (``scalp_loss_cap``); the champion's limit is
-    not reached (the trader runs on)."""
+    """Three stops in a row, the book's loss streak (#471), and a champion's daily limit of 0.01% (100
+    won) that each loss passes: the 10:30 buy right after the third loss is bought all the same (no
+    ``cooldown``, no ``scalp_loss_cap`` since #710), and the trader runs on."""
     fake, account = kis_mock
-    rules = whole_rules(daily_loss_percent=0.01, scalp=ScalpRules(daily_loss=100))
+    rules = whole_rules(daily_loss_percent=0.01)
     desk = scalp_desk(tmp_path, fake, account, rules=rules)
 
-    await desk.run(STOPPED_THEN_AGAIN)
+    await desk.run([*stopped("10:00"), *stopped("10:10"), *stopped("10:20"), said("10:30"), BOOK_10_30])
 
-    [trade] = desk.trades()
-    assert trade["net"] < -100
+    trades = desk.trades()
+    exited = [t for t in trades if t["exit"] is not None]
+    assert len(trades) == 4 and len(exited) == 3
+    assert all(t["exit"]["reason"] == STOP_LOSS and t["net"] < -100 for t in exited)
     assert desk.status == "running"
-    assert decisions(tmp_path) == {"10:00": ("buy", None), "10:20": ("skip", SCALP_LOSS_CAP)}
+    assert decisions(tmp_path) == {hm: ("buy", None) for hm in ("10:00", "10:10", "10:20", "10:30")}
     assert desk.state_now is not None and desk.state_now["today"]["net"] == 0, "the limits count none of it"
 
 
@@ -365,19 +386,25 @@ def test_its_rules_are_settings() -> None:
             "KRX_TRADER_MOCK_SCALP_RAISE_PERCENT": "0.05",
             "KRX_TRADER_MOCK_SCALP_STOP_PERCENT": "0.25",
             "KRX_TRADER_MOCK_SCALP_DEADLINE_MINUTES": "10",
-            "KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS": "5",
-            "KRX_TRADER_MOCK_SCALP_DAILY_LOSS_WON": "2000",
+            "KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS": "150",
         },
         None,
     )
     from krx_quant.trader.book import Rules
 
     rules = Rules.of(found, FEE).scalp
-    assert rules == ScalpRules(0.4, 0.15, 0.05, 0.25, timedelta(minutes=10), 5, 2000.0)
+    assert rules == ScalpRules(0.4, 0.15, 0.05, 0.25, timedelta(minutes=10), 150)
+    # The scalp's cap above 20 leaves the book's own risk rules as they were (#710).
+    assert (found.daily_buy_orders, found.loss_streak, found.cooldown_minutes) == (20, 3, 30)
+    assert TraderSettings.from_env({}, None).scalp_daily_buy_orders == 100
+    assert (
+        TraderSettings.from_env({"KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS": "0"}, None).scalp_daily_buy_orders
+        == 0
+    )
     with pytest.raises(SettingsError, match="must be below KRX_TRADER_MOCK_SCALP_TARGET_PERCENT"):
         TraderSettings.from_env({"KRX_TRADER_MOCK_SCALP_RAISE_PERCENT": "0.2"}, None)
-    with pytest.raises(SettingsError, match="scalp buy orders a day"):
-        TraderSettings.from_env({"KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS": "21"}, None)
+    with pytest.raises(SettingsError, match="KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS must be a number from 0"):
+        TraderSettings.from_env({"KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS": "-1"}, None)
 
 
 async def test_a_provisional_stop_above_the_fill_is_set_again_and_only_a_raised_one_kept(
@@ -417,6 +444,19 @@ async def test_an_exit_after_the_day_is_open_in_that_day_s_report(
 
     assert "그날: 매매 1건(열림 1) · 그날 매수 주문 1/?" in lines
     assert any(line.startswith("누적(2026-10-14부터): 매매 1건(열림 1)") for line in lines)
+
+
+def test_the_report_says_its_cap_and_no_cap_for_0() -> None:
+    """The nightly report's day line gives the scalp's buy orders against its cap; 0 is no cap (#710)."""
+    from krx_quant.trader.report import Scalp, Tally, _scalp_section
+
+    def day_line(cap: int | None) -> str:
+        found = _scalp_section(Scalp(day=Tally(), total=Tally(), since=None, buys=21, cap=cap))
+        return next(line for line in found.splitlines() if line.startswith("그날: "))
+
+    assert day_line(100).endswith("그날 매수 주문 21/100")
+    assert day_line(0).endswith("그날 매수 주문 21/제한 없음")
+    assert day_line(None).endswith("그날 매수 주문 21/?")
 
 
 # The switch to the scalp kind's ranking member (#706)

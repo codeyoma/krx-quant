@@ -44,10 +44,11 @@ narrow the capital, never widen it (#393).
   ``KRX_TRADER_MOCK_SCALP_TARGET_PERCENT`` (the target's net in percent of the fill price, 0.2),
   ``KRX_TRADER_MOCK_SCALP_RAISE_PERCENT`` (the net the stop is raised to, 0.1; from 0, below the
   target's), ``KRX_TRADER_MOCK_SCALP_STOP_PERCENT`` (the stop below the fill, gross, 0.3),
-  ``KRX_TRADER_MOCK_SCALP_DEADLINE_MINUTES`` (15), ``KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS`` (its own
-  buy orders a day, 20; from 1 to 20) and ``KRX_TRADER_MOCK_SCALP_DAILY_LOSS_WON`` (its own day's net
-  loss that stops its buys, 5,000 won; above 0). Its losses in a row and their cooldown are the book's
-  settings (``KRX_TRADER_LOSS_STREAK``, ``KRX_TRADER_COOLDOWN_MINUTES``), counted on its own trades.
+  ``KRX_TRADER_MOCK_SCALP_DEADLINE_MINUTES`` (15) and ``KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS`` (its
+  own buy orders a day, 100; 0 for no cap). Changed by #710 (2026-11-20): the cap was 20 at most, and
+  ``KRX_TRADER_MOCK_SCALP_DAILY_LOSS_WON`` (its day's net loss that stopped its buys, 5,000 won) and the
+  book's cooldown counted on its own trades held it too. Both are gone and the setting is no longer read:
+  the user wants the scalp to trade all day so that its results can be measured.
 
 ``KRX_TRADER_KIND`` and ``KRX_TRADER_PREDICTOR`` (#394: the one cell traded) are gone: the cost map
 picks the cells (#395). One still set is not read, and since #644 nothing says so: in the 14 days
@@ -76,7 +77,6 @@ from krx_quant.trader import (
     PRACTICE_SPACING,
     RISK_PER_TRADE_PERCENT,
     SCALP_DAILY_BUY_ORDERS,
-    SCALP_DAILY_LOSS_WON,
     SCALP_DEADLINE,
     SCALP_RAISE_PERCENT,
     SCALP_STOP_PERCENT,
@@ -121,8 +121,7 @@ class TraderSettings:
     scalp_raise_percent: float = SCALP_RAISE_PERCENT
     scalp_stop_percent: float = SCALP_STOP_PERCENT
     scalp_deadline_minutes: float = SCALP_DEADLINE.total_seconds() / 60
-    scalp_daily_buy_orders: int = SCALP_DAILY_BUY_ORDERS
-    scalp_daily_loss_won: float = SCALP_DAILY_LOSS_WON
+    scalp_daily_buy_orders: int = SCALP_DAILY_BUY_ORDERS  # 0: no cap (#710)
 
     @classmethod
     def from_env(
@@ -208,10 +207,12 @@ class TraderSettings:
         deadline = _positive(
             values, "KRX_TRADER_MOCK_SCALP_DEADLINE_MINUTES", SCALP_DEADLINE.total_seconds() / 60
         )
-        scalp_orders = _fewer(
-            values, "KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS", SCALP_DAILY_BUY_ORDERS, "scalp buy orders a day"
+        # Not a risk rule of the champion's (#710): any count, 0 for no cap, mock alone.
+        scalp_orders = int(
+            _number(
+                values, "KRX_TRADER_MOCK_SCALP_DAILY_BUY_ORDERS", str(SCALP_DAILY_BUY_ORDERS), int, 0, None
+            )
         )
-        scalp_loss = _positive(values, "KRX_TRADER_MOCK_SCALP_DAILY_LOSS_WON", SCALP_DAILY_LOSS_WON)
         spacing = float(
             _number(
                 values,
@@ -244,7 +245,6 @@ class TraderSettings:
             scalp_stop_percent=stop,
             scalp_deadline_minutes=deadline,
             scalp_daily_buy_orders=scalp_orders,
-            scalp_daily_loss_won=scalp_loss,
         )
 
 
