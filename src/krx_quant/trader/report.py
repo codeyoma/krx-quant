@@ -53,8 +53,10 @@ replayed figures; the night's choice of the next cycle's is in the re-fit's outp
 their own and a row of the sources' table: that day's and every day's to it (since its first trade):
 the trades, the share that netted a profit after costs (the user judges by it first), the net a trade,
 the sum, the deepest fall of the summed net from its high (in exit order), and the exits by the target,
-the raised stop, the stop and the deadline; its own buy orders against its cap, and what it did with
-the signals it read. It says which signal it read (#706: the verdicts' 4-minute pool, or the scalp
+the raised stop, the stop and the deadline; its own buy orders against its cap ("제한 없음" for 0, #710),
+and what it did with the signals it read. Since #710 it takes no cooldown and no daily loss cap, so its
+decisions no longer say ``cooldown`` or ``scalp_loss_cap`` (days before keep them). It says which
+signal it read (#706: the verdicts' 4-minute pool, or the scalp
 kind's ranking member at the break-even rate), how many buys each source made that day, and of the
 pool that its algorithms were not trained for its target. The ledger and the limits count none of it
 (as the practice's).
@@ -354,8 +356,8 @@ def tally(rows: Sequence[Mapping[str, Any]]) -> Tally:
 @dataclass(frozen=True)
 class Scalp:
     """The mock book's scalp on the day (#705): its trades that day and to it, its buy orders that day
-    against its cap (``cap`` None: the trader's last start kept none), the sources its signals were read
-    from, and what it did with them (as ``Report.decisions``)."""
+    against its cap (``cap`` None: the trader's last start kept none; 0: no cap, #710), the sources its
+    signals were read from, and what it did with them (as ``Report.decisions``)."""
 
     day: Tally
     total: Tally
@@ -1478,7 +1480,8 @@ def _scalp_section(scalp: Scalp) -> str:
             "(목표와 손절의 순손익으로, 틱 올림 포함) 이상이면 산다"
             + (f"(그날 문턱 {rates[0]:.3f}–{rates[-1]:.3f})" if rates else "")
         )
-    cap = "?" if scalp.cap is None else str(scalp.cap)
+    # 0: no cap (#710); None: the trader's last start kept none.
+    cap = "?" if scalp.cap is None else "제한 없음" if scalp.cap == 0 else str(scalp.cap)
     kept = scalp.rules
 
     def rule(key: str) -> str:
