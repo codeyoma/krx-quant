@@ -159,7 +159,7 @@ INVERSE_REPLAY = Job(
 # brings it, trading or not, so that its first table does not wait for a weekend. A day's quotes at a time
 # (005930's about 570,000 a day, 14 MB of arrays, and the ETF's), each call's window searched once for every
 # geometry: three made-up days of that size (374 bar closes of both sources each) took 2.6 s and 210 MB on a
-# Mac (#711's PR), so about 20 s for 20 days, under a minute on the server; the half hour is a bound. Each
+# Mac (#713), so about 20 s for 20 days, under a minute on the server; the half hour is a bound. Each
 # night's comment on #711 is a record and changes no label; ``ready-for-agent`` comes on a failed run and the
 # first night a variant qualifies (``scalp_lab.AGENT_LINE``, once, kept in ``state/scalp-lab.json``). Its
 # output holds counts, rates, percent and won per unit, no price.
