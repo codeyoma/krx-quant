@@ -40,7 +40,7 @@ sidecar, ``cells.special_windows``) touching its window from the bar close to th
   ``no_exit_quote``.
 - *Net*, per share, in won: the bid sold at less the ask bought at, less the commission on both sides
   (``KRX_FEE_PERCENT``, on the ETF's own prices). An ETF's sale pays no securities transaction tax
-  (``products.py``). The cost map's inverse floor is not used. In the ETF's ticks too (``etf_tick``:
+  (``products.py``). The cost map's inverse floor is not used. In the ETF's ticks too (``pricing.etf_tick``:
   1 won below 2,000 won, 5 from 2,000, checked by the probe on 2026-11-06).
 
 **Missing data**, left out and counted: a day without the ETF's quotes or 005930's
@@ -94,7 +94,8 @@ from krx_quant.kinds import DIRECTION, most_likely
 from krx_quant.market_calendar import MarketCalendar, Session, calendar_store
 from krx_quant.object_store import open_store
 from krx_quant.predictions import DB_NAME, read_only
-from krx_quant.products import INVERSE_PRODUCTS, etf_tick
+from krx_quant.pricing import etf_tick
+from krx_quant.products import INVERSE_PRODUCTS
 from krx_quant.raw_days import RawDays
 from krx_quant.special import Window, touching
 from krx_quant.stats import day_mean
@@ -251,12 +252,12 @@ def read_day(data_dir: Path, raw: RawDays, day: date) -> Recording | None:
         return None
     gaps = (
         *day_gaps(data_dir, day, STOCK_GAP_FEEDS),
-        *(_closed(gap, etf.times) for gap in day_gaps(data_dir, day, ETF_GAP_FEEDS, ETF)),
+        *(closed_gap(gap, etf.times) for gap in day_gaps(data_dir, day, ETF_GAP_FEEDS, ETF)),
     )
     return Recording(etf, stock, tuple(sorted(gaps, key=lambda g: g[0])))
 
 
-def _closed(gap: tuple[int, int | None], times: np.ndarray) -> tuple[int, int | None]:
+def closed_gap(gap: tuple[int, int | None], times: np.ndarray) -> tuple[int, int | None]:
     """An ETF gap still open when its collector stopped, ended at the first of the day's records
     received after its start (``day_gaps`` finds that in the events alone: a day read from its raw
     frames has none); without one it covers the rest of the day."""

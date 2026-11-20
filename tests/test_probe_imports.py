@@ -68,6 +68,7 @@ LEAVES = frozenset(
         # Experiments and research reports: a hypothesis judged, or a report an agent reads.
         "holdout",
         "inverse_replay",
+        "scalp_lab",
         "smt_experiment",
         "verdict_replay",
     }

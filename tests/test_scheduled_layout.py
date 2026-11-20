@@ -31,6 +31,7 @@ FIRST = (
     "close-restart-memory-687",
     "close-restart-memory-687-again",
     "inverse-replay-606",
+    "scalp-lab-711",
     "verdict-replay-679",
     "ranking-evidence-697",
     "probe-live-account-408",

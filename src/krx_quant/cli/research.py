@@ -78,6 +78,19 @@ def _inverse_replay(day: date | None) -> int:
     return code
 
 
+def _scalp_lab(day: date | None, days: int) -> int:
+    """The mock scalp's variants replayed over the recorded days and ranked by net per day (#711)."""
+    from krx_quant.scalp_lab import scalp_lab
+    from krx_quant.trader.book import Rules
+    from krx_quant.trader.settings import TraderSettings
+
+    settings = Settings.from_env(require_kis=False)
+    rules = Rules.of(TraderSettings.from_env(), settings.fee_rate)
+    report, code = scalp_lab(settings, rules, datetime.now(KST), day, days)
+    print(report)
+    return code
+
+
 def _verdict_replay(day: date | None, days: int, version: int) -> int:
     """The verdict (#676) made again at each recorded bar close and its BUYs replayed (#679): counts, ticks
     and won; of the verdict ``version`` (#697)."""
@@ -139,6 +152,22 @@ def add(sub: Commands) -> None:
         help="the last day replayed, YYYY-MM-DD (default: the latest trading day whose session is over)",
     )
     inverse_cmd.set_defaults(run=lambda args: _inverse_replay(args.day))
+    scalp_cmd = sub.add_parser(
+        "scalp-lab",
+        help="replay the mock scalp's variants (005930 and its inverse ETF, target, stop, deadline, raised"
+        " stop, the pool's and breiman-scalp's thresholds) over the recorded days, one position at a time,"
+        " and rank them by net per day, with a day-level walk-forward and the live scalp's reproduction"
+        " (#711); reads only, places no order, no price",
+    )
+    scalp_cmd.add_argument(
+        "--day",
+        type=date.fromisoformat,
+        help="the last day replayed, YYYY-MM-DD (default: the latest trading day whose session is over)",
+    )
+    scalp_cmd.add_argument(
+        "--days", type=positive, default=20, help="the recorded trading days replayed (default 20)"
+    )
+    scalp_cmd.set_defaults(run=lambda args: _scalp_lab(args.day, args.days))
     verdict_cmd = sub.add_parser(
         "verdict-replay",
         help="make the verdict (#676) again at each bar close of the recorded days, with the barrier"

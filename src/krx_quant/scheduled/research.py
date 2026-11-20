@@ -1,6 +1,6 @@
 """The research and review jobs (#500): the nightly swap's hit rates, the down calls replayed through
-the inverse ETF, the verdict replayed, the ranking's walk-forward evidence of the daily kinds (#697), and
-the experiment on the SMT, which runs last. ``JOBS``
+the inverse ETF, the mock scalp's variants replayed (#711), the verdict replayed, the ranking's
+walk-forward evidence of the daily kinds (#697), and the experiment on the SMT, which runs last. ``JOBS``
 (``krx_quant.scheduled``) lists them in the order they run.
 
 The diagnosis and the entry delay, the first two signal reviews, the structure check, the error
@@ -27,6 +27,7 @@ from datetime import timedelta
 from krx_quant.inverse_replay import AGENT_LINE
 from krx_quant.nightly_hit_rates import HIT_RATE_NIGHTS, nights_with_hit_rates
 from krx_quant.process_log import Ran
+from krx_quant.scalp_lab import AGENT_LINE as SCALP_LAB_AGENT_LINE
 from krx_quant.scheduled.core import (
     FAILED,
     OK,
@@ -142,6 +143,60 @@ INVERSE_REPLAY = Job(
                 "그때 에이전트가 이 이슈에 안을 남기고 사용자가 정한다. 다시 돌리기(읽기만): "
                 "`docker compose run --rm engine inverse-replay --day <날>`. 출력에는 가격이 없다(개수, "
                 "비율, 틱, 원만)."
+            ),
+        ),
+    ),
+)
+
+
+# The scalp lab (#711, ``scalp_lab.py``): the mock scalp policy's variants (005930 and its inverse ETF 0193L0;
+# target +0.1/+0.2/+0.3 % net, stop −0.15/−0.3/−0.5 % gross, deadline 5/15/30 minutes, the raised stop on or
+# off; the 4-minute pool's and breiman-scalp's thresholds) replayed over the latest 20 recorded trading days
+# on the recorded quotes, one position at a time, ranked by net per day among those with 10 trades a day and a
+# positive lower bound of the net per trade, with a day-level walk-forward of that choice and the current
+# variant's reproduction of the live scalp trades. A measurement: no order, and nothing of the trader reads
+# it. Every trading night, once (a run a restart cut, the next), and on the first night after the deploy that
+# brings it, trading or not, so that its first table does not wait for a weekend. A day's quotes at a time
+# (005930's about 570,000 a day, 14 MB of arrays, and the ETF's), each call's window searched once for every
+# geometry: three made-up days of that size (374 bar closes of both sources each) took 2.6 s and 210 MB on a
+# Mac (#713), so about 20 s for 20 days, under a minute on the server; the half hour is a bound. Each
+# night's comment on #711 is a record and changes no label; ``ready-for-agent`` comes on a failed run and the
+# first night a variant qualifies (``scalp_lab.AGENT_LINE``, once, kept in ``state/scalp-lab.json``). Its
+# output holds counts, rates, percent and won per unit, no price.
+SCALP_LAB_ISSUE = 711
+
+
+def _first_or_every_trading_night(night: Night[None]) -> bool:
+    """The first night it is known, trading or not; then every trading night, once."""
+    return night.record is None or _every_trading_night(night)
+
+
+def scalp_lab_calls(ran: Ran) -> bool:
+    """Whether the lab's night calls an agent: it failed, or its output says so (``AGENT_LINE``)."""
+    return ran.exit_code != 0 or ran.timed_out or SCALP_LAB_AGENT_LINE in ran.stdout
+
+
+SCALP_LAB = Job(
+    name="scalp-lab-711",
+    due=_first_or_every_trading_night,
+    command=("scalp-lab",),
+    timeout=timedelta(minutes=30),
+    label_if=scalp_lab_calls,
+    unlabel=(),
+    targets=(
+        Target(
+            SCALP_LAB_ISSUE,
+            note=(
+                "모의 스캘프의 변형을 기록된 최근 20거래일로 재생했다(#711, 매매하지 않는다): 005930과 "
+                "인버스 ETF 0193L0(아래 신호에 산다, 거래세 없음), 목표 순 +0.1/+0.2/+0.3%, 손절 총 "
+                "−0.15/−0.3/−0.5%, 기한 5/15/30분, 올린 손절 켬/끔, 4분 풀과 breiman-scalp의 문턱. "
+                "표시 뒤 첫 매도 호가에 1단위 사고, 한 번에 하나만 든다. 2절이 순위(하루 10회 이상, "
+                "매매당 순손익 하한 > 0, 하루 순손익 순), 5절이 날 단위 전진(그날 전의 날들로만 고른 "
+                "변형의 그날 결과), 6절이 지금 변형과 실제 스캘프 매매의 재현이다. 밤마다의 댓글은 기록이고 "
+                "라벨을 바꾸지 않는다. 실패한 밤과 처음 순위에 든 변형이 나온 밤(`에이전트 차례:` 줄, 한 "
+                "번)에만 `ready-for-agent`를 붙인다. 다시 돌리기(읽기만): "
+                "`docker compose run --rm engine scalp-lab [--day <날>] [--days N]`. 출력에는 가격이 없다"
+                "(개수, 비율, %, 원/1주만)."
             ),
         ),
     ),

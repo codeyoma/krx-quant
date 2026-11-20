@@ -30,6 +30,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 
+from krx_quant.pricing import ETF, STOCK, Instrument
+
 
 class Structure(enum.Enum):
     SPOT_FUTURES = "spot_futures"  # 현물+선물형: the stock and single-stock futures
@@ -87,11 +89,11 @@ def _inverse_products() -> dict[str, Product]:
 # Each symbol's inverse product (#267): 005930's 0193L0 and 000660's 0197X0.
 INVERSE_PRODUCTS: Mapping[str, Product] = _inverse_products()
 
-# The tick an ETF's price moves by (KRX: 1 won below 2,000 won, 5 won from 2,000 won; the stock table,
-# ``pricing.tick_size``, does not cover ETFs). The inverse ETF's book bore it out on 2026-11-06: no
-# best quote nor spread off it in 36,716 records of continuous trading (#606, ``probe-inverse-book``).
-ETF_TICK_FROM = 2_000
+# The ETF tick (``ETF_TICK_FROM``, ``etf_tick``) moved to ``pricing.py`` beside the stock table (#711).
+_CODES = frozenset(p.code for p in PRODUCTS)
 
 
-def etf_tick(price: int) -> int:
-    return 5 if price >= ETF_TICK_FROM else 1
+def instrument(code: str) -> Instrument:
+    """What ``code``'s round trip pays and the tick it moves by (#711, ``pricing.Instrument``): an ETF's
+    for a product here (no sell tax, the ETF tick), a stock's for any other code."""
+    return ETF if code in _CODES else STOCK
